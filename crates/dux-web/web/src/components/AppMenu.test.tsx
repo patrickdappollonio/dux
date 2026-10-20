@@ -185,9 +185,9 @@ describe("AppMenu", () => {
     expect(screen.getByText("Name")).toBeTruthy()
   })
 
-  // The creation submenus mirror the launcher corner's ⋯ menu: same items,
-  // same store actions, same gh gating. This is the desktop half; the sheet
-  // test has the mobile twin.
+  // The creation submenus share their lists with the launcher's New dialog:
+  // same items, same store actions, same gh gating. This is the desktop half;
+  // the sheet test has the mobile twin.
   it("expands the New submenu and routes a variant to its store action", async () => {
     render(<AppMenu />)
     fireEvent.click(screen.getByRole("button", { name: /^settings$/i }))

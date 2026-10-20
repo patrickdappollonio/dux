@@ -1516,77 +1516,26 @@ describe("AppSidebar auto-collapse on narrow drag", () => {
 })
 
 describe("AppSidebar launcher corner", () => {
-  // The corner is one verb plus one ⋯, so there is nothing left to stack: the
-  // footer's container-query scaffolding went with the second split button.
-  it("drops the container-query stacking scaffolding", () => {
+  // The collapsed rail is too narrow for the words, so it carries the same
+  // button as a bare +, and nothing else: no ⋯ beside it.
+  it("gives the collapsed rail one + that names itself New…", () => {
     mockState = makeState()
     const { container } = render(
       <SidebarProvider>
         <AppSidebar />
       </SidebarProvider>,
     )
-
-    const footer = container.querySelector('[data-sidebar="footer"]')
-    expect(footer).toBeTruthy()
-    expect(footer!.className).not.toContain("@container")
-    expect(footer!.innerHTML).not.toContain("@[18rem]")
-  })
-
-  // No seam-joined group any more, so no base-ui focus-guard rounding hack
-  // either: both died with the split buttons.
-  it("renders the verb and the ⋯ as two gapped buttons, not a button group", () => {
-    mockState = makeState()
-    const { container } = render(
-      <SidebarProvider>
-        <AppSidebar />
-      </SidebarProvider>,
-    )
-
     const footer = container.querySelector(
       '[data-sidebar="footer"]',
     ) as HTMLElement
-    expect(footer.querySelector('[data-slot="button-group"]')).toBeNull()
-    expect(footer.innerHTML).not.toContain("rounded-r-lg")
-
-    // The corner's own two controls, at one height plus the touch floor. The
-    // verb is picked by its LABEL TEXT: the rail's icon button carries the same
-    // accessible name and no text of its own.
-    const verb = Array.from(footer.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "New agent",
-    ) as HTMLElement
-    expect(verb).toBeTruthy()
-    const overflow = footer.querySelector(
-      '[aria-label="More ways to create"]:not(.size-8)',
-    ) as HTMLElement
-    expect(overflow).toBeTruthy()
-    for (const control of [verb, overflow]) {
-      expect(control.className, control.textContent ?? "").toContain("h-7")
-      expect(control.className, control.textContent ?? "").toContain(
-        "max-md:min-h-11",
-      )
-    }
-  })
-
-  // The rail is icon-only: a bare verb icon and the SAME grouped ⋯ menu the
-  // corner above carries, so a collapsed sidebar is not a dead end for
-  // everything the ⋯ holds (Add project included).
-  it("gives the collapsed rail a New agent icon and its own ⋯", () => {
-    mockState = makeState()
-    const { container } = render(
-      <SidebarProvider>
-        <AppSidebar />
-      </SidebarProvider>,
+    const named = Array.from(footer.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
     )
-    const railVerb = container.querySelector(
-      '[data-sidebar="footer"] [aria-label="New agent"].size-8',
-    )
-    expect(railVerb).toBeTruthy()
-    const railOverflow = container.querySelector(
-      '[data-sidebar="footer"] [aria-label="More ways to create"].size-8',
-    )
-    expect(railOverflow).toBeTruthy()
-    // The Add-project rail icon is gone; its action lives in that ⋯ now.
-    expect(screen.queryByLabelText("Add project")).toBeNull()
+    // The corner and the rail, each one button.
+    expect(named).toEqual(["New…", "New…"])
+    expect(
+      footer.querySelector('[aria-label="New…"].size-8 svg.lucide-plus'),
+    ).toBeTruthy()
   })
 })
 

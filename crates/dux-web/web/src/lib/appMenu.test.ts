@@ -96,7 +96,7 @@ describe("appMenuModel", () => {
   })
 
   // THE ANTI-DRIFT PIN for the creation submenus: their entries are the same
-  // shared lists the launcher corner's ⋯ menu renders (creationMenus.ts), so
+  // shared lists the launcher's New dialog reads (creationMenus.ts), so
   // the cog menu and the sidebar cannot disagree about labels, icons, order, or
   // gating.
   it("titles the Projects entry as a dialog and gives it the board icon", () => {
@@ -133,7 +133,7 @@ describe("appMenuModel", () => {
         sharedShape(newMenuItems({ ghAvailable })),
       )
       // The cog keeps the whole list, separator and standalone terminal
-      // included: unlike the launcher corner there is no adjacent verb here.
+      // included.
       expect(agentSub?.entries.map((e) => e.id)).toContain(
         "new-standalone-terminal",
       )

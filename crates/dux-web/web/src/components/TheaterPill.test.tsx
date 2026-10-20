@@ -220,7 +220,7 @@ const terminalTarget = {
 
 describe("the app menu the pill carries", () => {
   // THEATER TAKES EVERY OTHER ANCHOR AWAY. On a computer the mode unmounts the
-  // sidebar (the launcher corner's `⋯` with it) and the header (the cog with
+  // sidebar (the launcher's New… with it) and the header (the cog with
   // it), and on a phone the top bar; without this trigger Preferences, New
   // agent and every other global action are unreachable for the duration,
   // against the "exactly one surface-scoped `⋯` on screen" rule.

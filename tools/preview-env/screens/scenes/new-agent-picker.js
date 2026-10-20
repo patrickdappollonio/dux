@@ -1,4 +1,4 @@
-// The corner's filled verb, stopped at the project picker it opens first: the
+// New… then New agent, stopped at the project picker it opens first: the
 // projects with their agent counts, and the two ways out at its foot.
 const {
   boxOf,

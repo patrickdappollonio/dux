@@ -111,7 +111,6 @@ import {
   workspaceProjectId, folderDisplayName } from "@/lib/agentWorkspace"
 import {
   agentSortValue,
-  createStandaloneTerminal,
   openAddProject,
   openNewAgentPicker,
   reorderAgents,
@@ -711,12 +710,8 @@ function TerminalsSection({
   if (terminals.length === 0) return null
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
-      {/* The divider is a ROW of two siblings, not one button with another
-          nested inside it (nested interactive elements are invalid HTML and
-          the click routing is a coin toss). Same shape as AgentFlatRow and
-          TerminalFlatRow: a full-width primary button plus its own control in
-          a flex wrapper. The word "Terminals" stays INSIDE the toggle, so the
-          whole label is still what expands the section. */}
+      {/* The whole label is what expands the section. It carries no + of its
+          own: creating lives behind the launcher's New…. */}
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -730,32 +725,6 @@ function TerminalsSection({
           <span>Terminals</span>
           <span className={SECTION_COUNT_PILL}>{terminals.length}</span>
         </button>
-        {/* One tap, no dialog: a standalone terminal has nothing to confirm
-            (that is why its shared menu entry carries no trailing "…").
-
-            Look: exactly the Agents header's + (outline, its border and
-            background, the header's height token), through the one shared
-            class list, because the user asked for the two section creation
-            buttons to look the same (2026-10-02).
-
-            Sizing: 28px square on desktop, the per-axis exemption from the
-            40px floor. Its only neighbour on either axis is the collapse
-            toggle 8px to its left, which expands a section and executes
-            nothing; on touch it takes the 40px floor on both axes. */}
-        {/* Icon-only, so the tooltip and the accessible name are the only
-            place the location can be said; they carry the same sentence the
-            menu entries do. */}
-        <SimpleTooltip content="New standalone terminal in your home folder">
-          <Button
-            variant="outline"
-            size="sm"
-            aria-label="New standalone terminal in your home folder"
-            onClick={() => createStandaloneTerminal()}
-            className={SECTION_CREATE_SIZING}
-          >
-            <Plus />
-          </Button>
-        </SimpleTooltip>
       </div>
       {open ? (
         // A separate DndContext holding ONLY terminal ids, so dnd-kit can never
@@ -919,15 +888,6 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
 
-// A section's own creation +, the Agents header's and the Terminals divider's
-// alike: an outline square at the header's height token, lifted to the 40px
-// floor on both axes where a finger is the pointer. `shrink-0` keeps the
-// divider's flex row from squeezing it.
-const SECTION_CREATE_SIZING = cn(
-  "w-7 shrink-0 px-0 max-md:min-w-10",
-  HEADER_CONTROL_SIZING,
-)
-
 // One counter pill for every section of the list: the count sits immediately
 // after the section word everywhere, and right edges carry controls only.
 const SECTION_COUNT_PILL =
@@ -943,15 +903,10 @@ function SortControl() {
     <DropdownMenu>
       <SimpleTooltip content={`Sorted by ${FLAT_SORT_LABELS[agentSort]}`}>
         {/* The trigger reads "Sort" and never the mode name: the full label
-            plus the neighbouring + overflows a narrow sidebar and wraps, and a
-            control that changes width when you use it is its own small
-            annoyance. The mode lives in the tooltip and the menu instead.
-
-            The old 36px phone exemption is retired: this trigger now HAS a
-            horizontal neighbour (the new-agent + immediately to its left), so
-            the "no interactive neighbour on that axis" basis for the
-            relaxation is gone. It takes the 40px floor through the shared
-            header sizing token, same as the +. */}
+            overflows a narrow sidebar and wraps, and a control that changes
+            width when you use it is its own small annoyance. The mode lives in
+            the tooltip and the menu instead. It takes the 40px floor on a
+            phone through the shared header sizing token. */}
         <DropdownMenuTrigger
           render={
             <button
@@ -1208,40 +1163,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Agents</span>
           <span className={SECTION_COUNT_PILL}>{coreSessions.length}</span>
+          {/* Sort rides the same gate as the list it sorts: with no agent
+              there is nothing to order, and the empty state below carries its
+              own hero button. Creating lives behind the launcher's New…, so
+              the header carries no + of its own. */}
           {coreSessions.length > 0 ? (
             <div className="ml-auto flex items-center gap-2">
-              {/* The section's own + : one tap to the same picker the launcher
-                  corner's verb opens. A deliberate duplicate of that verb, and
-                  worth it, because this is where the eye already is when the
-                  thought "another one" arrives.
-
-                  Variant: outline, while the sort trigger beside it keeps its
-                  quieter borderless-until-hover styling. They are not two peers
-                  in one cluster: this one acts (it opens a creation dialog) and
-                  that one only reveals a menu.
-
-                  It rides the same `coreSessions.length > 0` gate as sort,
-                  because the empty state below carries its own hero button and
-                  two buttons offering the same click on one screen is one too
-                  many.
-
-                  Sizing: 28px square on desktop is the per-axis exemption from
-                  the 40px floor; its one horizontal neighbour is the Sort
-                  trigger 8px to the right, which only reveals a menu, so a
-                  misclick opens a list rather than executing anything. On
-                  touch both controls take the floor through the shared header
-                  token. */}
-              <SimpleTooltip content="New agent">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label="New agent"
-                  onClick={() => openNewAgentPicker("new")}
-                  className={SECTION_CREATE_SIZING}
-                >
-                  <Plus />
-                </Button>
-              </SimpleTooltip>
               <SortControl />
             </div>
           ) : null}
@@ -1279,14 +1206,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             </EmptyHeader>
             {/* A real button, not a sentence pointing at one elsewhere: an
                 empty workspace is exactly where the next click should be on
-                screen. It doubles with the launcher corner's verb, which is
-                accepted: the duplicate costs a tap nobody needs, while the
-                missing one costs a hunt.
+                screen. It doubles with the launcher's New…, which is accepted:
+                the duplicate costs a tap nobody needs, while the missing one
+                costs a hunt.
 
-                It flips through the SAME pure helper the corner's verb reads,
-                so the two buttons on screen can never offer different next
-                steps. max-md:min-h-11 is the touch floor, matching the
-                corner. */}
+                On a confirmed-empty workspace it flips to Add project through
+                the pure helper in lib/launcherVerb.ts. max-md:min-h-11 is the
+                touch floor, matching the launcher. */}
             <EmptyContent>
               <Button
                 variant="outline"

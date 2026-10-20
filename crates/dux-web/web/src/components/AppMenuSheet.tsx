@@ -92,7 +92,7 @@ export function AppMenuSheet({
   }
 
   // The model's one context input: gh availability gates the from-PR agent
-  // variant, exactly as the launcher corner's ⋯ menu gates its copy.
+  // variant, exactly as the launcher's New dialog gates its copy.
   const { bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
   const githubIntegrationEnabled = bootstrap?.github_integration ?? false

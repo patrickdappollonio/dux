@@ -67,9 +67,9 @@ function selectTerminalAndOpen(
   selectTerminal(terminalId, owner)
 }
 
-// The hub: the shared flat agent list at touch size. Search, sort and the
-// new-agent + live in the list header; the launcher corner sits in the bottom
-// bar, the same component and size tokens as the desktop sidebar's footer.
+// The hub: the shared flat agent list at touch size. Search and sort live in
+// the list header; the launcher corner sits in the bottom bar, the same
+// component and size tokens as the desktop sidebar's footer.
 function HomeScreen() {
   const { bootstrap } = useDux()
   const [menuOpen, setMenuOpen] = useState(false)

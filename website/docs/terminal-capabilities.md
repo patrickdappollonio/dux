@@ -54,10 +54,9 @@ for yourself sees the same terminal an agent would. There are three kinds:
 - A **companion terminal** belongs to an agent and opens in that agent's worktree.
 - A **project terminal** belongs to a project and opens at its repo root.
 - A **standalone terminal** belongs to nothing. It opens in your home directory, so you
-  can have one before you have added a single project. Open one from the `⋯` menu beside
-  the launcher button at the bottom of the sidebar, under **Terminals**, or from the cog
-  menu's **New** submenu. Once you have one, the sidebar's Terminals divider grows a
-  **+**.
+  can have one before you have added a single project. Open one from the **New…** button
+  at the bottom of the sidebar, under **Terminals**, or from the cog menu's **New**
+  submenu.
 
 > [!NOTE]
 > Environment is where the standalone kind differs: the two owned kinds merge your global

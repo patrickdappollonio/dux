@@ -89,19 +89,34 @@ Everything else, including what each failure leaves on disk, is in
 
 Two doors, differing in what you start from.
 
-**The launcher** sits at the bottom of the sidebar (and on the mobile hub): one filled
-button and one `⋯`.
+**The launcher** is the **New…** button at the bottom of the sidebar (and along the bottom
+of the mobile hub). Every now and then its label flips through **New agent**, **New
+terminal** and **New project** to hint at what is behind it, then settles back on
+**New…**; hovering it or tabbing to it holds it still, and it never moves if your system
+asks for reduced motion. With the sidebar collapsed it is a bare **+**.
 
-- **The button** is a single click to a plain new agent. It reads **Add project** instead
-  while you have none.
-- **The `⋯`** groups everything else you can create from nothing: **Agents** (from a pull
-  request, from an existing worktree, or standalone in a folder you already have),
-  **Terminals** (a standalone shell) and **Projects**.
-- **The Agents header** above the list carries a **+** too.
+Press it and **Start something new** opens: everything you can create, in three groups,
+each with a sentence saying what it makes.
+
+- **Agents:** a new agent on a project, one from a pull request, one from an existing
+  worktree, or a standalone agent in a folder you already have.
+- **Terminals:** a terminal in an agent's copy of the code, or a standalone one in your
+  home folder (that one opens right away).
+- **Projects:** add one that is already on the server, clone one, or initialize one.
+
+![The Start something new dialog: Agents, Terminals and Projects groups, each row an icon, a title and a sentence saying what it makes.](/screens/new-dialog.png)
+
+On a phone it opens as a sheet from the bottom of the screen with the same list.
+
+![The same list on a phone, as a sheet over the agents list: the Agents group with its four rows and the start of the Terminals group.](/screens/phone-new-sheet.png)
 
 > [!TIP]
 > Use the launcher when you have not picked a project yet. It is the only place the
 > reference-first flow lives.
+
+With no projects yet, the dialog puts **Projects** first and says so: add one, then start
+agents on it. The agent rows that need a project stay in view but greyed out, while the
+standalone agent and the standalone terminal still work.
 
 A plain new agent starts by asking which project it belongs to. If the answer is "none",
 the bottom of that project list has two ways out: **Add a new project…**, and **Add
@@ -111,13 +126,13 @@ starts from.
 
 ![The New agent project picker: a search field over the projects, each with its agent count, and Add a new project and Add standalone agent side by side at the bottom.](/screens/new-agent-picker.png)
 
-**New agent from existing worktree…**, also in the launcher's `⋯`, picks a project and then
+**New agent from existing worktree**, also in the New dialog, picks a project and then
 opens that project's worktree manager, described below, so you can bring an orphaned worktree
 back as an agent.
 
 ### Starting from a pull request, with no project
 
-Pick **New agent from PR…** from that `⋯` segment and the dialog opens with the reference
+Pick **New agent from PR** in the New dialog and its own dialog opens with the reference
 field first. **No project is chosen and none is asked for.** Paste a PR link (or
 `owner/repo#123`, or a bare `owner/repo`) and dux compares the repository it names against
 every project you have:

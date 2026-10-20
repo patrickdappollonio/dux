@@ -179,7 +179,7 @@ describe("AppMenuSheet", () => {
   })
 
   // The mobile twin of AppMenu.test.tsx's creation-submenu checks: the sheet
-  // drills into the same shared lists the launcher corner's ⋯ menu renders.
+  // drills into the same shared lists the launcher's New dialog reads.
   it("drills into New and routes a variant to its store action", async () => {
     const onOpenChange = vi.fn()
     render(<AppMenuSheet open onOpenChange={onOpenChange} />)

@@ -255,8 +255,8 @@ and empty directories.
 
 The repository you want to work on lives on a remote and not on this machine? One action
 clones it, adds it as a project and starts its first agent there. In the browser it is
-**Clone a repository…**, beside **Add project…** under **Projects** in the launcher's `⋯`
-and in the app menu's **Add project** submenu. In the terminal UI it is the
+**Clone a repository**, beside **Add project** under **Projects** in the dialog the
+**New…** button opens, and in the app menu's **Add project** submenu. In the terminal UI it is the
 `clone-project` palette command.
 
 Both open the same short form:
@@ -352,8 +352,9 @@ What to do next, for the cases that need more than the table says:
 
 ## Creating an agent from a GitHub PR
 
-In the browser, **New agent from PR…** in the launcher's `⋯` menu at the bottom of the
-sidebar, under **Agents**, or in a project's own `⋯` menu to start from that project. In
+In the browser, **New agent from PR** in the dialog the **New…** button at the bottom of
+the sidebar opens, under **Agents**, or in a project's own `⋯` menu to start from that
+project. In
 the terminal UI, the `new-agent-from-pr` palette command.
 
 This path needs the `gh` CLI installed, authenticated with `gh auth login`, and
@@ -810,8 +811,8 @@ agent would name, and the changes panel says why it has nothing to show.
 Every way in opens the same folder browser. Any folder is accepted: it does not have to
 be a git repository, and dux initializes nothing in it.
 
-- **In the browser:** **New standalone agent…** from any creation menu (the launcher's `⋯`,
-  the app menu's New submenu), and **Add standalone agent…** at the bottom of the New agent
+- **In the browser:** **New standalone agent** from the dialog the **New…** button opens or
+  the app menu's New submenu, and **Add standalone agent…** at the bottom of the New agent
   project list, for when you went looking for a project and none fits.
 - **In the terminal UI:** a key anywhere in the agents pane, a key inside the "New agent in
   project" chooser too (so you can change your mind once you are already there and no

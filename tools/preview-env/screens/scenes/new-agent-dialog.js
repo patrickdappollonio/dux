@@ -1,4 +1,4 @@
-// The corner's filled verb, through the project picker, to the naming step.
+// New… then New agent, through the project picker, to the naming step.
 const {
   boxOf,
   clearToasts,

@@ -79,7 +79,7 @@ export interface AppMenuSeparator {
 
 export interface AppMenuContext {
   /** Whether `gh` is usable, which gates the from-PR agent variant here as it
-   *  does in the launcher corner's and the per-project `⋯` menus. */
+   *  does in the launcher's New dialog and the per-project `⋯` menus. */
   ghAvailable: boolean
   /** Whether the integration is switched on, a different question from whether
    *  `gh` works. It gates "Re-check GitHub", which exists for when `gh` does
@@ -104,7 +104,7 @@ export const EDIT_CONFIG_TITLE = "Edit config file…"
  */
 export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
   // The creation submenus splice in the shared lists from `creationMenus.ts`
-  // verbatim, the same ones the launcher corner renders. An annotation rather
+  // verbatim, the same ones the launcher's New dialog reads. An annotation rather
   // than a cast, so a future divergence between the two unions fails here
   // instead of rendering wrong.
   const asEntries = (

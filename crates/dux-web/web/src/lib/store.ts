@@ -797,13 +797,15 @@ export interface DuxState {
   // The shared search query filtering the flat agent/terminal list on both
   // surfaces. Empty string shows everything.
   agentSearch: string
+  // Whether the launcher's New dialog (every way to create something) is open.
+  newLauncherOpen: boolean
   // Whether the New-agent picker dialog is open. The picker is the home for agent
   // creation and every project action now that there are no project headers.
   newAgentPickerOpen: boolean
   // How the New-agent picker was opened, so it can guide the right creation flow:
   // "new" (pick project + provider + Create), "from_pr" (pick a project to create
   // an agent from a PR), or "from_worktree" (pick a project to adopt an existing
-  // worktree). The launcher corner's ⋯ menu sets this; a bare open defaults to
+  // worktree). The New dialog and the cog menu set this; a bare open defaults to
   // "new".
   newAgentPickerIntent: "new" | "from_pr" | "from_worktree"
   // When set, the picker lists ONLY these project ids. Used when a pull-request
@@ -1183,6 +1185,7 @@ let state: DuxState = {
   projectOpen: {},
   agentSort: null,
   agentSearch: "",
+  newLauncherOpen: false,
   newAgentPickerOpen: false,
   newAgentPickerIntent: "new",
   newAgentPickerOnlyIds: null,
@@ -5981,8 +5984,8 @@ export function openAddProject(): void {
   runBrowse(null)
 }
 
-// Open the same picker with the "init" intent (the launcher corner's
-// "Initialize a repository…" entry). The intent only changes a header hint;
+// Open the same picker with the "init" intent (the "Initialize a
+// repository" entry of the New dialog and the cog menu). The intent only changes a header hint;
 // the primary-action ladder decides the real action from the inspection.
 export function openAddProjectForInit(): void {
   setState({
@@ -7161,6 +7164,14 @@ export function agentSortValue(s: DuxState): FlatSortKey {
 
 export function setAgentSearch(query: string): void {
   setState({ agentSearch: query })
+}
+
+export function openNewLauncher(): void {
+  setState({ newLauncherOpen: true })
+}
+
+export function closeNewLauncher(): void {
+  setState({ newLauncherOpen: false })
 }
 
 export function openNewAgentPicker(

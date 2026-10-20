@@ -31,6 +31,7 @@ import { ConfirmCloseEditorTabDialog } from "@/components/ConfirmCloseEditorTabD
 import { ConfirmVanishedEditorDialog } from "@/components/ConfirmVanishedEditorDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { NewAgentPickerDialog } from "@/components/NewAgentPickerDialog"
+import { NewLauncherDialog } from "@/components/NewLauncherDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { ChangeBaseBranchDialog } from "@/components/ChangeBaseBranchDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
@@ -90,6 +91,7 @@ function GlobalOverlays() {
       <CommitDialog />
       <EditorOverlay />
       <CreateAgentDialog />
+      <NewLauncherDialog />
       <NewAgentPickerDialog />
       {/* Before every project dialog, so one opened from a row's menu stacks
           over the list and closing it lands back on the list. */}

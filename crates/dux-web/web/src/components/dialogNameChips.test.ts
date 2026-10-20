@@ -137,6 +137,16 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     line: '<StartTruncatedText text={project.path} className="font-mono" tooltip />',
     reason: "A project row's folder on its second line: part of a list row, not a name in a sentence.",
   },
+  {
+    file: "components/NewLauncherDialog.tsx",
+    line: '<span className="min-w-0 truncate font-mono text-[11.5px]">',
+    reason: "An agent row's worktree on its second line: part of a list row, not a name in a sentence.",
+  },
+  {
+    file: "components/NewLauncherDialog.tsx",
+    line: '<span className="flex min-w-0 items-baseline gap-1 font-mono text-[11.5px] text-dux-standalone">',
+    reason: "A standalone agent row's folder on its second line: part of a list row, not a name in a sentence.",
+  },
   // The files below are scanned because they build toast prose, not because
   // they are dialogs; each line is something other than a name in a sentence.
   {

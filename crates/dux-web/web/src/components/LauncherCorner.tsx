@@ -1,77 +1,121 @@
-import { EllipsisVertical, Plus, SquarePlus } from "lucide-react"
+import { Plus } from "lucide-react"
+import { useEffect, useState, type FocusEvent } from "react"
 
-import { CreationOverflowMenuItems } from "@/components/CreationOverflowMenuItems"
 import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { launcherVerb } from "@/lib/launcherVerb"
-import { openAddProject, openNewAgentPicker, useDux } from "@/lib/store"
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
+import { LAUNCHER_LABELS, launcherLabelAt } from "@/lib/launcherLabel"
+import { openNewLauncher } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 // The launcher corner on every surface: the desktop sidebar's footer and the
-// mobile hub's bottom bar render this one component. One filled verb, one square
-// ⋯, and that is the whole corner.
+// mobile hub's bottom bar render this one component. One filled button that
+// opens the New dialog, where every way to create something lives.
 //
-// The verb is the workspace's one primary creation click: "New agent" whenever a
-// project exists, flipping to "Add project" on a confirmed-empty workspace,
-// where a new-agent picker would open with nothing to pick. The decision is the
-// shared pure helper (lib/launcherVerb.ts), which the empty list's hero button
-// reads too, so the two can never name different next steps.
-//
-// The ⋯ does not flip: it is the constant home of every other way to create
-// something, grouped under Agents, Terminals and Projects, so its rows never
-// move under the cursor.
+// Its label rests on "New…" and now and then names, one word at a time, what
+// is behind it. Hover or keyboard focus holds it on "New…", reduced motion never
+// cycles it, and a screen reader always hears "New…" (the words are hidden).
 export function LauncherCorner({ className }: { className?: string }) {
-  const { spine } = useDux()
-  // null while the spine has not arrived: see launcherVerb for why that is not
-  // a zero.
-  const verb = launcherVerb(spine ? spine.projects.length : null)
-  const addProject = verb === "add-project"
+  const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const { index, previous } = useLauncherLabel(hovered || focused)
   return (
-    // Two separate rounded buttons with a gap, NOT a seam-joined ButtonGroup:
-    // the ⋯ is the corner's overflow rather than a second half of the verb, and
-    // the gap is also what keeps a mistimed tap off the wrong control.
-    <div className={cn("flex items-center gap-2", className)}>
-      {/* size="sm" is the shared height token for both controls, with
-        * max-md:min-h-11 lifting each over the touch floor. The desktop height
-        * is the per-axis exemption: with a mouse the only neighbour on either
-        * axis is the ⋯, which opens a menu and executes nothing. */}
+    <div className={cn("flex items-center", className)}>
+      {/* size="sm" is the height token, with max-md:min-h-11 lifting it over
+        * the touch floor. The desktop height is the per-axis exemption: the
+        * corner has no other control beside it. */}
       <Button
         size="sm"
+        aria-label={LAUNCHER_LABELS[0]}
         className="min-w-0 flex-1 max-md:min-h-11"
-        onClick={addProject ? openAddProject : () => openNewAgentPicker("new")}
+        onClick={openNewLauncher}
+        onPointerEnter={() => setHovered(true)}
+        onPointerLeave={() => setHovered(false)}
+        onFocus={(event) => setFocused(isKeyboardFocus(event))}
+        onBlur={() => setFocused(false)}
       >
-        {addProject ? <SquarePlus /> : <Plus />}
-        <span className="truncate">
-          {addProject ? "Add project" : "New agent"}
+        <Plus />
+        {/* Every word sits in the same grid cell, so the box is as wide as the
+          * widest one and nothing beside it moves while the words change. */}
+        <span
+          aria-hidden="true"
+          className="inline-grid min-w-0 justify-items-start overflow-hidden"
+        >
+          {LAUNCHER_LABELS.map((label, i) => (
+            <span
+              key={label}
+              data-shown={i === index ? "" : undefined}
+              className={cn(
+                "[grid-area:1/1] whitespace-nowrap transition-[transform,opacity] duration-[125ms] ease-out motion-reduce:transition-none",
+                i === index
+                  ? "translate-y-0 opacity-100"
+                  : i === previous
+                    ? "-translate-y-full opacity-0"
+                    : "translate-y-full opacity-0",
+              )}
+            >
+              {label}
+            </span>
+          ))}
         </span>
       </Button>
-      <DropdownMenu>
-        {/* Outline, deliberately quieter than the filled verb: this corner draws
-          * exactly one primary and the ⋯ only reveals a menu, the reasoning that
-          * also keeps the Agents header's sort trigger quieter than its +.
-          * Outline carries the data-popup-open tint too, since base-ui does not
-          * flip aria-expanded on an open menu trigger. The aria-label names
-          * every group behind it, not just the agents. */}
-        <DropdownMenuTrigger
-          render={
-            <Button
-              size="sm"
-              variant="outline"
-              aria-label="More ways to create"
-              className="min-w-7 shrink-0 px-0 max-md:min-h-11 max-md:min-w-11"
-            >
-              <EllipsisVertical />
-            </Button>
-          }
-        />
-        <DropdownMenuContent align="end" side="top">
-          <CreationOverflowMenuItems />
-        </DropdownMenuContent>
-      </DropdownMenu>
     </div>
   )
+}
+
+// Keyboard focus holds the label still, the way hover does. A click focuses the
+// button too, but that is not somebody reading it; where the browser cannot
+// answer the question, any focus counts.
+function isKeyboardFocus(event: FocusEvent<HTMLElement>): boolean {
+  try {
+    return event.currentTarget.matches(":focus-visible")
+  } catch {
+    return true
+  }
+}
+
+// Which word shows, and which one just left (it slides up and out while the
+// new one slides in from below). Wall-clock timed, so the words keep their
+// pace whatever else the page is doing; a hidden tab stops the cycle and a
+// returning one starts it again from the rest, as does the end of a hold.
+function useLauncherLabel(held: boolean): { index: number; previous: number } {
+  const reduced = usePrefersReducedMotion()
+  const still = held || reduced
+  const [shown, setShown] = useState({ index: 0, previous: 0 })
+  useEffect(() => {
+    if (still) return
+    let timer: number | undefined
+    let startedAt = 0
+    const show = (index: number) =>
+      setShown((current) =>
+        current.index === index ? current : { index, previous: current.index },
+      )
+    const tick = () => {
+      const { index, nextInMs } = launcherLabelAt(Date.now() - startedAt)
+      show(index)
+      timer = window.setTimeout(tick, nextInMs)
+    }
+    const begin = () => {
+      startedAt = Date.now()
+      timer = window.setTimeout(tick, launcherLabelAt(0).nextInMs)
+    }
+    const stop = () => {
+      window.clearTimeout(timer)
+      timer = undefined
+      show(0)
+    }
+    const onVisibility = () => {
+      stop()
+      if (!document.hidden) begin()
+    }
+    if (!document.hidden) begin()
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility)
+      stop()
+    }
+  }, [still])
+  // Held, the word on screen leaves the way any word does, upward, before the
+  // stop above has caught up with it.
+  if (still && shown.index !== 0) return { index: 0, previous: shown.index }
+  return still ? { index: 0, previous: shown.previous } : shown
 }

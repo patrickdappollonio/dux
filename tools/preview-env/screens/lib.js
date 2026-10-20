@@ -467,31 +467,37 @@ async function clickBox(page, box, label) {
   await sleep(1200)
 }
 
-// The corner's filled verb, not the Agents-header "+" that shares its label.
-async function openNewAgent(page) {
+// The corner's one filled button, which opens the New dialog. The collapsed
+// rail's + shares its name, so the visible, labelled one is picked.
+async function openLauncher(page) {
   const box = await page.evaluate(() => {
-    const b = [...document.querySelectorAll("button")].find(
-      (x) => /^\s*New agent\s*$/.test(x.textContent || "") && x.getBoundingClientRect().width > 40,
+    const b = [...document.querySelectorAll('button[aria-label="New…"]')].find(
+      (x) => x.getBoundingClientRect().width > 40,
     )
     if (!b) return null
     const r = b.getBoundingClientRect()
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
   })
-  await clickBox(page, box, "New agent verb")
+  await clickBox(page, box, "New… button")
 }
 
-// The launcher corner's grouped ellipsis, which is the constant home of every
-// other way to create something.
-async function openMoreWays(page) {
-  const box = await page.evaluate(() => {
-    const b = [...document.querySelectorAll('[aria-label="More ways to create"]')].find(
-      (x) => x.getBoundingClientRect().width > 0,
-    )
+// One row of the New dialog, by the creation list's id, so a title that is the
+// start of another one ("New agent", "New agent from PR") cannot pick the
+// wrong row.
+async function openLauncherRow(page, rowId) {
+  await openLauncher(page)
+  const box = await page.evaluate((id) => {
+    const b = document.querySelector(`[role="dialog"] [data-row-id="${id}"]`)
     if (!b) return null
     const r = b.getBoundingClientRect()
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-  })
-  await clickBox(page, box, "More ways to create trigger")
+  }, rowId)
+  await clickBox(page, box, `New dialog row ${rowId}`)
+}
+
+// The plain New agent row, which opens the project picker.
+async function openNewAgent(page) {
+  await openLauncherRow(page, "new-agent-plain")
 }
 
 // --- Refusal guards --------------------------------------------------------
@@ -943,7 +949,8 @@ module.exports = {
   DEFAULT_STAGING,
   displayOrder,
   armAttention,
-  openMoreWays,
+  openLauncher,
+  openLauncherRow,
   openNewAgent,
   containerSh,
   stage,
