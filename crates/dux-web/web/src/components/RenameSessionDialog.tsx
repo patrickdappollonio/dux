@@ -139,7 +139,7 @@ export function RenameSessionDialog() {
           autoFocus
         />
         <p className="text-xs text-muted-foreground">
-          Letters, digits, dashes, underscores and slashes.
+          Any name git accepts for a branch.
         </p>
         {branch !== null && (
           <div className="grid gap-1">

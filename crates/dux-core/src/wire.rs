@@ -3860,8 +3860,8 @@ impl Engine {
                                 " has head branch ",
                                 q(pr.head_ref_name),
                                 ", which is not a usable agent \
-                                 name. Create the agent again and type a name using only \
-                                 letters, digits, dashes, underscores and slashes."
+                                 name. Create the agent again and type a name for it. ",
+                                crate::git::AGENT_NAME_RULE
                             ],
                         );
                         if let Some(lookup) = status_op_id {
@@ -11179,10 +11179,10 @@ mod tests {
                 &["Invalid agent name", "not a name"],
             ),
             (
-                "a name only git's own rules refuse",
+                "a name only git's branch form refuses",
                 request(&url, &dest, Some("HEAD")),
                 &dest,
-                &["won't take", "HEAD"],
+                &["Invalid agent name", "HEAD"],
             ),
             (
                 "a relative destination",
@@ -13037,9 +13037,9 @@ mod tests {
             "a//b",      // no consecutive slashes
             "trailing/", // can't end with a slash
             "/leading",  // can't start with a slash
-            "naïve",     // non-ASCII dropped
-            "emoji😀",   // non-ASCII dropped
-            "with.dot",  // '.' isn't whitelisted
+            "a..b",      // no ".."
+            "x.lock",    // can't end with ".lock"
+            "trailing.", // can't end with a dot
         ] {
             let result = engine.wire_to_command(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
@@ -13774,7 +13774,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        for bad in ["-leading", "a//b", "trailing/", "with.dot"] {
+        for bad in ["-leading", "a//b", "trailing/", "trailing."] {
             let err = engine
                 .wire_to_command(WireCommand::ForkSession {
                     session_id: "s1".to_string(),
@@ -14576,7 +14576,7 @@ mod tests {
         }
 
         // And rejects names git's agent-name rules refuse, same as the prompt.
-        for bad in ["-leading", "a//b", "trailing/", "with.dot"] {
+        for bad in ["-leading", "a//b", "trailing/", "trailing."] {
             let err = engine
                 .wire_to_command(WireCommand::CreateAgentFromWorktree {
                     project_id: "p1".to_string(),

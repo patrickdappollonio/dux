@@ -192,7 +192,7 @@ describe("RenameSessionDialog", () => {
     expect(screen.getByText(/show its folder's name again/)).toBeTruthy()
     const field = screen.getByRole("textbox", { name: "Agent name" })
     expect(field.getAttribute("placeholder")).toBe("My-Notes")
-    fireEvent.change(field, { target: { value: "My Notes (2026)" } })
+    fireEvent.change(field, { target: { value: "My Notes: 2026" } })
     expect((field as HTMLInputElement).value).toBe("My-Notes-2026")
     fireEvent.change(field, { target: { value: "notes/" } })
     expect(saveButton().disabled).toBe(true)

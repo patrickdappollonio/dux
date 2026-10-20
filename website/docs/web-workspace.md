@@ -443,7 +443,7 @@ How long a finished one stays depends on how much it matters:
 
 A message that clears itself shows how long it has left as a thin bar along its bottom edge, in the message's own color, draining toward the left.
 
-- **Point at the stack** and every countdown stops: the stack opens up, the bars dim, each one says **Paused while you read**, and they pick up where they left off once the pointer leaves.
+- **Point at the stack** and every countdown stops: the stack opens up, the bars stop and dim, and they pick up where they left off once the pointer leaves.
 - **On a phone,** tapping the stack does the same, and it stays paused until you tap somewhere else.
 - **Holding a finger or the mouse button down** on a message also stops the clock for as long as you hold it.
 - **The countdown waits** while the tab is in the background, too.

@@ -5536,10 +5536,7 @@ impl App {
             return Ok(());
         }
         if !git::is_valid_agent_name(&name) {
-            self.set_error(
-                "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
-                 It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
-            );
+            self.set_error(git::invalid_agent_name_refusal(&name));
             return Ok(());
         }
 
@@ -27762,7 +27759,7 @@ cyan = "#00ffff"
         let folder = tempfile::tempdir().expect("folder");
 
         pick_standalone_folder(&mut app, folder.path());
-        for ch in "notes for q3!/".chars() {
+        for ch in "notes for q3?/".chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .expect("the letter must type into the field");
         }

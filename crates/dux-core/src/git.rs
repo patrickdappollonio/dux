@@ -2324,13 +2324,16 @@ fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
 
 /// Where [`create_worktree_existing_branch`] puts the worktree for `branch_name`
 /// of project `project_name`, so a caller can ask whether that folder is free
-/// before asking git to create it.
+/// before asking git to create it. The folder is the flattened name
+/// ([`agent_folder_name`]), so this is only ever the answer for a create.
 pub fn managed_worktree_path(
     worktrees_root: &Path,
     project_name: &str,
     branch_name: &str,
 ) -> PathBuf {
-    worktrees_root.join(project_name).join(branch_name)
+    worktrees_root
+        .join(project_name)
+        .join(agent_folder_name(branch_name))
 }
 
 /// Creates a worktree that checks out an **existing** branch (no `-b`).
@@ -2648,10 +2651,9 @@ pub fn create_worktree_from_start_point_claimed(
     let branch_name = custom_name
         .map(|s| s.to_string())
         .unwrap_or_else(docker_style_name);
-    let project_root = worktrees_root.join(project_name);
-    let worktree_path = project_root.join(&branch_name);
+    let worktree_path = managed_worktree_path(worktrees_root, project_name, &branch_name);
     claim(&worktree_path)?;
-    fs::create_dir_all(&project_root)?;
+    fs::create_dir_all(worktrees_root.join(project_name))?;
     let canonical =
         add_worktree_new_branch_at(repo_path, &worktree_path, &branch_name, start_point)?;
     Ok((branch_name, canonical))
@@ -6214,11 +6216,14 @@ pub fn push(worktree_path: &Path) -> Result<String> {
             ));
         }
     };
+    // `--` so the branch is read as a REFSPEC and never as an option. Without
+    // it, a checkout whose HEAD points at a ref named `--all` pushes EVERY
+    // branch to the remote. Measured on git 2.55. The fully qualified form,
+    // because a refspec's leading `+` means force and a branch may be called
+    // `+feature`: as a bare refspec that force-pushes `feature` instead.
+    let refspec = format!("refs/heads/{branch}");
     let output = Command::new("git")
-        // `--` so the branch is read as a REFSPEC and never as an option.
-        // Without it, a checkout whose HEAD points at a ref named `--all`
-        // pushes EVERY branch to the remote. Measured on git 2.55.
-        .args(["-C", wt.as_ref(), "push", "-u", "origin", "--", &branch])
+        .args(["-C", wt.as_ref(), "push", "-u", "origin", "--", &refspec])
         .output()?;
     if !output.status.success() {
         return Err(git_failure("git push", worktree_path, &output));
@@ -6641,63 +6646,90 @@ pub fn standalone_agent_name_from_folder(folder: &Path) -> String {
     trimmed.to_string()
 }
 
+/// What an agent name may be, said the same way in every refusal of one.
+pub const AGENT_NAME_RULE: &str = "An agent name must be a name git accepts as a branch, so \
+     no spaces, none of ~ ^ : ? * [ \\, no \"..\", and it cannot start with \"-\" or end \
+     with \"/\", \".\" or \".lock\".";
+
 /// The sentence a create refuses an invalid agent name with, the same for a
 /// managed agent and a standalone one.
 pub fn invalid_agent_name_refusal(name: &str) -> String {
-    format!(
-        "Invalid agent name \"{name}\". Use only letters, digits, dashes, \
-         underscores and slashes; it must start with a letter or digit, must \
-         not contain \"//\", and must not end with \"/\"."
-    )
+    format!("Invalid agent name \"{name}\". {AGENT_NAME_RULE}")
 }
 
 pub fn docker_style_name() -> String {
     petname::petname(2, "-").expect("petname generation should not fail")
 }
 
-/// Returns `true` if `name` contains only characters safe for git branch names:
-/// ASCII alphanumeric, dash (`-`), underscore (`_`), and slash (`/`).
-/// Also rejects names that start or end with `/`, contain consecutive slashes,
-/// or start with `-`, since git forbids these patterns in ref names.
+/// Whether git accepts `name` as a branch name: the rules of
+/// `git check-ref-format --branch`, checked without running git because
+/// every keystroke in a name field asks.
+///
+/// An agent's name becomes its branch, so a name is exactly as free as a
+/// branch name, which is what lets any pull request's head branch name its
+/// agent. Non-ASCII text is allowed because git allows it. The web's
+/// `isValidAgentName` is its twin; both read the shared
+/// `agent_name_cross_language.json` vectors, which a test also puts to git.
+///
+/// Two names git takes are refused on purpose: `@`, which git commands also
+/// read as `HEAD`, and any name carrying a bidirectional control, which would
+/// make the name draw as something it does not say ([`crate::bidi`]).
 pub fn is_valid_agent_name(name: &str) -> bool {
-    if name.is_empty() {
+    // The branch form's own refusals, on top of the ref name rules below.
+    if name.is_empty() || name.starts_with('-') || name == "HEAD" || name == "@" {
         return false;
     }
-    if name.starts_with('-') || name.starts_with('/') || name.ends_with('/') {
+    if name.chars().any(never_in_an_agent_name) {
         return false;
     }
-    if name.contains("//") {
+    if name.contains("..") || name.contains("@{") || name.ends_with('.') {
         return false;
     }
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
+    // An empty component is a leading or trailing slash, or `//`.
+    name.split('/').all(|component| {
+        !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")
+    })
 }
 
-/// Input mapper for agent name text fields. Maps characters for insertion,
-/// rejecting those that would make the name invalid per [`is_valid_agent_name`]
-/// rules. Spaces are transparently converted to dashes. Designed for use with
-/// [`TextInput::with_char_map`].
-pub fn agent_name_char_map(text: &str, cursor: usize, ch: char) -> Option<char> {
-    // Transparently convert spaces to dashes.
+/// A character no agent name may hold anywhere: what git refuses anywhere in
+/// a ref name (ASCII control characters and DEL, space, and `~ ^ : ? * [ \`),
+/// and the bidirectional controls.
+fn never_in_an_agent_name(ch: char) -> bool {
+    ch.is_ascii_control()
+        || matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        || crate::bidi::is_bidi_control(ch)
+}
+
+/// The folder a NEW agent's worktree is named from its name: every character
+/// other than ASCII letters, digits, `-` and `_` becomes `-`, so
+/// `dependabot/cargo/tray-icon-0.26.1` lands in
+/// `dependabot-cargo-tray-icon-0-26-1`. The branch keeps its real name.
+///
+/// A flat folder keeps a name's slashes from nesting one agent's folder inside
+/// another's, and keeps every other character a branch allows out of the path.
+/// Two names that flatten alike want the same folder, and the second create is
+/// refused because the folder is already there. An existing agent's folder is
+/// the one its record holds, never derived from its name again.
+pub fn agent_folder_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Input mapper for agent name text fields, for
+/// [`TextInput::with_char_map`]. A space becomes a dash, and a character no
+/// agent name may hold anywhere is refused as it is typed. Everything else
+/// goes in, and [`is_valid_agent_name`] judges the whole name when it is
+/// submitted.
+pub fn agent_name_char_map(_text: &str, _cursor: usize, ch: char) -> Option<char> {
     let ch = if ch == ' ' { '-' } else { ch };
-    // Only allow ASCII alphanumeric, '-', '_', '/'
-    if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '/') {
-        return None;
-    }
-    // First position must be alphanumeric (reject '-', '_', '/')
-    if cursor == 0 && !ch.is_ascii_alphanumeric() {
-        return None;
-    }
-    // Prevent '//' by checking the character before and after the cursor
-    if ch == '/' {
-        if cursor > 0 && text.as_bytes().get(cursor - 1) == Some(&b'/') {
-            return None;
-        }
-        if text.as_bytes().get(cursor) == Some(&b'/') {
-            return None;
-        }
-    }
-    Some(ch)
+    (!never_in_an_agent_name(ch)).then_some(ch)
 }
 
 #[cfg(test)]
@@ -11791,6 +11823,70 @@ mod tests {
         );
     }
 
+    /// A leading `+` is a refspec's force marker, and git allows it in a
+    /// branch name, so pushing a branch called `+feature` must push that
+    /// branch rather than force-push `feature` over the remote's.
+    #[test]
+    fn push_reads_a_plus_leading_branch_as_a_ref_and_forces_nothing() {
+        let repo = init_test_repo();
+        let remote = repo.path().join("remote.git");
+        run_git(
+            repo.path(),
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "theirs"]);
+        run_git(
+            repo.path(),
+            &["push", "-q", "origin", "HEAD:refs/heads/feature"],
+        );
+        let theirs = head_commit(repo.path()).unwrap();
+        run_git(repo.path(), &["reset", "--hard", "--quiet", "HEAD~1"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "mine"]);
+        run_git(repo.path(), &["branch", "feature"]);
+        run_git(repo.path(), &["branch", "+feature"]);
+        run_git(
+            repo.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/+feature"],
+        );
+        let mine = head_commit(repo.path()).unwrap();
+
+        push(repo.path()).unwrap();
+
+        let remote_tip = |name: &str| {
+            let out = test_support::git_command()
+                .args([
+                    "-C",
+                    remote.to_string_lossy().as_ref(),
+                    "rev-parse",
+                    "--verify",
+                ])
+                .arg(format!("refs/heads/{name}"))
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(
+            remote_tip("feature"),
+            theirs,
+            "feature was force-pushed over"
+        );
+        assert_eq!(remote_tip("+feature"), mine);
+        let upstream = test_support::git_command()
+            .args(["-C", repo.path().to_string_lossy().as_ref()])
+            .args(["config", "branch.+feature.merge"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "refs/heads/+feature",
+            "the push still sets the upstream"
+        );
+    }
+
     #[test]
     fn create_worktree_existing_branch_fails_when_already_checked_out() {
         let repo = init_test_repo();
@@ -12543,28 +12639,78 @@ mod tests {
         assert_eq!(staged[0].status, "R");
     }
 
+    #[derive(serde::Deserialize)]
+    struct AgentNameFixture {
+        cases: Vec<AgentNameCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct AgentNameCase {
+        name: String,
+        valid: bool,
+        git_accepts: Option<bool>,
+    }
+
+    /// Every shared vector is answered the same by the pure rule and by git
+    /// itself, apart from the cases the fixture records dux refusing on
+    /// purpose. Git is asked inside a repository, as a branch create would be;
+    /// there `--branch` turns a shorthand like `@{-1}` into the branch it
+    /// stands for, so a name counts as accepted only when git prints it back
+    /// unchanged.
     #[test]
-    fn valid_agent_names() {
-        assert!(is_valid_agent_name("foo"));
-        assert!(is_valid_agent_name("foo-bar"));
-        assert!(is_valid_agent_name("foo_bar"));
-        assert!(is_valid_agent_name("foo/bar"));
-        assert!(is_valid_agent_name("ABC123"));
-        assert!(is_valid_agent_name("feature/my-branch_v2"));
+    fn agent_names_are_exactly_the_names_git_accepts_as_branches() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agent_name_cross_language.json");
+        let fixture: AgentNameFixture =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let repo = init_test_repo();
+        for case in fixture.cases {
+            let out = test_support::git_command()
+                .args(["check-ref-format", "--branch", &case.name])
+                .current_dir(repo.path())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .unwrap();
+            let git_says = out.status.success()
+                && out.stdout.strip_suffix(b"\n") == Some(case.name.as_bytes());
+            assert_eq!(
+                git_says,
+                case.git_accepts.unwrap_or(case.valid),
+                "git and the fixture on {:?}",
+                case.name
+            );
+            assert_eq!(
+                is_valid_agent_name(&case.name),
+                case.valid,
+                "the rule on {:?}",
+                case.name
+            );
+        }
     }
 
     #[test]
-    fn invalid_agent_names() {
-        assert!(!is_valid_agent_name(""));
-        assert!(!is_valid_agent_name("foo bar"));
-        assert!(!is_valid_agent_name("foo@bar"));
-        assert!(!is_valid_agent_name("-foo"));
-        assert!(!is_valid_agent_name("foo/"));
-        assert!(!is_valid_agent_name("/foo"));
-        assert!(!is_valid_agent_name("foo//bar"));
-        assert!(!is_valid_agent_name("foo.bar"));
-        assert!(!is_valid_agent_name("foo..bar"));
-        assert!(!is_valid_agent_name("hello world!"));
+    fn a_new_agents_folder_is_its_name_flattened_and_a_clash_is_refused() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("agents");
+        let name = "dependabot/cargo/tray-icon-0.26.1";
+        let (branch, path) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            None,
+            Some(name),
+        )
+        .unwrap();
+        assert_eq!(branch, name);
+        assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
+        assert!(path.ends_with("proj/dependabot-cargo-tray-icon-0-26-1"));
+
+        let clash = "dependabot-cargo/tray-icon-0.26.1";
+        create_worktree_from_start_point(repo.path(), &worktrees_root, "proj", None, Some(clash))
+            .expect_err("a folder already there refuses the create");
+        assert_eq!(current_branch_opt(&path).unwrap().as_deref(), Some(name));
+        assert!(!local_branch_exists(repo.path(), clash));
     }
 
     #[test]
@@ -12644,54 +12790,14 @@ mod tests {
     // ── agent_name_char_map tests ───────────────────────────────
 
     #[test]
-    fn agent_map_allows_valid_chars() {
-        assert_eq!(agent_name_char_map("a", 1, 'b'), Some('b'));
-        assert_eq!(agent_name_char_map("a", 1, '0'), Some('0'));
-        assert_eq!(agent_name_char_map("a", 1, '-'), Some('-'));
-        assert_eq!(agent_name_char_map("a", 1, '_'), Some('_'));
-        assert_eq!(agent_name_char_map("a", 1, '/'), Some('/'));
-    }
-
-    #[test]
-    fn agent_map_rejects_invalid_chars() {
-        assert_eq!(agent_name_char_map("a", 1, '@'), None);
-        assert_eq!(agent_name_char_map("a", 1, '.'), None);
-        assert_eq!(agent_name_char_map("a", 1, '!'), None);
-        assert_eq!(agent_name_char_map("a", 1, '#'), None);
-    }
-
-    #[test]
-    fn agent_map_converts_space_to_dash() {
+    fn the_name_field_turns_a_space_into_a_dash_and_refuses_what_git_never_takes() {
         assert_eq!(agent_name_char_map("a", 1, ' '), Some('-'));
-    }
-
-    #[test]
-    fn agent_map_rejects_space_at_position_zero() {
-        // Space maps to dash, but dash is rejected at position 0.
-        assert_eq!(agent_name_char_map("", 0, ' '), None);
-    }
-
-    #[test]
-    fn agent_map_first_char_must_be_alphanumeric() {
-        // Rejected at position 0
-        assert_eq!(agent_name_char_map("", 0, '-'), None);
-        assert_eq!(agent_name_char_map("", 0, '_'), None);
-        assert_eq!(agent_name_char_map("", 0, '/'), None);
-        // Accepted at position 0
-        assert_eq!(agent_name_char_map("", 0, 'a'), Some('a'));
-        assert_eq!(agent_name_char_map("", 0, '1'), Some('1'));
-        // Also rejected when inserting at position 0 in non-empty text
-        assert_eq!(agent_name_char_map("abc", 0, '-'), None);
-    }
-
-    #[test]
-    fn agent_map_prevents_double_slash() {
-        // Inserting '/' right after an existing '/'
-        assert_eq!(agent_name_char_map("a/", 2, '/'), None);
-        // Inserting '/' right before an existing '/'
-        assert_eq!(agent_name_char_map("a/b", 1, '/'), None);
-        // Inserting '/' where no adjacent slash exists
-        assert_eq!(agent_name_char_map("ab", 1, '/'), Some('/'));
+        for ch in ['~', '^', ':', '?', '*', '[', '\\', '\t', '\u{7f}'] {
+            assert_eq!(agent_name_char_map("a", 1, ch), None, "{ch:?}");
+        }
+        for ch in ['.', '@', '+', '/', 'é', '{'] {
+            assert_eq!(agent_name_char_map("a", 1, ch), Some(ch), "{ch:?}");
+        }
     }
 
     #[test]

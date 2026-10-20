@@ -476,8 +476,8 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             autoFocus
           />
           <span className="text-xs text-muted-foreground">
-            Display name only: the branch already exists. Letters, digits,
-            dashes, underscores and slashes.
+            Display name only: the branch already exists. Any name git
+            accepts for a branch.
           </span>
         </div>
       ) : null}

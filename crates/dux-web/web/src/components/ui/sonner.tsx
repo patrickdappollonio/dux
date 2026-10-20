@@ -75,10 +75,11 @@ const TONE_ICON = {
 } as const
 
 /// The foot of every toast `lib/notify.ts` raises: a bar draining over `ms`, the
-/// toast's exact sonner duration, plus the tag that says it is paused; nothing at
-/// all when the toast will not dismiss itself (`ms` null). Both sit in the
-/// toast's own bottom padding, absolutely placed, so they take no room in it and
-/// cover nothing outside it, and both are hidden from the toaster's live region.
+/// toast's exact sonner duration, and nothing at all when the toast will not
+/// dismiss itself (`ms` null). The bar stopping, dimmed while the stack is open,
+/// is the only sign of a pause. It sits in the toast's own bottom padding,
+/// absolutely placed, so it takes no room in it and covers nothing outside it,
+/// and it is hidden from the toaster's live region.
 ///
 /// The bar keeps no clock of its own. It is a CSS animation that `index.css`
 /// pauses on exactly the conditions sonner pauses on (see `Toaster` below), and
@@ -122,7 +123,6 @@ export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }
   if (ms === null) return null
   return (
     <span aria-hidden className="dux-toast-drain">
-      <span className="dux-toast-held-tag">Paused while you read</span>
       <span
         ref={fillRef}
         className={`dux-toast-drain-fill bg-current ${color}`}

@@ -139,8 +139,8 @@ export function CloneProjectDialog() {
             autoFocus={false}
           />
           <p className="text-xs text-muted-foreground">
-            Letters, digits, dashes, underscores and slashes. This becomes the
-            branch name.
+            Any name git accepts for a branch. This becomes the branch
+            name.
           </p>
         </div>
         {pr ? (

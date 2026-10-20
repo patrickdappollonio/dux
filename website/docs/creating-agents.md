@@ -33,8 +33,15 @@ Creating an agent does three things:
 
 Worktrees live under a `worktrees/` subdirectory of dux's data directory:
 
-- **Linux:** `~/.config/dux/worktrees/<project-name>/<branch-name>/`
-- **macOS:** `~/.dux/worktrees/<project-name>/<branch-name>/`
+- **Linux:** `~/.config/dux/worktrees/<project-name>/<folder>/`
+- **macOS:** `~/.dux/worktrees/<project-name>/<folder>/`
+
+The folder is the agent's name flattened into one plain folder name: every character other
+than letters, digits, `-` and `_` becomes `-`. An agent named
+`dependabot/cargo/tray-icon-0.26.1` gets the folder `dependabot-cargo-tray-icon-0-26-1`,
+while its branch keeps the real name. Two names that flatten to the same folder can't both
+have one, so the second create is refused and the first agent's folder is left alone.
+Agents created before dux flattened folder names keep the folders they already have.
 
 Because each agent owns a real git worktree, your project's `.gitignore`, git hooks, and
 local config behave exactly as they do in the main checkout.
@@ -42,12 +49,15 @@ local config behave exactly as they do in the main checkout.
 ## Naming an agent
 
 Every creation path that makes a branch ends at a naming prompt, and there the name IS
-the branch name. It becomes a git ref, so the rules are strict:
+the branch name. Any name git accepts for a branch works, so a pull request's head branch
+can always name its agent, whatever it is called:
 
-- **Allowed characters:** ASCII letters, digits, `-`, `_`, and `/`. Spaces become dashes
-  as you type.
-- **Shape:** it must start with a letter or digit, must not contain `//`, and must not end
-  with `/`.
+- **Refused as you type:** spaces become dashes, and the characters git never allows in a
+  branch name (`~ ^ : ? * [ \` and control characters) don't go in at all.
+- **Checked when you confirm:** no `..` or `@{`, it can't be `@` or `HEAD`, it can't
+  start with `-`, start or end with `/`, contain `//` or end with `.`, and no part
+  between slashes may start with `.` or end with `.lock`.
+- **Anything else is fine:** dots, `@`, `+`, slashes and letters outside English all work.
 
 Tick the pet-name checkbox in the naming prompt and dux generates a two-word pet name
 such as `brave-morse`, for both the agent and the branch. The checkbox starts unticked;
@@ -834,8 +844,8 @@ that question creates nothing and leaves the folder untouched.
   Notes! (2026)` becomes `My-Notes-2026`). A folder with nothing usable in its name gives
   `standalone-agent`. The same happens when you clear the name later when renaming.
 - **Typed:** it follows the same rules as any agent's name, even though no branch is
-  created: letters, digits, `-`, `_` and `/`, with spaces becoming dashes as you type. See
-  [Naming an agent](#naming-an-agent).
+  created: any name git accepts for a branch, with spaces becoming dashes as you type.
+  See [Naming an agent](#naming-an-agent).
 
 What a standalone agent does NOT have:
 

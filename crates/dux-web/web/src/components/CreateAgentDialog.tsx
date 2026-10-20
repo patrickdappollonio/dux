@@ -90,8 +90,7 @@ export function CreateAgentDialog() {
           autoFocus={dialog.nameAutoFocus}
         />
         <p className="text-xs text-muted-foreground">
-          Letters, digits, dashes, underscores and slashes. This becomes the
-          branch name.
+          Any name git accepts for a branch. This becomes the branch name.
         </p>
         <AgentOptions
           showCopyChanges={dialog.showCopyChanges}

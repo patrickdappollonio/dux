@@ -24,10 +24,7 @@ pub fn branch_rename_refusal(rejection: &BranchRenameRejection) -> &'static str 
             "Type the name to rename the git branch to. An empty name only resets the agent's \
              name to its branch name, so untick \"Also rename the git branch\" to do that."
         }
-        BranchRenameRejection::MalformedName => {
-            "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
-             It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\"."
-        }
+        BranchRenameRejection::MalformedName => crate::git::AGENT_NAME_RULE,
         BranchRenameRejection::AlreadyInFlight => {
             "A rename is already in progress for this agent. Wait for it to finish before \
              renaming again."

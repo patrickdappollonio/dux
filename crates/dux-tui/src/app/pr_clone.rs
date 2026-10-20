@@ -616,10 +616,7 @@ impl App {
             return true;
         }
         if !is_valid_agent_name(&name) {
-            self.set_error(
-                "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
-                 It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
-            );
+            self.set_error(crate::git::invalid_agent_name_refusal(&name));
             return true;
         }
         match form.question_for(&name) {

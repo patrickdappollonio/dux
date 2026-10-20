@@ -179,8 +179,8 @@ pub fn prepare_clone(
             return Err(crate::status_text![
                 "Invalid agent name ",
                 q(typed),
-                ". Use only letters, digits, dashes, underscores and slashes; it must start \
-                 with a letter or digit, must not contain \"//\", and must not end with \"/\"."
+                ". ",
+                crate::git::AGENT_NAME_RULE
             ]);
         }
         typed.to_string()
@@ -661,8 +661,9 @@ fn settle_pull_request(
                 " has head branch ",
                 q(branch),
                 format!(
-                    ", which is not a usable agent name. Type a name using only letters, \
-                     digits, dashes, underscores and slashes.{nothing_was}"
+                    ", which is not a usable agent name. Type a name for the agent instead. \
+                     {}{nothing_was}",
+                    crate::git::AGENT_NAME_RULE
                 )
             ]));
         }

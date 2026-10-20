@@ -888,8 +888,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 /* Held exactly when sonner holds its timers: the stack is expanded (sonner's
    own attribute), a pointer is down on it, or the page is hidden (the last two
    mirrored by the Toaster). Only the expanded stack, the one a reader is
-   looking at, also SAYS it is paused: a press is a close, an action or a swipe
-   on its way somewhere, and a hidden page has nobody looking. */
+   looking at, also dims its bars: a press is a close, an action or a swipe on
+   its way somewhere, and a hidden page has nobody looking. */
 [data-sonner-toast][data-expanded="true"] .dux-toast-drain-fill,
 [data-dux-pressed] .dux-toast-drain-fill,
 [data-dux-hidden] .dux-toast-drain-fill {
@@ -903,31 +903,6 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 @media (prefers-reduced-motion: reduce) {
   .dux-toast-drain-fill {
     animation-timing-function: steps(var(--dux-drain-steps));
-    transition: none;
-  }
-}
-
-/* "Paused while you read": a small label right-aligned just above the bar, on
-   each counting toast, in the 16px bottom padding sonner gives every toast.
-   Text, icon, action button and close button all live inside that padding, so
-   the label covers none of them, and it is inside the clip box, so it can
-   never reach past its own toast. */
-.dux-toast-held-tag {
-  position: absolute;
-  right: 12px;
-  bottom: 4px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-  line-height: 1;
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 150ms;
-}
-[data-sonner-toast][data-expanded="true"] .dux-toast-held-tag {
-  opacity: 1;
-}
-@media (prefers-reduced-motion: reduce) {
-  .dux-toast-held-tag {
     transition: none;
   }
 }
