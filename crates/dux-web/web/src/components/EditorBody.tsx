@@ -1569,8 +1569,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     if (activeTab?.mode !== "file" || isImageTab) return null
     // The cluster's one filled primary action, beside its outline peers: Save
     // commits the user's work, so it is the header's primary act. A
-    // user-approved exception, like the launcher's filled verb; it still keeps
-    // the header's one height.
+    // user-approved exception, like the launcher's filled New… button; it still
+    // keeps the header's one height.
     return (
       <Button
         variant="default"

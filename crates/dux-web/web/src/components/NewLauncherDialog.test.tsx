@@ -176,6 +176,19 @@ describe("NewLauncherDialog agent step", () => {
     expect(screen.getByText("login").tagName).toBe("MARK")
   })
 
+  // The busy word is the working cue wherever it is shown, not a static label.
+  it("gives a busy agent's state word the working cue and an idle one none", () => {
+    ;(state.current.spine as { sessions: Record<string, unknown>[] }).sessions[0]!
+      .working = true
+    render(<NewLauncherDialog />)
+    fireEvent.click(row("New terminal for an agent"))
+    const busy = screen.getByText("Working")
+    expect(busy.querySelector(".working-dots")).toBeTruthy()
+    expect(busy.className).toContain("animate-working-pulse")
+    const idle = screen.getAllByText("Idle")[0]!
+    expect(idle.querySelector(".working-dots")).toBeNull()
+  })
+
   it("opens the terminal for the picked agent, and Back returns to the list", () => {
     render(<NewLauncherDialog />)
     fireEvent.click(row("New terminal for an agent"))

@@ -27,11 +27,12 @@ import {
   SquareTerminal,
   TriangleAlert,
 } from "lucide-react"
-import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react"
+import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useRef, useState } from "react"
 
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { MatchHighlight } from "@/components/MatchHighlight"
+import { RowStateWord } from "@/components/RowStateWord"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { useWorkingPulseAnchor } from "@/hooks/use-working-cue"
 import {
@@ -85,7 +86,6 @@ import {
   sortQuietTail,
   stateWord,
   type FlatSortKey,
-  type StateWord,
 } from "@/lib/flatList"
 import {
   displayedTerminalOrder,
@@ -185,42 +185,6 @@ function RowLineTwo({ children }: { children: ReactNode }) {
   return (
     <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
       {children}
-    </span>
-  )
-}
-
-// The row's state word, shared by both row kinds and keyed on the label so a
-// change replays the swap. A fade only: motion drops it off line two's baseline.
-//
-// While the row is working the word IS the cue: it pulses on the same clock as
-// the glyph and carries the cycling ellipsis in a fixed slot behind it. The
-// pulse takes the place of the one-shot swap fade rather than joining it, since
-// both are the `animation` shorthand and only one of them can win; the word is
-// already at full opacity when the pulse starts, so nothing snaps. The row
-// anchors it to the glyph's bounce (`useWorkingPulseAnchor`) through `ref`, so
-// work resuming mid-settle keeps the word in step with the glyph.
-function RowStateWord({
-  word,
-  working,
-  ref,
-}: {
-  word: StateWord
-  working: boolean
-  ref?: Ref<HTMLSpanElement>
-}) {
-  return (
-    <span
-      ref={ref}
-      className={cn(
-        "shrink-0 font-medium",
-        working
-          ? "motion-safe:animate-working-pulse"
-          : "motion-safe:animate-state-word",
-        word.className,
-      )}
-    >
-      {word.label}
-      {working ? <span aria-hidden className="working-dots" /> : null}
     </span>
   )
 }
@@ -1197,9 +1161,8 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 <Bot />
               </EmptyMedia>
               <EmptyTitle>No agents yet</EmptyTitle>
-              {/* Copy unchanged by the launcher overhaul: the button flips, the
-                  sentence does not (it is what was signed off, and it reads
-                  true either way). */}
+              {/* The button below flips on an empty workspace and this
+                  sentence does not: it reads true either way. */}
               <EmptyDescription>
                 Pick a project and dux gives the agent its own worktree.
               </EmptyDescription>

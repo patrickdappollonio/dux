@@ -2,6 +2,7 @@ import { Bot, ChevronLeft, ChevronRight, Search } from "lucide-react"
 import { Fragment, useMemo, useState, type KeyboardEvent } from "react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
+import { RowStateWord } from "@/components/RowStateWord"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useSearchPick } from "@/hooks/use-search-pick"
+import { agentRowVisual } from "@/lib/agentRow"
 import { agentTerminalGroups } from "@/lib/agentTerminalPick"
 import { matchWorkspace, sessionLabel } from "@/lib/agentWorkspace"
 import {
@@ -393,6 +395,14 @@ function AgentPickRow({
 }) {
   const name = sessionLabel(session)
   const word = stateWord(session)
+  // The same flag the sidebar row's cue fires on, so the word pulses and
+  // carries its ellipsis exactly when it reads the busy word.
+  const { working } = agentRowVisual(
+    session.status,
+    session.working,
+    session.needs_attention,
+    session.typing,
+  )
   return (
     <button
       type="button"
@@ -411,7 +421,7 @@ function AgentPickRow({
           <MatchHighlight text={name} ranges={matchCharRanges(name, [needle])} />
         </span>
         <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground">
-          <span className={cn("shrink-0", word.className)}>{word.label}</span>
+          <RowStateWord key={word.label} word={word} working={working} />
           {/* The agent row's own separator: a dot, centered because a box
               with no text has no baseline. */}
           <span

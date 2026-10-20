@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 const OPEN_DELAY_MS = 150
 const CLOSE_DELAY_MS = 300
 
-// A menu opened from inside the panel (a row's ⋯, the launcher's ⋯) renders in a
+// A menu opened from inside the panel (a row's ⋯, the sort control) renders in a
 // portal outside it, so its trigger is how the panel knows one is open: Base UI
 // marks an open trigger with `data-popup-open` (its `aria-expanded` is not a
 // reliable signal). `aria-haspopup` keeps a tooltip trigger, which wears the
