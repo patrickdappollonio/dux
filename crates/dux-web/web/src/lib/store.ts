@@ -1382,32 +1382,67 @@ function routeEvent(event: EventsServerMessage): void {
 //
 // The hold belongs to the newest open: only that open's check settles it. A
 // reopen before it settles keeps what the replaced open held, in order, ahead of
-// what the new one brings, so a one-shot frame is never lost on the same dux.
-let heldFrames: EventsServerMessage[] | null = null
+// what the new one brings, so a one-shot frame is never lost on the same run.
+// Each open's frames remember the run its own check named: a replaced open's
+// frames are applied only when that is the very run the newest open confirms,
+// because a document from an older run would outrank the new run's revisions.
+type HeldOpen = {
+  owner: number
+  frames: EventsServerMessage[]
+  run: ServerIdentity | null
+}
+let held: HeldOpen[] | null = null
 let heldRecovery: (() => void) | null = null
-let heldOwner = 0
 let openSeq = 0
 
 eventsSocket.onEvent = (event) => {
-  if (heldFrames !== null) {
-    heldFrames.push(event)
+  if (held !== null) {
+    held[held.length - 1].frames.push(event)
     return
   }
   routeEvent(event)
 }
 
-// End the hold for the open `owner`: `apply` applies the held frames in the
-// order they arrived and then runs the held refetch; otherwise both are
-// dropped. A check that belongs to no open, or to a replaced one, settles
-// nothing.
-function settleHeldOpen(owner: number | null, apply: boolean): void {
-  if (heldFrames === null || owner === null || owner !== heldOwner) return
-  const frames = heldFrames
+function sameRun(a: ServerIdentity | null, b: ServerIdentity | null): boolean {
+  return (
+    a !== null &&
+    b !== null &&
+    a.instance !== null &&
+    a.instance === b.instance &&
+    a.process === b.process
+  )
+}
+
+// Settle what the open `owner` held, on its own check's answer `current`. The
+// newest open's settles the hold: `apply` applies the frames of every replaced
+// open on the same run, then its own, in the order they arrived, then the held
+// refetch; otherwise everything is dropped. A replaced open's check only names
+// the run of its own frames, or drops them. A check that belongs to no open
+// settles nothing.
+function settleHeldOpen(
+  owner: number | null,
+  apply: boolean,
+  current: ServerIdentity | null = null,
+): void {
+  if (held === null || owner === null) return
+  const index = held.findIndex((open) => open.owner === owner)
+  if (index === -1) return
+  if (index !== held.length - 1) {
+    if (apply && current !== null) held[index].run = current
+    else held.splice(index, 1)
+    return
+  }
+  const opens = held
   const recovery = heldRecovery
-  heldFrames = null
+  held = null
   heldRecovery = null
   if (!apply) return
-  for (const frame of frames) routeEvent(frame)
+  const newest = opens[opens.length - 1]
+  for (const open of opens.slice(0, -1)) {
+    if (!sameRun(open.run, current)) continue
+    for (const frame of open.frames) routeEvent(frame)
+  }
+  for (const frame of newest.frames) routeEvent(frame)
   recovery?.()
 }
 
@@ -1510,7 +1545,7 @@ async function reloadIfServerChanged(owner: number | null = null): Promise<void>
   // A newer check was asked since: it decides the page; this one only settles
   // what its own open held.
   if (seq !== identityProbeSeq) {
-    settleHeldOpen(owner, !gateCovered() && heldMayApply(current))
+    settleHeldOpen(owner, !gateCovered() && heldMayApply(current), current)
     return
   }
   // A late answer decides nothing: the page left its session, or it is
@@ -1536,7 +1571,7 @@ async function reloadIfServerChanged(owner: number | null = null): Promise<void>
     reloadLeavingNoModalEntry()
     return
   }
-  settleHeldOpen(owner, true)
+  settleHeldOpen(owner, true, current)
   noteServerRunProbe(current === null ? "unknown" : "same")
   // The check has RESOLVED and the run has not moved, which is the moment a PTY
   // socket may attach again. `conn === "open"` is true a whole round trip before
@@ -1588,8 +1623,8 @@ eventsSocket.onOpen = () => {
       // A page that knows its dux applies nothing from this socket until the
       // answer to this open's check says it is that dux.
       const owner = ++openSeq
-      if (heldFrames === null) heldFrames = []
-      heldOwner = owner
+      if (held === null) held = []
+      held.push({ owner, frames: [], run: null })
       heldRecovery = recover
       void reloadIfServerChanged(owner).catch(() => settleHeldOpen(owner, !gateCovered()))
     } else {

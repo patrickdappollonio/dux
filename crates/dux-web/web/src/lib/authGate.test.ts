@@ -235,6 +235,45 @@ describe("reportUnauthorized", () => {
     expect(g.getAuthPhase().kind).toBe("open")
   })
 
+  it("checks a newer session's refusal even while an older session's check is still out", async () => {
+    statusBody = { ...SIGNED_IN, instance: "dux-a" }
+    const g = await load()
+    await g.initAuthGate()
+    let first = true
+    let current: unknown = { ...SIGNED_IN, instance: "dux-a" }
+    const statusReads = vi.fn()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const url = String(input)
+        if (url.endsWith("/auth/status") && first) {
+          first = false
+          // The older session's check, which never answers.
+          return new Promise<Response>(() => {})
+        }
+        if (url.endsWith("/auth/status")) {
+          statusReads()
+          return Promise.resolve(json(200, current))
+        }
+        return Promise.resolve(json(204, undefined))
+      }),
+    )
+    g.reportUnauthorized()
+    current = { ...SIGNED_OUT, instance: "dux-a" }
+    await g.signOut()
+    current = { ...SIGNED_IN, instance: "dux-a" }
+    await g.signIn("pw")
+    expect(g.getAuthPhase().kind).toBe("open")
+    // The new session ends too.
+    current = { ...SIGNED_OUT, instance: "dux-a" }
+    statusReads.mockClear()
+    g.reportUnauthorized()
+    await vi.waitFor(() =>
+      expect(g.getAuthPhase()).toMatchObject({ kind: "signed_out", reason: "expired" }),
+    )
+    expect(statusReads).toHaveBeenCalled()
+  })
+
   it("signs out as before once the dux it opened on, or an unknown one, answers", async () => {
     statusBody = { ...SIGNED_IN, instance: "dux-a" }
     const g = await load()

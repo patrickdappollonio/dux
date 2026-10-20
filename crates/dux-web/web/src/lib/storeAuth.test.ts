@@ -355,11 +355,44 @@ describe("an app socket reopened twice before its dux is confirmed", () => {
     store.eventsSocket.onEvent(pushed(["from-first-open"], 60))
     await reopen(store)
     await vi.waitFor(() => expect(heldBuilds).toHaveLength(2))
+    // The replaced open's own check names the run its frame came from.
+    heldBuilds[0](json(200, { version: "development", process: "run-1", instance: "dux-a" }))
+    await settle()
     // The recovery's own refetch hangs, so only the held frame can paint.
     holdWorkspace = () => {}
     heldBuilds[1](json(200, { version: "development", process: "run-1", instance: "dux-a" }))
     await vi.waitFor(() =>
       expect(store.getSnapshot().spine?.sessions.map((s) => s.id)).toContain("from-first-open"),
+    )
+  })
+})
+
+describe("frames a replaced open held from a run nobody confirmed", () => {
+  it("drops them and applies only the newest open's frames", async () => {
+    instance = "dux-a"
+    const { store } = await loadSignedIn("")
+    FakeWebSocket.instances[0].open()
+    await settle()
+    holdBuilds = true
+    const reopen = async () => {
+      const count = FakeWebSocket.instances.length
+      FakeWebSocket.instances[count - 1].drop(1006)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(count + 1), {
+        timeout: 3000,
+      })
+      FakeWebSocket.instances[count].open()
+    }
+    await reopen()
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(1))
+    store.eventsSocket.onEvent({ event: "workspace", rev: 60, workspace: { ...makeSpine(["stale-run"]), rev: 60 } })
+    await reopen()
+    await vi.waitFor(() => expect(heldBuilds).toHaveLength(2))
+    store.eventsSocket.onEvent({ event: "workspace", rev: 1, workspace: { ...makeSpine(["current-run"]), rev: 1 } })
+    holdWorkspace = () => {}
+    // Only the newest open's check answers; the first open's never does.
+    heldBuilds[1](json(200, { version: "development", process: "run-1", instance: "dux-a" }))
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().spine?.sessions.map((s) => s.id)).toEqual(["current-run"]),
     )
   })
 })

@@ -363,12 +363,14 @@ export function reportUnauthorized(): void {
   // a different dux (an unknown one included) brings the login page. An act of
   // this page's own (a sign-out, a password change) is answered by its own dux.
   if (openedInstance() !== null && !actInFlight()) {
-    if (unauthorizedCheck !== null) return
+    // One check per session: a newer session's refusal gets its own.
+    const pending = unauthorizedCheck
+    if (pending !== null && pending.epoch === epoch && pending.opens === opens) return
     // The refusal belongs to the session it arrived in: a page that moved on
     // meanwhile, or opened a newer session, has its answer already.
     const atEpoch = epoch
     const atOpens = opens
-    unauthorizedCheck = fetchAuthStatus()
+    const check = fetchAuthStatus()
       .then((answer) => {
         if (epoch !== atEpoch || opens !== atOpens) return
         if (phase.kind !== "open" && phase.kind !== "checking") return
@@ -376,16 +378,19 @@ export function reportUnauthorized(): void {
         signOutForRefusal()
       })
       .finally(() => {
-        unauthorizedCheck = null
+        // Only its own: a newer session's check is not this one's to clear.
+        if (unauthorizedCheck === entry) unauthorizedCheck = null
       })
+    const entry = { epoch: atEpoch, opens: atOpens, check }
+    unauthorizedCheck = entry
     return
   }
   signOutForRefusal()
 }
 
-// The status read a refusal waits on before the login page may show; one at a
-// time, however many refusals arrive meanwhile.
-let unauthorizedCheck: Promise<void> | null = null
+// The status read a refusal waits on before the login page may show; one per
+// session, however many refusals arrive in it.
+let unauthorizedCheck: { epoch: number; opens: number; check: Promise<void> } | null = null
 
 function signOutForRefusal(): void {
   const reason: SignOutReason = signingOut
