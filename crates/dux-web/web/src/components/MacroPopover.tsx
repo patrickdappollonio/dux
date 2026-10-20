@@ -23,7 +23,7 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
-import { subsequenceMatchRanges } from "@/lib/searchMatch"
+import { cmdkMatchRanges } from "@/lib/searchMatch"
 import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
 import { cn } from "@/lib/utils"
 import { openMacrosDialog, runMacro, useDux, useDuxSelector } from "@/lib/store"
@@ -245,7 +245,7 @@ function MacroCommand({
               <span>
                 <MatchHighlight
                   text={macro.name}
-                  ranges={subsequenceMatchRanges(macro.name, search)}
+                  ranges={cmdkMatchRanges(macro.name, search)}
                 />
               </span>
             </CommandItem>
