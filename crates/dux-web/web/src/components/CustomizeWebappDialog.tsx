@@ -136,9 +136,19 @@ function rowMatches(fields: string[], words: string[]): boolean {
 }
 
 // What a row shows, as searched. A locked row shows its lock sentence in place
-// of its description; the password row shows no default.
-function settingSearchFields(d: SettingDescriptor, lock: string | null): string[] {
-  const fields = [d.label, inlineCodeDisplayText(lock ?? d.description), d.key]
+// of its description; the password row shows no default. `extra` is any other
+// sentence the row shows, in its backticked source form.
+function settingSearchFields(
+  d: SettingDescriptor,
+  lock: string | null,
+  extra: string[],
+): string[] {
+  const fields = [
+    d.label,
+    inlineCodeDisplayText(lock ?? d.description),
+    d.key,
+    ...extra.map(inlineCodeDisplayText),
+  ]
   if (d.control.kind !== "password") fields.push(defaultText(d))
   return fields
 }
@@ -375,14 +385,35 @@ function SettingControl({
 
 // Browser-notification permission, not a SettingDescriptor: it writes no config
 // and asks the browser, per visitor. dux never auto-prompts, so this is the only
-// way to grant it, and it shows only while permission is still "default".
-function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boolean }) {
-  const apiAvailable = typeof Notification !== "undefined"
-  const [permission, setPermission] = useState<NotificationPermission>(
-    apiAvailable ? Notification.permission : "denied",
-  )
+// way to grant it, and it shows only while permission is still "default". It
+// sits under the desktop-notifications row and is searched as part of it.
+const NOTIFICATION_PERMISSION_TEXT = {
+  title: "Browser permission",
+  body: "This browser hasn’t granted dux permission to show notifications yet, so the setting above can’t do anything. dux never asks on its own, so grant it here when you want it.",
+  action: "Enable browser notifications",
+}
 
-  if (!enabledInConfig || !apiAvailable || permission !== "default") return null
+function initialNotificationPermission(): NotificationPermission {
+  return typeof Notification !== "undefined" ? Notification.permission : "denied"
+}
+
+function notificationPermissionShown(
+  enabledInConfig: boolean,
+  permission: NotificationPermission,
+): boolean {
+  return enabledInConfig && typeof Notification !== "undefined" && permission === "default"
+}
+
+function NotificationPermissionRow({
+  setPermission,
+  words,
+}: {
+  setPermission: (p: NotificationPermission) => void
+  words: string[]
+}) {
+  const lit = (text: string) => (
+    <MatchHighlight text={text} ranges={matchCharRanges(text, words)} />
+  )
 
   const request = async () => {
     try {
@@ -401,12 +432,8 @@ function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boole
   return (
     <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Browser permission</span>
-        <p className="text-xs text-muted-foreground">
-          This browser hasn&rsquo;t granted dux permission to show notifications
-          yet, so the setting above can&rsquo;t do anything. dux never asks on its
-          own, so grant it here when you want it.
-        </p>
+        <span className="text-sm font-medium">{lit(NOTIFICATION_PERMISSION_TEXT.title)}</span>
+        <p className="text-xs text-muted-foreground">{lit(NOTIFICATION_PERMISSION_TEXT.body)}</p>
       </div>
       <div className="shrink-0 md:pt-0.5">
         <Button
@@ -416,7 +443,7 @@ function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boole
           className="max-md:min-h-10"
           onClick={() => void request()}
         >
-          Enable browser notifications
+          {lit(NOTIFICATION_PERMISSION_TEXT.action)}
         </Button>
       </div>
     </div>
@@ -599,6 +626,20 @@ function PasswordField({
 // Which fields show is the server's answer about this connection, read again
 // each time Preferences opens: change (a password is set), set the first one
 // (allowed from here), or neither.
+// The sentence under the password row's description: the minimums while the
+// password can be changed from here, otherwise why it cannot. Searched as part
+// of the row.
+function passwordNote(status: AuthStatus | null): string {
+  if (status === null) {
+    return "dux could not read its sign-in status, so the password cannot be changed from here right now. Close Preferences and open it again to ask once more."
+  }
+  if (status.password_set || status.can_set_first_password) {
+    const mins = passwordMinimums(status)
+    return `At least ${mins.length} characters. The meter shows how hard it is to guess; dux asks for ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better and says so if it refuses. Leave these empty to keep the current password.`
+  }
+  return firstPasswordUnavailable(status.required_reason)
+}
+
 function PasswordSettingRow({
   d,
   status,
@@ -622,10 +663,6 @@ function PasswordSettingRow({
   const editable =
     status !== null && (status.password_set || status.can_set_first_password)
   const mins = status ? passwordMinimums(status) : null
-  const unavailable =
-    status === null
-      ? "dux could not read its sign-in status, so the password cannot be changed from here right now. Close Preferences and open it again to ask once more."
-      : firstPasswordUnavailable(status.required_reason)
   return (
     <div className="flex flex-col gap-3 py-3 first:pt-0">
       <div className="flex flex-col gap-1">
@@ -641,13 +678,9 @@ function PasswordSettingRow({
         <p className="text-xs text-muted-foreground">
           {renderInlineCode(d.description, words)}
         </p>
-        {editable && mins ? (
-          <p className="text-xs text-muted-foreground">
-            {`At least ${mins.length} characters. The meter shows how hard it is to guess; dux asks for ${STRENGTH_LABELS[Math.min(4, mins.score)]} or better and says so if it refuses. Leave these empty to keep the current password.`}
-          </p>
-        ) : (
-          <p className="text-xs text-muted-foreground">{renderInlineCode(unavailable)}</p>
-        )}
+        <p className="text-xs text-muted-foreground">
+          {renderInlineCode(passwordNote(status), words)}
+        </p>
       </div>
       {editable && mins ? (
         <div className="flex flex-col gap-3">
@@ -890,6 +923,15 @@ function CustomizeWebappForm({
   const isMobile = useIsMobile()
   const coarsePointer = useIsCoarsePointer()
   const searchAutoFocus = !isMobile && !coarsePointer
+  // A password error stops or ends a Save, and it is said on the password row,
+  // so a search that hides that row is cleared to bring the reason on screen.
+  const showPasswordError = (message: string) => {
+    setPasswordError(message)
+    setQuery("")
+  }
+  const [notificationPermission, setNotificationPermission] = useState(
+    initialNotificationPermission,
+  )
 
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
@@ -945,13 +987,13 @@ function CustomizeWebappForm({
         notifyWarning(storedNotInForceSentence(answer.message), { sticky: true })
         return false
       case "refused":
-        setPasswordError(answer.message)
+        showPasswordError(answer.message)
         return false
       case "signed_out":
         reportUnauthorized()
         return false
       case "unreachable":
-        setPasswordError(
+        showPasswordError(
           answer.timedOut
             ? "dux did not answer in time, so the password may not have changed. Check by signing in again, or try once more."
             : "Could not reach dux, so the password was not changed. Try again.",
@@ -974,7 +1016,7 @@ function CustomizeWebappForm({
         })
       : ({ kind: "none" } as const)
     if (pw.kind === "invalid") {
-      setPasswordError(pw.message)
+      showPasswordError(pw.message)
       return
     }
     setPasswordError(null)
@@ -1029,10 +1071,25 @@ function CustomizeWebappForm({
     }
   }
 
+  // Whether the permission row shows under the desktop-notifications row.
+  const permissionRowShown = (d: SettingDescriptor): boolean =>
+    notificationPermissionShown(effective(d) as boolean, notificationPermission)
+
+  // Every other sentence a row shows, so it is searched as well as lit.
+  const extraShownText = (d: SettingDescriptor): string[] => {
+    if (d.control.kind === "password") return [passwordNote(authStatus)]
+    if (d.key === "capabilities.web_notifications" && permissionRowShown(d)) {
+      return Object.values(NOTIFICATION_PERMISSION_TEXT)
+    }
+    return []
+  }
+
   const shownGroups = SETTING_GROUPS.map((group) => ({
     group,
     settings: searching
-      ? group.settings.filter((d) => rowMatches(settingSearchFields(d, lockOn(d)), words))
+      ? group.settings.filter((d) =>
+          rowMatches(settingSearchFields(d, lockOn(d), extraShownText(d)), words),
+        )
       : group.settings,
   })).filter(({ settings }) => settings.length > 0)
 
@@ -1133,9 +1190,10 @@ function CustomizeWebappForm({
                         />
                       )}
                       {/* Directly beneath the setting it is a precondition for. */}
-                      {d.key === "capabilities.web_notifications" ? (
+                      {d.key === "capabilities.web_notifications" && permissionRowShown(d) ? (
                         <NotificationPermissionRow
-                          enabledInConfig={effective(d) as boolean}
+                          setPermission={setNotificationPermission}
+                          words={words}
                         />
                       ) : null}
                     </Fragment>

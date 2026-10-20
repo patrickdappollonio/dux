@@ -757,7 +757,7 @@ Lost in there? Type in **Search settings** at the top and the list shrinks to th
 holding every word you typed, in a row's name, description, default or config key, so
 `server.tailscale` finds its row too, with each hit highlighted. Escape clears the search
 first and closes the dialog on the second press; anything you changed in a row the search
-hid is still saved.
+hid is still saved, and if a new password is refused, the search clears so you can see why.
 
 The Tailscale row does more than save a value: it also moves the listener that is
 serving right now and tells you what happened to it. Choosing **No** from a browser

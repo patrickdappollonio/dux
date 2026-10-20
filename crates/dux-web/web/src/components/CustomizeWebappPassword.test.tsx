@@ -345,3 +345,30 @@ describe("the password row", () => {
     }
   })
 })
+
+describe("the password row under a search", () => {
+  it("clears a search that hides the row when Save stops on a password error", async () => {
+    render(<CustomizeWebappDialog />)
+    type("Current password", "the old password")
+    type("New password", STRONG)
+    type("New password again", `${STRONG} typo`)
+    type("Search settings", "tab_reaches")
+    expect(screen.queryByLabelText("New password")).toBeNull()
+
+    await save()
+
+    expect(postPassword).not.toHaveBeenCalled()
+    expect(screen.getByRole("alert").textContent).not.toBe("")
+    expect(screen.getByLabelText("New password")).toBeTruthy()
+  })
+
+  it("searches and lights the row's status sentence", () => {
+    phase = { kind: "open", status: status({ password_set: false }) }
+    render(<CustomizeWebappDialog />)
+    type("Search settings", "tail")
+    const inStatus = [...document.querySelectorAll("mark")].filter((m) =>
+      m.closest("p")?.textContent?.startsWith("No password is set."),
+    )
+    expect(inStatus.map((m) => m.textContent)).toEqual(["tail"])
+  })
+})
