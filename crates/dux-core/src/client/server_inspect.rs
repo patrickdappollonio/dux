@@ -497,9 +497,10 @@ mod tests {
     #[test]
     fn a_remote_that_asks_for_a_sign_in_says_so_even_when_its_refusal_has_no_body() {
         let (_fake, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
-            "/api/v1/auth/status" => {
-                Reply::json(200, r#"{"password_set":false,"required_here":false}"#)
-            }
+            "/api/v1/auth/status" => Reply::json(
+                200,
+                r#"{"password_set":false,"required_here":false,"signed_in":false}"#,
+            ),
             "/api/v1/build" => Reply::json(200, BUILD),
             _ => Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".into()),
         });

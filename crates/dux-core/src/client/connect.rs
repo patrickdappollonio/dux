@@ -123,8 +123,11 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
 #[derive(serde::Deserialize)]
 pub(crate) struct AuthStatus {
     pub(crate) password_set: bool,
-    #[serde(default)]
     pub(crate) required_here: bool,
+    /// Never read: required so that only the whole status document every
+    /// dux sends counts as dux.
+    #[serde(rename = "signed_in")]
+    _signed_in: bool,
     /// The remote's instance id; absent from a dux too old to have one.
     #[serde(default)]
     pub(crate) instance: Option<String>,
@@ -140,15 +143,25 @@ pub(crate) fn read_auth_status(target: &str, reply: &Response) -> Result<AuthSta
         let dux_refusal = serde_json::from_slice::<serde_json::Value>(&reply.body)
             .ok()
             .is_some_and(|json| json.get("error").is_some_and(|e| e.is_string()));
-        // A refusal in words (the Host check's) is dux's own too; a page is not.
-        let plain_words = !matches!(reply.status, 401 | 404 | 405)
-            && !String::from_utf8_lossy(&reply.body)
-                .trim_start()
-                .starts_with('<');
-        if dux_refusal || plain_words {
+        if dux_refusal {
             return Err(CliError::new(Exit::Failed, reply_sentence(reply)));
         }
-        return Err(not_dux());
+        // No dux route answers these without its error code.
+        if matches!(reply.status, 401 | 404 | 405) {
+            return Err(not_dux());
+        }
+        // Anything else is a dux that cannot answer right now (a gateway's
+        // page while it restarts), or a refusal in words, the Host check's.
+        if String::from_utf8_lossy(&reply.body)
+            .trim_start()
+            .starts_with('<')
+        {
+            return Err(CliError::new(
+                Exit::NotRunning,
+                format!("{target} does not answer: HTTP status {}", reply.status),
+            ));
+        }
+        return Err(CliError::new(Exit::Failed, reply_sentence(reply)));
     }
     serde_json::from_slice(&reply.body).map_err(|_| not_dux())
 }
@@ -346,7 +359,12 @@ impl Client {
     /// knows which; then one that asks this client for its password needs a
     /// sign-in, and one that does not is used with none.
     fn check_sign_in(&self, remote: &Remote) -> Result<AuthStatus, CliError> {
-        let reply = self.send(Request::get("/api/v1/auth/status"))?;
+        // Asked without the saved sign-in: it goes out only once the answer
+        // shows the dux it belongs to.
+        let reply = self
+            .transport
+            .send(&Request::get("/api/v1/auth/status"))
+            .map_err(|error| self.no_reply(&error))?;
         let status = read_auth_status(&self.target, &reply)?;
         if let (Some(name), Some(known), Some(now)) =
             (&self.remote, &remote.instance, &status.instance)
@@ -631,7 +649,9 @@ mod tests {
             FakeDux::tcp(move |seen| match seen.path.as_str() {
                 "/api/v1/auth/status" => Reply::json(
                     200,
-                    &format!(r#"{{"password_set":true,"required_here":{required}}}"#),
+                    &format!(
+                        r#"{{"password_set":true,"required_here":{required},"signed_in":false}}"#
+                    ),
                 ),
                 "/api/v1/build" if required && seen.header("authorization").is_none() => {
                     Reply::json(401, r#"{"error":"auth_required"}"#)
@@ -684,7 +704,9 @@ mod tests {
             })
         };
         let dux_status = |instance: &str| {
-            format!(r#"{{"password_set":true,"required_here":true,"instance":"{instance}"}}"#)
+            format!(
+                r#"{{"password_set":true,"required_here":true,"signed_in":false,"instance":"{instance}"}}"#
+            )
         };
         let dir = private_dir();
         let lock = dir.path().join("dux.lock");
@@ -713,6 +735,7 @@ mod tests {
         // Something that is not dux: its page is never printed.
         for (status, content_type, body) in [
             (200, "text/html", "<html><body>hello</body></html>"),
+            (200, "application/json", "{}"),
             (404, "text/html", "<html><body>Not Found</body></html>"),
             (401, "text/plain", "Unauthorized"),
         ] {
@@ -725,8 +748,32 @@ mod tests {
             );
         }
 
+        // A gateway's page while dux restarts behind it is a dux that does not
+        // answer yet, not a stranger.
+        let (_gateway, gateway_addr) = serve(
+            502,
+            "text/html",
+            "<html><body>Bad Gateway</body></html>".to_string(),
+        );
+        let error = connect(&remote(gateway_addr, Some("a")), &lock).unwrap_err();
+        assert_eq!(error.exit, Exit::NotRunning);
+        assert_eq!(
+            error.message,
+            format!("work (http://{gateway_addr}) does not answer: HTTP status 502")
+        );
+
+        // The saved sign-in is not shown to a different dux: only once the
+        // status says it is the same one does the token go out.
+        let before = _other.seen().len();
+        let _ = connect(&remote(other_addr, Some("a")), &lock);
+        assert!(
+            _other.seen()[before..]
+                .iter()
+                .all(|seen| seen.header("authorization").is_none())
+        );
+
         // An old remote, saved before dux had an id, adopts the one it reaches.
-        let (_same, same_addr) = serve(200, "application/json", dux_status("a"));
+        let (same, same_addr) = serve(200, "application/json", dux_status("a"));
         let url = format!("http://{same_addr}");
         Remotes::update(dir.path(), |saved| {
             saved.add("work", &url, false)?;
@@ -736,6 +783,14 @@ mod tests {
         connect(&remote(same_addr, None), &lock).expect("the same dux answers");
         let saved = Remotes::load(dir.path()).unwrap();
         assert_eq!(saved.get("work").unwrap().instance.as_deref(), Some("a"));
+        let seen = same.seen();
+        let status = seen
+            .iter()
+            .find(|s| s.path == "/api/v1/auth/status")
+            .unwrap();
+        assert_eq!(status.header("authorization"), None);
+        let build = seen.iter().find(|s| s.path == "/api/v1/build").unwrap();
+        assert_eq!(build.header("authorization"), Some("Bearer t0k"));
     }
 
     #[test]

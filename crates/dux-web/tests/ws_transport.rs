@@ -4159,12 +4159,17 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         .await
         .unwrap();
     assert_eq!(first, again, "two reads of one server run must agree");
-    assert_eq!(
-        first, other,
-        "one process is one run, whatever is serving it"
-    );
+    // The run is the process's; the instance is each database's own, and these
+    // two routers keep two.
+    for key in ["version", "process", "api"] {
+        assert_eq!(
+            first[key], other[key],
+            "one process is one run, whatever is serving it"
+        );
+    }
+    assert_ne!(first["instance"], other["instance"]);
 
-    // The documented shape, exactly: two non-empty strings and the API's
+    // The documented shape, exactly: three non-empty strings and the API's
     // version, which the command line checks.
     let mut keys: Vec<&str> = first
         .as_object()
@@ -4173,7 +4178,7 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         .map(|k| k.as_str())
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["api", "process", "version"]);
+    assert_eq!(keys, vec!["api", "instance", "process", "version"]);
     assert!(!first["process"].as_str().unwrap().is_empty());
     assert!(!first["version"].as_str().unwrap().is_empty());
     assert_eq!(first["api"], 1);

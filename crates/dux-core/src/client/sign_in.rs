@@ -41,6 +41,30 @@ pub fn look(name: &str, remote: &Remote) -> Result<RemoteDux, CliError> {
     })
 }
 
+/// The instance id to keep with a sign-in that just succeeded: the remote is
+/// asked again, and a dux other than the one `before` found when the sign-in
+/// began refuses the sign-in rather than pin the remote to either.
+pub fn pin_after_login(
+    name: &str,
+    remote: &Remote,
+    before: &RemoteDux,
+) -> Result<Option<String>, CliError> {
+    let after = look(name, remote)?;
+    if let (Some(was), Some(now)) = (&before.instance, &after.instance)
+        && was != now
+    {
+        return Err(CliError::new(
+            Exit::Failed,
+            format!(
+                "{name} ({}) became a different dux during the sign-in, so the sign-in was not \
+                 kept; run \"dux remote login {name}\" again",
+                remote.url
+            ),
+        ));
+    }
+    Ok(after.instance)
+}
+
 /// A sign-in the remote issued.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedIn {
@@ -138,9 +162,10 @@ mod tests {
     fn a_sign_in_returns_the_token_ends_the_one_it_replaces_and_a_wrong_password_gets_the_remote_sentence()
      {
         let (fake, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
-            "/api/v1/auth/status" => {
-                Reply::json(200, r#"{"password_set":true,"required_here":true}"#)
-            }
+            "/api/v1/auth/status" => Reply::json(
+                200,
+                r#"{"password_set":true,"required_here":true,"signed_in":false}"#,
+            ),
             "/api/v1/auth/cli-login" if seen.body.contains(r#""password":"right""#) => {
                 Reply::json(200, r#"{"token":"T0K","expires_at":null}"#)
             }
@@ -223,6 +248,67 @@ mod tests {
             fake.seen()[before..]
                 .iter()
                 .all(|seen| seen.path != "/api/v1/auth/cli-logout")
+        );
+    }
+
+    #[test]
+    fn the_sign_in_keeps_the_dux_that_answered_it_and_refuses_one_that_changed_during_it() {
+        let instance = std::sync::Arc::new(std::sync::Mutex::new("a"));
+        let answers = std::sync::Arc::clone(&instance);
+        let (_fake, addr) = FakeDux::tcp(move |seen| match seen.path.as_str() {
+            "/api/v1/auth/status" => Reply::json(
+                200,
+                &format!(
+                    r#"{{"password_set":true,"required_here":true,"signed_in":false,"instance":"{}"}}"#,
+                    answers.lock().unwrap()
+                ),
+            ),
+            _ => Reply::json(404, "{}"),
+        });
+        let remote = Remote {
+            url: format!("http://{addr}"),
+            insecure: false,
+            token: None,
+            instance: None,
+        };
+        let before = look("work", &remote).unwrap();
+        assert_eq!(
+            pin_after_login("work", &remote, &before)
+                .unwrap()
+                .as_deref(),
+            Some("a")
+        );
+        *instance.lock().unwrap() = "b";
+        let error = pin_after_login("work", &remote, &before).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "work (http://{addr}) became a different dux during the sign-in, so the sign-in \
+                 was not kept; run \"dux remote login work\" again"
+            )
+        );
+    }
+
+    #[test]
+    fn a_gateway_page_is_a_dux_that_does_not_answer_yet() {
+        let (_fake, addr) = FakeDux::tcp(|_| {
+            Reply::Raw(
+                "HTTP/1.1 503 X\r\ncontent-type: text/html\r\ncontent-length: 6\r\n\
+                 connection: close\r\n\r\n<html>"
+                    .into(),
+            )
+        });
+        let remote = Remote {
+            url: format!("http://{addr}"),
+            insecure: false,
+            token: None,
+            instance: None,
+        };
+        let error = look("work", &remote).unwrap_err();
+        assert_eq!(error.exit, Exit::NotRunning);
+        assert_eq!(
+            error.message,
+            format!("work (http://{addr}) does not answer: HTTP status 503")
         );
     }
 

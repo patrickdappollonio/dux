@@ -217,6 +217,8 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             let password = dux_tui::read_sign_in_password(stdin, &format!("Password for {name}"))
                 .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
             let signed_in = sign_in::login(&name, &remote, password.expose())?;
+            // The dux that answered the sign-in is the one the remote means now.
+            let instance = sign_in::pin_after_login(&name, &remote, &found)?;
             if let Some(kept) = &signed_in.old_sign_in_kept {
                 eprintln!("{kept}");
             }
@@ -227,7 +229,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 &name,
                 &remote.url,
                 &signed_in.token,
-                found.instance.as_deref(),
+                instance.as_deref(),
             )?;
             Ok(line(format!("Signed in to {name}.")))
         }
