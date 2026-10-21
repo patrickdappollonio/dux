@@ -335,8 +335,10 @@ pub fn listener_lines(rows: &[ListenerRow]) -> Vec<LogLine> {
 
 /// QR codes for `urls` (the Tailscale IP URL, then the MagicDNS one), laid out
 /// by [`crate::qr::layout`] in `columns` columns, side by side when they fit and
-/// stacked when they do not, each with its URL under it, after a caption.
-/// Empty when there is nothing to draw.
+/// stacked when they do not, each with its URL under it, after a caption. A
+/// blank line sits between the caption and the codes and another after the URLs,
+/// so neither the caption nor the next log line touches a code. Empty when there
+/// is nothing to draw.
 ///
 /// Each code segment carries both spellings: the rich one drawn dark on light,
 /// and the plain one drawn for a dark terminal, so stdout with color off still
@@ -349,11 +351,13 @@ pub fn qr_lines(hms: &str, urls: &[String], columns: usize) -> Vec<LogLine> {
     if dark.is_empty() {
         return Vec::new();
     }
-    let mut out = vec![LogLine::event(
-        hms,
-        LogTone::Info,
-        "Scan to open dux from your phone:",
-    )];
+    let blank = || LogLine {
+        segments: Vec::new(),
+    };
+    let mut out = vec![
+        LogLine::event(hms, LogTone::Info, "Scan to open dux from your phone:"),
+        blank(),
+    ];
     for (dark_row, light_row) in dark.iter().zip(&light) {
         let mut segments = vec![LogSegment::plain(QR_INDENT)];
         for (dark_seg, light_seg) in dark_row.iter().zip(light_row) {
@@ -369,6 +373,7 @@ pub fn qr_lines(hms: &str, urls: &[String], columns: usize) -> Vec<LogLine> {
         }
         out.push(LogLine { segments });
     }
+    out.push(blank());
     out
 }
 
@@ -523,7 +528,16 @@ mod tests {
             120 - QR_INDENT.len(),
             crate::qr::Polarity::LightModulesFilled,
         );
-        let rows = &lines[1..];
+        let blank = |line: &LogLine| line.render(true).is_empty() && line.render(false).is_empty();
+        assert!(
+            blank(&lines[1]),
+            "a blank line sets the caption off the codes"
+        );
+        assert!(
+            blank(lines.last().unwrap()),
+            "a blank line sets the codes off the next log line"
+        );
+        let rows = &lines[2..lines.len() - 1];
         assert_eq!(rows.len(), dark.len());
         for ((line, dark), light) in rows.iter().zip(&dark).zip(&light) {
             let codes: Vec<&LogSegment> = line
@@ -559,7 +573,7 @@ mod tests {
                 "the plain spelling is drawn for a dark terminal"
             );
         }
-        let labels = lines.last().unwrap();
+        let labels = rows.last().unwrap();
         assert!(labels.text().contains(QR_IP) && labels.text().contains(QR_NAME));
         assert!(labels.segments.iter().any(|s| s.role == LogRole::Url));
         assert!(qr_lines("12:00:00", &[], 120).is_empty());
@@ -568,9 +582,9 @@ mod tests {
     #[test]
     fn a_qr_code_renders_black_on_white_in_color_and_plain_without() {
         let lines = qr_lines("12:00:00", &[QR_IP.to_string()], 120);
-        let colored = lines[1].render(true);
+        let colored = lines[2].render(true);
         assert!(colored.contains("\x1b[30;107m"), "{colored:?}");
-        let plain = lines[1].render(false);
+        let plain = lines[2].render(false);
         assert!(!plain.contains('\x1b'), "{plain:?}");
     }
 
