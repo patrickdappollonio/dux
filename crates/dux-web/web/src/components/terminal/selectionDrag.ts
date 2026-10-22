@@ -32,6 +32,7 @@ import {
   wordSpanAt,
   type AnchorWord,
   type ScreenRect,
+  type SelectSpan,
 } from "@/lib/termselect"
 
 export type SelectionDrag = {
@@ -61,21 +62,19 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   // The pressed word, as the columns it spans plus a MARKER on each row it
   // occupies. A marker belongs to its line, so it moves with that line's text:
   // up when the scrollback at its cap trims lines off the top (which a
-  // streaming agent does on every line) or when an app scrolls its screen,
-  // down when an app inserts lines above it, and it is disposed when its line
-  // leaves the buffer, which is the one case where the word is truly gone.
-  // Rows captured at press time would slide off the word in every one of
-  // those cases.
+  // streaming agent does on every line) or when an app scrolls the whole
+  // alternate screen, up or down when an app deletes or inserts lines above
+  // it, and it is disposed when its line leaves the buffer, which is the one
+  // case where the word is truly gone. Rows captured at press time would
+  // slide off the word in every one of those cases. One scroll is NOT
+  // followed: a scroll inside a scroll region on the normal screen moves the
+  // text without telling any marker, so there the anchor stays on its row.
   //
   // A resize ends the gesture: xterm reflows the buffer and clears its own
   // selection when the rows change, so there is nothing left to extend.
   let anchorCols: { startCol: number; endColExclusive: number } | null = null
   let anchorStart: IMarker | null = null
   let anchorEnd: IMarker | null = null
-  // A press on a blank run anchors without painting; the span it grows into is
-  // checked for text only then, because a span holding a non-blank word
-  // cannot be blank.
-  let anchorBlank = false
   // What the last gesture amounted to, read on the lift after `end`.
   let foundOnlyBlanks = false
   // The viewport hold, on the normal screen only (the alternate screen has no
@@ -132,10 +131,15 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   // requested there is measured from a stale position. Moving the viewport up
   // is also what tells xterm the user is scrolling, so from then on it keeps
   // the text still by itself and this only has to step in for the first line.
+  //
+  // An app can delete the very line the hold sits on. The viewport then stays
+  // wherever it is: there is no line left to measure from, and the top of the
+  // scrollback is the one place the user certainly was not looking.
   const keepViewport = () => {
-    if (term.buffer.active.type !== "normal") return
-    const target = live(holdTop) ? holdTop.line : 0
-    if (term.buffer.active.viewportY !== target) term.scrollToLine(target)
+    if (term.buffer.active.type !== "normal" || !live(holdTop)) return
+    if (term.buffer.active.viewportY !== holdTop.line) {
+      term.scrollToLine(holdTop.line)
+    }
   }
   const holdViewport = () => {
     holdTop?.dispose()
@@ -160,7 +164,47 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     }
     resumeFollowing = false
   }
-  const end = () => {
+  // Whether the cells of a span hold any text right now. Cheap: it stops at
+  // the first cell with text, and the pressed word is asked first, because a
+  // span holding a word that still has text cannot be blank.
+  const hasText = (span: SelectSpan, anchor: AnchorWord): boolean => {
+    const rowAt = (row: number) => lineAt(row)?.cells
+    const word = {
+      col: anchor.startCol,
+      row: anchor.startRow,
+      length:
+        (anchor.endRow - anchor.startRow) * term.cols +
+        anchor.endColExclusive -
+        anchor.startCol,
+    }
+    return spanHasText(rowAt, word, term.cols) || spanHasText(rowAt, span, term.cols)
+  }
+  // The verdict the lift reads, settled when the gesture ends. A gesture the
+  // terminal cut short (a resize, the app switching screens, the pressed word
+  // leaving the buffer) was never found blank, whatever is painted. Otherwise
+  // the painted cells are asked as they are NOW: the app may have redrawn
+  // them as spaces under a still finger, and a highlight over blank cells
+  // promises a copy that would be empty.
+  const settle = (cutShort: boolean) => {
+    if (!anchorCols) return
+    const anchor = currentAnchor()
+    if (cutShort || term.buffer.active.type !== selectBuffer || !anchor) {
+      foundOnlyBlanks = false
+      return
+    }
+    if (foundOnlyBlanks) return
+    const painted = term.getSelectionPosition()
+    if (!painted) return
+    const span = {
+      col: painted.start.x,
+      row: painted.start.y,
+      length:
+        (painted.end.y - painted.start.y) * term.cols + painted.end.x - painted.start.x,
+    }
+    if (!hasText(span, anchor)) select(span.col, span.row, span.length, true)
+  }
+  const finish = (cutShort: boolean) => {
+    settle(cutShort)
     stopSelectAutoScroll()
     release()
     // The ANCHOR is per gesture; the SELECTION deliberately outlives it, so
@@ -169,12 +213,10 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     selectPoint = null
     selectBuffer = ""
   }
+  const end = () => finish(false)
   // The terminal took the gesture away: whatever is painted is what the user
   // last saw, and it was not found blank.
-  const interrupt = () => {
-    foundOnlyBlanks = false
-    end()
-  }
+  const interrupt = () => finish(true)
   const select = (col: number, row: number, length: number, blank: boolean) => {
     foundOnlyBlanks = blank
     // A highlight over blank cells promises a copy that would be empty.
@@ -207,11 +249,6 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     anchorStart = start
     anchorEnd = endMarker === start ? null : endMarker
     anchorCols = { startCol: span.startCol, endColExclusive: span.endColExclusive }
-    anchorBlank = !spanHasText(
-      (row) => lineAt(row)?.cells,
-      { col: span.startCol, row: span.startRow, length },
-      term.cols,
-    )
     selectBuffer = term.buffer.active.type
     selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
     gestureSubscriptions.push(term.onResize(interrupt))
@@ -221,7 +258,8 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
       holdViewport()
       gestureSubscriptions.push(term.onWriteParsed(keepViewport))
     }
-    select(span.startCol, span.startRow, length, anchorBlank)
+    const pressed = { col: span.startCol, row: span.startRow, length }
+    select(pressed.col, pressed.row, length, !hasText(pressed, span))
     // A short buzz is the platform's own "you are now selecting" signal. Guarded
     // twice: Safari implements no Vibration API, and one that does may throw
     // without user activation.
@@ -267,9 +305,10 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     // would start the span inside the glyph.
     const focus = glyphAt(cells, cell.col)
     const span = selectionSpan(anchor, { col: focus.col, row }, term.cols, focus.width)
-    const blank =
-      anchorBlank && !spanHasText((r) => lineAt(r)?.cells, span, term.cols)
-    select(span.col, span.row, span.length, blank)
+    // Asked every move rather than once at the press: a marker follows its
+    // line, not its text, and an app redrawing that line (a spinner, a status
+    // bar) can turn the pressed word into spaces.
+    select(span.col, span.row, span.length, !hasText(span, anchor))
   }
   const autoScrollTick = (): void => {
     const point = selectPoint

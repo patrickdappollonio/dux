@@ -481,6 +481,16 @@ describe("a touch selection while output streams", () => {
     expect(term.buffer.active.viewportY).toBe(1)
   })
 
+  it("keeps the viewport where it is when the app deletes the first line on screen", async () => {
+    const { term } = await openTouchable(12, 100)
+    const drag = createSelectionDrag(term)
+    const before = term.buffer.active.viewportY
+    drag.begin(at(5, 1))
+    // Cursor to the top row of the screen, delete that line.
+    await write(term, "\x1b[1;1H\x1b[M")
+    expect(term.buffer.active.viewportY).toBe(before)
+  })
+
   it("ends the gesture when the terminal is resized under it", async () => {
     const { term } = await openTouchable(12, 100)
     const drag = createSelectionDrag(term)

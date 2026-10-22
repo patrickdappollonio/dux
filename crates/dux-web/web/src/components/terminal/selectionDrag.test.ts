@@ -77,6 +77,15 @@ class TermFake {
   clearSelection() {
     this.selection = null
   }
+  // Single-row spans are all these tests paint.
+  getSelectionPosition() {
+    const sel = this.selection
+    if (!sel) return undefined
+    return {
+      start: { x: sel.col, y: sel.row },
+      end: { x: sel.col + sel.length, y: sel.row },
+    }
+  }
   scrollLines(n: number) {
     this.scrolled.push(n)
     this.buffer.active.viewportY = Math.max(0, this.buffer.active.viewportY + n)
@@ -183,6 +192,35 @@ describe("extending a selection", () => {
     expect(drag.liftFoundOnlyBlanks()).toBe(true)
     for (const listener of term.resizeListeners) listener()
     expect(drag.liftFoundOnlyBlanks()).toBe(false)
+  })
+
+  it("does not call a still finger blank when the app switched screens under it", () => {
+    const { term, drag } = setup()
+    drag.begin(at(15, 0))
+    term.buffer.active.type = "alternate"
+    drag.end()
+    expect(drag.liftFoundOnlyBlanks()).toBe(false)
+  })
+
+  it("clears a highlight whose word the app blanked out, and calls the lift blank", () => {
+    const { term, drag } = setup()
+    drag.begin(at(1, 0))
+    expect(term.selection).not.toBeNull()
+    // A status line redrawn as spaces where the pressed word was.
+    term.lines = ["   " + " status", "second line"]
+    drag.extend(at(2, 0))
+    expect(term.selection).toBeNull()
+    drag.end()
+    expect(drag.liftFoundOnlyBlanks()).toBe(true)
+  })
+
+  it("calls the lift blank when the word was blanked out under a still finger", () => {
+    const { term, drag } = setup()
+    drag.begin(at(1, 0))
+    term.lines = ["          ", "second line"]
+    drag.end()
+    expect(term.selection).toBeNull()
+    expect(drag.liftFoundOnlyBlanks()).toBe(true)
   })
 
   it("grows the span to the finger's cell", () => {

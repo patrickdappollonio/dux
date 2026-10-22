@@ -295,6 +295,16 @@ class TermStub {
     }
     return out
   }
+  // Where the selection runs, as xterm reports it: the length wraps at `cols`.
+  getSelectionPosition() {
+    const sel = this.selection
+    if (!sel || sel.length <= 0) return undefined
+    const endIndex = sel.row * this.cols + sel.col + sel.length
+    return {
+      start: { x: sel.col, y: sel.row },
+      end: { x: endIndex % this.cols, y: Math.floor(endIndex / this.cols) },
+    }
+  }
   selectAll() {}
   // Counted and applied: the auto-scroll test asserts BOTH that the pane
   // scrolled and that the row the selection then resolves to moved with it.
