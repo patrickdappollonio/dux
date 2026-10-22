@@ -4541,6 +4541,20 @@ describe("TerminalPane long-press text selection", () => {
     // an editable textarea would get the browser's text editing instead of
     // the selection gesture.
     expect(term().textarea.style.pointerEvents).toBe("none")
+    fireEvent.pointerDown(container(), { pointerType: "touch" })
+    expect(term().textarea.style.pointerEvents).toBe("none")
+  })
+
+  it("lets a mouse reach the helper textarea, which middle-click paste lands in", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // On Linux xterm moves the textarea under the pointer on a middle click so
+    // the browser pastes the primary selection into it; that needs the
+    // textarea to be hit-testable for the mouse.
+    fireEvent.pointerDown(container(), { pointerType: "mouse", button: 1 })
+    expect(term().textarea.style.pointerEvents).toBe("")
+    // And a finger afterwards takes it back out of reach.
+    fireEvent.pointerDown(container(), { pointerType: "touch" })
+    expect(term().textarea.style.pointerEvents).toBe("none")
   })
 
   it("suppresses the platform callout and context menu on the terminal", () => {

@@ -161,12 +161,8 @@ export function openTerminal(options: OpenTerminalOptions): Disposable {
     term.textarea.setAttribute("autocorrect", "off")
     term.textarea.setAttribute("autocapitalize", "off")
     term.textarea.setAttribute("spellcheck", "false")
-    // xterm moves this textarea under the pointer on every contextmenu, which
-    // Android fires for each long press, and leaves it there above the screen.
-    // A later press would then land on an editable textarea and get the
-    // browser's text editing rather than the selection gesture. Nothing needs
-    // to hit it: focus is always given in script, and a paste reaches it
-    // through focus, not through the pointer.
+    // Out of the pointer's reach until a mouse press hands it back; the pane's
+    // paste guards own the switch and say why (`registerPasteGuards`).
     term.textarea.style.pointerEvents = "none"
   }
   // BEFORE the first fit, so the grid is measured against the renderer that

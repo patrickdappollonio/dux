@@ -155,12 +155,27 @@ function registerPasteGuards(
     }
   }
   const onPaste = (event: ClipboardEvent) => options.onClipboardPaste(event)
+  // xterm parks its helper textarea under the pointer on a contextmenu (which
+  // Android fires for every long press) and leaves it there, above the screen.
+  // A finger must never land on it: the next long press would get the
+  // browser's text editing instead of the selection gesture. A mouse must:
+  // on Linux xterm moves it under a middle click so the browser pastes the
+  // primary selection into it. So the latest pointer decides, and the textarea
+  // starts out of reach (see `openTerminal`). A touch press after a mouse
+  // right-click can still land on it once; its own press takes it away.
+  const onPointerDown = (event: PointerEvent) => {
+    const textarea = options.term.textarea
+    if (!textarea) return
+    textarea.style.pointerEvents = event.pointerType === "touch" ? "none" : ""
+  }
   options.container.addEventListener("contextmenu", onContextMenu)
   options.container.addEventListener("paste", onPaste, true)
+  options.container.addEventListener("pointerdown", onPointerDown, true)
   return {
     dispose: () => {
       options.container.removeEventListener("contextmenu", onContextMenu)
       options.container.removeEventListener("paste", onPaste, true)
+      options.container.removeEventListener("pointerdown", onPointerDown, true)
     },
   }
 }
