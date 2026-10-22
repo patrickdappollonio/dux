@@ -150,15 +150,13 @@ function registerPasteGuards(
   const onContextMenu = () => {
     if (!options.term.textarea) return
     options.term.textarea.value = ""
-    if (options.pointerTypeRef.current === "touch") {
-      options.term.textarea.blur()
-    }
   }
   const onPaste = (event: ClipboardEvent) => options.onClipboardPaste(event)
-  // xterm parks its helper textarea under the pointer on a contextmenu (which
-  // Android fires for every long press) and leaves it there, above the screen.
-  // A finger must never land on it: the next long press would get the
-  // browser's text editing instead of the selection gesture. A mouse must:
+  // xterm parks its helper textarea under the pointer on a contextmenu and
+  // leaves it there, above the screen. A touch contextmenu no longer reaches
+  // xterm (below), but a mouse right click still parks it, and a finger must
+  // never land on it: a long press there would get the browser's text editing
+  // instead of the selection gesture. A mouse must:
   // on Linux xterm moves it under a middle click so the browser pastes the
   // primary selection into it. So the latest pointer decides, and the textarea
   // starts out of reach (see `openTerminal`). A touch press after a mouse
@@ -168,11 +166,27 @@ function registerPasteGuards(
     if (!textarea) return
     textarea.style.pointerEvents = event.pointerType === "touch" ? "none" : ""
   }
+  // Android follows every long press with a `contextmenu`, and xterm answers it
+  // from a listener on its own element the way it answers a right click: it
+  // focuses its helper textarea. A touch selection must move no focus at all:
+  // with the message box up the focus guard carries that focus into the box,
+  // the soft keyboard rises, the terminal loses rows and xterm clears the
+  // highlight on the resize; in direct mode the textarea itself raises it. So
+  // a touch contextmenu stops here, on the way down, before xterm's element
+  // sees it, and the native menu is refused here too, since the pane's own
+  // handler further up never runs. A mouse right click is untouched.
+  const onTouchContextMenu = (event: MouseEvent) => {
+    if (options.pointerTypeRef.current !== "touch") return
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  options.container.addEventListener("contextmenu", onTouchContextMenu, true)
   options.container.addEventListener("contextmenu", onContextMenu)
   options.container.addEventListener("paste", onPaste, true)
   options.container.addEventListener("pointerdown", onPointerDown, true)
   return {
     dispose: () => {
+      options.container.removeEventListener("contextmenu", onTouchContextMenu, true)
       options.container.removeEventListener("contextmenu", onContextMenu)
       options.container.removeEventListener("paste", onPaste, true)
       options.container.removeEventListener("pointerdown", onPointerDown, true)

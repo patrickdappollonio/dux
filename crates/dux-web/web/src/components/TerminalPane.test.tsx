@@ -4434,16 +4434,6 @@ describe("TerminalPane long-press text selection", () => {
     expect(copied).toEqual([])
   })
 
-  it("hands focus back when xterm's contextmenu handler grabs the textarea", () => {
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // xterm's handler focuses its hidden textarea to prepare a native Copy,
-    // which on a phone raises the soft keyboard over the selection.
-    term().textarea.focus()
-    fireEvent.pointerDown(container(), { pointerType: "touch" })
-    fireEvent.contextMenu(container())
-    expect(term().textarea.focused).toBe(false)
-  })
-
   it("leaves the textarea focused for a MOUSE right-click, which pastes", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     term().textarea.focus()
@@ -4498,6 +4488,52 @@ describe("TerminalPane long-press text selection", () => {
     }
   })
 
+  // Android follows the long press with a `contextmenu`, and xterm's own
+  // listener on its element answers it the way it answers a right click: it
+  // focuses the hidden textarea. With the message box up the pane's focus
+  // guard then redirected that focus into the box, the soft keyboard rose,
+  // the terminal lost rows, and xterm cleared the highlight on the resize.
+  it("moves no focus when Android follows the long press with a contextmenu", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true })
+    const pointer = stubCoarsePointer()
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const compose = screen.getByRole("textbox", { name: "Message" })
+      ;(compose as HTMLTextAreaElement).blur()
+      // xterm's handler, as `rightClickHandler` behaves: a real textarea in
+      // xterm's element, focused from a contextmenu listener on that element.
+      const helper = document.createElement("textarea")
+      const element = term().element as HTMLElement
+      element.appendChild(helper)
+      const xtermSawIt = vi.fn(() => helper.focus())
+      element.addEventListener("contextmenu", xtermSawIt)
+      fireEvent.pointerDown(element, { pointerType: "touch" })
+      press(at(6, 0))
+      const menu = fireEvent.contextMenu(element)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      lift(at(6, 0))
+      expect(document.activeElement).not.toBe(compose)
+      expect(document.activeElement).not.toBe(helper)
+      expect(xtermSawIt).not.toHaveBeenCalled()
+      expect(menu).toBe(false)
+      expect(term().getSelection()).toBe("status")
+    } finally {
+      pointer.restore()
+    }
+  })
+
+  it("still lets xterm answer a MOUSE right click", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const element = term().element as HTMLElement
+    const xtermSawIt = vi.fn()
+    element.addEventListener("contextmenu", xtermSawIt)
+    fireEvent.pointerDown(element, { pointerType: "mouse", button: 2 })
+    fireEvent.contextMenu(element)
+    expect(xtermSawIt).toHaveBeenCalled()
+  })
+
   it("abandons the gesture when the app flips buffers mid-drag", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
@@ -4506,18 +4542,6 @@ describe("TerminalPane long-press text selection", () => {
     term().buffer.active.type = "alternate"
     move(at(20, 0))
     expect(term().getSelection()).toBe("status")
-  })
-
-  it("wipes the selection xterm stuffed into its hidden textarea on a touch long press", () => {
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // Android fires `contextmenu` on a long press. xterm's OWN listener sits on
-    // `term.element`, inside this container, so it runs first and writes the
-    // selection into the hidden textarea, where it would later be delivered to
-    // the PTY as a paste.
-    term().textarea.value = "status"
-    fireEvent.pointerDown(container(), { pointerType: "touch" })
-    fireEvent.contextMenu(container())
-    expect(term().textarea.value).toBe("")
   })
 
   it("retires the context-menu paste guard when the pane unmounts", () => {
