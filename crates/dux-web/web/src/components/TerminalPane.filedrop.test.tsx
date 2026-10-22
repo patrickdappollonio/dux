@@ -36,7 +36,7 @@ class TermStub {
   }
   rows = 24
   cols = 80
-  textarea = { setAttribute() {}, blur() {} }
+  textarea = { setAttribute() {}, blur() {}, style: {} }
   buffer = { active: { type: "normal" } }
   modes = {
     mouseTrackingMode: "none",

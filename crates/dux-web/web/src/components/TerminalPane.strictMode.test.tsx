@@ -27,6 +27,7 @@ class TermStub {
     blur: () => {},
     focus: () => {},
     value: "",
+    style: {},
   }
   modes = {
     mouseTrackingMode: "none",

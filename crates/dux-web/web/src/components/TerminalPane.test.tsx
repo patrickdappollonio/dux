@@ -82,6 +82,8 @@ class TermStub {
       this.focused = true
     },
     value: "",
+    // Inline style only: xterm's own stylesheet never loads in jsdom.
+    style: {} as Record<string, string>,
   }
   // The scrollback the selection tests read words out of. `lines` is the whole
   // buffer and `viewportY` is the first line on screen, so a test can scroll
@@ -4511,6 +4513,15 @@ describe("TerminalPane long-press text selection", () => {
     fireEvent.contextMenu(detachedContainer)
 
     expect(detachedTerm.textarea.value).toBe("detached selection")
+  })
+
+  it("keeps xterm's helper textarea out of hit testing, wherever xterm moves it", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // xterm parks its hidden textarea under the finger on every long press
+    // (its contextmenu handler), above the screen; a later press landing on
+    // an editable textarea would get the browser's text editing instead of
+    // the selection gesture.
+    expect(term().textarea.style.pointerEvents).toBe("none")
   })
 
   it("suppresses the platform callout and context menu on the terminal", () => {
