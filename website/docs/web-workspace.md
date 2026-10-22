@@ -372,7 +372,7 @@ On a phone or tablet, **press and hold** on the terminal. The word under your fi
 - Drag past the top or bottom edge and the terminal keeps scrolling for as long as you hold there.
 - **Lift your finger and it is copied**, under the same `ui.copy_on_select` preference.
 - Press on blank space and nothing highlights; dux tells you there is nothing to copy there.
-- The highlight stays up so you can see what you got; the next tap clears it.
+- The highlight stays on the text you copied until the next tap clears it. If the terminal was following output, that text may scroll out of view as it catches up, highlight and all.
 - A press is not a tap, so the keyboard stays down and does not cover what you highlighted.
 
 A long press **always** selects locally, even when a full-screen agent has taken the mouse, so this is the touch version of the Shift and Option hatch above.
