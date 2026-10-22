@@ -1,6 +1,7 @@
 import type { RefObject } from "react"
 import type { Terminal } from "@xterm/xterm"
 
+import { notifyInfo } from "@/lib/notify"
 import { copyTermSelection } from "@/lib/termClipboard"
 import { copyOnSelectAction } from "@/lib/termkeys"
 import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
@@ -160,6 +161,13 @@ function handleLift(
 ): void {
   if (outcome.wasSelecting) {
     event.preventDefault()
+    // The drag paints nothing over blank cells, so a press that found only
+    // blanks ends with no highlight, and a silent lift would read as a copy
+    // that failed. Not sticky: nothing is lost, and the next press is the fix.
+    if (options.term.getSelection().trim() === "") {
+      notifyInfo("Nothing to copy there: that spot is blank.")
+      return
+    }
     copyTouchSelection(options)
     return
   }

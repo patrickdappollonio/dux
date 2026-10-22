@@ -16,7 +16,11 @@
 // It always selects locally, even under mouse tracking, which makes it the touch
 // equivalent of the desktop force-local-selection modifier. Agent CLIs routinely
 // take the mouse, so forwarding instead leaves their panes unselectable.
-import type { Terminal } from "@xterm/xterm"
+//
+// While the finger is down the viewport holds still instead of following new
+// output, so the text under the finger stays under it; the lift hands the
+// viewport back to the output if it was following when the press landed.
+import type { IDisposable, IMarker, Terminal } from "@xterm/xterm"
 
 import {
   edgeAutoScroll,
@@ -53,11 +57,21 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   // resize hold, which is scroll-scoped), and xterm trimming lines off the top
   // once the scrollback ring is at its cap.
   //
-  // Neither is guarded. xterm compensates its own model from the internal
-  // `lines.onTrim`; the public surface publishes no trim signal, and no
-  // combination of `length` and `baseY` tells a scroll from a trim at the cap.
-  // Both cost one wrong selection that a lift and a fresh press fix.
+  // The trim is guarded, because a streaming agent at its scrollback cap trims
+  // on every line: the anchor would slide one row down the text per line, and
+  // the next move would select from somewhere the user never pressed. The
+  // public surface publishes no trim signal, but a marker is moved by every
+  // trim, so the distance one has travelled since the press is the count.
+  // The resize is not guarded: xterm clears its own selection when the rows
+  // change, and that costs one selection that a lift and a fresh press fix.
   let selectAnchor: AnchorWord | null = null
+  let trimMarker: IMarker | null = null
+  let trimMarkerStart = 0
+  // The viewport hold: the first line on screen, in rows counted BEFORE any
+  // trim, so a trim does not read as the viewport moving.
+  let holdTop = 0
+  let resumeFollowing = false
+  let holdWrites: IDisposable | null = null
   // The finger's last position, so the auto-scroll tick can re-resolve the
   // focus cell without an event of its own.
   let selectPoint: { clientX: number; clientY: number } | null = null
@@ -91,17 +105,63 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     if (!line) return undefined
     return { cells: rowCells(line), isWrapped: line.isWrapped }
   }
+  // Lines trimmed off the top since the press, or null once the marker itself
+  // was trimmed away, when nothing anchored to the press survives.
+  const trimmedSincePress = (): number | null => {
+    if (!trimMarker || trimMarker.isDisposed || trimMarker.line < 0) return null
+    return trimMarkerStart - trimMarker.line
+  }
+  // Puts the viewport back where the hold says it belongs. Runs once a write
+  // has been parsed, which is before the frame that would show it is painted,
+  // so nothing visibly jumps. Not on xterm's scroll event: that fires before
+  // xterm's own viewport has caught up with the line, and a scroll requested
+  // there is measured from a stale position. Moving the viewport up is also
+  // what tells xterm the user is scrolling, so from then on it keeps the text
+  // still by itself, and this only has to step in for the first line.
+  const keepViewport = () => {
+    const trimmed = trimmedSincePress()
+    if (trimmed === null) return
+    const target = Math.max(0, holdTop - trimmed)
+    if (term.buffer.active.viewportY !== target) term.scrollToLine(target)
+  }
+  const startHold = () => {
+    const buffer = term.buffer.active
+    resumeFollowing = buffer.viewportY >= buffer.baseY
+    trimMarker = term.registerMarker(0)
+    trimMarkerStart = trimMarker.line
+    holdTop = buffer.viewportY
+    holdWrites = term.onWriteParsed(keepViewport)
+  }
+  const releaseHold = () => {
+    if (!holdWrites) return
+    holdWrites.dispose()
+    holdWrites = null
+    trimMarker?.dispose()
+    trimMarker = null
+    if (resumeFollowing) term.scrollToBottom()
+    resumeFollowing = false
+  }
   const end = () => {
     stopSelectAutoScroll()
+    releaseHold()
     // The ANCHOR is per gesture; the SELECTION deliberately outlives it, so
     // the highlight stays on screen after the copy until the next tap.
     selectAnchor = null
     selectPoint = null
     selectBuffer = ""
   }
+  // Selects the span, or nothing at all when every cell in it is blank: a
+  // highlight over blank cells promises a copy that would be empty.
+  const paint = (col: number, row: number, length: number) => {
+    term.select(col, row, length)
+    if (term.getSelection().trim() === "") term.clearSelection()
+  }
   const begin = (touch: Touch): void => {
     const rect = screenRect()
     if (!rect) return
+    // A long press starts a new selection, so the previous highlight goes even
+    // when this one lands on nothing.
+    term.clearSelection()
     const cell = pointToCell(touch, rect, grid())
     const span = wordSpanAt(lineAt, absoluteRow(cell.row), cell.col)
     const length =
@@ -109,10 +169,13 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
       span.endColExclusive -
       span.startCol
     if (length <= 0) return
+    // A press on a blank run still anchors, so a drag from it onto text selects
+    // that text; it just paints nothing until there is something to copy.
     selectAnchor = span
     selectBuffer = term.buffer.active.type
     selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
-    term.select(span.startCol, span.startRow, length)
+    startHold()
+    paint(span.startCol, span.startRow, length)
     // A short buzz is the platform's own "you are now selecting" signal. Guarded
     // twice: Safari implements no Vibration API, and one that does may throw
     // without user activation.
@@ -125,14 +188,25 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   // Re-selects from the anchor to wherever `selectPoint` is. It reads the stored
   // point rather than taking one because the auto-scroll tick calls it too.
   const apply = (): void => {
-    const anchor = selectAnchor
+    const pressed = selectAnchor
     const point = selectPoint
-    if (!anchor || !point) return
-    if (term.buffer.active.type !== selectBuffer) {
-      // The app swapped buffers under the gesture, so the anchor's rows describe
-      // nothing here. The painted selection stays: it is what the user last saw.
+    if (!pressed || !point) return
+    const trimmed = trimmedSincePress()
+    if (
+      term.buffer.active.type !== selectBuffer ||
+      trimmed === null ||
+      pressed.endRow - trimmed < 0
+    ) {
+      // The app swapped buffers under the gesture, or the pressed word was
+      // trimmed out of the scrollback, so the anchor describes nothing here.
+      // The painted selection stays: it is what the user last saw.
       end()
       return
+    }
+    const anchor: AnchorWord = {
+      ...pressed,
+      startRow: pressed.startRow - trimmed,
+      endRow: pressed.endRow - trimmed,
     }
     const rect = screenRect()
     if (!rect) return
@@ -144,7 +218,7 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     // would start the span inside the glyph.
     const focus = glyphAt(cells, cell.col)
     const span = selectionSpan(anchor, { col: focus.col, row }, term.cols, focus.width)
-    term.select(span.col, span.row, span.length)
+    paint(span.col, span.row, span.length)
   }
   const autoScrollTick = (): void => {
     const point = selectPoint
@@ -159,8 +233,10 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
       return
     }
     // One row per TICK. Deliberately not a magnitude: the point is a readable
-    // walk the user can stop by moving back inside, not a jump.
+    // walk the user can stop by moving back inside, not a jump. The hold moves
+    // with it, so the viewport stays where the walk left it.
     term.scrollLines(direction)
+    holdTop = term.buffer.active.viewportY + (trimmedSincePress() ?? 0)
     apply()
   }
   const extend = (touch: Touch): void => {

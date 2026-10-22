@@ -24,6 +24,7 @@ class TermFake {
     active: {
       type: "normal",
       viewportY: 0,
+      baseY: 0,
       getLine: (y: number) => {
         const text = this.lines[y]
         if (text === undefined) return undefined
@@ -62,9 +63,33 @@ class TermFake {
   select(col: number, row: number, length: number) {
     this.selection = { col, row, length }
   }
+  // Only blank-or-not matters to the drag, so this reads the covered cells of
+  // the first row and nothing more.
+  getSelection() {
+    const sel = this.selection
+    if (!sel) return ""
+    return [...(this.lines[sel.row] ?? "")].slice(sel.col, sel.col + sel.length).join("")
+  }
+  clearSelection() {
+    this.selection = null
+  }
   scrollLines(n: number) {
     this.scrolled.push(n)
     this.buffer.active.viewportY = Math.max(0, this.buffer.active.viewportY + n)
+  }
+  // The viewport hold's seams. Its behaviour over streaming output is pinned
+  // against a real xterm in `lib/termselect.xterm.test.ts`.
+  registerMarker() {
+    return { line: 0, isDisposed: false, dispose() {} }
+  }
+  onWriteParsed() {
+    return { dispose() {} }
+  }
+  scrollToLine(line: number) {
+    this.buffer.active.viewportY = line
+  }
+  scrollToBottom() {
+    this.buffer.active.viewportY = this.buffer.active.baseY
   }
 }
 
@@ -97,12 +122,13 @@ describe("beginning a selection", () => {
     expect(drag.active()).toBe(true)
   })
 
-  it("selects only blanks where there is nothing, rather than the nearest word", () => {
+  it("paints nothing on blank cells, but a drag from there onto text selects it", () => {
     const { term, drag } = setup()
-    // Past the end of the text: a blank run, which expands as a run (xterm's
-    // own word rule) rather than reaching back for the word to its left.
+    // Past the end of the text: a blank run, which would copy nothing.
     drag.begin(at(15, 0))
-    expect(term.selection?.col).toBeGreaterThanOrEqual(10)
+    expect(term.selection).toBeNull()
+    drag.extend(at(4, 0))
+    expect(term.getSelection().trim()).toBe("status")
   })
 
   it("takes no anchor at all on a row that does not exist", () => {

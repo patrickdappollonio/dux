@@ -118,6 +118,7 @@ class TermStub {
     active: {
       type: "normal",
       viewportY: 0,
+      baseY: 0,
       getLine: (y: number) => {
         const cells = this.lineCells(y)
         if (!cells) return undefined
@@ -303,6 +304,18 @@ class TermStub {
     )
   }
   scrollToBottom() {}
+  scrollToLine(line: number) {
+    this.buffer.active.viewportY = line
+  }
+  // The selection drag's viewport hold; the stub never streams output, so the
+  // hold has nothing to correct here (it is pinned against a real xterm in
+  // `lib/termselect.xterm.test.ts`).
+  registerMarker() {
+    return { line: 0, isDisposed: false, dispose() {} }
+  }
+  onWriteParsed() {
+    return { dispose() {} }
+  }
   clearSelection() {
     this.selection = null
   }
@@ -4157,11 +4170,22 @@ describe("TerminalPane long-press text selection", () => {
     expect(term().getSelection()).toBe("status")
   })
 
-  it("selects nothing where there is nothing, rather than the nearest word", () => {
+  it("highlights nothing on blank cells and says so on the lift", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     // Column 60 of the first line is past the end of the text: blank cells.
     press(at(60, 0))
-    expect(term().getSelection().trim()).toBe("")
+    expect(term().hasSelection()).toBe(false)
+    lift(at(60, 0))
+    expect(toastCalls).toContain("Nothing to copy there: that spot is blank.")
+    expect(copied).toEqual([])
+  })
+
+  it("says the same when a drag ends with only blank cells selected", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(60, 0))
+    move(at(70, 0))
+    lift(at(70, 0))
+    expect(toastCalls).toContain("Nothing to copy there: that spot is blank.")
   })
 
   it("extends the selection as the finger drags forward", () => {
@@ -4384,9 +4408,8 @@ describe("TerminalPane long-press text selection", () => {
     press(at(2, 0))
     move(at(3, 0))
     lift(at(3, 0))
-    expect(t.getSelection()).toBe("    ")
-    expect(t.getSelection().trim()).toBe("")
-    expect(toastCalls).toEqual([])
+    // The one toast is the blank-spot notice, never the mouse hint.
+    expect(toastCalls).toEqual(["Nothing to copy there: that spot is blank."])
     expect(copied).toEqual([])
   })
 
