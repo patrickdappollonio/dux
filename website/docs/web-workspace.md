@@ -368,17 +368,16 @@ Your agent can also write your clipboard directly through an `OSC 52` escape seq
 
 On a phone or tablet, **press and hold** on the terminal. The word under your finger highlights, and dragging extends the selection.
 
+- While your finger is down, the terminal stops following new output, so the text you are selecting stays where it is. It catches up with the output when you lift.
 - Drag past the top or bottom edge and the terminal keeps scrolling for as long as you hold there.
 - **Lift your finger and it is copied**, under the same `ui.copy_on_select` preference.
+- Press on blank space and nothing highlights; dux tells you there is nothing to copy there.
 - The highlight stays up so you can see what you got; the next tap clears it.
 - A press is not a tap, so the keyboard stays down and does not cover what you highlighted.
 
 A long press **always** selects locally, even when a full-screen agent has taken the mouse, so this is the touch version of the Shift and Option hatch above.
 
-Two limits:
-
-- There are no drag handles, so a selection cannot be adjusted once you lift (press again to redo it).
-- If the agent is writing fast enough to push lines out of the scrollback mid-drag, the selection can slide onto the wrong text, which pressing again also fixes.
+There are no drag handles, so a selection cannot be adjusted once you lift (press again to redo it).
 
 ### Drag a file in, or paste one
 
