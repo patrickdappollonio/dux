@@ -55,26 +55,23 @@ describe("the shared attention pulse", () => {
     expect(Math.min(...expected.values())).toBe(ATTENTION_PULSE_FLOOR)
   })
 
-  it("plays the row dot's two quick dips then a hold, flipping where the dip crosses halfway", () => {
+  it("dips the favicon twice for 300 ms each from where the row dot's first dip starts, then holds", () => {
     const p = ATTENTION_PULSE_PERIOD_MS
-    // Each flip sits at the midpoint of a keyframe segment whose opacity
-    // changes, which is where an ease-in-out tween crosses halfway.
-    const flips: number[] = []
-    for (let i = 1; i < ATTENTION_PULSE_KEYFRAMES.length; i += 1) {
-      const a = ATTENTION_PULSE_KEYFRAMES[i - 1]
-      const b = ATTENTION_PULSE_KEYFRAMES[i]
-      if (a.opacity !== b.opacity) flips.push(((a.percent + b.percent) / 200) * p)
-    }
-    expect(flips).toHaveLength(4)
     expect(runs("rhythm", p)).toEqual([
       [0, "on"],
-      [flips[0], "dim"],
-      [flips[1], "on"],
-      [flips[2], "dim"],
-      [flips[3], "on"],
+      [90, "dim"],
+      [390, "on"],
+      [690, "dim"],
+      [990, "on"],
     ])
-    // Two dips, and the hold after them is the long majority of the period.
-    expect(p - flips[3]).toBeGreaterThan(p / 2)
+    // Chrome does not paint a favicon change that lasts under about 200 ms, so
+    // no frame, the hold across the period boundary included, may be shorter
+    // than 250 ms. The run at 0 is the tail of the previous period's hold, so
+    // the intervals are measured from the first flip.
+    const starts = runs("rhythm", 3 * p).map(([t]) => t)
+    for (let i = 2; i < starts.length; i += 1) {
+      expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(250)
+    }
   })
 
   it("repeats on the same period, whatever point in a cycle it is asked about", () => {

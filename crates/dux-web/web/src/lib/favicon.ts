@@ -211,8 +211,8 @@ const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)"
 
 /**
  * Composite the current favicon with a corner dot that blinks on the row dot's
- * rhythm (`attentionPulse.ts`, driven by `faviconBlink.ts`), or restore the
- * clean icon. Reduced motion holds the dot steady, like the row dot. Idempotent:
+ * period and two-dip shape (`attentionPulse.ts`, driven by `faviconBlink.ts`),
+ * or restore the clean icon. Reduced motion holds the dot steady, like the row dot. Idempotent:
  * each base's frames are composed once, a repeat call while attention holds
  * leaves the running blink alone, and clearing stops the blink and its clock
  * before restoring the configured favicon. Without a DOM or a working

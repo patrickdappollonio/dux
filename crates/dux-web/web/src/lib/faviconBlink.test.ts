@@ -45,7 +45,7 @@ afterEach(() => {
 })
 
 describe("startAttentionBlink", () => {
-  it("shows exactly the shared rhythm's frames at the shared times while visible", () => {
+  it("shows the favicon rhythm's frames at its flip times while visible", () => {
     const shown: Array<[number, string]> = []
     const start = Date.now()
     const blink = startAttentionBlink({
@@ -57,15 +57,17 @@ describe("startAttentionBlink", () => {
     vi.advanceTimersByTime(ATTENTION_PULSE_PERIOD_MS * 2)
     blink.stop()
 
-    const expected: Array<[number, string]> = []
-    let t = 0
-    let last: string | null = null
-    while (t <= ATTENTION_PULSE_PERIOD_MS * 2) {
-      const { frame, msUntilChange } = attentionFrameAt(t, "rhythm")
-      if (frame !== last) expected.push([t, frame])
-      last = frame
-      t += msUntilChange
-    }
+    const expected: Array<[number, string]> = [
+      [0, "on"],
+      [90, "dim"],
+      [390, "on"],
+      [690, "dim"],
+      [990, "on"],
+      [2090, "dim"],
+      [2390, "on"],
+      [2690, "dim"],
+      [2990, "on"],
+    ]
     expect(shown).toEqual(expected)
   })
 

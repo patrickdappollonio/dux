@@ -1,6 +1,7 @@
-// The "needs attention" pulse, the one rhythm both attention dots share: the
-// sidebar row's `AttentionDot` plays it as the `attention-pulse` CSS animation
-// and the favicon plays it by swapping pre-rendered frames. The stylesheet's
+// The "needs attention" pulse both attention dots share: the sidebar row's
+// `AttentionDot` plays it as the `attention-pulse` CSS animation and the favicon
+// plays the same period and two-dip shape by swapping pre-rendered frames, with
+// longer dips of its own (`FAVICON_RHYTHM_FLIPS_MS`). The stylesheet's
 // `--animate-attention-pulse` and `@keyframes attention-pulse` are pinned to the
 // constants below by `attentionPulse.test.ts`, so the two cannot drift.
 
@@ -26,28 +27,19 @@ export const ATTENTION_PULSE_KEYFRAMES: ReadonlyArray<{
 export type AttentionFrame = "on" | "dim"
 
 /**
- * `rhythm` is the row dot's two dips and hold, for a page whose timers run on
- * time. `steady` is an even on/off blink over the same period, for a hidden page
+ * `rhythm` is the row dot's shape, two dips and a hold (with the favicon's
+ * longer dips), for a page whose timers run on time. `steady` is an even on/off blink over the same period, for a hidden page
  * whose timers the browser only wakes about once a second: sampled at that rate
  * the rhythm's dips (a few hundred milliseconds each) would almost never be
  * seen, while a half-period square wave still alternates on every wake.
  */
 export type AttentionPulseMode = "rhythm" | "steady"
 
-// The frame flips of one `rhythm` period, in ms from its start. A tween between
-// two keyframes of different opacity crosses halfway at the segment's midpoint
-// (ease-in-out is symmetric), so that is where the two-frame favicon flips.
-const RHYTHM_FLIPS_MS: readonly number[] = (() => {
-  const flips: number[] = []
-  for (let i = 1; i < ATTENTION_PULSE_KEYFRAMES.length; i += 1) {
-    const a = ATTENTION_PULSE_KEYFRAMES[i - 1]
-    const b = ATTENTION_PULSE_KEYFRAMES[i]
-    if (a.opacity !== b.opacity) {
-      flips.push(((a.percent + b.percent) / 200) * ATTENTION_PULSE_PERIOD_MS)
-    }
-  }
-  return flips
-})()
+// The favicon's frame flips in one `rhythm` period, in ms from its start. The
+// row dot's dips last 180 ms, and Chrome does not paint a favicon change shorter
+// than about 200 ms, so the favicon starts its first dip where the row dot's does
+// and lengthens each step to 300 ms, which every dip survives.
+const FAVICON_RHYTHM_FLIPS_MS: readonly number[] = [90, 390, 690, 990]
 
 const STEADY_FLIPS_MS: readonly number[] = [ATTENTION_PULSE_PERIOD_MS / 2]
 
@@ -59,7 +51,7 @@ export function attentionFrameAt(
   elapsedMs: number,
   mode: AttentionPulseMode,
 ): { frame: AttentionFrame; msUntilChange: number } {
-  const flips = mode === "rhythm" ? RHYTHM_FLIPS_MS : STEADY_FLIPS_MS
+  const flips = mode === "rhythm" ? FAVICON_RHYTHM_FLIPS_MS : STEADY_FLIPS_MS
   const phase =
     ((elapsedMs % ATTENTION_PULSE_PERIOD_MS) + ATTENTION_PULSE_PERIOD_MS) %
     ATTENTION_PULSE_PERIOD_MS

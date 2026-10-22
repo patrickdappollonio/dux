@@ -469,14 +469,14 @@ describe("applyAttentionFavicon blink", () => {
     applyAttentionFavicon("", true)
     await loadImages()
 
-    // Half a second in, the rhythm is in its second dip...
-    vi.advanceTimersByTime(500 - (Date.now() - t0))
+    // 200 ms in, the rhythm is in its first dip...
+    vi.advanceTimersByTime(200 - (Date.now() - t0))
     expect(shownHref()).toContain("OFF")
 
     // ...while the hidden tab's even blink is still in its on half.
     setHidden(true)
     expect(shownHref()).toContain("ON")
-    vi.advanceTimersByTime(499)
+    vi.advanceTimersByTime(799)
     expect(shownHref()).toContain("ON")
     vi.advanceTimersByTime(1)
     expect(shownHref()).toContain("OFF")

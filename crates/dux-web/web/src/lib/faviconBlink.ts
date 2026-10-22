@@ -1,5 +1,6 @@
 // Drives the favicon's attention blink: which frame to show and when, on the
-// rhythm the sidebar row's dot plays (`attentionPulse.ts`).
+// sidebar row dot's period and two-dip shape with dips long enough for a
+// favicon to paint (`attentionPulse.ts`).
 //
 // WHY A WORKER. The favicon matters most in a tab you are NOT looking at, and
 // that is exactly where browsers throttle a page's timers:
