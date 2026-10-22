@@ -180,13 +180,21 @@ function registerPasteGuards(
     event.preventDefault()
     event.stopPropagation()
   }
+  // With nothing focused by xterm, Android Chrome then starts its own
+  // long-press text selection and cancels the touch (measured), so the lift
+  // never arrives and nothing is copied. dux drives the selection itself.
+  const onTouchSelectStart = (event: Event) => {
+    if (options.pointerTypeRef.current === "touch") event.preventDefault()
+  }
   options.container.addEventListener("contextmenu", onTouchContextMenu, true)
+  options.container.addEventListener("selectstart", onTouchSelectStart, true)
   options.container.addEventListener("contextmenu", onContextMenu)
   options.container.addEventListener("paste", onPaste, true)
   options.container.addEventListener("pointerdown", onPointerDown, true)
   return {
     dispose: () => {
       options.container.removeEventListener("contextmenu", onTouchContextMenu, true)
+      options.container.removeEventListener("selectstart", onTouchSelectStart, true)
       options.container.removeEventListener("contextmenu", onContextMenu)
       options.container.removeEventListener("paste", onPaste, true)
       options.container.removeEventListener("pointerdown", onPointerDown, true)

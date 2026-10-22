@@ -4524,6 +4524,18 @@ describe("TerminalPane long-press text selection", () => {
     }
   })
 
+  // Measured on Android Chrome: once the contextmenu is refused before xterm
+  // focuses anything, the browser starts its own long-press text selection
+  // and cancels the touch, so the lift never comes and nothing is copied.
+  it("refuses the browser's own text selection under a finger", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const element = term().element as HTMLElement
+    fireEvent.pointerDown(element, { pointerType: "touch" })
+    expect(fireEvent(element, new Event("selectstart", { bubbles: true, cancelable: true }))).toBe(false)
+    fireEvent.pointerDown(element, { pointerType: "mouse" })
+    expect(fireEvent(element, new Event("selectstart", { bubbles: true, cancelable: true }))).toBe(true)
+  })
+
   it("still lets xterm answer a MOUSE right click", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const element = term().element as HTMLElement
