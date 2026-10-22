@@ -28,8 +28,9 @@ export type AttentionFrame = "on" | "dim"
 
 /**
  * `rhythm` is the row dot's shape, two dips and a hold (with the favicon's
- * longer dips), for a page whose timers run on time. `steady` is an even on/off blink over the same period, for a hidden page
- * whose timers the browser only wakes about once a second: sampled at that rate
+ * longer dips), for a page whose timers run on time. `steady` is an even on/off
+ * blink over the same period, for a hidden page whose timers the browser only
+ * wakes about once a second: sampled at that rate
  * the rhythm's dips (a few hundred milliseconds each) would almost never be
  * seen, while a half-period square wave still alternates on every wake.
  */
