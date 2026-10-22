@@ -435,4 +435,57 @@ describe("a touch selection while output streams", () => {
     expect(term.getSelection()).toBe("9\nline 10")
     expect(term.getSelectionPosition()?.start.y).toBe(term.buffer.active.viewportY)
   })
+
+  // A full-screen app on the alternate screen, cursor parked on its last row.
+  async function openFullScreenApp(screen: string) {
+    const opened = await openTouchable(0, 100)
+    await write(opened.term, `\x1b[?1049h\x1b[H${screen}`)
+    return opened
+  }
+
+  it("keeps the anchor on the pressed word when an app inserts a line below it", async () => {
+    const { term } = await openFullScreenApp("top\r\nhello there\r\nrow two\r\nrow three")
+    const drag = createSelectionDrag(term)
+    drag.begin(at(1, 1))
+    expect(term.getSelection()).toBe("hello")
+    // Cursor to row 2, insert a line there: rows below the word move, it does not.
+    await write(term, "\x1b[3;1H\x1b[L")
+    drag.extend(at(7, 1))
+    expect(term.getSelection()).toBe("hello th")
+  })
+
+  it("follows the pressed word when an app scrolls its screen up, cursor on the top row", async () => {
+    const { term } = await openFullScreenApp("top\r\nhello there\r\nrow two\r\nrow three")
+    await write(term, "\x1b[H")
+    const drag = createSelectionDrag(term)
+    drag.begin(at(1, 1))
+    await write(term, "\x1b[S")
+    // The word is on row 0 now and still on screen, so the drag carries on.
+    drag.extend(at(2, 1))
+    expect(drag.active()).toBe(true)
+    expect(term.getSelection()).toBe("hello there\nrow")
+  })
+
+  it("leaves the normal screen where it was when the gesture began in an app that then exits", async () => {
+    const { term } = await openTouchable(12, 100)
+    // One more line, so xterm's viewport measures the laid-out cells.
+    await write(term, "line 12\r\n")
+    term.scrollToLine(1)
+    expect(term.buffer.active.viewportY).toBe(1)
+    await write(term, "\x1b[?1049h\x1b[Hhello")
+    const drag = createSelectionDrag(term)
+    drag.begin(at(1, 0))
+    await write(term, "\x1b[?1049l")
+    drag.end()
+    expect(term.buffer.active.type).toBe("normal")
+    expect(term.buffer.active.viewportY).toBe(1)
+  })
+
+  it("ends the gesture when the terminal is resized under it", async () => {
+    const { term } = await openTouchable(12, 100)
+    const drag = createSelectionDrag(term)
+    drag.begin(at(5, 0))
+    term.resize(20, 5)
+    expect(drag.active()).toBe(false)
+  })
 })

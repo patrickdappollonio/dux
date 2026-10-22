@@ -20,7 +20,7 @@ import type { LiveSettings } from "./liveValues"
 import type { LinkPress } from "./linkPress"
 import { mouseCaptureHintShown } from "./pageSessionHints"
 import type { ResizeCoordinator } from "./resizeCoordinator"
-import { createSelectionDrag } from "./selectionDrag"
+import { createSelectionDrag, type SelectionDrag } from "./selectionDrag"
 import {
   createTouchGesture,
   type TouchGestureOutcome,
@@ -156,6 +156,7 @@ function handleTap(
 
 function handleLift(
   options: TerminalTouchWiringOptions,
+  selection: SelectionDrag,
   outcome: TouchGestureOutcome,
   event: TouchEvent,
 ): void {
@@ -164,7 +165,9 @@ function handleLift(
     // The drag paints nothing over blank cells, so a press that found only
     // blanks ends with no highlight, and a silent lift would read as a copy
     // that failed. Not sticky: nothing is lost, and the next press is the fix.
-    if (options.term.getSelection().trim() === "") {
+    // Asked of the gesture rather than read off the selection, because a
+    // selection the terminal wiped mid-drag (a resize) was not found blank.
+    if (selection.liftFoundOnlyBlanks()) {
       notifyInfo("Nothing to copy there: that spot is blank.")
       return
     }
@@ -193,7 +196,7 @@ export function registerTerminalTouchWiring(
       options.composeInputRef.current?.blur()
     },
     onScrollMove: (pixels, touch) => moveScroll(options, pixels, touch),
-    onLift: (outcome, event) => handleLift(options, outcome, event),
+    onLift: (outcome, event) => handleLift(options, selection, outcome, event),
   })
   gesture.attach(options.container)
   return { dispose: () => gesture.dispose() }

@@ -25,6 +25,7 @@ class TermFake {
       type: "normal",
       viewportY: 0,
       baseY: 0,
+      cursorY: 0,
       getLine: (y: number) => {
         const text = this.lines[y]
         if (text === undefined) return undefined
@@ -63,9 +64,12 @@ class TermFake {
   select(col: number, row: number, length: number) {
     this.selection = { col, row, length }
   }
-  // Only blank-or-not matters to the drag, so this reads the covered cells of
-  // the first row and nothing more.
+  // Only blank-or-not matters to these tests, so this reads the covered cells
+  // of the first row and nothing more. Counted: the drag must not build the
+  // selected text on every move.
+  selectionReads = 0
   getSelection() {
+    this.selectionReads++
     const sel = this.selection
     if (!sel) return ""
     return [...(this.lines[sel.row] ?? "")].slice(sel.col, sel.col + sel.length).join("")
@@ -79,11 +83,28 @@ class TermFake {
   }
   // The viewport hold's seams. Its behaviour over streaming output is pinned
   // against a real xterm in `lib/termselect.xterm.test.ts`.
-  registerMarker() {
-    return { line: 0, isDisposed: false, dispose() {} }
+  // A marker on a line, as xterm places one: relative to the cursor's row.
+  registerMarker(cursorYOffset = 0) {
+    const b = this.buffer.active
+    return {
+      line: b.baseY + b.cursorY + cursorYOffset,
+      isDisposed: false,
+      dispose() {
+        this.isDisposed = true
+      },
+    }
   }
   onWriteParsed() {
     return { dispose() {} }
+  }
+  resizeListeners: (() => void)[] = []
+  onResize(cb: () => void) {
+    this.resizeListeners.push(cb)
+    return {
+      dispose: () => {
+        this.resizeListeners = this.resizeListeners.filter((l) => l !== cb)
+      },
+    }
   }
   scrollToLine(line: number) {
     this.buffer.active.viewportY = line
@@ -149,6 +170,21 @@ describe("beginning a selection", () => {
 })
 
 describe("extending a selection", () => {
+  it("never builds the selected text while the finger moves", () => {
+    const { term, drag } = setup()
+    drag.begin(at(1, 0))
+    for (let col = 2; col < 15; col++) drag.extend(at(col, 1))
+    expect(term.selectionReads).toBe(0)
+  })
+
+  it("does not call a gesture the terminal cut short a blank one", () => {
+    const { term, drag } = setup()
+    drag.begin(at(15, 0))
+    expect(drag.liftFoundOnlyBlanks()).toBe(true)
+    for (const listener of term.resizeListeners) listener()
+    expect(drag.liftFoundOnlyBlanks()).toBe(false)
+  })
+
   it("grows the span to the finger's cell", () => {
     const { term, drag } = setup()
     drag.begin(at(1, 0))

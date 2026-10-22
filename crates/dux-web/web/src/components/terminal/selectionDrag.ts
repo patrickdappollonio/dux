@@ -28,6 +28,7 @@ import {
   pointToCell,
   rowCells,
   selectionSpan,
+  spanHasText,
   wordSpanAt,
   type AnchorWord,
   type ScreenRect,
@@ -41,6 +42,11 @@ export type SelectionDrag = {
   /// The gesture is over (a lift, a cancel, a second finger). The ANCHOR goes;
   /// the painted selection stays.
   end: () => void
+  /// Whether the last gesture covered only blank cells, so its lift has
+  /// nothing to copy. False for a gesture the terminal cut short (a resize,
+  /// the pressed word scrolled out of the buffer, the app switching screens):
+  /// there the highlight was taken away, not found empty.
+  liftFoundOnlyBlanks: () => boolean
   /// Whether a selection gesture is currently anchored. No production client
   /// reads it; it exists so the highlight-outlives-gesture semantics are
   /// assertable without poking internals.
@@ -52,32 +58,38 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   // timer, not one row per touchmove: a finger held still produces no further
   // events. xterm's own drag scroll is an interval for the same reason.
   const SELECT_SCROLL_INTERVAL_MS = 50
-  // The anchor holds absolute buffer rows captured at press time, and two things
-  // can shift those mid-gesture: a debounced resize (a selection drag takes no
-  // resize hold, which is scroll-scoped), and xterm trimming lines off the top
-  // once the scrollback ring is at its cap.
+  // The pressed word, as the columns it spans plus a MARKER on each row it
+  // occupies. A marker belongs to its line, so it moves with that line's text:
+  // up when the scrollback at its cap trims lines off the top (which a
+  // streaming agent does on every line) or when an app scrolls its screen,
+  // down when an app inserts lines above it, and it is disposed when its line
+  // leaves the buffer, which is the one case where the word is truly gone.
+  // Rows captured at press time would slide off the word in every one of
+  // those cases.
   //
-  // The trim is guarded, because a streaming agent at its scrollback cap trims
-  // on every line: the anchor would slide one row down the text per line, and
-  // the next move would select from somewhere the user never pressed. The
-  // public surface publishes no trim signal, but a marker is moved by every
-  // trim, so the distance one has travelled since the press is the count.
-  // The resize is not guarded: xterm clears its own selection when the rows
-  // change, and that costs one selection that a lift and a fresh press fix.
-  let selectAnchor: AnchorWord | null = null
-  let trimMarker: IMarker | null = null
-  let trimMarkerStart = 0
-  // The viewport hold: the first line on screen, in rows counted BEFORE any
-  // trim, so a trim does not read as the viewport moving.
-  let holdTop = 0
+  // A resize ends the gesture: xterm reflows the buffer and clears its own
+  // selection when the rows change, so there is nothing left to extend.
+  let anchorCols: { startCol: number; endColExclusive: number } | null = null
+  let anchorStart: IMarker | null = null
+  let anchorEnd: IMarker | null = null
+  // A press on a blank run anchors without painting; the span it grows into is
+  // checked for text only then, because a span holding a non-blank word
+  // cannot be blank.
+  let anchorBlank = false
+  // What the last gesture amounted to, read on the lift after `end`.
+  let foundOnlyBlanks = false
+  // The viewport hold, on the normal screen only (the alternate screen has no
+  // scrollback to hold): a marker on the first line on screen, and whether the
+  // viewport was following the output when the press landed.
+  let holdTop: IMarker | null = null
   let resumeFollowing = false
-  let holdWrites: IDisposable | null = null
+  let gestureSubscriptions: IDisposable[] = []
   // The finger's last position, so the auto-scroll tick can re-resolve the
   // focus cell without an event of its own.
   let selectPoint: { clientX: number; clientY: number } | null = null
   let selectScrollTimer: ReturnType<typeof setInterval> | undefined
-  // Which buffer the anchor's rows belong to: an app entering or leaving its alt
-  // screen mid-gesture makes every one of them name unrelated content.
+  // Which buffer the markers belong to: an app entering or leaving its alt
+  // screen mid-gesture makes them name content that is no longer on screen.
   let selectBuffer = ""
   const stopSelectAutoScroll = () => {
     clearInterval(selectScrollTimer)
@@ -105,58 +117,72 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     if (!line) return undefined
     return { cells: rowCells(line), isWrapped: line.isWrapped }
   }
-  // Lines trimmed off the top since the press, or null once the marker itself
-  // was trimmed away, when nothing anchored to the press survives.
-  const trimmedSincePress = (): number | null => {
-    if (!trimMarker || trimMarker.isDisposed || trimMarker.line < 0) return null
-    return trimMarkerStart - trimMarker.line
+  // xterm places a marker relative to the cursor's row; this takes an
+  // absolute buffer line.
+  const markLine = (row: number): IMarker | undefined => {
+    const buffer = term.buffer.active
+    return term.registerMarker(row - (buffer.baseY + buffer.cursorY))
   }
-  // Puts the viewport back where the hold says it belongs. Runs once a write
-  // has been parsed, which is before the frame that would show it is painted,
-  // so nothing visibly jumps. Not on xterm's scroll event: that fires before
-  // xterm's own viewport has caught up with the line, and a scroll requested
-  // there is measured from a stale position. Moving the viewport up is also
-  // what tells xterm the user is scrolling, so from then on it keeps the text
-  // still by itself, and this only has to step in for the first line.
+  const live = (marker: IMarker | null): marker is IMarker =>
+    marker !== null && !marker.isDisposed && marker.line >= 0
+  // Puts the viewport back on the line it showed at the press. Runs once a
+  // write has been parsed, which is before the frame that would show it is
+  // painted, so nothing visibly jumps. Not on xterm's scroll event: that fires
+  // before xterm's own viewport has caught up with the line, and a scroll
+  // requested there is measured from a stale position. Moving the viewport up
+  // is also what tells xterm the user is scrolling, so from then on it keeps
+  // the text still by itself and this only has to step in for the first line.
   const keepViewport = () => {
-    const trimmed = trimmedSincePress()
-    if (trimmed === null) return
-    const target = Math.max(0, holdTop - trimmed)
+    if (term.buffer.active.type !== "normal") return
+    const target = live(holdTop) ? holdTop.line : 0
     if (term.buffer.active.viewportY !== target) term.scrollToLine(target)
   }
-  const startHold = () => {
-    const buffer = term.buffer.active
-    resumeFollowing = buffer.viewportY >= buffer.baseY
-    trimMarker = term.registerMarker(0)
-    trimMarkerStart = trimMarker.line
-    holdTop = buffer.viewportY
-    holdWrites = term.onWriteParsed(keepViewport)
+  const holdViewport = () => {
+    holdTop?.dispose()
+    holdTop = markLine(term.buffer.active.viewportY) ?? null
   }
-  const releaseHold = () => {
-    if (!holdWrites) return
-    holdWrites.dispose()
-    holdWrites = null
-    trimMarker?.dispose()
-    trimMarker = null
-    if (resumeFollowing) term.scrollToBottom()
+  const release = () => {
+    for (const subscription of gestureSubscriptions) subscription.dispose()
+    gestureSubscriptions = []
+    anchorStart?.dispose()
+    anchorEnd?.dispose()
+    anchorStart = null
+    anchorEnd = null
+    if (holdTop) {
+      holdTop.dispose()
+      holdTop = null
+      // Following resumes on the screen the hold was taken on, and only while
+      // it is the one showing: scrolling whatever screen is active now would
+      // move a view the user left somewhere on purpose.
+      if (resumeFollowing && term.buffer.active.type === "normal") {
+        term.scrollToBottom()
+      }
+    }
     resumeFollowing = false
   }
   const end = () => {
     stopSelectAutoScroll()
-    releaseHold()
+    release()
     // The ANCHOR is per gesture; the SELECTION deliberately outlives it, so
     // the highlight stays on screen after the copy until the next tap.
-    selectAnchor = null
+    anchorCols = null
     selectPoint = null
     selectBuffer = ""
   }
-  // Selects the span, or nothing at all when every cell in it is blank: a
-  // highlight over blank cells promises a copy that would be empty.
-  const paint = (col: number, row: number, length: number) => {
-    term.select(col, row, length)
-    if (term.getSelection().trim() === "") term.clearSelection()
+  // The terminal took the gesture away: whatever is painted is what the user
+  // last saw, and it was not found blank.
+  const interrupt = () => {
+    foundOnlyBlanks = false
+    end()
+  }
+  const select = (col: number, row: number, length: number, blank: boolean) => {
+    foundOnlyBlanks = blank
+    // A highlight over blank cells promises a copy that would be empty.
+    if (blank) term.clearSelection()
+    else term.select(col, row, length)
   }
   const begin = (touch: Touch): void => {
+    foundOnlyBlanks = false
     const rect = screenRect()
     if (!rect) return
     // A long press starts a new selection, so the previous highlight goes even
@@ -168,14 +194,34 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
       (span.endRow - span.startRow) * term.cols +
       span.endColExclusive -
       span.startCol
+    foundOnlyBlanks = true
     if (length <= 0) return
-    // A press on a blank run still anchors, so a drag from it onto text selects
-    // that text; it just paints nothing until there is something to copy.
-    selectAnchor = span
+    const start = markLine(span.startRow) ?? null
+    const endMarker =
+      span.endRow === span.startRow ? start : (markLine(span.endRow) ?? null)
+    if (!live(start) || !live(endMarker)) {
+      start?.dispose()
+      endMarker?.dispose()
+      return
+    }
+    anchorStart = start
+    anchorEnd = endMarker === start ? null : endMarker
+    anchorCols = { startCol: span.startCol, endColExclusive: span.endColExclusive }
+    anchorBlank = !spanHasText(
+      (row) => lineAt(row)?.cells,
+      { col: span.startCol, row: span.startRow, length },
+      term.cols,
+    )
     selectBuffer = term.buffer.active.type
     selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
-    startHold()
-    paint(span.startCol, span.startRow, length)
+    gestureSubscriptions.push(term.onResize(interrupt))
+    if (selectBuffer === "normal") {
+      const buffer = term.buffer.active
+      resumeFollowing = buffer.viewportY >= buffer.baseY
+      holdViewport()
+      gestureSubscriptions.push(term.onWriteParsed(keepViewport))
+    }
+    select(span.startCol, span.startRow, length, anchorBlank)
     // A short buzz is the platform's own "you are now selecting" signal. Guarded
     // twice: Safari implements no Vibration API, and one that does may throw
     // without user activation.
@@ -185,28 +231,31 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
       // A missing buzz is not worth failing a selection over.
     }
   }
+  // The pressed word where its text is NOW, or null once its line has left
+  // the buffer.
+  const currentAnchor = (): AnchorWord | null => {
+    const cols = anchorCols
+    const endMarker = anchorEnd ?? anchorStart
+    if (!cols || !live(anchorStart) || !live(endMarker)) return null
+    return {
+      startRow: anchorStart.line,
+      startCol: cols.startCol,
+      endRow: endMarker.line,
+      endColExclusive: cols.endColExclusive,
+    }
+  }
   // Re-selects from the anchor to wherever `selectPoint` is. It reads the stored
   // point rather than taking one because the auto-scroll tick calls it too.
   const apply = (): void => {
-    const pressed = selectAnchor
     const point = selectPoint
-    if (!pressed || !point) return
-    const trimmed = trimmedSincePress()
-    if (
-      term.buffer.active.type !== selectBuffer ||
-      trimmed === null ||
-      pressed.endRow - trimmed < 0
-    ) {
-      // The app swapped buffers under the gesture, or the pressed word was
-      // trimmed out of the scrollback, so the anchor describes nothing here.
-      // The painted selection stays: it is what the user last saw.
-      end()
+    if (!anchorCols || !point) return
+    const anchor = currentAnchor()
+    if (term.buffer.active.type !== selectBuffer || !anchor) {
+      // The app swapped screens under the gesture, or the pressed word left
+      // the buffer, so the anchor describes nothing on screen. The painted
+      // selection stays: it is what the user last saw.
+      interrupt()
       return
-    }
-    const anchor: AnchorWord = {
-      ...pressed,
-      startRow: pressed.startRow - trimmed,
-      endRow: pressed.endRow - trimmed,
     }
     const rect = screenRect()
     if (!rect) return
@@ -218,12 +267,14 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     // would start the span inside the glyph.
     const focus = glyphAt(cells, cell.col)
     const span = selectionSpan(anchor, { col: focus.col, row }, term.cols, focus.width)
-    paint(span.col, span.row, span.length)
+    const blank =
+      anchorBlank && !spanHasText((r) => lineAt(r)?.cells, span, term.cols)
+    select(span.col, span.row, span.length, blank)
   }
   const autoScrollTick = (): void => {
     const point = selectPoint
     const rect = screenRect()
-    if (!point || !rect || !selectAnchor) {
+    if (!point || !rect || !anchorCols) {
       stopSelectAutoScroll()
       return
     }
@@ -236,14 +287,14 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     // walk the user can stop by moving back inside, not a jump. The hold moves
     // with it, so the viewport stays where the walk left it.
     term.scrollLines(direction)
-    holdTop = term.buffer.active.viewportY + (trimmedSincePress() ?? 0)
+    if (holdTop) holdViewport()
     apply()
   }
   const extend = (touch: Touch): void => {
     selectPoint = { clientX: touch.clientX, clientY: touch.clientY }
     const rect = screenRect()
     const past = rect ? edgeAutoScroll(touch.clientY, rect) !== 0 : false
-    if (past && selectAnchor) {
+    if (past && anchorCols) {
       if (selectScrollTimer === undefined) {
         selectScrollTimer = setInterval(autoScrollTick, SELECT_SCROLL_INTERVAL_MS)
       }
@@ -252,5 +303,11 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     }
     apply()
   }
-  return { begin, extend, end, active: () => selectAnchor !== null }
+  return {
+    begin,
+    extend,
+    end,
+    liftFoundOnlyBlanks: () => foundOnlyBlanks,
+    active: () => anchorCols !== null,
+  }
 }

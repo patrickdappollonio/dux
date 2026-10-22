@@ -121,6 +121,7 @@ class TermStub {
       type: "normal",
       viewportY: 0,
       baseY: 0,
+      cursorY: 0,
       getLine: (y: number) => {
         const cells = this.lineCells(y)
         if (!cells) return undefined
@@ -309,11 +310,17 @@ class TermStub {
   scrollToLine(line: number) {
     this.buffer.active.viewportY = line
   }
-  // The selection drag's viewport hold; the stub never streams output, so the
-  // hold has nothing to correct here (it is pinned against a real xterm in
-  // `lib/termselect.xterm.test.ts`).
-  registerMarker() {
-    return { line: 0, isDisposed: false, dispose() {} }
+  // The selection drag's anchor and viewport hold. The stub never streams
+  // output, so a marker never moves here (how they follow a real buffer is
+  // pinned against a real xterm in `lib/termselect.xterm.test.ts`); it is
+  // placed the way xterm places one, relative to the cursor's row.
+  registerMarker(cursorYOffset = 0) {
+    const b = this.buffer.active
+    return {
+      line: b.baseY + b.cursorY + cursorYOffset,
+      isDisposed: false,
+      dispose() {},
+    }
   }
   onWriteParsed() {
     return { dispose() {} }
@@ -4188,6 +4195,18 @@ describe("TerminalPane long-press text selection", () => {
     move(at(70, 0))
     lift(at(70, 0))
     expect(toastCalls).toContain("Nothing to copy there: that spot is blank.")
+  })
+
+  it("says nothing about a blank spot when the terminal wiped the selection under the gesture", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    press(at(6, 0))
+    // A resize mid-drag: xterm clears its own selection when the rows change.
+    act(() => {
+      term().resize(80, 23)
+      term().clearSelection()
+    })
+    lift(at(6, 0))
+    expect(toastCalls).not.toContain("Nothing to copy there: that spot is blank.")
   })
 
   it("extends the selection as the finger drags forward", () => {
