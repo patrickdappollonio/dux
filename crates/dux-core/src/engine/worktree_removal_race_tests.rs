@@ -346,13 +346,11 @@ fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
     let message = result.expect_err("git cannot finish under a writer nobody stopped");
 
     let path = crate::home_path::shorten_home(&fx.worktree);
+    let named = format!("kept writing into {path} (.astro-");
     for needle in [
-        path.as_str(),
-        "kept writing into it",
-        "dev server",
-        "Still in it: .astro-",
-        "then delete the folder",
-        "Branch feat was deleted as asked.",
+        named.as_str(),
+        "then delete the folder yourself.",
+        "Branch feat was deleted.",
     ] {
         assert!(message.contains(needle), "missing {needle:?} in: {message}");
     }
@@ -377,7 +375,7 @@ fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
         surfaced
             .to_string()
             .starts_with("Worktree delete failed for ")
-            && surfaced.to_string().contains("kept writing into it"),
+            && surfaced.to_string().contains("kept writing into"),
         "{surfaced}"
     );
 }

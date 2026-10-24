@@ -3956,29 +3956,21 @@ pub struct LeftoverWorktreeFolder {
 impl std::fmt::Display for LeftoverWorktreeFolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path = crate::home_path::shorten_home(&self.path);
-        write!(
-            f,
-            "git removed the worktree at {path} from the repository but could not delete \
-             the folder itself, because something kept writing into it while it was being \
-             removed (possibly a dev server started in that worktree)."
-        )?;
-        if self.leftovers.is_empty() {
-            write!(f, " The folder is still there.")?;
-        } else {
-            write!(f, " Still in it: {}", self.leftovers.join(", "))?;
+        write!(f, "something kept writing into {path}")?;
+        if !self.leftovers.is_empty() {
+            write!(f, " ({}", self.leftovers.join(", "))?;
             if self.more > 0 {
                 write!(f, " and {} more", self.more)?;
             }
-            write!(f, ".")?;
+            write!(f, ")")?;
         }
         write!(
             f,
-            " Stop whatever is still running in that folder, then delete the folder {path} \
-             yourself."
+            ", so the folder is still there. Stop it, then delete the folder yourself."
         )?;
         for (name, outcome) in &self.branches {
             match outcome {
-                BranchDeletion::Deleted => write!(f, " Branch {name} was deleted as asked.")?,
+                BranchDeletion::Deleted => write!(f, " Branch {name} was deleted.")?,
                 BranchDeletion::AlreadyGone => write!(f, " Branch {name} was already gone.")?,
                 BranchDeletion::Refused { reason } => write!(
                     f,
@@ -3986,9 +3978,6 @@ impl std::fmt::Display for LeftoverWorktreeFolder {
                      git branch -D once the folder is gone."
                 )?,
             }
-        }
-        if !self.git_error.is_empty() {
-            write!(f, " (git said: {})", self.git_error)?;
         }
         Ok(())
     }
@@ -10317,6 +10306,30 @@ mod tests {
     /// Once git has dropped the registration and only the folder is left, the
     /// error is the leftover one, naming what is in it, and git lists nothing
     /// for the path any more. dux deletes none of it.
+    #[test]
+    fn a_leftover_folder_names_the_path_once_with_what_is_left_beside_it() {
+        let mut leftover = LeftoverWorktreeFolder {
+            path: std::path::PathBuf::from("/work/wt-feat"),
+            leftovers: vec![".astro/collections".to_string(), "dist".to_string()],
+            more: 3,
+            git_error: "error: failed to delete '/work/wt-feat': Directory not empty".to_string(),
+            branches: vec![("feat".to_string(), BranchDeletion::Deleted)],
+        };
+        assert_eq!(
+            leftover.to_string(),
+            "something kept writing into /work/wt-feat (.astro/collections, dist and 3 more), \
+             so the folder is still there. Stop it, then delete the folder yourself. \
+             Branch feat was deleted."
+        );
+        leftover.leftovers.clear();
+        leftover.more = 0;
+        assert_eq!(
+            leftover.to_string(),
+            "something kept writing into /work/wt-feat, so the folder is still there. \
+             Stop it, then delete the folder yourself. Branch feat was deleted."
+        );
+    }
+
     #[test]
     fn a_folder_git_has_let_go_of_is_reported_as_a_leftover() {
         let repo = init_test_repo();

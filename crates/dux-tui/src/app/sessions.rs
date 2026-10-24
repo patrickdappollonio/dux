@@ -8366,12 +8366,9 @@ mod tests {
             (
                 leftover,
                 &[
-                    "/work/wt-feat",
-                    "kept writing into it",
-                    "possibly a dev server",
-                    "Still in it: .astro/collections",
-                    "Stop whatever is still running in that folder, then delete the folder",
-                    "Branch feat was deleted as asked.",
+                    "kept writing into /work/wt-feat (.astro/collections)",
+                    "Stop it, then delete the folder yourself.",
+                    "Branch feat was deleted.",
                 ][..],
             ),
             (
