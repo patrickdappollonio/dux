@@ -48,6 +48,10 @@ export type SelectionDrag = {
   /// the pressed word scrolled out of the buffer, the app switching screens):
   /// there the highlight was taken away, not found empty.
   liftFoundOnlyBlanks: () => boolean
+  /// Whether the terminal cut the last gesture short (a resize, the app
+  /// switching screens, the pressed word leaving the buffer), so whatever the
+  /// lift finds is not what the user was selecting.
+  liftWasCutShort: () => boolean
   /// Whether a selection gesture is currently anchored. No production client
   /// reads it; it exists so the highlight-outlives-gesture semantics are
   /// assertable without poking internals.
@@ -77,6 +81,7 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   let anchorEnd: IMarker | null = null
   // What the last gesture amounted to, read on the lift after `end`.
   let foundOnlyBlanks = false
+  let cutShortVerdict = false
   // The viewport hold, on the normal screen only (the alternate screen has no
   // scrollback to hold): a marker on the first line on screen, and whether the
   // viewport was following the output when the press landed.
@@ -190,6 +195,7 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     const anchor = currentAnchor()
     if (cutShort || term.buffer.active.type !== selectBuffer || !anchor) {
       foundOnlyBlanks = false
+      cutShortVerdict = true
       return
     }
     if (foundOnlyBlanks) return
@@ -225,6 +231,7 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
   }
   const begin = (touch: Touch): void => {
     foundOnlyBlanks = false
+    cutShortVerdict = false
     const rect = screenRect()
     if (!rect) return
     // A long press starts a new selection, so the previous highlight goes even
@@ -347,6 +354,7 @@ export function createSelectionDrag(term: Terminal): SelectionDrag {
     extend,
     end,
     liftFoundOnlyBlanks: () => foundOnlyBlanks,
+    liftWasCutShort: () => cutShortVerdict,
     active: () => anchorCols !== null,
   }
 }

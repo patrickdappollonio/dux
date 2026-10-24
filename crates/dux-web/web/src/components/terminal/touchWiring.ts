@@ -162,11 +162,18 @@ function handleLift(
 ): void {
   if (outcome.wasSelecting) {
     event.preventDefault()
+    // Both notices are asked of the gesture rather than read off the
+    // selection, and neither is sticky: nothing is lost, and the next press
+    // is the fix. A gesture the terminal cut short (a resize, the app
+    // switching screens, the pressed line leaving the buffer) copies nothing,
+    // and a silent lift would read as a copy that happened.
+    if (selection.liftWasCutShort()) {
+      notifyInfo("Nothing copied: the terminal changed while you were selecting. Try again.")
+      return
+    }
     // The drag paints nothing over blank cells, so a press that found only
     // blanks ends with no highlight, and a silent lift would read as a copy
-    // that failed. Not sticky: nothing is lost, and the next press is the fix.
-    // Asked of the gesture rather than read off the selection, because a
-    // selection the terminal wiped mid-drag (a resize) was not found blank.
+    // that failed.
     if (selection.liftFoundOnlyBlanks()) {
       notifyInfo("Nothing to copy there: that spot is blank.")
       return

@@ -4130,6 +4130,8 @@ describe("TerminalPane typing-surface toggle", () => {
 // at (100, 50) with 10x20 cells and an 80x24 grid, and the stub buffer's first
 // line is "git status --porcelain".
 describe("TerminalPane long-press text selection", () => {
+  const CUT_SHORT_NOTE =
+    "Nothing copied: the terminal changed while you were selecting. Try again."
   const LONG_PRESS_MS = 400
   const container = () => screen.getByTestId("terminal-container")
   const term = () => {
@@ -4195,7 +4197,7 @@ describe("TerminalPane long-press text selection", () => {
     press(at(60, 0))
     expect(term().hasSelection()).toBe(false)
     lift(at(60, 0))
-    expect(toastCalls).toContain("Nothing to copy there: that spot is blank.")
+    expect(toastCalls).toEqual(["Nothing to copy there: that spot is blank."])
     expect(copied).toEqual([])
   })
 
@@ -4207,7 +4209,7 @@ describe("TerminalPane long-press text selection", () => {
     expect(toastCalls).toContain("Nothing to copy there: that spot is blank.")
   })
 
-  it("says nothing about a blank spot when the terminal wiped the selection under the gesture", () => {
+  it("says the terminal changed, not that the spot was blank, when a resize cut the gesture short", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     press(at(6, 0))
     // A resize mid-drag: xterm clears its own selection when the rows change.
@@ -4216,7 +4218,8 @@ describe("TerminalPane long-press text selection", () => {
       term().clearSelection()
     })
     lift(at(6, 0))
-    expect(toastCalls).not.toContain("Nothing to copy there: that spot is blank.")
+    expect(toastCalls).toEqual([CUT_SHORT_NOTE])
+    expect(copied).toEqual([])
   })
 
   it("extends the selection as the finger drags forward", () => {
@@ -4377,6 +4380,7 @@ describe("TerminalPane long-press text selection", () => {
     lift(at(6, 0))
     expect(copied).toEqual(["status"])
     expect(term().getSelection()).toBe("status")
+    expect(toastCalls).not.toContain(CUT_SHORT_NOTE)
   })
 
   it("copies a ONE-character word, because a long press is deliberate", () => {
