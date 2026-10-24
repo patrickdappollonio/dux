@@ -10303,9 +10303,6 @@ mod tests {
         assert!(worktree_is_registered(repo.path(), &wt));
     }
 
-    /// Once git has dropped the registration and only the folder is left, the
-    /// error is the leftover one, naming what is in it, and git lists nothing
-    /// for the path any more. dux deletes none of it.
     #[test]
     fn a_leftover_folder_names_the_path_once_with_what_is_left_beside_it() {
         let mut leftover = LeftoverWorktreeFolder {
@@ -10330,6 +10327,9 @@ mod tests {
         );
     }
 
+    /// Once git has dropped the registration and only the folder is left, the
+    /// error is the leftover one, naming what is in it, and git lists nothing
+    /// for the path any more. dux deletes none of it.
     #[test]
     fn a_folder_git_has_let_go_of_is_reported_as_a_leftover() {
         let repo = init_test_repo();
