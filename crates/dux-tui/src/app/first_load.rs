@@ -787,8 +787,10 @@ impl App {
         let plan = dux_core::first_load::plan(
             last_seen.as_deref(),
             dux_core::display_version(),
-            self.engine.config.ui.disable_automated_welcome_screen,
-            self.engine.config.ui.disable_release_notes,
+            dux_core::first_load::AutomaticScreens {
+                disable_welcome: self.engine.config.ui.disable_automated_welcome_screen,
+                disable_release_notes: self.engine.config.ui.disable_release_notes,
+            },
         );
         self.apply_first_load_plan(plan);
     }

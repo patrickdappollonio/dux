@@ -78,20 +78,29 @@ impl FirstLoadPlan {
     };
 }
 
+/// The two `[ui]` flags that each stop one first-load screen from showing by
+/// itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AutomaticScreens {
+    /// `ui.disable_automated_welcome_screen`.
+    pub disable_welcome: bool,
+    /// `ui.disable_release_notes`.
+    pub disable_release_notes: bool,
+}
+
 /// STEP 1, no network: what the stored state and the config say should happen.
 ///
 /// - `last_seen`: the version recorded in SQLite, `None` on a first ever launch.
 /// - `running`: the running build's display version (`"development"` for a
 ///   non-release build).
-/// - `disable_welcome` / `disable_release_notes`: the two `[ui]` flags. Each
-///   suppresses only the AUTOMATIC showing; an explicit user action to open
-///   either screen bypasses this function entirely.
-pub fn plan(
-    last_seen: Option<&str>,
-    running: &str,
-    disable_welcome: bool,
-    disable_release_notes: bool,
-) -> FirstLoadPlan {
+/// - `disabled`: the two `[ui]` flags. Each suppresses only the AUTOMATIC
+///   showing; an explicit user action to open either screen bypasses this
+///   function entirely.
+pub fn plan(last_seen: Option<&str>, running: &str, disabled: AutomaticScreens) -> FirstLoadPlan {
+    let AutomaticScreens {
+        disable_welcome,
+        disable_release_notes,
+    } = disabled;
     let Some(last_seen) = last_seen else {
         // First ever launch. A development build DOES get the welcome (a fresh
         // dev install is still a fresh install, and the welcome needs no
@@ -167,14 +176,28 @@ mod tests {
 
     #[test]
     fn no_stored_version_shows_the_welcome_and_stamps_it() {
-        let p = plan(None, V6, false, false);
+        let p = plan(
+            None,
+            V6,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: false,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::Welcome);
         assert!(p.mark_seen, "the welcome must not reappear next launch");
     }
 
     #[test]
     fn a_newer_running_version_shows_whats_new() {
-        let p = plan(Some(V6), V7, false, false);
+        let p = plan(
+            Some(V6),
+            V7,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: false,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::WhatsNew);
         assert!(p.mark_seen);
     }
@@ -183,17 +206,45 @@ mod tests {
     fn a_downgrade_also_counts_as_a_change() {
         // The rule is "differs", not "is newer": there is no version comparison
         // and only the newest release is ever fetched.
-        assert_eq!(plan(Some(V7), V6, false, false).screen, FirstLoad::WhatsNew);
+        assert_eq!(
+            plan(
+                Some(V7),
+                V6,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false
+                }
+            )
+            .screen,
+            FirstLoad::WhatsNew
+        );
     }
 
     #[test]
     fn the_same_version_shows_nothing_and_writes_nothing() {
-        assert_eq!(plan(Some(V6), V6, false, false), FirstLoadPlan::NOTHING);
+        assert_eq!(
+            plan(
+                Some(V6),
+                V6,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false
+                }
+            ),
+            FirstLoadPlan::NOTHING
+        );
     }
 
     #[test]
     fn a_development_build_never_auto_shows_release_notes() {
-        let p = plan(Some(V6), DEVELOPMENT_VERSION, false, false);
+        let p = plan(
+            Some(V6),
+            DEVELOPMENT_VERSION,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: false,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::Nothing);
         assert!(
             !p.mark_seen,
@@ -203,7 +254,14 @@ mod tests {
 
     #[test]
     fn a_development_build_still_gets_the_first_run_welcome() {
-        let p = plan(None, DEVELOPMENT_VERSION, false, false);
+        let p = plan(
+            None,
+            DEVELOPMENT_VERSION,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: false,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::Welcome);
         assert!(p.mark_seen, "otherwise it reappears on every dev launch");
     }
@@ -211,14 +269,28 @@ mod tests {
     #[test]
     fn a_development_build_that_already_saw_the_welcome_shows_nothing() {
         assert_eq!(
-            plan(Some(DEVELOPMENT_VERSION), DEVELOPMENT_VERSION, false, false),
+            plan(
+                Some(DEVELOPMENT_VERSION),
+                DEVELOPMENT_VERSION,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false
+                }
+            ),
             FirstLoadPlan::NOTHING
         );
     }
 
     #[test]
     fn disable_automated_welcome_screen_suppresses_only_the_welcome() {
-        let p = plan(None, V6, true, false);
+        let p = plan(
+            None,
+            V6,
+            AutomaticScreens {
+                disable_welcome: true,
+                disable_release_notes: false,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::Nothing);
         assert!(
             p.mark_seen,
@@ -226,32 +298,90 @@ mod tests {
         );
         // Proof of that last claim: with the version now stamped, an upgrade
         // shows the notes even though the welcome stayed off.
-        assert_eq!(plan(Some(V6), V7, true, false).screen, FirstLoad::WhatsNew);
+        assert_eq!(
+            plan(
+                Some(V6),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: true,
+                    disable_release_notes: false
+                }
+            )
+            .screen,
+            FirstLoad::WhatsNew
+        );
     }
 
     #[test]
     fn disable_release_notes_suppresses_only_the_whats_new_screen() {
-        let p = plan(Some(V6), V7, false, true);
+        let p = plan(
+            Some(V6),
+            V7,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: true,
+            },
+        );
         assert_eq!(p.screen, FirstLoad::Nothing);
         assert!(
             p.mark_seen,
             "the user opted out; do not re-decide every launch"
         );
         // The welcome is unaffected by the release-notes flag.
-        assert_eq!(plan(None, V6, false, true).screen, FirstLoad::Welcome);
+        assert_eq!(
+            plan(
+                None,
+                V6,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: true
+                }
+            )
+            .screen,
+            FirstLoad::Welcome
+        );
     }
 
     #[test]
     fn both_flags_set_shows_nothing_on_either_path() {
-        assert_eq!(plan(None, V6, true, true).screen, FirstLoad::Nothing);
-        assert_eq!(plan(Some(V6), V7, true, true).screen, FirstLoad::Nothing);
+        assert_eq!(
+            plan(
+                None,
+                V6,
+                AutomaticScreens {
+                    disable_welcome: true,
+                    disable_release_notes: true
+                }
+            )
+            .screen,
+            FirstLoad::Nothing
+        );
+        assert_eq!(
+            plan(
+                Some(V6),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: true,
+                    disable_release_notes: true
+                }
+            )
+            .screen,
+            FirstLoad::Nothing
+        );
     }
 
     #[test]
     fn a_transient_fetch_failure_shows_nothing_and_leaves_the_version_unmarked() {
         // THE subtle rule: an offline launch must not consume the notes.
         let p = after_fetch(
-            plan(Some(V6), V7, false, false),
+            plan(
+                Some(V6),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false,
+                },
+            ),
             NotesOutcome::TemporarilyUnavailable,
         );
         assert_eq!(p.screen, FirstLoad::Nothing);
@@ -267,18 +397,45 @@ mod tests {
         // Re-asking every launch is a permanent pointless request, so unlike a
         // transient failure this one settles the version.
         let p = after_fetch(
-            plan(Some(V6), V7, false, false),
+            plan(
+                Some(V6),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false,
+                },
+            ),
             NotesOutcome::NoSuchRelease,
         );
         assert_eq!(p.screen, FirstLoad::Nothing);
         assert!(p.mark_seen, "a definitive answer must not be re-asked");
         // Proof it settles: the next launch decides nothing at all.
-        assert_eq!(plan(Some(V7), V7, false, false), FirstLoadPlan::NOTHING);
+        assert_eq!(
+            plan(
+                Some(V7),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false
+                }
+            ),
+            FirstLoadPlan::NOTHING
+        );
     }
 
     #[test]
     fn a_successful_fetch_keeps_the_whats_new_plan() {
-        let p = after_fetch(plan(Some(V6), V7, false, false), NotesOutcome::Fetched);
+        let p = after_fetch(
+            plan(
+                Some(V6),
+                V7,
+                AutomaticScreens {
+                    disable_welcome: false,
+                    disable_release_notes: false,
+                },
+            ),
+            NotesOutcome::Fetched,
+        );
         assert_eq!(p.screen, FirstLoad::WhatsNew);
         assert!(p.mark_seen);
     }
@@ -286,7 +443,14 @@ mod tests {
     #[test]
     fn the_two_failure_outcomes_are_never_interchangeable() {
         // The whole reason `NotesOutcome` is not a bool.
-        let base = plan(Some(V6), V7, false, false);
+        let base = plan(
+            Some(V6),
+            V7,
+            AutomaticScreens {
+                disable_welcome: false,
+                disable_release_notes: false,
+            },
+        );
         assert_ne!(
             after_fetch(base, NotesOutcome::NoSuchRelease),
             after_fetch(base, NotesOutcome::TemporarilyUnavailable)
@@ -303,19 +467,80 @@ mod tests {
             NotesOutcome::TemporarilyUnavailable,
         ] {
             assert_eq!(
-                after_fetch(plan(None, V6, false, false), outcome),
-                plan(None, V6, false, false)
+                after_fetch(
+                    plan(
+                        None,
+                        V6,
+                        AutomaticScreens {
+                            disable_welcome: false,
+                            disable_release_notes: false
+                        }
+                    ),
+                    outcome
+                ),
+                plan(
+                    None,
+                    V6,
+                    AutomaticScreens {
+                        disable_welcome: false,
+                        disable_release_notes: false
+                    }
+                )
             );
             assert_eq!(
-                after_fetch(plan(None, V6, true, false), outcome),
-                plan(None, V6, true, false)
+                after_fetch(
+                    plan(
+                        None,
+                        V6,
+                        AutomaticScreens {
+                            disable_welcome: true,
+                            disable_release_notes: false
+                        }
+                    ),
+                    outcome
+                ),
+                plan(
+                    None,
+                    V6,
+                    AutomaticScreens {
+                        disable_welcome: true,
+                        disable_release_notes: false
+                    }
+                )
             );
             assert_eq!(
-                after_fetch(plan(Some(V6), V7, false, true), outcome),
-                plan(Some(V6), V7, false, true)
+                after_fetch(
+                    plan(
+                        Some(V6),
+                        V7,
+                        AutomaticScreens {
+                            disable_welcome: false,
+                            disable_release_notes: true
+                        }
+                    ),
+                    outcome
+                ),
+                plan(
+                    Some(V6),
+                    V7,
+                    AutomaticScreens {
+                        disable_welcome: false,
+                        disable_release_notes: true
+                    }
+                )
             );
             assert_eq!(
-                after_fetch(plan(Some(V6), V6, false, false), outcome),
+                after_fetch(
+                    plan(
+                        Some(V6),
+                        V6,
+                        AutomaticScreens {
+                            disable_welcome: false,
+                            disable_release_notes: false
+                        }
+                    ),
+                    outcome
+                ),
                 FirstLoadPlan::NOTHING
             );
         }
@@ -330,7 +555,14 @@ mod tests {
             for run in running {
                 for dw in [false, true] {
                     for drn in [false, true] {
-                        let p = plan(last, run, dw, drn);
+                        let p = plan(
+                            last,
+                            run,
+                            AutomaticScreens {
+                                disable_welcome: dw,
+                                disable_release_notes: drn,
+                            },
+                        );
                         // A dev build never lands on WhatsNew, whatever the inputs.
                         if run == DEVELOPMENT_VERSION {
                             assert_ne!(

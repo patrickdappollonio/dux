@@ -107,8 +107,10 @@ pub fn spawn_first_load_resolver(
         let plan = first_load::plan(
             inputs.last_seen.as_deref(),
             &inputs.running,
-            inputs.disable_welcome,
-            inputs.disable_release_notes,
+            first_load::AutomaticScreens {
+                disable_welcome: inputs.disable_welcome,
+                disable_release_notes: inputs.disable_release_notes,
+            },
         );
 
         match plan.screen {
