@@ -422,7 +422,7 @@ mod tests {
         }
         let mut status = 0;
         // SAFETY: `child` is this process's own child and `status` is writable.
-        let reaped = unsafe { libc::waitpid(child, &mut status, 0) };
+        let reaped = unsafe { libc::waitpid(child, &raw mut status, 0) };
         assert_eq!(reaped, child);
         assert!(
             libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,

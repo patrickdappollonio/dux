@@ -166,7 +166,7 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs` fills `list` with a linked list it allocated, which
     // is walked read-only below and handed back to `freeifaddrs` exactly once.
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+    if unsafe { libc::getifaddrs(&raw mut list) } != 0 {
         return Vec::new();
     }
     let mut found = Vec::new();
