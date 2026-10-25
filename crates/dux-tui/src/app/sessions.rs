@@ -8459,7 +8459,7 @@ mod tests {
                 .expect("channel send");
             app.drain_events();
 
-            assert_eq!(app.status.message(), expected, "branch outcome {branch:?}",);
+            assert_eq!(app.status.message(), expected, "branch outcome {branch:?}");
             assert!(
                 !app.engine.sessions.iter().any(|s| s.id == "s1"),
                 "session should be cleaned up after async success",

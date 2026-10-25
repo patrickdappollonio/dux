@@ -6223,7 +6223,7 @@ impl Engine {
         // stored count is the whole count.
         let max_per_agent = i64::from(self.agent_tabs_max());
         if self.session_store.count_agent_tabs(session_id)? >= max_per_agent {
-            anyhow::bail!("this agent already has the maximum of {max_per_agent} tabs",);
+            anyhow::bail!("this agent already has the maximum of {max_per_agent} tabs");
         }
 
         let tab_id = uuid::Uuid::new_v4().to_string();
