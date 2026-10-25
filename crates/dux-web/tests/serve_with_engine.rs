@@ -381,7 +381,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         let exited = returned_engine
             .companion_terminals
             .get(&terminal_id_for_thread)
-            .map_or(true, |t| child_is_shut_down(&t.client));
+            .is_none_or(|t| child_is_shut_down(&t.client));
         result_tx.send((exit, exited)).unwrap();
     });
 

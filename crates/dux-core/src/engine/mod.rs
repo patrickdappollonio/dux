@@ -4842,7 +4842,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map_or(true, super::model::AgentSession::supports_branch_git);
+            .is_none_or(super::model::AgentSession::supports_branch_git);
         if name.is_empty() {
             // An empty name resets the label to the branch (or, for a
             // standalone agent, the folder) name. A branch cannot be renamed
