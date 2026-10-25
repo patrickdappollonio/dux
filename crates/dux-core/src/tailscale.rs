@@ -328,19 +328,20 @@ fn cli_on_disk(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
 
 /// Whether a `tailscaled` is detectable without the CLI: its socket answers
 /// (see [`socket_answers`]) at a known path or at `$TS_SOCKET`, or a
-/// process with its name is running.
+/// process with its name is running. `process_running` is asked last, and only
+/// when no socket answers, because it reads the process table.
 pub fn tailscaled_detectable(
     answers: &dyn Fn(&std::path::Path) -> bool,
     ts_socket: Option<String>,
-    process_running: bool,
+    process_running: &dyn Fn() -> bool,
 ) -> bool {
-    process_running
-        || SOCKET_PATHS
-            .iter()
-            .any(|path| answers(std::path::Path::new(path)))
+    SOCKET_PATHS
+        .iter()
+        .any(|path| answers(std::path::Path::new(path)))
         || ts_socket
             .filter(|path| !path.is_empty())
             .is_some_and(|path| answers(std::path::Path::new(&path)))
+        || process_running()
 }
 
 /// Whether a daemon answers on the socket at `path`, by one non-blocking connect.
@@ -397,8 +398,13 @@ pub fn local_evidence() -> LocalEvidence {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    let address = if owned_tailscale_address(&interfaces(), &known) {
+        TailscaleAddress::Owned
+    } else {
+        TailscaleAddress::NotOwned
+    };
     evidence_from(
-        owned_tailscale_address(&interfaces(), &known),
+        address,
         &socket_answers,
         std::env::var("TS_SOCKET").ok(),
         &|| {
@@ -410,23 +416,32 @@ pub fn local_evidence() -> LocalEvidence {
     )
 }
 
+/// Whether this machine holds a Tailscale address on Tailscale's own interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TailscaleAddress {
+    /// It does.
+    Owned,
+    /// It does not.
+    NotOwned,
+}
+
 /// [`LocalEvidence`] from the cheapest signal that answers: an owned address,
 /// then a daemon socket, and the process table only when neither does. Only
 /// "something of Tailscale is here" matters to the caller, so the first yes
 /// ends the reading.
 fn evidence_from(
-    owned_address: bool,
+    address: TailscaleAddress,
     answers: &dyn Fn(&std::path::Path) -> bool,
     ts_socket: Option<String>,
     process_running: &dyn Fn() -> bool,
 ) -> LocalEvidence {
-    if owned_address {
+    if address == TailscaleAddress::Owned {
         return LocalEvidence {
             owned_address: true,
             daemon_detectable: false,
         };
     }
-    let daemon_detectable = tailscaled_detectable(answers, ts_socket, false) || process_running();
+    let daemon_detectable = tailscaled_detectable(answers, ts_socket, process_running);
     LocalEvidence {
         owned_address: false,
         daemon_detectable,
@@ -1530,7 +1545,7 @@ mod cost_measurement {
         stats(
             "sockets",
             time(30, || {
-                let _ = tailscaled_detectable(&socket_answers, None, false);
+                let _ = tailscaled_detectable(&socket_answers, None, &|| false);
             }),
         );
         stats(
@@ -1555,7 +1570,7 @@ mod cost_measurement {
                 // absent there.
                 drop(interfaces());
                 let _ = evidence_from(
-                    false,
+                    TailscaleAddress::NotOwned,
                     &|path| {
                         let _ = socket_answers(path);
                         false
@@ -2000,11 +2015,19 @@ mod identity_tests {
 
     // ── A raw TCP Funnel to dux ─────────────────────────────────────────────
 
-    fn tcp_funnel(target: &str, terminate_tls: bool) -> String {
-        let tls = if terminate_tls {
-            ", \"TerminateTLS\": \"demo-box.example-tailnet.ts.net\""
-        } else {
-            ""
+    /// Whether a test serve config's TCP forward terminates TLS.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Tls {
+        /// Tailscale terminates TLS before forwarding.
+        Terminated,
+        /// The stream is forwarded as it arrives.
+        PassedThrough,
+    }
+
+    fn tcp_funnel(target: &str, tls: Tls) -> String {
+        let tls = match tls {
+            Tls::Terminated => ", \"TerminateTLS\": \"demo-box.example-tailnet.ts.net\"",
+            Tls::PassedThrough => "",
         };
         format!(
             "{{\"TCP\": {{\"443\": {{\"TCPForward\": \"{target}\"{tls}}}}}, \
@@ -2023,11 +2046,11 @@ mod identity_tests {
             "[::]:3890",
             "192.168.1.5:3890",
         ] {
-            for tls in [false, true] {
+            for tls in [Tls::PassedThrough, Tls::Terminated] {
                 assert_eq!(
                     parse_funnel_to_port(&tcp_funnel(target, tls), 3890),
                     Some(true),
-                    "{target} tls={tls}"
+                    "{target} tls={tls:?}"
                 );
             }
         }
@@ -2036,7 +2059,7 @@ mod identity_tests {
     #[test]
     fn a_tcp_forward_that_is_not_funnelled_or_not_to_dux_does_not_count() {
         assert_eq!(
-            parse_funnel_to_port(&tcp_funnel("127.0.0.1:22", false), 3890),
+            parse_funnel_to_port(&tcp_funnel("127.0.0.1:22", Tls::PassedThrough), 3890),
             Some(false)
         );
         let tailnet_only = "{\"TCP\": {\"443\": {\"TCPForward\": \"127.0.0.1:3890\"}}}";
@@ -2322,11 +2345,11 @@ mod identity_tests {
             scanned.set(true);
             false
         };
-        let evidence = evidence_from(true, &|_| false, None, &scan);
+        let evidence = evidence_from(TailscaleAddress::Owned, &|_| false, None, &scan);
         assert!(evidence.owned_address && !scanned.get());
-        let evidence = evidence_from(false, &|_| true, None, &scan);
+        let evidence = evidence_from(TailscaleAddress::NotOwned, &|_| true, None, &scan);
         assert!(evidence.daemon_detectable && !scanned.get());
-        let evidence = evidence_from(false, &|_| false, None, &scan);
+        let evidence = evidence_from(TailscaleAddress::NotOwned, &|_| false, None, &scan);
         assert_eq!(evidence, LocalEvidence::default());
         assert!(scanned.get());
     }
@@ -2686,18 +2709,18 @@ mod identity_tests {
     #[test]
     fn a_daemon_is_detectable_by_its_socket_or_its_process() {
         let none = |_: &std::path::Path| false;
-        assert!(!tailscaled_detectable(&none, None, false));
+        assert!(!tailscaled_detectable(&none, None, &|| false));
         assert!(
-            tailscaled_detectable(&none, None, true),
+            tailscaled_detectable(&none, None, &|| true),
             "a running tailscaled"
         );
         for path in SOCKET_PATHS {
             let at = |p: &std::path::Path| p == std::path::Path::new(path);
-            assert!(tailscaled_detectable(&at, None, false), "{path}");
+            assert!(tailscaled_detectable(&at, None, &|| false), "{path}");
         }
         let custom = |p: &std::path::Path| p == std::path::Path::new("/srv/ts/sock");
         assert!(
-            tailscaled_detectable(&custom, Some("/srv/ts/sock".into()), false),
+            tailscaled_detectable(&custom, Some("/srv/ts/sock".into()), &|| false),
             "$TS_SOCKET"
         );
         assert!(SOCKET_PATHS.contains(&"/var/run/tailscale/tailscaled.sock"));
@@ -2777,7 +2800,7 @@ mod identity_tests {
         let cli = identity_cli(
             "identity-tcp-funnel",
             STATUS,
-            &tcp_funnel("127.0.0.1:3890", false),
+            &tcp_funnel("127.0.0.1:3890", Tls::PassedThrough),
         );
         let identity = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).unwrap();
         assert!(identity.funnel_to_dux);

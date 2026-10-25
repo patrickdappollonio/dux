@@ -17,9 +17,23 @@ pub fn running_in_container() -> bool {
         cfg!(target_os = "linux")
             && container_signals_in(
                 Path::new("/"),
-                std::env::var_os("KUBERNETES_SERVICE_HOST").is_some(),
+                if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() {
+                    KubernetesEnv::Set
+                } else {
+                    KubernetesEnv::Unset
+                },
             )
     })
+}
+
+/// Whether `KUBERNETES_SERVICE_HOST`, which Kubernetes sets in every pod, is
+/// set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KubernetesEnv {
+    /// It is set.
+    Set,
+    /// It is not.
+    Unset,
 }
 
 /// [`running_in_container`] against a root directory, so the signals can be
@@ -39,9 +53,9 @@ pub fn running_in_container() -> bool {
 ///
 /// A host whose own root is an overlay (a live image) reads as a container;
 /// that only adds a warning.
-pub fn container_signals_in(root: &Path, kubernetes_env: bool) -> bool {
+pub fn container_signals_in(root: &Path, kubernetes: KubernetesEnv) -> bool {
     let read = |path: &str| std::fs::read_to_string(root.join(path)).ok();
-    kubernetes_env
+    kubernetes == KubernetesEnv::Set
         || root.join(".dockerenv").exists()
         || root.join("run/.containerenv").exists()
         || read("proc/1/cgroup").is_some_and(|text| cgroup_names_a_runtime(&text))
@@ -102,12 +116,12 @@ mod tests {
     #[test]
     fn a_plain_host_is_not_a_container() {
         let empty = root_with(&[]);
-        assert!(!container_signals_in(empty.path(), false));
+        assert!(!container_signals_in(empty.path(), KubernetesEnv::Unset));
         let host = root_with(&[
             ("proc/1/cgroup", HOST_CGROUP),
             ("proc/self/mountinfo", HOST_MOUNTINFO),
         ]);
-        assert!(!container_signals_in(host.path(), false));
+        assert!(!container_signals_in(host.path(), KubernetesEnv::Unset));
     }
 
     #[test]
@@ -115,10 +129,16 @@ mod tests {
         // Docker writes /.dockerenv, Podman /run/.containerenv.
         for marker in [".dockerenv", "run/.containerenv"] {
             let root = root_with(&[(marker, "")]);
-            assert!(container_signals_in(root.path(), false), "{marker}");
+            assert!(
+                container_signals_in(root.path(), KubernetesEnv::Unset),
+                "{marker}"
+            );
         }
         // Kubernetes sets this in every pod.
-        assert!(container_signals_in(root_with(&[]).path(), true));
+        assert!(container_signals_in(
+            root_with(&[]).path(),
+            KubernetesEnv::Set
+        ));
     }
 
     #[test]
@@ -131,7 +151,10 @@ mod tests {
             "1:name=systemd:/machine.slice/libpod-0123.scope\n",
         ] {
             let root = root_with(&[("proc/1/cgroup", line)]);
-            assert!(container_signals_in(root.path(), false), "{line}");
+            assert!(
+                container_signals_in(root.path(), KubernetesEnv::Unset),
+                "{line}"
+            );
         }
     }
 
@@ -148,7 +171,10 @@ mod tests {
                 ("proc/1/cgroup", HOST_CGROUP),
                 ("proc/self/mountinfo", &mountinfo),
             ]);
-            assert!(container_signals_in(root.path(), false), "{mountinfo}");
+            assert!(
+                container_signals_in(root.path(), KubernetesEnv::Unset),
+                "{mountinfo}"
+            );
         }
     }
 }

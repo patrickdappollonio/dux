@@ -946,11 +946,21 @@ mod tests {
         use super::*;
         use std::io::Read;
 
-        fn settings(max_bytes: u64, keep: u32, compress: bool) -> RotationSettings {
+        /// Rotation at `max_bytes`, keeping `keep` plain old logs.
+        fn settings(max_bytes: u64, keep: u32) -> RotationSettings {
             RotationSettings {
                 max_bytes,
                 keep,
-                compress,
+                compress: false,
+            }
+        }
+
+        /// Rotation at `max_bytes`, keeping `keep` old logs compressed.
+        fn compressed(max_bytes: u64, keep: u32) -> RotationSettings {
+            RotationSettings {
+                max_bytes,
+                keep,
+                compress: true,
             }
         }
 
@@ -1005,7 +1015,7 @@ mod tests {
         #[test]
         fn a_write_past_the_limit_moves_the_old_log_aside() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(24, 3, false));
+            let log = log_in(dir.path(), settings(24, 3));
 
             log.write_line("first line\n");
             log.write_line("second line\n");
@@ -1030,7 +1040,7 @@ mod tests {
         #[test]
         fn max_bytes_zero_never_rotates() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(0, 3, true));
+            let log = log_in(dir.path(), compressed(0, 3));
             for n in 0..200 {
                 log.write_line(&format!("line {n}\n"));
             }
@@ -1047,7 +1057,7 @@ mod tests {
         #[test]
         fn five_rotations_with_keep_three_leave_exactly_three_copies() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(12, 3, true));
+            let log = log_in(dir.path(), compressed(12, 3));
             for n in 1..=6 {
                 write_and_settle(&log, &format!("line {n}\n"));
             }
@@ -1075,7 +1085,7 @@ mod tests {
         #[test]
         fn keep_zero_rotates_and_leaves_only_the_live_log() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(12, 0, true));
+            let log = log_in(dir.path(), compressed(12, 0));
             for n in 1..=6 {
                 log.write_line(&format!("line {n}\n"));
             }
@@ -1090,7 +1100,7 @@ mod tests {
         #[test]
         fn a_compressed_copy_decompresses_to_the_original_bytes() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(24, 3, true));
+            let log = log_in(dir.path(), compressed(24, 3));
             log.write_line("first line\n");
             log.write_line("second line\n");
             log.write_line("third line\n");
@@ -1112,7 +1122,7 @@ mod tests {
         #[test]
         fn compression_off_leaves_the_copies_plain() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(12, 3, false));
+            let log = log_in(dir.path(), settings(12, 3));
             for n in 1..=6 {
                 log.write_line(&format!("line {n}\n"));
             }
@@ -1130,7 +1140,7 @@ mod tests {
         fn a_failed_compression_leaves_the_plain_copy_and_the_log_keeps_working() {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("dux.log.1.gz")).unwrap();
-            let log = log_in(dir.path(), settings(24, 1, true));
+            let log = log_in(dir.path(), compressed(24, 1));
 
             log.write_line("first line\n");
             log.write_line("second line\n");
@@ -1170,7 +1180,7 @@ mod tests {
             // Compression stays off so the reader below sees a set of files
             // nothing is still rewriting, and `keep` is far above the number of
             // rotations so nothing is deleted.
-            let log = Arc::new(log_in(dir.path(), settings(200, 10_000, false)));
+            let log = Arc::new(log_in(dir.path(), settings(200, 10_000)));
 
             let writers = 8;
             let per_writer = 200;
@@ -1227,7 +1237,7 @@ mod tests {
             let existing = "x".repeat(4096);
             fs::write(&path, &existing).unwrap();
 
-            let log = log_in(dir.path(), settings(64, 3, false));
+            let log = log_in(dir.path(), settings(64, 3));
             assert_eq!(log.state.lock().unwrap().size, existing.len() as u64);
 
             log.write_line("the first line after the upgrade\n");
@@ -1241,7 +1251,7 @@ mod tests {
         #[test]
         fn a_reload_changes_the_limit_at_the_next_write() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(0, 3, false));
+            let log = log_in(dir.path(), settings(0, 3));
             for n in 1..=20 {
                 log.write_line(&format!("line {n}\n"));
             }
@@ -1250,7 +1260,7 @@ mod tests {
                 "nothing may rotate while the limit is 0"
             );
 
-            log.rotation.store(settings(16, 3, false));
+            log.rotation.store(settings(16, 3));
             log.write_line("after the reload\n");
 
             assert_eq!(
@@ -1264,7 +1274,7 @@ mod tests {
         #[test]
         fn every_file_rotation_produces_is_owner_only() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(12, 3, true));
+            let log = log_in(dir.path(), compressed(12, 3));
             for n in 1..=6 {
                 write_and_settle(&log, &format!("line {n}\n"));
             }
@@ -1338,7 +1348,7 @@ mod tests {
         #[test]
         fn compression_never_touches_a_copy_a_rotation_put_at_its_name() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(0, 3, false));
+            let log = log_in(dir.path(), settings(0, 3));
             let source = dir.path().join("dux.log.1");
             let target = dir.path().join("dux.log.1.gz");
             fs::write(&source, b"the copy being compressed\n").unwrap();
@@ -1392,7 +1402,7 @@ mod tests {
         #[test]
         fn a_reopen_failure_stops_rotating_and_keeps_every_copy() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(8, 3, false));
+            let log = log_in(dir.path(), settings(8, 3));
             fs::write(dir.path().join("dux.log.1"), "older one\n").unwrap();
             fs::write(dir.path().join("dux.log.2"), "oldest one\n").unwrap();
             log.fail_reopen.store(true, Ordering::Relaxed);
@@ -1432,7 +1442,7 @@ mod tests {
         #[test]
         fn a_nested_write_is_dropped_so_the_panic_hook_cannot_re_enter() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(0, 3, false));
+            let log = log_in(dir.path(), settings(0, 3));
 
             let outer = WriteGuard::acquire().expect("the first write claims the thread");
             log.write_line("a line the panic hook tried to write\n");
@@ -1455,7 +1465,7 @@ mod tests {
         #[test]
         fn the_sweep_cleans_positions_above_keep_across_a_hole() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(8, 3, false));
+            let log = log_in(dir.path(), settings(8, 3));
             for name in ["dux.log.1", "dux.log.2", "dux.log.5", "dux.log.6.gz"] {
                 fs::write(dir.path().join(name), "old\n").unwrap();
             }
@@ -1475,7 +1485,7 @@ mod tests {
         #[test]
         fn the_sweep_removes_a_temporary_an_earlier_run_abandoned() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(8, 3, false));
+            let log = log_in(dir.path(), settings(8, 3));
             fs::write(dir.path().join("dux.log.1.gz.999999.tmp"), "half a gzip").unwrap();
             // Names that only look like a copy or a temporary are somebody else's.
             let lookalikes = [
@@ -1511,7 +1521,7 @@ mod tests {
         fn a_large_keep_does_not_slow_rotation_down() {
             fn rotate_a_hundred_times(keep: u32) -> std::time::Duration {
                 let dir = tempfile::tempdir().unwrap();
-                let log = log_in(dir.path(), settings(8, keep, false));
+                let log = log_in(dir.path(), settings(8, keep));
                 let started = std::time::Instant::now();
                 for n in 1..=100 {
                     log.write_line(&format!("line {n}\n"));
@@ -1547,7 +1557,7 @@ mod tests {
         #[test]
         fn a_line_larger_than_the_limit_is_written_whole() {
             let dir = tempfile::tempdir().unwrap();
-            let log = log_in(dir.path(), settings(10, 3, false));
+            let log = log_in(dir.path(), settings(10, 3));
             let huge = format!("{}\n", "x".repeat(200));
 
             log.write_line(&huge);
@@ -1580,11 +1590,8 @@ mod tests {
             let link = dir.path().join("dux.log");
             std::os::unix::fs::symlink(&target, &link).unwrap();
 
-            let log = RotatingLog::open(
-                link.clone(),
-                Arc::new(RotationCell::new(settings(8, 3, false))),
-            )
-            .unwrap();
+            let log = RotatingLog::open(link.clone(), Arc::new(RotationCell::new(settings(8, 3))))
+                .unwrap();
             log.write_line("line one\n");
             log.write_line("line two\n");
 
@@ -1622,7 +1629,7 @@ mod tests {
         #[test]
         fn a_poisoned_lock_still_writes() {
             let dir = tempfile::tempdir().unwrap();
-            let log = Arc::new(log_in(dir.path(), settings(0, 3, false)));
+            let log = Arc::new(log_in(dir.path(), settings(0, 3)));
             let poisoner = {
                 let log = Arc::clone(&log);
                 std::thread::spawn(move || {
