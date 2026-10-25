@@ -2614,9 +2614,7 @@ mod tests {
     #[tokio::test]
     async fn stage_files_refuses_a_batch_over_the_count_cap_with_a_sentence() {
         let (_tmp, app, _state) = router_with_session_and_state().await;
-        let paths: Vec<String> = (0..MAX_BATCH_PATHS + 1)
-            .map(|i| format!("f{i}.txt"))
-            .collect();
+        let paths: Vec<String> = (0..=MAX_BATCH_PATHS).map(|i| format!("f{i}.txt")).collect();
         let body = serde_json::json!({ "paths": paths }).to_string();
         let resp = app
             .clone()
