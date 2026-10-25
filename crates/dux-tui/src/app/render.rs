@@ -1358,11 +1358,11 @@ fn guarded_confirm_label(verb: &str, attached: &[dux_core::attachments::Blocker]
 
 /// The Cancel / act pair most Confirm dialogs carry: a `ConfirmFocus` decides
 /// which of the two has focus.
-fn confirm_focus_buttons<'a>(
+fn confirm_focus_buttons(
     focus: ConfirmFocus,
     cancel_target: ButtonPressedTarget,
-    act: (&'a str, ButtonKind, ButtonPressedTarget),
-) -> (ConfirmButton<'static>, ConfirmButton<'a>) {
+    act: (&str, ButtonKind, ButtonPressedTarget),
+) -> (ConfirmButton<'static>, ConfirmButton<'_>) {
     let (label, kind, target) = act;
     (
         ConfirmButton::new(
