@@ -2112,15 +2112,14 @@ impl ClipboardPassthroughMode {
     /// load/reload (once), NOT per tick, so a typo is surfaced without spamming the
     /// log; the forward path uses the non-warning [`ClipboardPassthroughMode::parse`].
     pub fn from_config_str(s: &str) -> Self {
-        match Self::parse(s) {
-            Some(mode) => mode,
-            None => {
-                crate::logger::warn(&format!(
-                    "unknown capabilities.clipboard_passthrough value {s:?}; falling back to \
-                     \"focused\" (valid: focused, always, off)"
-                ));
-                Self::Focused
-            }
+        if let Some(mode) = Self::parse(s) {
+            mode
+        } else {
+            crate::logger::warn(&format!(
+                "unknown capabilities.clipboard_passthrough value {s:?}; falling back to \
+                 \"focused\" (valid: focused, always, off)"
+            ));
+            Self::Focused
         }
     }
 
@@ -2619,17 +2618,16 @@ pub fn expand_env_vars(raw: &str) -> Option<String> {
             if var_name.is_empty() || !is_valid_var_name(&var_name) {
                 return None;
             }
-            match std::env::var(&var_name) {
-                Ok(value) => result.push_str(&value),
-                Err(_) => {
-                    result.push('$');
-                    if braced {
-                        result.push('{');
-                    }
-                    result.push_str(&var_name);
-                    if braced {
-                        result.push('}');
-                    }
+            if let Ok(value) = std::env::var(&var_name) {
+                result.push_str(&value)
+            } else {
+                result.push('$');
+                if braced {
+                    result.push('{');
+                }
+                result.push_str(&var_name);
+                if braced {
+                    result.push('}');
                 }
             }
         } else {
@@ -5424,13 +5422,12 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
 pub fn load_config_file_as_written(
     config_path: &Path,
 ) -> std::result::Result<Config, ConfigLoadError> {
-    match read_config_text(config_path)? {
-        Some(raw) => config_from_read_text(&raw, config_path),
-        None => {
-            let mut config = Config::default();
-            config.providers.ensure_defaults();
-            Ok(config)
-        }
+    if let Some(raw) = read_config_text(config_path)? {
+        config_from_read_text(&raw, config_path)
+    } else {
+        let mut config = Config::default();
+        config.providers.ensure_defaults();
+        Ok(config)
     }
 }
 

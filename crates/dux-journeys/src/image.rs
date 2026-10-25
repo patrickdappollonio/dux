@@ -239,13 +239,12 @@ pub async fn setup() -> (String, String) {
             let work = tokio::task::spawn_blocking(|| {
                 run_id();
                 sweep_dead_runs();
-                let image = match std::env::var("DUX_JOURNEY_IMAGE") {
-                    Ok(full) => split_reference(&full),
-                    Err(_) => {
-                        let tag = content_tag();
-                        ensure_built(&tag);
-                        (IMAGE_NAME.to_string(), tag)
-                    }
+                let image = if let Ok(full) = std::env::var("DUX_JOURNEY_IMAGE") {
+                    split_reference(&full)
+                } else {
+                    let tag = content_tag();
+                    ensure_built(&tag);
+                    (IMAGE_NAME.to_string(), tag)
                 };
                 for key in ["JOURNEY_NGINX_IMAGE", "JOURNEY_CADDY_IMAGE"] {
                     ensure_pulled(&pinned(key));

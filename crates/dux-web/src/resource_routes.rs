@@ -124,13 +124,12 @@ impl ResourceService {
             }
             let role = {
                 let mut inflight = lock(&self.inflight);
-                match inflight.as_ref() {
-                    Some(rx) => Role::Waiter(rx.clone()),
-                    None => {
-                        let (tx, rx) = watch::channel(false);
-                        *inflight = Some(rx);
-                        Role::Owner(tx)
-                    }
+                if let Some(rx) = inflight.as_ref() {
+                    Role::Waiter(rx.clone())
+                } else {
+                    let (tx, rx) = watch::channel(false);
+                    *inflight = Some(rx);
+                    Role::Owner(tx)
                 }
             };
             match role {

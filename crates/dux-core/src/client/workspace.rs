@@ -1112,24 +1112,23 @@ fn pull_request_anywhere(
         return Err(CliError::new(Exit::Refused, sentence));
     };
 
-    let folder = match path {
-        Some(path) => output::path_for_target(path, client.remote_name(), cwd)?,
-        None => {
-            #[derive(Deserialize)]
-            struct Browse {
-                path: String,
-            }
-            let start: Browse = client.get_json("/api/v1/browse")?;
-            let dir = crate::clone_project::clone_dir_name(&offer.address).unwrap_or_else(|| {
-                offer
-                    .owner_repo
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            format!("{}/{dir}", start.path.trim_end_matches('/'))
+    let folder = if let Some(path) = path {
+        output::path_for_target(path, client.remote_name(), cwd)?
+    } else {
+        #[derive(Deserialize)]
+        struct Browse {
+            path: String,
         }
+        let start: Browse = client.get_json("/api/v1/browse")?;
+        let dir = crate::clone_project::clone_dir_name(&offer.address).unwrap_or_else(|| {
+            offer
+                .owner_repo
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        format!("{}/{dir}", start.path.trim_end_matches('/'))
     };
     let mut check = json!({
         "path": folder,

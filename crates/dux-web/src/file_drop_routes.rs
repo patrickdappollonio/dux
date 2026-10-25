@@ -180,20 +180,19 @@ async fn hold_a_file_drop_permit(
         state.file_drop_semaphore.clone().acquire_owned(),
     )
     .await;
-    let _permit = match permit {
-        Ok(permit) => permit,
-        Err(_) => {
-            dux_core::logger::warn(
-                "[server] /api/v1/file-drop refused: no upload slot came free within \
-                 the wait (file_drop_max_concurrency)",
-            );
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "The server is already handling as many dropped files as it \
-                 allows at once. Try the drop again shortly.",
-            )
-                .into_response();
-        }
+    let _permit = if let Ok(permit) = permit {
+        permit
+    } else {
+        dux_core::logger::warn(
+            "[server] /api/v1/file-drop refused: no upload slot came free within \
+             the wait (file_drop_max_concurrency)",
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The server is already handling as many dropped files as it \
+             allows at once. Try the drop again shortly.",
+        )
+            .into_response();
     };
     next.run(req).await
 }

@@ -2323,12 +2323,9 @@ fn handle_copy_mismatch(
 ) -> bool {
     match copy.on_head_mismatch {
         HeadMismatch::SkipWithNote { branch } => {
-            creation_notes.push(match check_error {
-                Some(error) => format!(
-                    "Uncommitted changes were not copied: could not verify the checkout's commit: {error}."
-                ).into(),
-                None => crate::status_text!["Uncommitted changes were not copied: the project checkout is not on ", q(branch), "'s commit."],
-            });
+            creation_notes.push(if let Some(error) = check_error { format!(
+                "Uncommitted changes were not copied: could not verify the checkout's commit: {error}."
+            ).into() } else { crate::status_text!["Uncommitted changes were not copied: the project checkout is not on ", q(branch), "'s commit."] });
             true
         }
         HeadMismatch::Fail => {
@@ -2340,20 +2337,21 @@ fn handle_copy_mismatch(
                 ));
             }
             rollback_managed_create(repo_path, session, owns_worktree, rollback);
-            let message = match check_error {
-                Some(error) => crate::status_text![
+            let message = if let Some(error) = check_error {
+                crate::status_text![
                     "Failed to copy uncommitted changes from ",
                     &copy.source_desc,
                     format!(
                         ": could not verify the source worktree's commit: {}.",
                         error
                     )
-                ],
-                None => crate::status_text![
+                ]
+            } else {
+                crate::status_text![
                     "Failed to copy uncommitted changes from ",
                     &copy.source_desc,
                     ": the source moved to a different commit during creation."
-                ],
+                ]
             };
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                 status_op_id: create_key.to_string(),

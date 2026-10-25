@@ -259,31 +259,27 @@ impl App {
             })
             .cloned();
         let mut agent_name = TextInput::new().with_char_map(agent_name_char_map);
-        let (destination, destination_edited, start_folder) = match restored {
-            Some(draft) => {
-                agent_name.set_text(draft.agent_name);
-                (
-                    draft.destination,
-                    draft.destination_edited,
-                    draft.start_folder,
-                )
+        let (destination, destination_edited, start_folder) = if let Some(draft) = restored {
+            agent_name.set_text(draft.agent_name);
+            (
+                draft.destination,
+                draft.destination_edited,
+                draft.start_folder,
+            )
+        } else {
+            // Never a made-up name: the pull request's own branch, when it
+            // is a name an agent can have, else nothing until the user
+            // types one.
+            let head = dux_core::bidi::strip_bidi_controls(&offer.head_branch);
+            if is_valid_agent_name(&head) {
+                agent_name.set_text(head);
             }
-            None => {
-                // Never a made-up name: the pull request's own branch, when it
-                // is a name an agent can have, else nothing until the user
-                // types one.
-                let head = dux_core::bidi::strip_bidi_controls(&offer.head_branch);
-                if is_valid_agent_name(&head) {
-                    agent_name.set_text(head);
-                }
-                let start_folder =
-                    dux_core::project_browser::resolve_start_dir(&self.engine.config);
-                (
-                    super::sessions::clone_destination_for(&start_folder, &offer.address),
-                    false,
-                    start_folder,
-                )
-            }
+            let start_folder = dux_core::project_browser::resolve_start_dir(&self.engine.config);
+            (
+                super::sessions::clone_destination_for(&start_folder, &offer.address),
+                false,
+                start_folder,
+            )
         };
         let form = PullRequestClone {
             review_copy: offer.review_copy.clone(),

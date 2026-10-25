@@ -1095,15 +1095,12 @@ impl App {
             self.left_section = LeftSection::Projects;
             self.focus = self.focus.next();
         } else if self.focus == FocusPane::Files {
-            match self.right_section.next(has_staged) {
-                Some(next) => {
-                    self.right_section = next;
-                    self.clamp_files_cursor();
-                }
-                None => {
-                    self.focus = self.focus.next();
-                    self.left_section = LeftSection::Projects;
-                }
+            if let Some(next) = self.right_section.next(has_staged) {
+                self.right_section = next;
+                self.clamp_files_cursor();
+            } else {
+                self.focus = self.focus.next();
+                self.left_section = LeftSection::Projects;
             }
         } else {
             self.focus = self.focus.next();

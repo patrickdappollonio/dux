@@ -76,28 +76,25 @@ pub fn run_command_with_timeout(
     // with a deadline and abandon them if a grandchild keeps the pipe open.
     let (out_tx, out_rx) = std::sync::mpsc::channel();
     let (err_tx, err_rx) = std::sync::mpsc::channel();
-    match (child.stdout.take(), child.stderr.take()) {
-        (Some(mut out), Some(mut err)) => {
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                let _ = out.read_to_end(&mut buf);
-                let _ = out_tx.send(buf);
-            });
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                let _ = err.read_to_end(&mut buf);
-                let _ = err_tx.send(buf);
-            });
-        }
-        _ => {
-            // Should be unreachable (we just set piped stdio), but never leak the
-            // spawned child if a pipe handle is somehow missing.
-            kill_with_group(&mut child);
-            let _ = child.wait();
-            return CommandOutcome::Failed(format!("{label} stdout/stderr pipe unavailable"));
-        }
+    if let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            let _ = out_tx.send(buf);
+        });
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            let _ = err_tx.send(buf);
+        });
+    } else {
+        // Should be unreachable (we just set piped stdio), but never leak the
+        // spawned child if a pipe handle is somehow missing.
+        kill_with_group(&mut child);
+        let _ = child.wait();
+        return CommandOutcome::Failed(format!("{label} stdout/stderr pipe unavailable"));
     }
 
     let start = Instant::now();

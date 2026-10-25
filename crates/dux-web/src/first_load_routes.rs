@@ -255,15 +255,16 @@ async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) ->
     // being rejected, and usually answers from cache once it gets in. `None` means
     // the config value is 0, unlimited.
     let _permit = match &state.release_notes_semaphore {
-        Some(sem) => match Arc::clone(sem).acquire_owned().await {
-            Ok(permit) => Some(permit),
-            Err(_) => {
+        Some(sem) => {
+            if let Ok(permit) = Arc::clone(sem).acquire_owned().await {
+                Some(permit)
+            } else {
                 let message =
                     "the release-notes concurrency semaphore closed unexpectedly".to_string();
                 final_status("error", message.clone());
                 return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
             }
-        },
+        }
         None => None,
     };
 

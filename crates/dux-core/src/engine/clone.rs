@@ -53,19 +53,22 @@ impl Engine {
         if !self.mark_in_flight(key.clone()) {
             // The refusal says what the folder's holder is doing, whatever
             // this request would have done.
-            return Err(match self.clone_running_into(&destination) {
-                Some(CloneMode::AddExisting) => crate::status_text![
-                    "dux is already adding ",
-                    n(destination.display()),
-                    " as a project. Wait for it to finish, or pick another folder."
-                ],
-                _ => crate::status_text![
-                    "dux is already cloning a repository into ",
-                    n(destination.display()),
-                    " or setting one up there. Wait for it to finish, or pick another \
-                     destination."
-                ],
-            });
+            return Err(
+                if let Some(CloneMode::AddExisting) = self.clone_running_into(&destination) {
+                    crate::status_text![
+                        "dux is already adding ",
+                        n(destination.display()),
+                        " as a project. Wait for it to finish, or pick another folder."
+                    ]
+                } else {
+                    crate::status_text![
+                        "dux is already cloning a repository into ",
+                        n(destination.display()),
+                        " or setting one up there. Wait for it to finish, or pick another \
+                 destination."
+                    ]
+                },
+            );
         }
         // One clone per repository at a time, held until the project exists,
         // so two quick requests into different folders (a plain clone and a
@@ -89,17 +92,18 @@ impl Engine {
                 .values()
                 .find(|held| held.repository_key.as_deref() == Some(repository.as_str()))
                 .map(|held| held.mode);
-            return Err(match holder {
-                Some(CloneMode::AddExisting) => crate::status_text![
+            return Err(if let Some(CloneMode::AddExisting) = holder {
+                crate::status_text![
                     "dux is already adding a checkout of ",
                     n(repository),
                     " for a new agent. Wait for it to finish, then use New agent from PR again."
-                ],
-                _ => crate::status_text![
+                ]
+            } else {
+                crate::status_text![
                     "dux is already cloning ",
                     n(repository),
                     " for a new agent. Wait for it to finish, then use New agent from PR again."
-                ],
+                ]
             });
         }
         if let Err(refused) = self.hold_path_for_in_flight(
@@ -112,21 +116,22 @@ impl Engine {
             return Err(refused.sentence("clone a repository there"));
         }
         let address = crate::clone_project::redact_remote_userinfo(&prepared.url);
-        let busy = match (&offer, mode) {
-            (Some(offer), CloneMode::AddExisting) => crate::status_text![
+        let busy = if let (Some(offer), CloneMode::AddExisting) = (&offer, mode) {
+            crate::status_text![
                 "Adding ",
                 n(destination.display()),
                 " as a project for pull request ",
                 n(format!("#{}", offer.number)),
                 "..."
-            ],
-            _ => crate::status_text![
+            ]
+        } else {
+            crate::status_text![
                 "Cloning ",
                 n(address),
                 " into ",
                 n(destination.display()),
                 "..."
-            ],
+            ]
         };
         let op = crate::engine::status_op(busy)
             .resolve_in_handler(|outcome: &CloneOutcome| outcome.final_status())

@@ -1306,46 +1306,43 @@ impl crate::engine::Engine {
         }: Settle,
         now: Instant,
     ) -> String {
-        match running {
-            Some(key) => {
-                let id = if may_rekey && crate::engine::status_op::is_minted_status_id(&key) {
-                    self.operations.rekey(provisional, &key);
-                    key.clone()
-                } else {
-                    self.operations.await_key(provisional, &key);
-                    provisional.to_string()
-                };
-                if let Some(settled) = settled {
-                    self.operations.finish_by_key(
-                        &key,
-                        StatusTone::from_wire(&settled.tone),
-                        &settled.message,
-                        settled.segments.as_deref(),
+        if let Some(key) = running {
+            let id = if may_rekey && crate::engine::status_op::is_minted_status_id(&key) {
+                self.operations.rekey(provisional, &key);
+                key.clone()
+            } else {
+                self.operations.await_key(provisional, &key);
+                provisional.to_string()
+            };
+            if let Some(settled) = settled {
+                self.operations.finish_by_key(
+                    &key,
+                    StatusTone::from_wire(&settled.tone),
+                    &settled.message,
+                    settled.segments.as_deref(),
+                    now,
+                );
+            }
+            id
+        } else {
+            match status {
+                Some(status) => {
+                    if stamp_key && status.key.is_none() {
+                        status.key = Some(provisional.to_string());
+                    }
+                    self.operations.finish(
+                        provisional,
+                        StatusTone::from_wire(&status.tone),
+                        &status.message,
+                        status.segments.as_deref(),
                         now,
                     );
                 }
-                id
+                None => self
+                    .operations
+                    .finish(provisional, StatusTone::Info, "", None, now),
             }
-            None => {
-                match status {
-                    Some(status) => {
-                        if stamp_key && status.key.is_none() {
-                            status.key = Some(provisional.to_string());
-                        }
-                        self.operations.finish(
-                            provisional,
-                            StatusTone::from_wire(&status.tone),
-                            &status.message,
-                            status.segments.as_deref(),
-                            now,
-                        );
-                    }
-                    None => self
-                        .operations
-                        .finish(provisional, StatusTone::Info, "", None, now),
-                }
-                provisional.to_string()
-            }
+            provisional.to_string()
         }
     }
 

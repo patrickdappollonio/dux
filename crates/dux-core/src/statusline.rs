@@ -764,23 +764,19 @@ impl KeyedStatusController {
     /// key it already holds has produced none.
     fn store_queued(&mut self, now: Instant, key: Option<String>, entry: KeyedStatus) {
         let tone = entry.tone;
-        let storage = match key {
-            Some(k) => {
-                if tone != StatusTone::Busy {
-                    self.live.retire(&k);
-                }
-                k
+        let storage = if let Some(k) = key {
+            if tone != StatusTone::Busy {
+                self.live.retire(&k);
             }
-            None => {
-                // The pin always belonged to the message that was last set.
-                self.anon_pinned = false;
-                match self.anon_storage_for(&entry.message) {
-                    Some(k) => k,
-                    None => {
-                        self.drop_newest_anonymous();
-                        return;
-                    }
-                }
+            k
+        } else {
+            // The pin always belonged to the message that was last set.
+            self.anon_pinned = false;
+            if let Some(k) = self.anon_storage_for(&entry.message) {
+                k
+            } else {
+                self.drop_newest_anonymous();
+                return;
             }
         };
 
@@ -834,13 +830,12 @@ impl KeyedStatusController {
                     .is_some_and(|e| e.key.is_none() && e.message == message)
             })
             .cloned();
-        let key = match existing {
-            Some(k) => k,
-            None => {
-                let k = anon_storage_key(self.next_anon);
-                self.next_anon += 1;
-                k
-            }
+        let key = if let Some(k) = existing {
+            k
+        } else {
+            let k = anon_storage_key(self.next_anon);
+            self.next_anon += 1;
+            k
         };
         self.anon_key = Some(key.clone());
         Some(key)

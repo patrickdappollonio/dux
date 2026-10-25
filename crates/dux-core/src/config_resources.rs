@@ -36,19 +36,18 @@ pub fn read(config_path: &Path) -> Result<ConfigFile, String> {
         }
         .to_string()
     };
-    match crate::config::read_config_text(config_path).map_err(|error| error.to_string())? {
-        Some(raw) => {
-            let config = crate::config::config_from_text_as_loaded(&raw).map_err(fail)?;
-            Ok(ConfigFile { raw, config })
-        }
-        None => {
-            let mut config = Config::default();
-            config.providers.ensure_defaults();
-            Ok(ConfigFile {
-                raw: String::new(),
-                config,
-            })
-        }
+    if let Some(raw) =
+        crate::config::read_config_text(config_path).map_err(|error| error.to_string())?
+    {
+        let config = crate::config::config_from_text_as_loaded(&raw).map_err(fail)?;
+        Ok(ConfigFile { raw, config })
+    } else {
+        let mut config = Config::default();
+        config.providers.ensure_defaults();
+        Ok(ConfigFile {
+            raw: String::new(),
+            config,
+        })
     }
 }
 

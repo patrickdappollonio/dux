@@ -604,13 +604,14 @@ fn plan_entries(
                 results.push((entry.session_id.clone(), pr));
                 continue;
             }
-            git::RemoteResolution::Unresolved => match &entry.known_pr {
-                Some(known) => (known.host.clone(), known.owner_repo.clone()),
-                None => {
+            git::RemoteResolution::Unresolved => {
+                if let Some(known) = &entry.known_pr {
+                    (known.host.clone(), known.owner_repo.clone())
+                } else {
                     results.push((entry.session_id.clone(), None));
                     continue;
                 }
-            },
+            }
         };
 
         // Hostnames are case-insensitive and this value becomes a `gh`

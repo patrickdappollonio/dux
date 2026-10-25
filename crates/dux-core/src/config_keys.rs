@@ -267,8 +267,8 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
              starts with",
         ));
     }
-    match shape_of(&segments) {
-        Some(shape) => Ok(Key {
+    if let Some(shape) = shape_of(&segments) {
+        Ok(Key {
             policy: if segments.len() == 2 && segments[0] == "env" {
                 WritePolicy::Secret(SecretKind::Text)
             } else {
@@ -276,24 +276,23 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
             },
             path: segments,
             shape,
-        }),
-        None => {
-            // The longest start of the path that names a setting or table;
-            // what follows it is never repeated (it may be a value).
-            let known = (0..segments.len())
-                .rev()
-                .find(|len| {
-                    let prefix = &segments[..*len];
-                    *len > 0
-                        && (shape_of(prefix).is_some()
-                            || VIRTUAL_KEYS.iter().any(|(name, _)| *name == prefix))
-                })
-                .unwrap_or(0);
-            Err(KeyError::Unknown {
-                known: known_prefix(&segments[..known]),
-                suggestion: suggest(&segments[..known], &segments[known]),
+        })
+    } else {
+        // The longest start of the path that names a setting or table;
+        // what follows it is never repeated (it may be a value).
+        let known = (0..segments.len())
+            .rev()
+            .find(|len| {
+                let prefix = &segments[..*len];
+                *len > 0
+                    && (shape_of(prefix).is_some()
+                        || VIRTUAL_KEYS.iter().any(|(name, _)| *name == prefix))
             })
-        }
+            .unwrap_or(0);
+        Err(KeyError::Unknown {
+            known: known_prefix(&segments[..known]),
+            suggestion: suggest(&segments[..known], &segments[known]),
+        })
     }
 }
 
@@ -2373,8 +2372,8 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
             let whole = covering(&at).filter(|(scope, _)| {
                 inside(&at, scope) && inside(scope, &path) && used_at(scope).is_none()
             });
-            corrections.push(match whole {
-                Some((scope, reason)) => Correction {
+            corrections.push(if let Some((scope, reason)) = whole {
+                Correction {
                     from: None,
                     surface: surface_of(scope),
                     path: scope.clone(),
@@ -2385,25 +2384,24 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
                     used: None,
                     value_hidden: crate::config::path_is_hidden(scope),
                     reason: reason.clone(),
-                },
-                None => {
-                    let value_hidden = crate::config::path_is_hidden(&at);
-                    Correction {
-                        from: None,
-                        surface: surface_of(&at),
-                        reason: reason_at(&at),
-                        // Through the one value printer: a list may hold
-                        // tables whose keys are no setting names, and a key
-                        // it does not name prints no value at all.
-                        in_file: printed_value(raw, &at, value, ValueForm::Get),
-                        used: if value_hidden {
-                            used.map(|_| NOT_SHOWN.to_string())
-                        } else {
-                            used
-                        },
-                        value_hidden,
-                        path: at.clone(),
-                    }
+                }
+            } else {
+                let value_hidden = crate::config::path_is_hidden(&at);
+                Correction {
+                    from: None,
+                    surface: surface_of(&at),
+                    reason: reason_at(&at),
+                    // Through the one value printer: a list may hold
+                    // tables whose keys are no setting names, and a key
+                    // it does not name prints no value at all.
+                    in_file: printed_value(raw, &at, value, ValueForm::Get),
+                    used: if value_hidden {
+                        used.map(|_| NOT_SHOWN.to_string())
+                    } else {
+                        used
+                    },
+                    value_hidden,
+                    path: at.clone(),
                 }
             });
         }

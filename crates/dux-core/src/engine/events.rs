@@ -2715,34 +2715,31 @@ impl Engine {
         self.stop_agent_restarts(&session.id, true);
         self.begin_session_tab_shutdown(&session, worktree_removal);
 
-        match busy_message {
-            Some(busy_message) => {
-                logger::info(&format!(
-                    "deleting session {} at {} (delete_worktree=true; worktree removal deferred until the agent exits)",
-                    session.id,
-                    session.directory()
-                ));
-                // The caller vanishes the session now and mints a keyed op from
-                // `busy_message`; the reaper spawns the worktree worker once the
-                // agent PTY is reaped, and its `WorktreeRemoveCompleted` resolves
-                // that op.
-                BeginDeleteSessionOutcome::AsyncStarted { busy_message }
-            }
-            None => {
-                logger::info(&format!(
-                    "deleting session {} at {} (delete_worktree={}, no worktree removal)",
-                    session.id,
-                    session.directory(),
-                    delete_worktree
-                ));
-                BeginDeleteSessionOutcome::Inline {
-                    removal: WorktreeRemoval::from_decision(
-                        &session,
-                        delete_worktree,
-                        other_sessions_on_worktree,
-                        None,
-                    ),
-                }
+        if let Some(busy_message) = busy_message {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree=true; worktree removal deferred until the agent exits)",
+                session.id,
+                session.directory()
+            ));
+            // The caller vanishes the session now and mints a keyed op from
+            // `busy_message`; the reaper spawns the worktree worker once the
+            // agent PTY is reaped, and its `WorktreeRemoveCompleted` resolves
+            // that op.
+            BeginDeleteSessionOutcome::AsyncStarted { busy_message }
+        } else {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree={}, no worktree removal)",
+                session.id,
+                session.directory(),
+                delete_worktree
+            ));
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::from_decision(
+                    &session,
+                    delete_worktree,
+                    other_sessions_on_worktree,
+                    None,
+                ),
             }
         }
     }

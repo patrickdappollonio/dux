@@ -1812,21 +1812,18 @@ impl AgentProcessRegistry {
                 Ok(stored) => {
                     for entry in stored.into_iter().filter(|e| e.session.is_this_boot()) {
                         let known = (entry.session, entry.folder.clone());
-                        match &entry.owner {
-                            Some(owner) => {
-                                let list = inner.sessions.entry(owner.clone()).or_default();
-                                if !list.contains(&known) {
-                                    list.push(known);
-                                }
-                                if entry.standalone {
-                                    inner.standalone_owners.insert(owner.clone());
-                                }
+                        if let Some(owner) = &entry.owner {
+                            let list = inner.sessions.entry(owner.clone()).or_default();
+                            if !list.contains(&known) {
+                                list.push(known);
                             }
-                            None => {
-                                inner.retired.push_back(known);
-                                if entry.standalone {
-                                    inner.retired_standalone.insert(entry.session);
-                                }
+                            if entry.standalone {
+                                inner.standalone_owners.insert(owner.clone());
+                            }
+                        } else {
+                            inner.retired.push_back(known);
+                            if entry.standalone {
+                                inner.retired_standalone.insert(entry.session);
                             }
                         }
                         if !entry.survivors.is_empty() {

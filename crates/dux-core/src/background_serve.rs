@@ -85,12 +85,11 @@ impl TuiOwnership {
         let mut claimed = Vec::new();
         let mut skipped = Vec::new();
         for pty_id in &running {
-            match self.claim_if_free(pty_id) {
-                Some(event) => claimed.push(event),
-                None => {
-                    let (holder, _, _) = self.owners.current_owner(pty_id);
-                    skipped.push((pty_id.clone(), holder));
-                }
+            if let Some(event) = self.claim_if_free(pty_id) {
+                claimed.push(event)
+            } else {
+                let (holder, _, _) = self.owners.current_owner(pty_id);
+                skipped.push((pty_id.clone(), holder));
             }
         }
         crate::logger::info(&bulk_claim_log_line(claimed.len(), running.len(), &skipped));

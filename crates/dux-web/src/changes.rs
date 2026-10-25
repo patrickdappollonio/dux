@@ -463,13 +463,12 @@ impl ChangesService {
             }
             let role = {
                 let mut inflight = lock(&self.inflight);
-                match inflight.get(&session_id) {
-                    Some(rx) => Role::Waiter(rx.clone()),
-                    None => {
-                        let (tx, rx) = watch::channel(false);
-                        inflight.insert(session_id.clone(), rx);
-                        Role::Owner(tx)
-                    }
+                if let Some(rx) = inflight.get(&session_id) {
+                    Role::Waiter(rx.clone())
+                } else {
+                    let (tx, rx) = watch::channel(false);
+                    inflight.insert(session_id.clone(), rx);
+                    Role::Owner(tx)
                 }
             };
             match role {

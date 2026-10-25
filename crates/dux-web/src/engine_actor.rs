@@ -1379,14 +1379,13 @@ impl EngineHandle {
             ));
             return 0;
         }
-        match rx.await {
-            Ok(rev) => rev,
-            Err(_) => {
-                dux_core::logger::warn(&format!(
-                    "next_changes_rev for session {sid}: engine reply dropped; using rev 0 fallback"
-                ));
-                0
-            }
+        if let Ok(rev) = rx.await {
+            rev
+        } else {
+            dux_core::logger::warn(&format!(
+                "next_changes_rev for session {sid}: engine reply dropped; using rev 0 fallback"
+            ));
+            0
         }
     }
 
@@ -9393,15 +9392,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let final_status = loop {
             svc.run_maintenance(&mut engine);
-            match statuses.try_recv() {
-                Ok(status) => break status,
-                Err(_) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the detach outcome never reached the status stream"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
+            if let Ok(status) = statuses.try_recv() {
+                break status;
+            } else {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the detach outcome never reached the status stream"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         };
         assert_eq!(final_status.key.as_deref(), Some("detach-agent:s1"));

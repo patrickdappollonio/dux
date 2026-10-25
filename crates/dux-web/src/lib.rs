@@ -1492,18 +1492,17 @@ impl TailscaleLoop {
         // Without a primary there is no port to hang the Tailscale leg on, but
         // the Funnel check still has to run, so such a serve watches the name
         // alone. The address it is handed is never bound.
-        let (primary, addresses) = match self.primary {
-            Some(primary) => (primary, addresses),
-            None => {
-                if addresses {
-                    dux_core::logger::warn(
-                        "[server] not watching for the Tailscale address: the address of the \
-                         primary listener could not be read, so there is no port to serve the \
-                         Tailscale leg on. dux still checks Tailscale for a Funnel.",
-                    );
-                }
-                (SocketAddr::from(([127, 0, 0, 1], 0)), false)
+        let (primary, addresses) = if let Some(primary) = self.primary {
+            (primary, addresses)
+        } else {
+            if addresses {
+                dux_core::logger::warn(
+                    "[server] not watching for the Tailscale address: the address of the \
+                     primary listener could not be read, so there is no port to serve the \
+                     Tailscale leg on. dux still checks Tailscale for a Funnel.",
+                );
             }
+            (SocketAddr::from(([127, 0, 0, 1], 0)), false)
         };
         #[cfg(test)]
         if self.refuse_watcher_threads {
@@ -2143,15 +2142,12 @@ fn say(
     console: &Console,
     status: &LegStatus,
 ) {
-    match tone {
-        dux_core::statusline::StatusTone::Warning => {
-            dux_core::logger::warn(&format!("[server] {message}"));
-            console.bind_degraded(message);
-        }
-        _ => {
-            dux_core::logger::info(&format!("[server] {message}"));
-            console.leg_changed(message);
-        }
+    if tone == dux_core::statusline::StatusTone::Warning {
+        dux_core::logger::warn(&format!("[server] {message}"));
+        console.bind_degraded(message);
+    } else {
+        dux_core::logger::info(&format!("[server] {message}"));
+        console.leg_changed(message);
     }
     status.identity_news(tone, message);
 }

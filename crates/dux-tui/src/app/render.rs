@@ -4248,46 +4248,43 @@ impl App {
         active_surface: SessionSurface,
     ) {
         let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
-        let (label_spans, label_len) = match provider_name {
-            Some(name) => {
-                let prefix = match active_surface {
-                    SessionSurface::Agent => "Starting ",
-                    SessionSurface::Terminal => "Launching ",
-                };
-                // The card is ten columns wider than its label, up to the pane;
-                // a name that cannot fit gives up its end rather than running
-                // under the card's border.
-                let chrome = display_width(prefix) + 3;
-                let room = usize::from(term_area.width)
-                    .saturating_sub(10)
-                    .saturating_sub(chrome);
-                let cut = ellipsize_end(name, room);
-                // A cut name already ends in the mark; the loading dots after
-                // it would be a second one.
-                let dots = if cut == name { "..." } else { "" };
-                let label_len = display_width(prefix) + display_width(&cut) + dots.len();
-                (
-                    vec![
-                        Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::styled(cut, Style::default().fg(self.theme.branch_fg)),
-                        Span::styled(dots, Style::default().fg(self.theme.hint_desc_fg)),
-                    ],
-                    label_len,
-                )
-            }
-            None => {
-                let text = match active_surface {
-                    SessionSurface::Agent => "Starting agent...",
-                    SessionSurface::Terminal => "Launching terminal...",
-                };
-                (
-                    vec![Span::styled(
-                        text,
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )],
-                    display_width(text),
-                )
-            }
+        let (label_spans, label_len) = if let Some(name) = provider_name {
+            let prefix = match active_surface {
+                SessionSurface::Agent => "Starting ",
+                SessionSurface::Terminal => "Launching ",
+            };
+            // The card is ten columns wider than its label, up to the pane;
+            // a name that cannot fit gives up its end rather than running
+            // under the card's border.
+            let chrome = display_width(prefix) + 3;
+            let room = usize::from(term_area.width)
+                .saturating_sub(10)
+                .saturating_sub(chrome);
+            let cut = ellipsize_end(name, room);
+            // A cut name already ends in the mark; the loading dots after
+            // it would be a second one.
+            let dots = if cut == name { "..." } else { "" };
+            let label_len = display_width(prefix) + display_width(&cut) + dots.len();
+            (
+                vec![
+                    Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
+                    Span::styled(cut, Style::default().fg(self.theme.branch_fg)),
+                    Span::styled(dots, Style::default().fg(self.theme.hint_desc_fg)),
+                ],
+                label_len,
+            )
+        } else {
+            let text = match active_surface {
+                SessionSurface::Agent => "Starting agent...",
+                SessionSurface::Terminal => "Launching terminal...",
+            };
+            (
+                vec![Span::styled(
+                    text,
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )],
+                display_width(text),
+            )
         };
         let card_width = u16::try_from(label_len + 10)
             .unwrap_or(u16::MAX)
@@ -7402,13 +7399,12 @@ impl App {
             .iter()
             .map(|row| {
                 let mut spans = vec![Span::raw(" ")];
-                match &row.unavailable {
-                    None => spans.push(Span::styled(row.label.clone(), text_style)),
-                    Some(_) => {
-                        let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
-                        spans.push(Span::styled(row.label.clone(), dim));
-                        spans.push(Span::styled("  unavailable: the folder is missing", dim));
-                    }
+                if row.unavailable == None {
+                    spans.push(Span::styled(row.label.clone(), text_style))
+                } else {
+                    let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
+                    spans.push(Span::styled(row.label.clone(), dim));
+                    spans.push(Span::styled("  unavailable: the folder is missing", dim));
                 }
                 ListItem::new(Line::from(spans))
             })

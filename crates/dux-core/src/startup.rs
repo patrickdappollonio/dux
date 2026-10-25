@@ -232,18 +232,17 @@ pub fn run_startup_command(
     run: StartupCommandRun,
     registry: &crate::process_sessions::AgentProcessRegistry,
 ) -> StartupCommandResult {
-    match registry.begin_startup_run(&run.session.id) {
-        Some(guard) => run_claimed_startup_command(paths, run, guard),
-        None => {
-            let log_path = startup_log_path(paths, &run);
-            StartupCommandResult {
-                status: Err(startup_already_running_message(
-                    &run.session.display_label(),
-                )),
-                session_id: run.session.id,
-                project_name: run.project.name,
-                log_path,
-            }
+    if let Some(guard) = registry.begin_startup_run(&run.session.id) {
+        run_claimed_startup_command(paths, run, guard)
+    } else {
+        let log_path = startup_log_path(paths, &run);
+        StartupCommandResult {
+            status: Err(startup_already_running_message(
+                &run.session.display_label(),
+            )),
+            session_id: run.session.id,
+            project_name: run.project.name,
+            log_path,
         }
     }
 }

@@ -222,18 +222,17 @@ pub fn resolve_worktree_path_for_read(
     //
     // For a leaf that does not yet exist (new file), canonicalize its parent
     // and re-attach the leaf component so we get a real path we can check.
-    let real = match std::fs::canonicalize(&joined) {
-        Ok(r) => r,
-        Err(_) => {
-            // Leaf may not exist. Try canonicalizing the parent.
-            let parent = joined.parent().unwrap_or(worktree);
-            let real_parent = std::fs::canonicalize(parent)
-                .map_err(|e| anyhow::anyhow!("cannot resolve path {rel_path}: {e}"))?;
-            let leaf = joined
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("invalid path: {rel_path}"))?;
-            real_parent.join(leaf)
-        }
+    let real = if let Ok(r) = std::fs::canonicalize(&joined) {
+        r
+    } else {
+        // Leaf may not exist. Try canonicalizing the parent.
+        let parent = joined.parent().unwrap_or(worktree);
+        let real_parent = std::fs::canonicalize(parent)
+            .map_err(|e| anyhow::anyhow!("cannot resolve path {rel_path}: {e}"))?;
+        let leaf = joined
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("invalid path: {rel_path}"))?;
+        real_parent.join(leaf)
     };
 
     // Containment check against the canonical worktree.

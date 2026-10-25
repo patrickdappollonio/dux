@@ -11366,16 +11366,15 @@ mod tests {
                 ));
             // Refused at once, or by the worker before it runs git.
             let mut asked = None;
-            let sentence = match engine.apply_wire(command) {
-                Err(refused) => refused.to_string(),
-                Ok(_) => {
-                    let chain = drive_clone_chain(&mut engine);
-                    let finals = finals(&chain);
-                    assert_eq!(finals.len(), 1, "{what}: {finals:?}");
-                    assert_eq!(finals[0].tone, "error", "{what}");
-                    asked = finals[0].ask.clone();
-                    finals[0].message.clone()
-                }
+            let sentence = if let Err(refused) = engine.apply_wire(command) {
+                refused.to_string()
+            } else {
+                let chain = drive_clone_chain(&mut engine);
+                let finals = finals(&chain);
+                assert_eq!(finals.len(), 1, "{what}: {finals:?}");
+                assert_eq!(finals[0].tone, "error", "{what}");
+                asked = finals[0].ask.clone();
+                finals[0].message.clone()
             };
             for needle in needles {
                 assert!(sentence.contains(needle), "{what}: {sentence}");

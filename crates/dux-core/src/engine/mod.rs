@@ -1169,20 +1169,21 @@ impl ProjectBaseAdoption {
             " is on ",
             q(branch)
         ];
-        let middle = match previous {
-            Some(previous) => status_text![
+        let middle = if let Some(previous) = previous {
+            status_text![
                 lead,
                 ", but new worktrees still branch from ",
                 q(previous),
                 format!(" because dux could not save the new base ({reason})."),
-            ],
-            None => status_text![
+            ]
+        } else {
+            status_text![
                 lead,
                 format!(
                     ", but dux could not save it as the base new worktrees branch from \
-                     ({reason}), so the project still has no base branch recorded."
+                 ({reason}), so the project still has no base branch recorded."
                 ),
-            ],
+            ]
         };
         Some(status_text![middle, advice.to_string()])
     }
@@ -1542,9 +1543,10 @@ pub fn checkout_default_branch_cancelled_message(
         q(project_name),
         ". Nothing was checked out"
     ];
-    match stored_base {
-        Some(base) => status_text![lead, ", and new worktrees still branch from ", q(base), "."],
-        None => status_text![lead, ", and the project's base branch is unchanged."],
+    if let Some(base) = stored_base {
+        status_text![lead, ", and new worktrees still branch from ", q(base), "."]
+    } else {
+        status_text![lead, ", and the project's base branch is unchanged."]
     }
 }
 
@@ -4177,38 +4179,35 @@ impl Engine {
     ) {
         for sig in signals {
             let key = format!("{PR_QUOTA_STATUS_KEY}:{}", sig.host);
-            match pr_pause_notice(sig, Utc::now()) {
-                Some(notice) => {
-                    let until = Instant::now() + notice.pause;
-                    let already_active = {
-                        let mut map = shared
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let already = map.get(&sig.host).is_some_and(|u| Instant::now() < *u);
-                        map.insert(sig.host.clone(), until);
-                        already
-                    };
-                    // Emitted once per pause window (the `already_active` gate),
-                    // keyed per host. Every tone here self-dismisses on both
-                    // surfaces, so a pause that resolves on its own never sits on
-                    // screen as a stuck notice.
-                    if !already_active {
-                        let _ = tx.send(WorkerEvent::CommandWorkerStarted(StatusUpdate::keyed(
-                            key,
-                            notice.tone,
-                            notice.message,
-                        )));
-                    }
-                }
-                None => {
-                    // Host is healthy again: clear its backoff so it is queried
-                    // normally. No "resumed" message: the pause notice already
-                    // auto-cleared, so a fresh toast now would be stale.
+            if let Some(notice) = pr_pause_notice(sig, Utc::now()) {
+                let until = Instant::now() + notice.pause;
+                let already_active = {
                     let mut map = shared
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    map.remove(&sig.host);
+                    let already = map.get(&sig.host).is_some_and(|u| Instant::now() < *u);
+                    map.insert(sig.host.clone(), until);
+                    already
+                };
+                // Emitted once per pause window (the `already_active` gate),
+                // keyed per host. Every tone here self-dismisses on both
+                // surfaces, so a pause that resolves on its own never sits on
+                // screen as a stuck notice.
+                if !already_active {
+                    let _ = tx.send(WorkerEvent::CommandWorkerStarted(StatusUpdate::keyed(
+                        key,
+                        notice.tone,
+                        notice.message,
+                    )));
                 }
+            } else {
+                // Host is healthy again: clear its backoff so it is queried
+                // normally. No "resumed" message: the pause notice already
+                // auto-cleared, so a fresh toast now would be stale.
+                let mut map = shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                map.remove(&sig.host);
             }
         }
     }

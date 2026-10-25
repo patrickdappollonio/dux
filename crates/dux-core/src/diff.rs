@@ -304,18 +304,17 @@ fn decode_patch_lines(
             in_hunk && matches!(line.first(), Some(b' ' | b'+' | b'-'))
         })
         .collect();
-    let (encoding, fallback) = match requested {
-        Some(encoding) => (encoding, false),
-        None => {
-            let all_utf8 = lines
-                .iter()
-                .zip(&content)
-                .all(|(line, is_content)| !is_content || std::str::from_utf8(&line[1..]).is_ok());
-            if all_utf8 {
-                (encoding_rs::UTF_8, false)
-            } else {
-                (encoding_rs::WINDOWS_1252, true)
-            }
+    let (encoding, fallback) = if let Some(encoding) = requested {
+        (encoding, false)
+    } else {
+        let all_utf8 = lines
+            .iter()
+            .zip(&content)
+            .all(|(line, is_content)| !is_content || std::str::from_utf8(&line[1..]).is_ok());
+        if all_utf8 {
+            (encoding_rs::UTF_8, false)
+        } else {
+            (encoding_rs::WINDOWS_1252, true)
         }
     };
     let mut out = Vec::with_capacity(lines.len());

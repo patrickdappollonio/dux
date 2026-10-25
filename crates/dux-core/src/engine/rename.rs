@@ -163,13 +163,14 @@ impl Engine {
                     None => crate::status_text!["Renamed agent to ", q(name), "."],
                 }
             }
-            BranchRenamePlan::TitleCleared => match branch {
-                Some(branch) => crate::status_text![
-                    "Cleared the custom name. Agent shows its branch name ",
-                    q(branch),
-                    " again."
-                ],
-                None => {
+            BranchRenamePlan::TitleCleared => {
+                if let Some(branch) = branch {
+                    crate::status_text![
+                        "Cleared the custom name. Agent shows its branch name ",
+                        q(branch),
+                        " again."
+                    ]
+                } else {
                     // A standalone agent has no branch to fall back to; its
                     // label falls back to its folder's name instead.
                     let label = self
@@ -184,7 +185,7 @@ impl Engine {
                         " again."
                     ]
                 }
-            },
+            }
         };
         // Loud on both surfaces: a rename lands on one row's label in a long
         // list, which can sit outside the visible scroll area, and a reset lands

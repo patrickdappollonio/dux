@@ -54,40 +54,37 @@ where
     let mut merged = config.projects.clone();
 
     for (index, cfg_project) in config.projects.iter().enumerate() {
-        match stored.iter().position(|stored_project| {
+        if let Some(stored_index) = stored.iter().position(|stored_project| {
             stored_project.id == cfg_project.id
                 || same_expanded_project_path(stored_project, cfg_project)
         }) {
-            Some(stored_index) => {
-                let stored_project = &stored[stored_index];
-                // Named by its line in config.toml, never by its id or path.
-                let (merged_config_project, merged_stored_project) =
-                    merge_project_records(cfg_project, stored_project).map_err(|clause| {
-                        let label = config
-                            .source_text
-                            .as_str()
-                            .and_then(|raw| crate::config::line_of_project(raw, index))
-                            .map_or_else(
-                                || format!("project {} (counting from 1)", index + 1),
-                                |line| format!("the project on line {line}"),
-                            );
-                        anyhow::anyhow!("Project sync conflict: {label} in config.toml {clause:#}")
-                    })?;
-                if &merged_config_project != cfg_project {
-                    merged[index] = merged_config_project;
-                    changed_config = true;
-                }
-                if &merged_stored_project != stored_project {
-                    session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
-                    stored[stored_index] = merged_stored_project;
-                    changed_store = true;
-                }
+            let stored_project = &stored[stored_index];
+            // Named by its line in config.toml, never by its id or path.
+            let (merged_config_project, merged_stored_project) =
+                merge_project_records(cfg_project, stored_project).map_err(|clause| {
+                    let label = config
+                        .source_text
+                        .as_str()
+                        .and_then(|raw| crate::config::line_of_project(raw, index))
+                        .map_or_else(
+                            || format!("project {} (counting from 1)", index + 1),
+                            |line| format!("the project on line {line}"),
+                        );
+                    anyhow::anyhow!("Project sync conflict: {label} in config.toml {clause:#}")
+                })?;
+            if &merged_config_project != cfg_project {
+                merged[index] = merged_config_project;
+                changed_config = true;
             }
-            None => {
-                session_store.upsert_project_at(cfg_project, index as i64)?;
+            if &merged_stored_project != stored_project {
+                session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
+                stored[stored_index] = merged_stored_project;
                 changed_store = true;
-                stored.push(cfg_project.clone());
             }
+        } else {
+            session_store.upsert_project_at(cfg_project, index as i64)?;
+            changed_store = true;
+            stored.push(cfg_project.clone());
         }
     }
 

@@ -1345,15 +1345,14 @@ fn acquire_ws_permit(
     route: &str,
     cap_setting: &str,
 ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-    match Arc::clone(semaphore).try_acquire_owned() {
-        Ok(permit) => Some(permit),
-        Err(_) => {
-            dux_core::logger::warn(&format!(
-                "[server] {route} upgrade refused for {peer_ip}: connection cap reached \
-                 ({cap_setting})"
-            ));
-            None
-        }
+    if let Ok(permit) = Arc::clone(semaphore).try_acquire_owned() {
+        Some(permit)
+    } else {
+        dux_core::logger::warn(&format!(
+            "[server] {route} upgrade refused for {peer_ip}: connection cap reached \
+             ({cap_setting})"
+        ));
+        None
     }
 }
 
@@ -4143,32 +4142,32 @@ impl AttachmentGuard {
         let linked = client.link.clone().filter(|events| {
             attachments.linkable(events, client.address, std::time::Instant::now())
         });
-        let own_connection = match linked {
-            Some(_) => None,
-            None => {
-                attachments.register(
-                    registry_id,
-                    client.facts(device, false),
-                    Some(heard.clone()),
-                );
-                Some(registry_id.to_string())
-            }
+        let own_connection = if let Some(_) = linked {
+            None
+        } else {
+            attachments.register(
+                registry_id,
+                client.facts(device, false),
+                Some(heard.clone()),
+            );
+            Some(registry_id.to_string())
         };
         let connection = linked.unwrap_or_else(|| registry_id.to_string());
-        match attachments.attach(&connection, target, Some(heard.clone()), Some(conn_id)) {
-            Ok(token) => Some(Self {
+        if let Ok(token) =
+            attachments.attach(&connection, target, Some(heard.clone()), Some(conn_id))
+        {
+            Some(Self {
                 attachments,
                 token,
                 own_connection,
                 live_limits,
                 deliberate: std::sync::atomic::AtomicBool::new(false),
-            }),
-            Err(dux_core::attachments::Reserved) => {
-                if let Some(own) = own_connection {
-                    attachments.deregister(&own, dux_core::attachments::Ending::Deliberate);
-                }
-                None
+            })
+        } else {
+            if let Some(own) = own_connection {
+                attachments.deregister(&own, dux_core::attachments::Ending::Deliberate);
             }
+            None
         }
     }
 

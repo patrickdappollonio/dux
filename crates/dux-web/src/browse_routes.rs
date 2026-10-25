@@ -65,20 +65,19 @@ struct BrowseReply {
 async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Response {
     // Absent or empty means the configured default, read from the live engine
     // config so a reload is reflected; `$HOME` then `/` if the engine is gone.
-    let dir = match query.path.filter(|p| !p.is_empty()) {
-        Some(p) => p,
-        None => {
-            let dir = match state.engine.browse_start_dir().await {
-                Some(dir) => dir,
-                None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
-            };
-            // A configured start folder may be relative; the answer is the
-            // folder it means, so a client can join onto it.
-            std::path::absolute(&dir)
-                .map(|abs| dux_core::project_browser::canonical_or_original(&abs))
-                .map(|abs| abs.to_string_lossy().into_owned())
-                .unwrap_or(dir)
-        }
+    let dir = if let Some(p) = query.path.filter(|p| !p.is_empty()) {
+        p
+    } else {
+        let dir = match state.engine.browse_start_dir().await {
+            Some(dir) => dir,
+            None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+        };
+        // A configured start folder may be relative; the answer is the
+        // folder it means, so a client can join onto it.
+        std::path::absolute(&dir)
+            .map(|abs| dux_core::project_browser::canonical_or_original(&abs))
+            .map(|abs| abs.to_string_lossy().into_owned())
+            .unwrap_or(dir)
     };
 
     if dir.chars().count() > MAX_PATH_LEN {

@@ -1266,19 +1266,18 @@ pub fn switch_branch(
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
     let local = format!("refs/heads/{branch_name}");
-    let (target, created) = match crate::checkout_move::commit_id(repo_path, &local)? {
-        Some(id) => (id, false),
-        None => {
-            let remote = tracking_remote(repo_path, branch_name)?;
-            create_tracking_branch_from(repo_path, branch_name, &remote)?;
-            let id = crate::checkout_move::commit_id(repo_path, &local)?.ok_or_else(|| {
-                anyhow!(
-                    "dux did not switch to branch {branch_name}: the local branch it created \
-                     from {remote} cannot be read back"
-                )
-            })?;
-            (id, true)
-        }
+    let (target, created) = if let Some(id) = crate::checkout_move::commit_id(repo_path, &local)? {
+        (id, false)
+    } else {
+        let remote = tracking_remote(repo_path, branch_name)?;
+        create_tracking_branch_from(repo_path, branch_name, &remote)?;
+        let id = crate::checkout_move::commit_id(repo_path, &local)?.ok_or_else(|| {
+            anyhow!(
+                "dux did not switch to branch {branch_name}: the local branch it created \
+                 from {remote} cannot be read back"
+            )
+        })?;
+        (id, true)
     };
     let switched = guard
         .clear(repo_path, &target, "switch to the branch")

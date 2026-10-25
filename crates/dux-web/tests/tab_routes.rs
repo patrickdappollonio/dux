@@ -1194,17 +1194,14 @@ async fn tab_with_a_failing_async_launch_never_looks_live_and_is_cleaned_up() {
             .await
             .unwrap();
         let tabs = session["tabs"].as_array().unwrap();
-        match tabs.iter().find(|t| t["id"].as_str() == Some(tab.as_str())) {
-            Some(row) => {
-                assert_ne!(
-                    row["has_live_process"], true,
-                    "a tab whose launch failed must never look live"
-                );
-            }
-            None => {
-                saw_row_removed = true;
-                break;
-            }
+        if let Some(row) = tabs.iter().find(|t| t["id"].as_str() == Some(tab.as_str())) {
+            assert_ne!(
+                row["has_live_process"], true,
+                "a tab whose launch failed must never look live"
+            );
+        } else {
+            saw_row_removed = true;
+            break;
         }
         if tokio::time::Instant::now() >= deadline {
             break;

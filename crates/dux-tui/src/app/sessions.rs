@@ -494,20 +494,17 @@ impl App {
             self.set_error("That project is no longer available.");
             return Ok(());
         }
-        match intent {
-            ProjectChooserIntent::Manage => {
-                self.open_project_actions(
-                    ProjectActionsTarget::Orphaned {
-                        project_id: entry.id,
-                        name: entry.name,
-                    },
-                    Some(list),
-                );
-            }
-            _ => {
-                self.prompt = PromptState::None;
-                self.confirm_remove_orphaned_group(entry.id, entry.name, None);
-            }
+        if intent == ProjectChooserIntent::Manage {
+            self.open_project_actions(
+                ProjectActionsTarget::Orphaned {
+                    project_id: entry.id,
+                    name: entry.name,
+                },
+                Some(list),
+            );
+        } else {
+            self.prompt = PromptState::None;
+            self.confirm_remove_orphaned_group(entry.id, entry.name, None);
         }
         Ok(())
     }
@@ -1196,25 +1193,24 @@ impl App {
         carried_op_id: Option<String>,
     ) {
         let path = action.repo_path().to_string();
-        let status_op_id = match carried_op_id {
-            Some(id) => id,
-            None => {
-                // The keyed busy is dismissed by the op's `Final::Clear` when the
-                // worker reports back; the visible final (the engine's unkeyed
-                // success/error `Status`, or the TUI's add-project view handler)
-                // is authored elsewhere, byte-for-byte unchanged.
-                let op = dux_core::engine::status_op(format!(
-                    "Checking out \"{target_branch}\" in {path} {reason}..."
-                ))
-                .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
-                    TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
-                });
-                let pending = self.engine.begin_status_op(&op);
-                let id = op.id().to_string();
-                self.pending_checkout_inspect_ops.insert(id.clone(), op);
-                self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
-                id
-            }
+        let status_op_id = if let Some(id) = carried_op_id {
+            id
+        } else {
+            // The keyed busy is dismissed by the op's `Final::Clear` when the
+            // worker reports back; the visible final (the engine's unkeyed
+            // success/error `Status`, or the TUI's add-project view handler)
+            // is authored elsewhere, byte-for-byte unchanged.
+            let op = dux_core::engine::status_op(format!(
+                "Checking out \"{target_branch}\" in {path} {reason}..."
+            ))
+            .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+                TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+            });
+            let pending = self.engine.begin_status_op(&op);
+            let id = op.id().to_string();
+            self.pending_checkout_inspect_ops.insert(id.clone(), op);
+            self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+            id
         };
         let worker_tx = self.engine.worker_tx.clone();
         let guard = self.engine.checkout_move_guard();

@@ -273,35 +273,32 @@ fn place(
     heights: &[u16],
 ) -> CardPlan {
     let inner_h = stack_height(kept, blocks, heights);
-    match ring_inner_w {
-        Some(inner_w) => {
-            let card = Rect::new(
-                area.x + (area.width - (inner_w + 2)) / 2,
-                area.y + (area.height - (inner_h + 2)) / 2,
-                inner_w + 2,
-                inner_h + 2,
-            );
-            let content_w = inner_w.saturating_sub(SIDE_PADDING * 2).max(1);
-            CardPlan {
-                ring: Some(card),
-                blocks: stack(
-                    kept,
-                    heights,
-                    card.x + 1 + SIDE_PADDING,
-                    card.y + 1,
-                    content_w,
-                ),
-                content_width: content_w,
-            }
+    if let Some(inner_w) = ring_inner_w {
+        let card = Rect::new(
+            area.x + (area.width - (inner_w + 2)) / 2,
+            area.y + (area.height - (inner_h + 2)) / 2,
+            inner_w + 2,
+            inner_h + 2,
+        );
+        let content_w = inner_w.saturating_sub(SIDE_PADDING * 2).max(1);
+        CardPlan {
+            ring: Some(card),
+            blocks: stack(
+                kept,
+                heights,
+                card.x + 1 + SIDE_PADDING,
+                card.y + 1,
+                content_w,
+            ),
+            content_width: content_w,
         }
-        None => {
-            let content_w = bare_content_width(area).max(1);
-            let y = area.y + (area.height.saturating_sub(inner_h)) / 2;
-            CardPlan {
-                ring: None,
-                blocks: stack(kept, heights, area.x + SIDE_PADDING, y, content_w),
-                content_width: content_w,
-            }
+    } else {
+        let content_w = bare_content_width(area).max(1);
+        let y = area.y + (area.height.saturating_sub(inner_h)) / 2;
+        CardPlan {
+            ring: None,
+            blocks: stack(kept, heights, area.x + SIDE_PADDING, y, content_w),
+            content_width: content_w,
         }
     }
 }

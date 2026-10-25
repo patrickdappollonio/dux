@@ -715,36 +715,33 @@ impl SessionStore {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            let (tab_id, how) = match oldest {
-                Some((id, adopted_provider)) => {
-                    // `agent_sessions.provider` mirrors the SLOT tab's provider
-                    // and is what a launch reads, so the mirror has to move with
-                    // the slot. Leaving it behind would relaunch the vanished
-                    // tab's provider in the adopted tab's PTY.
-                    tx.execute(
-                        "update agent_sessions set provider = ?2 where id = ?1",
-                        params![session_id, adopted_provider],
+            let (tab_id, how) = if let Some((id, adopted_provider)) = oldest {
+                // `agent_sessions.provider` mirrors the SLOT tab's provider
+                // and is what a launch reads, so the mirror has to move with
+                // the slot. Leaving it behind would relaunch the vanished
+                // tab's provider in the adopted tab's PTY.
+                tx.execute(
+                    "update agent_sessions set provider = ?2 where id = ?1",
+                    params![session_id, adopted_provider],
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to move the provider mirror to the adopted slot tab \
+                         for session {session_id}"
                     )
-                    .with_context(|| {
-                        format!(
-                            "failed to move the provider mirror to the adopted slot tab \
-                             for session {session_id}"
-                        )
-                    })?;
-                    (id, "its oldest surviving tab")
-                }
-                None => {
-                    let tab_id = uuid::Uuid::new_v4().to_string();
-                    tx.execute(
-                        "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
-                         values (?1, ?2, ?3, 0, ?4)",
-                        params![tab_id, session_id, provider, created_at],
-                    )
-                    .with_context(|| {
-                        format!("failed to mint a replacement slot tab for session {session_id}")
-                    })?;
-                    (tab_id, "a freshly minted tab")
-                }
+                })?;
+                (id, "its oldest surviving tab")
+            } else {
+                let tab_id = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+                     values (?1, ?2, ?3, 0, ?4)",
+                    params![tab_id, session_id, provider, created_at],
+                )
+                .with_context(|| {
+                    format!("failed to mint a replacement slot tab for session {session_id}")
+                })?;
+                (tab_id, "a freshly minted tab")
             };
             tx.execute(
                 "update agent_sessions set slot_tab_id = ?2 where id = ?1",
