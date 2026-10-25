@@ -442,7 +442,7 @@ fn kitty_notify_is_attention(metadata: &[u8]) -> bool {
         let (key, value) = split_once(token, b'=');
         match key {
             b"d" => d_final = value != Some(b"0"),
-            b"p" => p_ok = matches!(value, None | Some(b"title") | Some(b"body")),
+            b"p" => p_ok = matches!(value, None | Some(b"title" | b"body")),
             _ => {}
         }
     }

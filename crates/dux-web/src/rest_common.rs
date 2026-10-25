@@ -409,7 +409,7 @@ impl ForceConnectedQuery {
     /// everybody).
     fn decision(&self) -> (bool, Option<std::collections::BTreeSet<String>>) {
         match self.force_connected.as_deref().map(str::trim) {
-            None | Some("") | Some("false") => (false, None),
+            None | Some("" | "false") => (false, None),
             Some("true") => (true, None),
             Some(keys) => (
                 true,

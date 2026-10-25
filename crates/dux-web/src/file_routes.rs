@@ -767,7 +767,7 @@ fn mime_for_path(path: &str) -> &'static str {
         .map(|(_, ext)| ext.to_ascii_lowercase());
     match ext.as_deref() {
         Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("svg") => "image/svg+xml",
         Some("webp") => "image/webp",

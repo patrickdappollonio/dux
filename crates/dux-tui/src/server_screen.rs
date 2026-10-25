@@ -889,7 +889,7 @@ fn action_for_key(key: KeyEvent) -> Option<ExitKind> {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(ExitKind::QuitProcess)
         }
-        KeyCode::Char('q') | KeyCode::Char('Q') => Some(ExitKind::ReturnToTui),
+        KeyCode::Char('q' | 'Q') => Some(ExitKind::ReturnToTui),
         KeyCode::Esc => Some(ExitKind::ReturnToTui),
         _ => None,
     }

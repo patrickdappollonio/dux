@@ -625,8 +625,10 @@ async fn discard(
     let deletes_a_link =
         std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
     let claim = match confirmed {
-        Some(dux_core::git::ConfirmedEntry::Folder { .. })
-        | Some(dux_core::git::ConfirmedEntry::Repository) => true,
+        Some(
+            dux_core::git::ConfirmedEntry::Folder { .. }
+            | dux_core::git::ConfirmedEntry::Repository,
+        ) => true,
         _ => deletes_a_link,
     };
     let claim = match claim {

@@ -1059,7 +1059,7 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
                 closed = true;
                 break;
             }
@@ -1115,7 +1115,7 @@ async fn every_established_socket_closes_when_its_client_stops_being_allowed() {
                     assert_eq!(u16::from(frame.code), 4401, "{what}");
                     return;
                 }
-                Ok(Some(Ok(Message::Close(None)))) | Ok(None) | Ok(Some(Err(_))) => {
+                Ok(Some(Ok(Message::Close(None)) | Err(_)) | None) => {
                     panic!("the {what} socket ended without the auth close code")
                 }
                 _ => continue,

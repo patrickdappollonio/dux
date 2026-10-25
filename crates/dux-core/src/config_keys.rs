@@ -344,7 +344,7 @@ fn shape_of_json(value: &serde_json::Value) -> Shape {
 fn shape_of(segments: &[String]) -> Option<Shape> {
     let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
     match parts.as_slice() {
-        ["providers"] | ["env"] => return Some(Shape::Table),
+        ["providers" | "env"] => return Some(Shape::Table),
         ["providers", _] => return Some(Shape::Table),
         ["providers", _, field] => {
             return provider_template().get(*field).map(shape_of_json);
@@ -353,7 +353,7 @@ fn shape_of(segments: &[String]) -> Option<Shape> {
         // Maps whose keys are names: an action's bindings, a macro by its
         // name (and the fields of one written as a table). Any name is a
         // setting there, set or not, as for `[env]` and `[providers]`.
-        ["keys", _] | ["macros", _] | ["macros", _, _] => return Some(Shape::Unknown),
+        ["keys" | "macros", _] | ["macros", _, _] => return Some(Shape::Unknown),
         _ => {}
     }
     let mut node = default_tree();

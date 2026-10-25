@@ -1002,7 +1002,7 @@ where
             Ok(Some(Ok(Message::Close(frame)))) => {
                 return Some(frame.map_or(1005, |f| u16::from(f.code)));
             }
-            Ok(None) | Ok(Some(Err(_))) => return Some(1006),
+            Ok(None | Some(Err(_))) => return Some(1006),
             _ => continue,
         }
     }

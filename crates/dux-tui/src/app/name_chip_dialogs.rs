@@ -1326,7 +1326,7 @@ fn code_only(source: &str) -> Vec<char> {
                     }
                 }
             }
-            'r' if matches!(next, Some('"') | Some('#'))
+            'r' if matches!(next, Some('"' | '#'))
                 && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) =>
             {
                 let mut j = i + 1;

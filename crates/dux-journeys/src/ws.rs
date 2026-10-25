@@ -156,7 +156,7 @@ impl Socket {
                 }
                 Ok(Some(Ok(Message::Binary(bytes)))) => self.output.extend_from_slice(&bytes),
                 Ok(Some(Ok(_))) | Err(_) => {}
-                Ok(Some(Err(_))) | Ok(None) => return None,
+                Ok(Some(Err(_)) | None) => return None,
             }
         }
         None
@@ -172,7 +172,7 @@ impl Socket {
             match tokio::time::timeout(Duration::from_millis(250), self.stream.next()).await {
                 Ok(Some(Ok(Message::Binary(bytes)))) => self.output.extend_from_slice(&bytes),
                 Ok(Some(Ok(_))) | Err(_) => {}
-                Ok(Some(Err(_))) | Ok(None) => break,
+                Ok(Some(Err(_)) | None) => break,
             }
         }
         String::from_utf8_lossy(&self.output).contains(needle)
@@ -192,7 +192,7 @@ impl Socket {
                 Ok(Some(Ok(Message::Close(frame)))) => return Some(ended_by(frame)),
                 Ok(Some(Ok(Message::Binary(bytes)))) => self.output.extend_from_slice(&bytes),
                 Ok(Some(Ok(_))) | Err(_) => {}
-                Ok(Some(Err(_))) | Ok(None) => return Some(Ended::Dropped),
+                Ok(Some(Err(_)) | None) => return Some(Ended::Dropped),
             }
         }
         None

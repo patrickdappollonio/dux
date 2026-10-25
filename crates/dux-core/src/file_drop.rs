@@ -635,9 +635,9 @@ impl DropDir {
                 // arm. They are one refusal anyway: something that is not the
                 // directory dux expected is sitting on the path, and following
                 // it or writing next to it would be worse than saying so.
-                Err(rustix::io::Errno::LOOP)
-                | Err(rustix::io::Errno::MLINK)
-                | Err(rustix::io::Errno::NOTDIR) => {
+                Err(
+                    rustix::io::Errno::LOOP | rustix::io::Errno::MLINK | rustix::io::Errno::NOTDIR,
+                ) => {
                     return Err(DropDirError::UploadPathBlocked {
                         component: name.to_string_lossy().into_owned(),
                     });
@@ -698,9 +698,9 @@ impl DropDir {
                 // symlink reports ENOTDIR on Linux, exactly like a plain file
                 // in the way, while macOS documents ELOOP and some BSDs answer
                 // EMLINK.
-                Err(rustix::io::Errno::LOOP)
-                | Err(rustix::io::Errno::MLINK)
-                | Err(rustix::io::Errno::NOTDIR) => {
+                Err(
+                    rustix::io::Errno::LOOP | rustix::io::Errno::MLINK | rustix::io::Errno::NOTDIR,
+                ) => {
                     return Err(DropDirError::TreePathBlocked {
                         component: segment.to_string(),
                     });
@@ -1051,7 +1051,7 @@ pub fn save_drop_from<R: Read>(
             }
             // O_NOFOLLOW on an existing symlink reports ELOOP on Linux and
             // EMLINK on some BSDs. Either way it is the same refusal.
-            Err(rustix::io::Errno::LOOP) | Err(rustix::io::Errno::MLINK) => {
+            Err(rustix::io::Errno::LOOP | rustix::io::Errno::MLINK) => {
                 return Err(DropSaveError::Symlink { name: candidate });
             }
             Err(e) => return Err(DropSaveError::Io(e.into())),

@@ -3045,7 +3045,7 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
             Ok(Some(Ok(Message::Binary(b)))) => acc.extend_from_slice(&b),
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
                 ended = true;
                 break;
             }
@@ -3151,7 +3151,7 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
             Ok(Some(Ok(Message::Binary(b)))) => acc.extend_from_slice(&b),
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
                 ended = true;
                 break;
             }
@@ -3926,7 +3926,7 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
                 closed = true;
                 break;
             }

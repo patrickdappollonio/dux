@@ -1547,10 +1547,7 @@ pub fn server_screen_reaches(key: KeyCombination) -> bool {
     let event: KeyEvent = key.into();
     let ctrl_c =
         event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL);
-    let quit_or_back = matches!(
-        event.code,
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')
-    );
+    let quit_or_back = matches!(event.code, KeyCode::Esc | KeyCode::Char('q' | 'Q'));
     !(ctrl_c || quit_or_back)
 }
 
@@ -1584,7 +1581,7 @@ pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
     let key: KeyCombination = key.into();
     match key.codes {
         crokey::OneToThree::One(KeyCode::Char(_)) => !key.modifiers.contains(KeyModifiers::CONTROL),
-        crokey::OneToThree::One(KeyCode::Left) | crokey::OneToThree::One(KeyCode::Right) => true,
+        crokey::OneToThree::One(KeyCode::Left | KeyCode::Right) => true,
         _ => false,
     }
 }
