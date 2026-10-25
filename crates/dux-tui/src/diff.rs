@@ -993,17 +993,17 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|l| l.contains("1") && l.contains("aaa")),
+                .any(|l| l.contains('1') && l.contains("aaa")),
             "expected line number 1 for context line 'aaa', got: {rendered:?}"
         );
 
         // Inserted line "XXX" should show only the new line number.
         let insert_line = rendered
             .iter()
-            .find(|l| l.contains("XXX") && l.contains("+"))
+            .find(|l| l.contains("XXX") && l.contains('+'))
             .expect("expected an inserted line containing XXX");
         assert!(
-            insert_line.contains("3"),
+            insert_line.contains('3'),
             "expected new line number 3 for inserted line, got: {insert_line}"
         );
 

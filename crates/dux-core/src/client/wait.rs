@@ -554,7 +554,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(!error.message.contains("{"), "{}", error.message);
+        assert!(!error.message.contains('{'), "{}", error.message);
     }
 
     #[test]

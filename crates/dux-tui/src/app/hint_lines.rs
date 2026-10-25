@@ -662,7 +662,7 @@ fn every_hint_line_uses_the_one_style() {
 fn rebinding_every_action_leaves_no_default_key_in_any_hint() {
     let labels = rebound_labels(&unusual_bindings());
     assert!(
-        labels.iter().all(|label| label.contains("F")),
+        labels.iter().all(|label| label.contains('F')),
         "the rebound labels are {labels:?}"
     );
     let bindings = unusual_bindings();

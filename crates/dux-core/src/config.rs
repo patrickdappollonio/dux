@@ -7364,7 +7364,7 @@ mod tests {
         };
         assert!(reason.contains("line 7"), "{reason}");
         assert!(
-            !reason.contains("(") && !reason.contains("lan"),
+            !reason.contains('(') && !reason.contains("lan"),
             "the real line, never the key or the value: {reason}"
         );
     }
