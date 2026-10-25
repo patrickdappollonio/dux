@@ -1056,8 +1056,38 @@ mod quiet_web_wire {
 /// something away is often the only place the way back is named. Written as one
 /// helper so a flip's two arms are decided together at the site rather than by
 /// remembering to append `.quiet_web()` to one branch of an `if`.
-fn quiet_web_when(status: WireStatus, quiet: bool) -> WireStatus {
-    if quiet { status.quiet_web() } else { status }
+fn quiet_web_when(status: WireStatus, web: WebScreen) -> WireStatus {
+    match web {
+        WebScreen::ShowsTheOutcome => status.quiet_web(),
+        WebScreen::LacksTheOutcome => status,
+    }
+}
+
+/// Whether the web already shows what a status reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebScreen {
+    /// The outcome is on screen there, so a toast would only repeat it.
+    ShowsTheOutcome,
+    /// Nothing on screen shows it, so the toast is the only place it is said.
+    LacksTheOutcome,
+}
+
+/// Whether the changes pane is to be shown or hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneVisibility {
+    /// On screen.
+    Shown,
+    /// Off screen.
+    Hidden,
+}
+
+/// What a new agent's create does when a branch with its name already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExistingBranch {
+    /// Attach to that branch's history.
+    Attach,
+    /// Refuse, so the user can confirm attaching or pick another name.
+    Refuse,
 }
 
 impl WireStatus {
@@ -1224,14 +1254,6 @@ impl WireCommandOutcome {
     fn with_optional_status(status: Option<WireStatus>) -> Self {
         Self {
             status,
-            ..Self::default()
-        }
-    }
-
-    fn with_detached(status: WireStatus, detached: bool) -> Self {
-        Self {
-            status: Some(status),
-            detached: Some(detached),
             ..Self::default()
         }
     }
@@ -1988,13 +2010,33 @@ impl Engine {
                 title,
                 rename_branch,
             } => {
-                let status = self.rename_session(&session_id, &title, rename_branch)?;
+                // Through [`Engine::rename_agent`], the implementation the
+                // terminal UI's dialog calls too, so the rules, the refusals
+                // and the statuses are one set. The answer is the final of a
+                // rename that is done, or the keyed busy of a branch rename now
+                // running.
+                let reaction = self.rename_agent(
+                    &session_id,
+                    &title,
+                    if rename_branch {
+                        crate::engine::BranchRename::AlsoTheBranch
+                    } else {
+                        crate::engine::BranchRename::NameOnly
+                    },
+                )?;
+                let status = wire_status_from_reaction(&reaction)
+                    .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
             WireCommand::ReconnectSession { session_id, force } => {
-                let status = self.reconnect_session(&session_id, force)?;
+                let mode = if force {
+                    crate::engine::ReconnectMode::Force
+                } else {
+                    crate::engine::ReconnectMode::Normal
+                };
+                let status = self.reconnect_session(&session_id, mode)?;
                 Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
@@ -2024,9 +2066,11 @@ impl Engine {
                 ask_id,
             } => {
                 let consent = crate::worker::ReviewCopyConsent::from_request(
-                    review_copy,
+                    crate::worker::ReviewCopyAnswer {
+                        agreed: review_copy,
+                        by_flag: review_copy_by_flag,
+                    },
                     review_copy_warned,
-                    review_copy_by_flag,
                 );
                 let status = self.create_agent_from_pr(&project_id, &pr, &name, consent, ask_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
@@ -2035,12 +2079,18 @@ impl Engine {
             }
             WireCommand::KillSessionPty { session_id } => {
                 let (status, detached) = self.kill_session_pty(&session_id)?;
-                Ok(WireDispatch::handled(WireCommandOutcome::with_detached(
-                    status, detached,
-                )))
+                Ok(WireDispatch::handled(WireCommandOutcome {
+                    status: Some(status),
+                    detached: Some(detached),
+                    ..WireCommandOutcome::default()
+                }))
             }
             WireCommand::DetachAgent { session_id, force } => {
-                let status = self.detach_agent(&session_id, force)?;
+                let status = if force {
+                    self.force_detach_agent(&session_id)?
+                } else {
+                    self.detach_agent(&session_id)?
+                };
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2049,7 +2099,29 @@ impl Engine {
                 session_id,
                 restart_tabs,
             } => {
-                let status = self.recreate_working_copy_wire(&session_id, restart_tabs)?;
+                // Put a managed agent's working copy back at the path it
+                // already had. Refusals are errors rather than a quiet no-op:
+                // this is also an HTTP route and a palette command, so an id
+                // that should never have reached here has to be answered in a
+                // sentence. An id nobody has is a 404, not a refusal about an
+                // agent: without this bail every unknown id fell through to
+                // "dux only recreates a working copy it manages", which is a
+                // sentence about an agent that is not there, and the route's
+                // own 404 arm was unreachable.
+                if !self.sessions.iter().any(|s| s.id == session_id) {
+                    anyhow::bail!("unknown session: {session_id}");
+                }
+                let reaction = self.begin_recreate_working_copy(
+                    &session_id,
+                    if restart_tabs {
+                        crate::engine::TabsAfterRecreate::Restart
+                    } else {
+                        crate::engine::TabsAfterRecreate::Leave
+                    },
+                )?;
+                let status = wire_status_from_reaction(&reaction).ok_or_else(|| {
+                    anyhow::anyhow!("recreating the working copy raised no status")
+                })?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2062,9 +2134,11 @@ impl Engine {
             }
             WireCommand::StopAgentTab { session_id, tab_id } => {
                 let (status, detached) = self.stop_agent_tab_wire(&session_id, &tab_id)?;
-                Ok(WireDispatch::handled(WireCommandOutcome::with_detached(
-                    status, detached,
-                )))
+                Ok(WireDispatch::handled(WireCommandOutcome {
+                    status: Some(status),
+                    detached: Some(detached),
+                    ..WireCommandOutcome::default()
+                }))
             }
             WireCommand::ChangeAgentTabProvider {
                 session_id,
@@ -2094,7 +2168,11 @@ impl Engine {
     ) -> anyhow::Result<WireDispatch> {
         match command {
             WireCommand::SetChangesPaneVisible { visible } => {
-                let status = self.set_changes_pane_visible(visible);
+                let status = self.set_changes_pane_visible(if visible {
+                    PaneVisibility::Shown
+                } else {
+                    PaneVisibility::Hidden
+                });
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2223,7 +2301,8 @@ impl Engine {
     /// optimistic override once they match. Visibility is a low-stakes
     /// preference, so the write is lazy: the queue coalesces concurrent toggles
     /// and logs any disk failure; no rollback is needed.
-    fn set_changes_pane_visible(&mut self, visible: bool) -> WireStatus {
+    fn set_changes_pane_visible(&mut self, visibility: PaneVisibility) -> WireStatus {
+        let visible = visibility == PaneVisibility::Shown;
         // Idempotent: skip the disk write when nothing changes (also blunts a
         // client that spams the toggle).
         if self.config.ui.show_changes_pane == visible {
@@ -2238,7 +2317,14 @@ impl Engine {
             // Quiet only when the pane is (or already was) SHOWN: the pane is
             // right there. Both hidden answers stay loud, because they name the
             // way back to something that has just left the screen.
-            return quiet_web_when(WireStatus::new("info", message.to_string()), visible);
+            return quiet_web_when(
+                WireStatus::new("info", message.to_string()),
+                if visible {
+                    WebScreen::ShowsTheOutcome
+                } else {
+                    WebScreen::LacksTheOutcome
+                },
+            );
         }
         self.config.ui.show_changes_pane = visible;
         self.config_writer.save_lazy(self.config.clone());
@@ -2247,7 +2333,14 @@ impl Engine {
         } else {
             "Changes pane hidden. Reopen it from the show button in the header, or set it permanently in Preferences."
         };
-        quiet_web_when(WireStatus::new("info", message.to_string()), visible)
+        quiet_web_when(
+            WireStatus::new("info", message.to_string()),
+            if visible {
+                WebScreen::ShowsTheOutcome
+            } else {
+                WebScreen::LacksTheOutcome
+            },
+        )
     }
 
     /// Persist this dux instance's identity, the browser tab title
@@ -2550,7 +2643,14 @@ impl Engine {
         // Turning it OFF takes a behavior away with nothing on screen to show
         // for it, and the sentence is where the other three ways to copy are
         // named, so that arm stays loud.
-        quiet_web_when(WireStatus::new("info", message.to_string()), next)
+        quiet_web_when(
+            WireStatus::new("info", message.to_string()),
+            if next {
+                WebScreen::ShowsTheOutcome
+            } else {
+                WebScreen::LacksTheOutcome
+            },
+        )
     }
 
     /// Flip `ui.always_show_tab_strip` and persist it, mirroring the TUI's
@@ -2566,7 +2666,14 @@ impl Engine {
         };
         // Turning it on puts the strip on screen. Turning it off can make the
         // strip vanish, so that arm keeps the sentence that explains why.
-        quiet_web_when(WireStatus::new("info", message.to_string()), next)
+        quiet_web_when(
+            WireStatus::new("info", message.to_string()),
+            if next {
+                WebScreen::ShowsTheOutcome
+            } else {
+                WebScreen::LacksTheOutcome
+            },
+        )
     }
 
     /// Flip `ui.tab_reaches_agent` and persist it, mirroring the TUI's
@@ -2702,13 +2809,11 @@ impl Engine {
     /// by the background reaper. So the status this returns is a keyed BUSY, and
     /// the reaper's own final replaces it once the last tab is actually gone.
     ///
-    /// `force` takes the immediate path instead ([`Engine::kill_session_runtime`]),
-    /// for the panic button. It answers with a plain final, because there is
-    /// nothing left to wait for by the time it returns.
-    fn detach_agent(&mut self, session_id: &str, force: bool) -> anyhow::Result<WireStatus> {
-        if force {
-            return self.force_detach_agent(session_id);
-        }
+    /// [`Self::force_detach_agent`] takes the immediate path instead
+    /// ([`Engine::kill_session_runtime`]), for the panic button. It answers
+    /// with a plain final, because there is nothing left to wait for by the
+    /// time it returns.
+    fn detach_agent(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
         match self.begin_detach_session(session_id) {
             crate::engine::DetachSessionOutcome::UnknownSession => {
                 Err(anyhow::anyhow!("unknown session: {session_id}"))
@@ -2724,35 +2829,6 @@ impl Engine {
                 Ok(WireStatus::keyed(key, "busy", busy))
             }
         }
-    }
-
-    /// Put a managed agent's working copy back at the path it already had.
-    ///
-    /// Refusals are errors rather than a quiet no-op: this is also an HTTP route
-    /// and a palette command, so an id that should never have reached here has
-    /// to be answered in a sentence.
-    fn recreate_working_copy_wire(
-        &mut self,
-        session_id: &str,
-        restart_tabs: bool,
-    ) -> anyhow::Result<WireStatus> {
-        // An id nobody has is a 404, not a refusal about an agent: without this
-        // bail every unknown id fell through to "dux only recreates a working
-        // copy it manages", which is a sentence about an agent that is not
-        // there, and the route's own 404 arm was unreachable.
-        if !self.sessions.iter().any(|s| s.id == session_id) {
-            anyhow::bail!("unknown session: {session_id}");
-        }
-        let reaction = self.begin_recreate_working_copy(
-            session_id,
-            if restart_tabs {
-                crate::engine::TabsAfterRecreate::Restart
-            } else {
-                crate::engine::TabsAfterRecreate::Leave
-            },
-        )?;
-        wire_status_from_reaction(&reaction)
-            .ok_or_else(|| anyhow::anyhow!("recreating the working copy raised no status"))
     }
 
     /// The panic button's arm of [`Self::detach_agent`]: end the agent's
@@ -2789,29 +2865,6 @@ impl Engine {
                 })
             }
         }
-    }
-
-    /// Rename an agent through [`Engine::rename_agent`], the implementation the
-    /// terminal UI's dialog calls too, so the rules, the refusals and the
-    /// statuses are one set. The answer is the final of a rename that is done,
-    /// or the keyed busy of a branch rename now running.
-    fn rename_session(
-        &mut self,
-        session_id: &str,
-        title: &str,
-        rename_branch: bool,
-    ) -> anyhow::Result<WireStatus> {
-        let reaction = self.rename_agent(
-            session_id,
-            title,
-            if rename_branch {
-                crate::engine::BranchRename::AlsoTheBranch
-            } else {
-                crate::engine::BranchRename::NameOnly
-            },
-        )?;
-        wire_status_from_reaction(&reaction)
-            .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))
     }
 
     /// Swap which provider a session uses, mirroring the TUI's
@@ -3053,7 +3106,7 @@ impl Engine {
     fn reconnect_session(
         &mut self,
         session_id: &str,
-        force: bool,
+        mode: crate::engine::ReconnectMode,
     ) -> anyhow::Result<Option<WireStatus>> {
         // The guards, the collision-aware resume decision, the status message,
         // and the pre-dispatch mutations (force teardown + conflicting-worktree
@@ -3061,15 +3114,7 @@ impl Engine {
         // TUI. The web sources no PTY size, so it uses the subscribe-launch
         // default `(24, 80)` (rows, cols); the focused pane re-attaches via the
         // subscribe machinery once the new provider comes up.
-        let (request, busy) = match self.reconnect_plan(
-            session_id,
-            if force {
-                crate::engine::ReconnectMode::Force
-            } else {
-                crate::engine::ReconnectMode::Normal
-            },
-            (24, 80),
-        )? {
+        let (request, busy) = match self.reconnect_plan(session_id, mode, (24, 80))? {
             crate::engine::ReconnectPlan::AlreadyConnected { message } => {
                 return Ok(Some(WireStatus::new("info", message)));
             }
@@ -5055,8 +5100,9 @@ impl Engine {
         project_id: &str,
         name: &str,
         copy_uncommitted_changes: Option<bool>,
-        use_existing_branch: bool,
+        existing_branch: ExistingBranch,
     ) -> anyhow::Result<Command> {
+        let use_existing_branch = existing_branch == ExistingBranch::Attach;
         let project = self
             .projects
             .iter()
@@ -5232,7 +5278,11 @@ impl Engine {
                 &project_id,
                 &name,
                 copy_uncommitted_changes,
-                use_existing_branch,
+                if use_existing_branch {
+                    ExistingBranch::Attach
+                } else {
+                    ExistingBranch::Refuse
+                },
             )?,
             WireCommand::ForkSession { session_id, name } => {
                 self.fork_session_command(&session_id, &name)?
@@ -8914,31 +8964,35 @@ mod tests {
     }
 
     /// A project on `feature` in a repository whose other branch is `trunk`,
-    /// stored in SQLite (unless `stored` is false) the way an add leaves it.
-    fn change_base_fixture(
-        stored: bool,
-    ) -> (tempfile::TempDir, Engine, crate::test_scratch::ScratchDir) {
+    /// stored in SQLite the way an add leaves it.
+    fn change_base_fixture() -> (tempfile::TempDir, Engine, crate::test_scratch::ScratchDir) {
+        let (repo, engine, tmp) = unstored_change_base_fixture();
+        let project = &engine.projects[0];
+        engine
+            .session_store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: None,
+                leading_branch: Some("feature".to_string()),
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("seed the project row");
+        (repo, engine, tmp)
+    }
+
+    /// [`change_base_fixture`]'s project, with no SQLite row.
+    fn unstored_change_base_fixture() -> (tempfile::TempDir, Engine, crate::test_scratch::ScratchDir)
+    {
         let repo = init_repo_on_feature_branch("trunk");
         let (mut engine, tmp) = test_engine();
         let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
         project.leading_branch = Some("feature".to_string());
         project.current_branch = "feature".to_string();
         project.branch_status = ProjectBranchStatus::Leading;
-        if stored {
-            engine
-                .session_store
-                .upsert_project(&crate::config::ProjectConfig {
-                    id: project.id.clone(),
-                    path: project.path.clone(),
-                    name: Some(project.name.clone()),
-                    default_provider: None,
-                    leading_branch: Some("feature".to_string()),
-                    auto_reopen_agents: None,
-                    startup_command: None,
-                    env: Default::default(),
-                })
-                .expect("seed the project row");
-        }
         engine.projects.push(project);
         (repo, engine, tmp)
     }
@@ -8976,7 +9030,7 @@ mod tests {
     /// releases the folder.
     #[test]
     fn change_base_branch_busy_is_keyed_and_holds_the_folder_until_it_finishes() {
-        let (repo, mut engine, _tmp) = change_base_fixture(true);
+        let (repo, mut engine, _tmp) = change_base_fixture();
 
         let busy = change_base(&mut engine, "trunk");
         assert_eq!(busy.tone, "busy");
@@ -9060,7 +9114,7 @@ mod tests {
             ),
             (crate::engine::ProjectFolderAction::Pull, "pulling"),
         ] {
-            let (repo, mut engine, _tmp) = change_base_fixture(true);
+            let (repo, mut engine, _tmp) = change_base_fixture();
             let path = repo.path().to_string_lossy().into_owned();
             engine
                 .begin_project_folder_action(&path, "p1-name", running)
@@ -9134,7 +9188,7 @@ mod tests {
     #[test]
     fn a_change_to_a_branch_that_is_not_listed_is_refused_and_keeps_the_base() {
         for branch in ["nope", "--detach"] {
-            let (repo, mut engine, _tmp) = change_base_fixture(true);
+            let (repo, mut engine, _tmp) = change_base_fixture();
             change_base(&mut engine, branch);
 
             let statuses = drive_change_base(&mut engine);
@@ -9170,7 +9224,7 @@ mod tests {
     /// the base stays what it was.
     #[test]
     fn a_change_whose_base_cannot_be_saved_resolves_with_the_sticky_error() {
-        let (repo, mut engine, _tmp) = change_base_fixture(false);
+        let (repo, mut engine, _tmp) = unstored_change_base_fixture();
         change_base(&mut engine, "trunk");
 
         let statuses = drive_change_base(&mut engine);
@@ -9204,7 +9258,7 @@ mod tests {
     /// changes nothing and says so rather than claiming a checkout.
     #[test]
     fn a_change_to_the_current_base_and_folder_branch_says_nothing_needed_to_change() {
-        let (repo, mut engine, _tmp) = change_base_fixture(true);
+        let (repo, mut engine, _tmp) = change_base_fixture();
         change_base(&mut engine, "feature");
 
         let statuses = drive_change_base(&mut engine);

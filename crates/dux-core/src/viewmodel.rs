@@ -558,6 +558,16 @@ pub struct RecreateView {
     pub restart_offer: Vec<String>,
 }
 
+/// Whether an agent's provider resumes its prior conversation when it comes up
+/// in the same directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationResume {
+    /// It picks the prior conversation back up.
+    Resumes,
+    /// It starts a fresh one: it has no directory-scoped resume.
+    StartsFresh,
+}
+
 impl AgentWorkspaceView {
     /// Project the model workspace, folding in the live repository verdict a
     /// folder needs (the model does not carry it: it is engine state, refreshed
@@ -565,7 +575,7 @@ impl AgentWorkspaceView {
     pub fn from_workspace(
         workspace: &crate::model::AgentWorkspace,
         repo_status: crate::git::FolderRepoStatus,
-        conversation_resumes: bool,
+        conversation: ConversationResume,
         recreate: Option<RecreateView>,
     ) -> Self {
         match workspace {
@@ -582,7 +592,7 @@ impl AgentWorkspaceView {
                     worktree_missing: repo_status == crate::git::FolderRepoStatus::Missing,
                     quiet_reason: crate::working_copy::quiet_reason(repo_status, worktree, true)
                         .unwrap_or_default(),
-                    conversation_resumes,
+                    conversation_resumes: conversation == ConversationResume::Resumes,
                     recreate,
                 }
             }
@@ -1195,55 +1205,11 @@ impl ProjectView {
     }
 }
 
-impl SessionView {
-    #[allow(clippy::too_many_arguments)]
-    fn from_session(
-        s: &AgentSession,
-        pr: Option<&PrInfo>,
-        pr_overridden: bool,
-        pr_autodetect_suppressed: bool,
-        tabs: Vec<AgentTabView>,
-        has_output: bool,
-        working: bool,
-        typing: bool,
-        needs_attention: bool,
-        detachable: bool,
-        repo_status: crate::git::FolderRepoStatus,
-        conversation_resumes: bool,
-        recreate: Option<RecreateView>,
-    ) -> Self {
-        Self {
-            id: s.id.clone(),
-            title: s.title.clone(),
-            provider: s.provider.as_str().to_string(),
-            workspace: AgentWorkspaceView::from_workspace(
-                &s.workspace,
-                repo_status,
-                conversation_resumes,
-                recreate,
-            ),
-            status: s.status.as_str().to_string(),
-            auto_reopen_enabled: s.auto_reopen_enabled,
-            pr: pr.map(|pr| PrView::from_pr(pr, pr_overridden)),
-            pr_autodetect_suppressed,
-            slot_tab_id: s.slot_tab_id().to_string(),
-            detachable,
-            tabs,
-            has_output,
-            working,
-            typing,
-            needs_attention,
-            created_at: s.created_at.to_rfc3339(),
-            updated_at: s.updated_at.to_rfc3339(),
-            last_focused_tab: s.last_focused_tab.clone(),
-        }
-    }
-}
-
 impl PrView {
-    fn from_pr(pr: &PrInfo, overridden: bool) -> Self {
+    /// Project `pr` as dux found it, not overridden by a pin.
+    fn from_pr(pr: &PrInfo) -> Self {
         Self {
-            overridden,
+            overridden: false,
             number: pr.number,
             state: match pr.state {
                 PrState::Open => "open",
@@ -1450,25 +1416,47 @@ impl Engine {
                 .unwrap_or_else(|| t.provider.clone());
             tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, (i + 1) as u32));
         }
-        SessionView::from_session(
-            s,
-            self.pr_statuses.get(&s.id),
-            self.pr_overrides.contains_key(&s.id),
-            self.pr_suppressions.contains(&s.id),
+        let conversation = if crate::config::provider_config(&self.config, &s.provider)
+            .supports_session_resume()
+        {
+            ConversationResume::Resumes
+        } else {
+            ConversationResume::StartsFresh
+        };
+        let recreate = self
+            .recreate_working_copy_inputs(&s.id)
+            .map(|inputs| RecreateView {
+                running: inputs.running_tabs,
+                restart_offer: inputs.restart_offer,
+            });
+        SessionView {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            provider: s.provider.as_str().to_string(),
+            workspace: AgentWorkspaceView::from_workspace(
+                &s.workspace,
+                self.folder_repo_status(&s.id),
+                conversation,
+                recreate,
+            ),
+            status: s.status.as_str().to_string(),
+            auto_reopen_enabled: s.auto_reopen_enabled,
+            pr: self.pr_statuses.get(&s.id).map(|pr| PrView {
+                overridden: self.pr_overrides.contains_key(&s.id),
+                ..PrView::from_pr(pr)
+            }),
+            pr_autodetect_suppressed: self.pr_suppressions.contains(&s.id),
+            slot_tab_id: s.slot_tab_id().to_string(),
+            detachable: self.is_detachable(&s.id),
             tabs,
             has_output,
             working,
             typing,
             needs_attention,
-            self.is_detachable(&s.id),
-            self.folder_repo_status(&s.id),
-            crate::config::provider_config(&self.config, &s.provider).supports_session_resume(),
-            self.recreate_working_copy_inputs(&s.id)
-                .map(|inputs| RecreateView {
-                    running: inputs.running_tabs,
-                    restart_offer: inputs.restart_offer,
-                }),
-        )
+            created_at: s.created_at.to_rfc3339(),
+            updated_at: s.updated_at.to_rfc3339(),
+            last_focused_tab: s.last_focused_tab.clone(),
+        }
     }
 
     /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.

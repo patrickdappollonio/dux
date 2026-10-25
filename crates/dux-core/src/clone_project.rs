@@ -68,10 +68,12 @@ pub struct UpfrontReviewCopy {
 impl UpfrontReviewCopy {
     pub fn consent(&self) -> crate::worker::ReviewCopyConsent {
         crate::worker::ReviewCopyConsent::from_upfront(
-            self.agreed,
+            crate::worker::ReviewCopyAnswer {
+                agreed: self.agreed,
+                by_flag: self.by_flag,
+            },
             self.reason.clone(),
             self.branch.clone(),
-            self.by_flag,
         )
     }
 }

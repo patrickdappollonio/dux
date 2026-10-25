@@ -105,12 +105,22 @@ pub struct ShownReason {
     pub branch: Option<String>,
 }
 
+/// What a surface sent about a review copy, before the warning it was shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewCopyAnswer {
+    /// Whether the box was ticked or the flag given.
+    pub agreed: bool,
+    /// Whether the answer came from the command line, which agrees with a
+    /// flag instead of a box.
+    pub by_flag: bool,
+}
+
 impl ReviewCopyConsent {
-    /// Read the two fields every surface sends: whether the box was ticked or
-    /// the flag given, and the identifier of the warning the user was shown.
-    pub fn from_request(agreed: bool, warned: Option<String>, by_flag: bool) -> Self {
-        match (agreed, warned) {
-            (false, _) if by_flag => Self::WithheldByFlag,
+    /// Read the fields every surface sends: the answer, and the identifier of
+    /// the warning the user was shown.
+    pub fn from_request(answer: ReviewCopyAnswer, warned: Option<String>) -> Self {
+        match (answer.agreed, warned) {
+            (false, _) if answer.by_flag => Self::WithheldByFlag,
             (false, _) => Self::Withheld,
             (true, None) => Self::Blanket,
             (true, Some(warned)) => Self::Warned(warned),
@@ -120,14 +130,13 @@ impl ReviewCopyConsent {
     /// [`Self::from_request`] for an agreement given before the project
     /// existed, which names the reason it was shown rather than a full warning.
     pub fn from_upfront(
-        agreed: bool,
+        answer: ReviewCopyAnswer,
         reason: Option<String>,
         branch: Option<String>,
-        by_flag: bool,
     ) -> Self {
-        match (agreed, reason) {
+        match (answer.agreed, reason) {
             (true, Some(kind)) => Self::Reason(Box::new(ShownReason { kind, branch })),
-            (agreed, _) => Self::from_request(agreed, None, by_flag),
+            _ => Self::from_request(answer, None),
         }
     }
 
@@ -1051,4 +1060,52 @@ pub enum ProjectPersistenceAction {
         project_name: String,
         env: BTreeMap<String, String>,
     },
+}
+
+#[cfg(test)]
+mod review_copy_consent_tests {
+    use super::{ReviewCopyAnswer, ReviewCopyConsent, ShownReason};
+
+    #[test]
+    fn a_request_reads_as_the_consent_it_gave() {
+        let read = |agreed, warned: Option<&str>, by_flag| {
+            ReviewCopyConsent::from_request(
+                ReviewCopyAnswer { agreed, by_flag },
+                warned.map(str::to_string),
+            )
+        };
+        assert_eq!(
+            read(false, Some("w"), true),
+            ReviewCopyConsent::WithheldByFlag
+        );
+        assert_eq!(read(false, None, false), ReviewCopyConsent::Withheld);
+        assert_eq!(read(true, None, true), ReviewCopyConsent::Blanket);
+        assert_eq!(
+            read(true, Some("w"), false),
+            ReviewCopyConsent::Warned("w".to_string())
+        );
+    }
+
+    #[test]
+    fn an_upfront_agreement_names_its_reason_or_reads_as_a_request() {
+        let read = |agreed, reason: Option<&str>, by_flag| {
+            ReviewCopyConsent::from_upfront(
+                ReviewCopyAnswer { agreed, by_flag },
+                reason.map(str::to_string),
+                Some("b".to_string()),
+            )
+        };
+        assert_eq!(
+            read(true, Some("busy"), false),
+            ReviewCopyConsent::Reason(Box::new(ShownReason {
+                kind: "busy".to_string(),
+                branch: Some("b".to_string()),
+            }))
+        );
+        assert_eq!(read(true, None, false), ReviewCopyConsent::Blanket);
+        assert_eq!(
+            read(false, Some("busy"), true),
+            ReviewCopyConsent::WithheldByFlag
+        );
+    }
 }
