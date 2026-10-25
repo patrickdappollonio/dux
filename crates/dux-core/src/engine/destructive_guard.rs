@@ -37,9 +37,10 @@ impl Drop for EngineThreadMark {
 /// clearance does) runs on the engine thread during a destructive command.
 pub fn assert_off_engine_thread(what: &str) {
     #[cfg(test)]
-    if ON_ENGINE_THREAD.with(std::cell::Cell::get) {
-        panic!("{what} ran on the engine thread during a destructive command");
-    }
+    assert!(
+        !ON_ENGINE_THREAD.with(std::cell::Cell::get),
+        "{what} ran on the engine thread during a destructive command"
+    );
     #[cfg(not(test))]
     let _ = what;
 }

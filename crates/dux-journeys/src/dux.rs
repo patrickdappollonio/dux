@@ -506,13 +506,12 @@ impl Dux {
             || async {
                 // A seed hook that failed (a `dux config set` refusing, say)
                 // ends the container; say that rather than timing out on it.
-                if !self.container.is_running().await.unwrap_or(false) {
-                    panic!(
-                        "the container {} stopped before dux answered; a seed hook or dux \
-                         itself failed (its output is printed below)",
-                        self.name
-                    );
-                }
+                assert!(
+                    self.container.is_running().await.unwrap_or(false),
+                    "the container {} stopped before dux answered; a seed hook or dux \
+                     itself failed (its output is printed below)",
+                    self.name
+                );
                 self.answers_healthz().await.then_some(())
             },
         )

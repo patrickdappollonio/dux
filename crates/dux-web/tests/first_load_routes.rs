@@ -195,9 +195,10 @@ async fn await_pending_screen(server: &Server) -> serde_json::Value {
         if !doc["pending_first_load"].is_null() {
             return doc["pending_first_load"].clone();
         }
-        if Instant::now() >= deadline {
-            panic!("no first-load screen was ever offered: {doc}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "no first-load screen was ever offered: {doc}"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -210,12 +211,11 @@ async fn await_last_seen(server: &Server, expected: &str) {
         if server.last_seen().as_deref() == Some(expected) {
             return;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "the stored version never became {expected:?} (it is {:?})",
-                server.last_seen()
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "the stored version never became {expected:?} (it is {:?})",
+            server.last_seen()
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

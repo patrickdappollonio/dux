@@ -98,9 +98,10 @@ where
         if let Some(value) = probe().await {
             return value;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out after {within:?} waiting for {what}");
-        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after {within:?} waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }

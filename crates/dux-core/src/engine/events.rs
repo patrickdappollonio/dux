@@ -11408,9 +11408,7 @@ mod tests {
                 // the count below measures rather than there having been one
                 // panic to report.
                 let n = counter_for_body.fetch_add(1, Ordering::Relaxed);
-                if n < 2 {
-                    panic!("this iteration panics");
-                }
+                assert!(n >= 2, "this iteration panics");
                 LoopControl::Break
             },
         );
@@ -11467,9 +11465,7 @@ mod tests {
             },
             move |_tx| {
                 let n = counter_for_body.fetch_add(1, Ordering::Relaxed);
-                if n == 0 || n == clean + 1 {
-                    panic!("this iteration panics");
-                }
+                assert!(!(n == 0 || n == clean + 1), "this iteration panics");
                 if n > clean + 1 {
                     return LoopControl::Break;
                 }
