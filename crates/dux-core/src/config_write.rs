@@ -6039,8 +6039,7 @@ second_note = \"nowhere to go\"
             mutate_config_file(&link, |doc| {
                 doc["ui"]["left_width_pct"] = toml_edit::value(30);
                 Ok(())
-            })
-            .map(|()| ()),
+            }),
             replace_config_file(&link, |_| Ok(("[ui]\n".to_string(), ()))),
             write_config_secure(&link, "[ui]\n"),
             save_config_three_way(&link, None, &Config::default(), Durability::NoFsync).map(|_| ()),
