@@ -238,25 +238,28 @@ impl LogLine {
         self.segments.iter().map(|s| s.text.as_str()).collect()
     }
 
-    /// The stdout spelling: ANSI-styled glyphs when `color`, plain words and no
-    /// escapes otherwise.
-    pub fn render(&self, color: bool) -> String {
+    /// The colored stdout spelling: ANSI-styled glyphs.
+    pub fn render_colored(&self) -> String {
         let mut out = String::new();
         for segment in &self.segments {
-            if color {
-                match segment.ansi_prefix() {
-                    Some(prefix) => {
-                        out.push_str(prefix);
-                        out.push_str(&segment.text);
-                        out.push_str(RESET);
-                    }
-                    None => out.push_str(&segment.text),
+            match segment.ansi_prefix() {
+                Some(prefix) => {
+                    out.push_str(prefix);
+                    out.push_str(&segment.text);
+                    out.push_str(RESET);
                 }
-            } else {
-                out.push_str(segment.plain.as_deref().unwrap_or(&segment.text));
+                None => out.push_str(&segment.text),
             }
         }
         out
+    }
+
+    /// The plain stdout spelling: plain words and no escapes.
+    pub fn render_plain(&self) -> String {
+        self.segments
+            .iter()
+            .map(|segment| segment.plain.as_deref().unwrap_or(&segment.text))
+            .collect()
     }
 }
 
@@ -528,7 +531,8 @@ mod tests {
             120 - QR_INDENT.len(),
             crate::qr::Polarity::LightModulesFilled,
         );
-        let blank = |line: &LogLine| line.render(true).is_empty() && line.render(false).is_empty();
+        let blank =
+            |line: &LogLine| line.render_colored().is_empty() && line.render_plain().is_empty();
         assert!(
             blank(&lines[1]),
             "a blank line sets the caption off the codes"
@@ -582,9 +586,9 @@ mod tests {
     #[test]
     fn a_qr_code_renders_black_on_white_in_color_and_plain_without() {
         let lines = qr_lines("12:00:00", &[QR_IP.to_string()], 120);
-        let colored = lines[2].render(true);
+        let colored = lines[2].render_colored();
         assert!(colored.contains("\x1b[30;107m"), "{colored:?}");
-        let plain = lines[2].render(false);
+        let plain = lines[2].render_plain();
         assert!(!plain.contains('\x1b'), "{plain:?}");
     }
 
@@ -611,7 +615,7 @@ mod tests {
             line.text(),
             "12:00:00 \u{279c} client connected from 10.0.0.1"
         );
-        let colored = line.render(true);
+        let colored = line.render_colored();
         assert!(colored.contains("\x1b["), "{colored}");
         assert_eq!(strip_ansi(&colored), line.text());
     }
@@ -619,7 +623,7 @@ mod tests {
     #[test]
     fn an_event_line_without_color_uses_the_word_and_no_escape() {
         let line = LogLine::event("12:00:00", LogTone::Warn, "careful");
-        assert_eq!(line.render(false), "12:00:00 warn careful");
+        assert_eq!(line.render_plain(), "12:00:00 warn careful");
     }
 
     #[test]
@@ -627,8 +631,8 @@ mod tests {
         for tone in [LogTone::Info, LogTone::Ok, LogTone::Warn, LogTone::Error] {
             let line = LogLine::event("t", tone, "m");
             assert!(line.text().contains(tone.glyph()));
-            assert!(line.render(true).contains(tone.ansi()));
-            assert!(line.render(false).contains(tone.label()));
+            assert!(line.render_colored().contains(tone.ansi()));
+            assert!(line.render_plain().contains(tone.label()));
         }
     }
 
@@ -636,25 +640,25 @@ mod tests {
     fn an_access_line_has_its_shape_and_status_class() {
         let line = LogLine::access("12:00:00", "GET", "/api/v1/build", 200, 3);
         assert_eq!(line.text(), "12:00:00 GET /api/v1/build 200 3ms");
-        assert_eq!(line.render(false), line.text());
+        assert_eq!(line.render_plain(), line.text());
         assert!(
             LogLine::access("t", "GET", "/", 204, 1)
-                .render(true)
+                .render_colored()
                 .contains(GREEN)
         );
         assert!(
             LogLine::access("t", "GET", "/", 308, 1)
-                .render(true)
+                .render_colored()
                 .contains(CYAN)
         );
         assert!(
             LogLine::access("t", "GET", "/", 404, 1)
-                .render(true)
+                .render_colored()
                 .contains(YELLOW)
         );
         assert!(
             LogLine::access("t", "GET", "/", 500, 1)
-                .render(true)
+                .render_colored()
                 .contains(RED)
         );
     }
@@ -678,7 +682,7 @@ mod tests {
         let lines: Vec<String> = sample_banner()
             .lines()
             .iter()
-            .map(|l| l.render(false))
+            .map(|l| l.render_plain())
             .collect();
         assert_eq!(lines[1], "  -> Local (loopback): http://127.0.0.1:3890");
         assert_eq!(
@@ -691,7 +695,7 @@ mod tests {
     #[test]
     fn the_colored_banner_strips_to_its_rich_spelling() {
         for line in sample_banner().lines() {
-            assert_eq!(strip_ansi(&line.render(true)), line.text());
+            assert_eq!(strip_ansi(&line.render_colored()), line.text());
         }
     }
 

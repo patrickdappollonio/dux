@@ -154,6 +154,15 @@ impl LineWriter {
         }
     }
 
+    /// `line` as this stream prints it: colored or plain.
+    fn render(&self, line: &LogLine) -> String {
+        if self.color {
+            line.render_colored()
+        } else {
+            line.render_plain()
+        }
+    }
+
     /// Queue `line` without blocking. After a drop streak, a note naming the
     /// count goes first, once.
     fn send(&self, line: &LogLine, clock: Clock) {
@@ -175,13 +184,13 @@ impl LineWriter {
             // still-full queue keeps counting rather than losing the notice.
             if self
                 .tx
-                .try_send(WriterMsg::Line(note.render(self.color)))
+                .try_send(WriterMsg::Line(self.render(&note)))
                 .is_ok()
             {
                 self.dropped.fetch_sub(drop_streak, Ordering::Relaxed);
             }
         }
-        match self.tx.try_send(WriterMsg::Line(line.render(self.color))) {
+        match self.tx.try_send(WriterMsg::Line(self.render(line))) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -490,7 +499,7 @@ impl Console {
 
     fn write_to_file(&self, line: &LogLine) {
         if let Some(file) = &self.0.file {
-            file.write_line(&format!("{} {}", (self.0.stamp)(), line.render(false)));
+            file.write_line(&format!("{} {}", (self.0.stamp)(), line.render_plain()));
         }
     }
 
