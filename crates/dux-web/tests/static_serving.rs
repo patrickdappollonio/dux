@@ -663,7 +663,7 @@ fn chunk_refs_reads_backticks_and_a_missing_leading_dot_slash() {
     // template literals, and the editor's web worker is constructed from a URL
     // with no `./` prefix at all. Both shapes below are copied from a real build.
     assert_eq!(
-        chunk_refs(r#"Zy(()=>jh(()=>import(`./DiffViewer-CenXBp36.js`)));"#),
+        chunk_refs(r"Zy(()=>jh(()=>import(`./DiffViewer-CenXBp36.js`)));"),
         vec!["DiffViewer-CenXBp36.js".to_string()],
         "a backtick template literal is the form the bundler actually emits"
     );
@@ -673,7 +673,7 @@ fn chunk_refs_reads_backticks_and_a_missing_leading_dot_slash() {
         "a worker URL carries no leading ./ and must still be followed"
     );
     assert_eq!(
-        chunk_refs(r#"const a='./css-mode-DEadBeEf.js'"#),
+        chunk_refs(r"const a='./css-mode-DEadBeEf.js'"),
         vec!["css-mode-DEadBeEf.js".to_string()],
         "single quotes are a legal JavaScript string delimiter too"
     );

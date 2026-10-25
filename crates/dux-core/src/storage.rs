@@ -140,7 +140,7 @@ impl SessionStore {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists agent_sessions (
                 id text primary key,
                 project_id text not null,
@@ -156,10 +156,10 @@ impl SessionStore {
                 created_at text not null,
                 updated_at text not null
             );
-            "#,
+            ",
         )?;
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists projects (
                 id text primary key,
                 path text not null unique,
@@ -173,7 +173,7 @@ impl SessionStore {
                 created_at text not null,
                 updated_at text not null
             );
-            "#,
+            ",
         )?;
         ensure_column(&self.conn, "projects", "name", "text")?;
         ensure_column(&self.conn, "projects", "default_provider", "text")?;
@@ -384,7 +384,7 @@ impl SessionStore {
         // down, because they write rows into it.
         ensure_column(&self.conn, "agent_sessions", "slot_tab_id", "text")?;
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists session_prs (
                 session_id text not null,
                 pr_number integer not null,
@@ -394,7 +394,7 @@ impl SessionStore {
                 primary key (session_id, pr_number),
                 foreign key (session_id) references agent_sessions(id) on delete cascade
             );
-            "#,
+            ",
         )?;
         ensure_column(
             &self.conn,
@@ -424,7 +424,7 @@ impl SessionStore {
         // first sync cycle refreshes them. Derived runtime state, so it lives
         // here and never in portable config.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists session_pr_overrides (
                 session_id text primary key
                     references agent_sessions(id) on delete cascade,
@@ -435,7 +435,7 @@ impl SessionStore {
                 title      text not null default '',
                 url        text not null default ''
             );
-            "#,
+            ",
         )?;
         // A session whose pull-request autodetection the user switched off by
         // detaching. One row per session, presence is the whole meaning, so the
@@ -446,12 +446,12 @@ impl SessionStore {
         // and `remove_project_records` delete these rows explicitly. Derived
         // runtime state, so it lives here and never in portable config.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists session_pr_suppressions (
                 session_id text primary key
                     references agent_sessions(id) on delete cascade
             );
-            "#,
+            ",
         )?;
         // The name the branch dux minted for an agent has now, recorded when an
         // explicit rename moves it. An agent whose branch differs from the one it
@@ -459,13 +459,13 @@ impl SessionStore {
         // one, and only this row tells the two apart after a restart. Deleted
         // explicitly with the session, like the tables above.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists session_minted_branch_renames (
                 session_id text primary key
                     references agent_sessions(id) on delete cascade,
                 branch_name text not null
             );
-            "#,
+            ",
         )?;
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
@@ -473,12 +473,12 @@ impl SessionStore {
         // persisted so it survives restarts (never resets to a lower value). The
         // row is removed when the session is deleted (see `delete_session`).
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists changes_rev (
                 session_id text primary key,
                 rev integer not null
             );
-            "#,
+            ",
         )?;
         // One row per provider tab, the agent's FIRST tab included: the
         // session-slot tab is a row like any other, named by
@@ -486,7 +486,7 @@ impl SessionStore {
         // (or its project) is deleted (see
         // `delete_session`/`remove_project_records`).
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists agent_tabs (
                 id text primary key,
                 session_id text not null,
@@ -495,7 +495,7 @@ impl SessionStore {
                 created_at text not null
             );
             create index if not exists idx_agent_tabs_session on agent_tabs(session_id);
-            "#,
+            ",
         )?;
         // Small key/value bag for whole-app derived state that belongs to no
         // session and no project, and that must be SHARED by the TUI and the
@@ -505,12 +505,12 @@ impl SessionStore {
         // per-entity state belongs in its own purpose-built table, exactly like
         // `changes_rev`.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists app_state (
                 key text primary key,
                 value text not null
             );
-            "#,
+            ",
         )?;
         // A worktree removal the user asked for and dux has not finished: the
         // agent's record is already gone when the removal starts (it waits for
@@ -519,7 +519,7 @@ impl SessionStore {
         // nothing remembers to remove. The next start finishes what is here.
         // Additive: existing databases start with zero rows.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists pending_worktree_removals (
                 session_id text primary key,
                 label text not null,
@@ -536,7 +536,7 @@ impl SessionStore {
                 process_registry text not null default '',
                 created_at text not null
             );
-            "#,
+            ",
         )?;
         // What was running in those sessions when the delete began, by
         // identity: the only evidence a later start may act on for a session
@@ -559,12 +559,12 @@ impl SessionStore {
         // `crate::process_sessions::AgentProcessRegistry::attach_store`): one
         // row holding the whole registry, replaced atomically on every change.
         self.conn.execute_batch(
-            r#"
+            r"
             create table if not exists process_registry (
                 id integer primary key check (id = 1),
                 body text not null
             );
-            "#,
+            ",
         )?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
@@ -1370,7 +1370,7 @@ impl SessionStore {
     pub fn upsert_project_at(&self, project: &ProjectConfig, sort_order: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let updated = self.conn.execute(
-            r#"
+            r"
             update projects
             set path = ?2,
                 name = ?3,
@@ -1382,7 +1382,7 @@ impl SessionStore {
                 sort_order = ?9,
                 updated_at = ?10
             where id = ?1
-            "#,
+            ",
             params![
                 project.id,
                 project.path,
@@ -1401,7 +1401,7 @@ impl SessionStore {
         }
 
         self.conn.execute(
-            r#"
+            r"
             insert into projects
                 (id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, env, sort_order, created_at, updated_at)
             values
@@ -1415,7 +1415,7 @@ impl SessionStore {
                 env=excluded.env,
                 sort_order=excluded.sort_order,
                 updated_at=excluded.updated_at
-            "#,
+            ",
             params![
                 project.id,
                 project.path,
@@ -1444,11 +1444,11 @@ impl SessionStore {
 
     pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             select id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, env
             from projects
             order by sort_order, name collate nocase, path collate nocase
-            "#,
+            ",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectConfig {
@@ -1500,12 +1500,12 @@ impl SessionStore {
         default_provider: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             update projects
             set default_provider = ?2,
                 updated_at = ?3
             where id = ?1
-            "#,
+            ",
             params![project_id, default_provider, Utc::now().to_rfc3339()],
         )?;
         Ok(())
@@ -1515,12 +1515,12 @@ impl SessionStore {
     /// base is derived state and config never carries it.
     pub fn update_project_leading_branch(&self, project_id: &str, branch: &str) -> Result<()> {
         let updated = self.conn.execute(
-            r#"
+            r"
             update projects
             set leading_branch = ?2,
                 updated_at = ?3
             where id = ?1
-            "#,
+            ",
             params![project_id, branch, Utc::now().to_rfc3339()],
         )?;
         // A write that matched no row saved nothing, and must not read as saved.
@@ -1536,12 +1536,12 @@ impl SessionStore {
         auto_reopen_agents: Option<bool>,
     ) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             update projects
             set auto_reopen_agents = ?2,
                 updated_at = ?3
             where id = ?1
-            "#,
+            ",
             params![project_id, auto_reopen_agents, Utc::now().to_rfc3339()],
         )?;
         Ok(())
@@ -1553,12 +1553,12 @@ impl SessionStore {
         startup_command: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             update projects
             set startup_command = ?2,
                 updated_at = ?3
             where id = ?1
-            "#,
+            ",
             params![project_id, startup_command, Utc::now().to_rfc3339()],
         )?;
         Ok(())
@@ -1570,12 +1570,12 @@ impl SessionStore {
         env: &BTreeMap<String, String>,
     ) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             update projects
             set env = ?2,
                 updated_at = ?3
             where id = ?1
-            "#,
+            ",
             params![
                 project_id,
                 serialize_project_env(env),
@@ -1659,7 +1659,7 @@ impl SessionStore {
     /// Insert a PR association or update its state and title if it already exists.
     pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             insert into session_prs (session_id, pr_number, host, owner_repo, state, title, url)
             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             on conflict(session_id, pr_number) do update set
@@ -1668,7 +1668,7 @@ impl SessionStore {
                 state=excluded.state,
                 title=excluded.title,
                 url=excluded.url
-            "#,
+            ",
             params![
                 pr.session_id,
                 pr.pr_number as i64,
@@ -1685,12 +1685,12 @@ impl SessionStore {
     /// Load all known PRs for a session, ordered by `pr_number` descending (latest first).
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             select pr_number, host, owner_repo, state, title, url
             from session_prs
             where session_id = ?1
             order by pr_number desc
-            "#,
+            ",
         )?;
         let sid = session_id.to_string();
         let rows = stmt.query_map(params![session_id], |row| {
@@ -1717,13 +1717,13 @@ impl SessionStore {
     /// Load the latest (highest-numbered) PR for each session that has at least one.
     pub fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             select session_id, pr_number, host, owner_repo, state, title, url
             from session_prs
             where (session_id, pr_number) in (
                 select session_id, max(pr_number) from session_prs group by session_id
             )
-            "#,
+            ",
         )?;
         let rows = stmt.query_map([], |row| {
             let pr_number = row.get::<_, i64>(1)? as u64;
@@ -1750,7 +1750,7 @@ impl SessionStore {
     /// One row per session: attaching again replaces the previous pin.
     pub fn upsert_pr_override(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
-            r#"
+            r"
             insert into session_pr_overrides
                 (session_id, host, owner_repo, pr_number, state, title, url)
             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -1761,7 +1761,7 @@ impl SessionStore {
                 state=excluded.state,
                 title=excluded.title,
                 url=excluded.url
-            "#,
+            ",
             params![
                 pr.session_id,
                 pr.host,
@@ -1778,10 +1778,10 @@ impl SessionStore {
     /// Load every session's pinned pull request (at most one per session).
     pub fn load_pr_overrides(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             select session_id, pr_number, host, owner_repo, state, title, url
             from session_pr_overrides
-            "#,
+            ",
         )?;
         let rows = stmt.query_map([], |row| {
             let pr_number = row.get::<_, i64>(1)? as u64;
@@ -1997,7 +1997,7 @@ impl SessionStore {
         // `initial_branch` IS in the SET list; its immutability is engine
         // discipline rather than a schema guarantee, so do not follow it here.
         let updated = conn.execute(
-            r#"
+            r"
             update agent_sessions set
                 project_path=?2,
                 provider=?3,
@@ -2014,7 +2014,7 @@ impl SessionStore {
                 workspace_kind=?14,
                 folder_path=?15
             where id = ?1
-            "#,
+            ",
             params![
                 session.id,
                 project_path,
@@ -2054,12 +2054,12 @@ impl SessionStore {
             min_session_sort_order_in(conn, project_id)?.unwrap_or(1) - 1
         };
         conn.execute(
-            r#"
+            r"
             insert into agent_sessions
                 (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch, branch_provenance, workspace_kind, folder_path, slot_tab_id)
             values
                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-            "#,
+            ",
             params![
                 session.id,
                 project_id,
@@ -2218,11 +2218,11 @@ impl SessionStore {
 
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
-            r#"
+            r"
             select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab, branch_provenance, workspace_kind, folder_path, slot_tab_id
             from agent_sessions
             order by sort_order asc, updated_at desc
-            "#,
+            ",
         )?;
         let rows = stmt.query_map([], |row| {
             let started_providers: String = row.get(8)?;
@@ -2863,7 +2863,7 @@ mod tests {
     fn the_title_freeze_never_gives_a_standalone_row_an_empty_name() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            r#"
+            r"
             create table agent_sessions (
                 id text primary key,
                 project_id text not null,
@@ -2879,7 +2879,7 @@ mod tests {
                 workspace_kind text not null default 'managed',
                 folder_path text
             );
-            "#,
+            ",
         )
         .unwrap();
         // A folder row and a managed row side by side, both with a NULL title.
@@ -4317,7 +4317,7 @@ mod tests {
     fn auto_reopen_fields_migrate_from_old_database() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            r#"
+            r"
             create table agent_sessions (
                 id text primary key,
                 project_id text not null,
@@ -4338,7 +4338,7 @@ mod tests {
                 'old', 'proj', 'claude', 'main', 'agent', '/tmp/agent',
                 null, null, 'detached', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
             );
-            "#,
+            ",
         )
         .unwrap();
 
@@ -4737,7 +4737,7 @@ mod tests {
         // through the one-time backfill (the `title IS NULL` guard protects it).
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            r#"
+            r"
             create table agent_sessions (
                 id text primary key,
                 project_id text not null,
@@ -4751,18 +4751,18 @@ mod tests {
                 created_at text not null,
                 updated_at text not null
             );
-            "#,
+            ",
         )
         .unwrap();
         conn.execute(
-            r#"
+            r"
             insert into agent_sessions (
                 id, project_id, provider, source_branch, branch_name,
                 worktree_path, title, project_path, status, created_at, updated_at
             ) values ('id1', 'p1', 'claude', 'main', 'feat-x', '/tmp/x',
                       'My Named Agent', null, 'detached',
                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-            "#,
+            ",
             [],
         )
         .unwrap();
@@ -4783,7 +4783,7 @@ mod tests {
     fn legacy_store_with_sessions(rows: &[(&str, &str, &str)]) -> SessionStore {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            r#"
+            r"
             create table agent_sessions (
                 id text primary key,
                 project_id text not null,
@@ -4797,17 +4797,17 @@ mod tests {
                 created_at text not null,
                 updated_at text not null
             );
-            "#,
+            ",
         )
         .unwrap();
         for (id, project_id, updated_at) in rows {
             conn.execute(
-                r#"
+                r"
                 insert into agent_sessions (
                     id, project_id, provider, source_branch, branch_name,
                     worktree_path, title, project_path, status, created_at, updated_at
                 ) values (?1, ?2, 'claude', 'main', ?1, '/tmp/x', null, null, 'detached', ?3, ?3)
-                "#,
+                ",
                 params![id, project_id, updated_at],
             )
             .unwrap();

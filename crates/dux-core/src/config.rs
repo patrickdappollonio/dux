@@ -8558,10 +8558,10 @@ allowed_hosts = ["box.tailnet.ts.net"]
     fn server_config_partial_section_defaults_remaining_fields() {
         // Only `port` is provided; the rest default.
         let config: Config = toml::from_str(
-            r#"
+            r"
 [server]
 port = 9000
-"#,
+",
         )
         .expect("config with partial [server] should parse");
         assert_eq!(config.server.host, "127.0.0.1");
@@ -8577,10 +8577,10 @@ port = 9000
     #[test]
     fn server_config_websocket_caps_default_when_keys_absent() {
         let config: Config = toml::from_str(
-            r#"
+            r"
 [server]
 port = 3890
-"#,
+",
         )
         .expect("config without max_websocket_* keys should parse");
         assert_eq!(
@@ -8621,9 +8621,9 @@ port = 3890
         // error because `ServerConfig` has no `#[serde(deny_unknown_fields)]` (TOML
         // simply ignores unknown keys; this is not a `serde(default)` effect), and
         // the three new split fields take their per-field defaults.
-        let toml = r#"[server]
+        let toml = r"[server]
 max_websocket_connections = 16
-"#;
+";
         let cfg: Config = toml::from_str(toml).expect("old config must still parse");
         assert_eq!(cfg.server.max_websocket_events_connections, 32);
         assert_eq!(cfg.server.max_websocket_agent_connections, 32);

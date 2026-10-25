@@ -3901,13 +3901,13 @@ name = "test"
 
     #[test]
     fn old_config_missing_staged_pane_height_defaults_to_50() {
-        let toml_str = r#"
+        let toml_str = r"
 [ui]
 left_width_pct = 20
 right_width_pct = 23
 terminal_pane_height_pct = 35
 agent_scrollback_lines = 10000
-"#;
+";
         let parsed: Config = toml::from_str(toml_str).expect("should parse");
         assert_eq!(parsed.ui.empty_project_separator_min_projects, 5);
         assert_eq!(parsed.ui.staged_pane_height_pct, 50);

@@ -57,7 +57,7 @@ use rusqlite::Connection;
 /// `project_path` and paired `agent_sessions` with a stripped `projects` table,
 /// which is a database no dux version ever wrote: several of its assertions
 /// therefore described a user who cannot exist.
-const FIRST_RELEASE_SCHEMA: &str = r#"
+const FIRST_RELEASE_SCHEMA: &str = r"
 create table agent_sessions (
     id text primary key,
     project_id text not null,
@@ -71,7 +71,7 @@ create table agent_sessions (
     created_at text not null,
     updated_at text not null
 );
-"#;
+";
 
 /// `sessions.sqlite3` as of `a4f628b` ("Move project state out of config"), the
 /// commit that introduced the `projects` table. It arrived ALREADY carrying
@@ -93,7 +93,7 @@ create table agent_sessions (
 /// them as trailing `alter table ... add column`s and so holds them LAST. Only the
 /// physical column order differs, and every query in `storage.rs` names its columns,
 /// so nothing under test can see it.
-const PROJECTS_ERA_SCHEMA: &str = r#"
+const PROJECTS_ERA_SCHEMA: &str = r"
 create table agent_sessions (
     id text primary key,
     project_id text not null,
@@ -129,13 +129,13 @@ create table session_prs (
     primary key (session_id, pr_number),
     foreign key (session_id) references agent_sessions(id) on delete cascade
 );
-"#;
+";
 
 /// The three session rows both eras share, written with raw SQL naming only the
 /// columns that existed then. `sess-1` carries a hand-set `title` (a renamed
 /// agent), the other two leave it NULL (auto-named agents), which is what makes
 /// the one-time title freeze observable in both directions.
-const SESSION_ROWS: &str = r#"
+const SESSION_ROWS: &str = r"
 insert into agent_sessions
   (id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, status, created_at, updated_at)
 values
@@ -148,7 +148,7 @@ values
   ('sess-3', 'proj-gadget', 'opencode', 'develop', 'dux/quiet-moose',
    '/home/ada/.config/dux/worktrees/quiet-moose', null, '/home/ada/code/gadget',
    'active', '2024-01-03T00:00:00Z', '2024-01-06T00:00:00Z');
-"#;
+";
 
 /// A database from the very first release: `agent_sessions` and nothing else.
 /// This is the shape a genuine early adopter still has, and until now nothing
@@ -173,14 +173,14 @@ fn old_database() -> (tempfile::TempDir, std::path::PathBuf) {
     conn.execute_batch(PROJECTS_ERA_SCHEMA)
         .expect("projects-era schema");
     conn.execute_batch(
-        r#"
+        r"
         insert into projects (id, path, name, default_provider, leading_branch, sort_order, created_at, updated_at)
         values
           ('proj-widget', '/home/ada/code/widget', 'widget', 'codex', 'trunk', 0,
            '2024-01-01T00:00:00Z', '2024-01-02T00:00:00Z'),
           ('proj-gadget', '/home/ada/code/gadget', null, null, null, 1,
            '2024-01-01T00:00:00Z', '2024-01-03T00:00:00Z');
-        "#,
+        ",
     )
     .expect("seed projects");
     conn.execute_batch(SESSION_ROWS).expect("seed sessions");
