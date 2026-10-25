@@ -974,9 +974,13 @@ fn delete_untracked_folder(
         );
     }
     let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.iter().collect();
-    git::discard_confirmed(worktree, path, true, Some(confirmed), || {
-        check.clear(&claims, "delete")
-    })
+    git::discard_confirmed(
+        worktree,
+        path,
+        dux_core::git::FileTracking::Untracked,
+        Some(confirmed),
+        || check.clear(&claims, "delete"),
+    )
 }
 
 /// What a stage left out, in words: "1 nested repository and 2 worktrees of

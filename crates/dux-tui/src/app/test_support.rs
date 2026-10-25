@@ -503,7 +503,7 @@ pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
             continue;
         }
         if let Some(provider) = app.selected_terminal_surface_client() {
-            provider.scroll(true, lines);
+            provider.scroll(dux_core::pty::ScrollDirection::Up, lines);
             if provider.scrollback_offset() > 0 {
                 app.note_user_scroll();
                 assert!(

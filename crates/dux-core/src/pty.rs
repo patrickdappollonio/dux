@@ -57,6 +57,51 @@ pub enum CellColor {
     Indexed(u8),
 }
 
+/// Which of a terminal's two screen buffers is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenBuffer {
+    /// The main screen, with scrollback.
+    Primary,
+    /// The alternate screen full-screen apps draw on.
+    Alternate,
+}
+
+/// Whether asking about a child's exit waits for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitWait {
+    /// Wait until the child exits.
+    Block,
+    /// Answer at once.
+    NoHang,
+}
+
+/// Which way a scroll moves the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollDirection {
+    /// Back into the scrollback.
+    Up,
+    /// Toward the live screen.
+    Down,
+}
+
+/// Whether a snapshot interns the OSC 8 hyperlinks its cells carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hyperlinks {
+    /// Intern them, so each cell carries its link.
+    Collect,
+    /// Skip them: no cell carries a link.
+    Skip,
+}
+
+/// Whether a plain bell counts as asking for attention (`attention_on_bell`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BellPolicy {
+    /// A bell counts.
+    Counts,
+    /// A bell is drained and ignored.
+    Ignored,
+}
+
 /// The subset of text attributes the terminal grid carries, as a set of
 /// flags. Mirrors the `ratatui::style::Modifier` flags the snapshot sets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,7 +202,7 @@ impl TerminalSnapshot {
 }
 
 /// Build an ANSI byte sequence that repaints `snapshot` onto a freshly-connected
-/// client's terminal. If `alt_screen` is set, switch the client into the
+/// client's terminal. On the alternate `screen`, switch the client into the
 /// alternate-screen buffer first so full-screen apps (vim, claude) render
 /// correctly. Reflects the visible screen only (no scrollback replay).
 ///
@@ -169,11 +214,11 @@ impl TerminalSnapshot {
 /// screen up front, cells, region, cursor.
 pub fn synthesize_repaint(
     snapshot: &TerminalSnapshot,
-    alt_screen: bool,
+    screen: ScreenBuffer,
     scroll_region: ScrollRegion,
 ) -> Vec<u8> {
     let mut out = String::new();
-    if alt_screen {
+    if screen == ScreenBuffer::Alternate {
         out.push_str("\x1b[?1049h");
     }
     // Widen to the whole screen and turn origin mode off before painting. A
@@ -1277,7 +1322,12 @@ impl PtyClient {
         self.reaped.as_ref()?;
         let group = self.child.process_id()?;
         let (registry, session) = self.recording.lock().ok()?.clone()?;
-        if reaped_group_plan(registry.recording_in_flight(session)) != GroupPlan::Deferred {
+        let recording = if registry.recording_in_flight(session) {
+            Recording::InFlight
+        } else {
+            Recording::Landed
+        };
+        if reaped_group_plan(recording) != GroupPlan::Deferred {
             return None;
         }
         let members = self.recorded_members.lock().ok()?.take()?;
@@ -1301,14 +1351,14 @@ impl PtyClient {
 
     /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
     /// its pid and session number stay allocated until `try_wait` or `wait`
-    /// reaps it. `block` waits for the exit. `None` when the question cannot
-    /// be asked (no pid, already reaped elsewhere, an error): the caller then
-    /// reaps as before.
-    fn child_exit_unreaped(&self, block: bool) -> Option<bool> {
+    /// reaps it. `wait` says whether to wait for the exit. `None` when the
+    /// question cannot be asked (no pid, already reaped elsewhere, an error):
+    /// the caller then reaps as before.
+    fn child_exit_unreaped(&self, wait: ExitWait) -> Option<bool> {
         let pid = rustix::process::Pid::from_raw(self.child.process_id()? as i32)?;
         let mut options =
             rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
-        if !block {
+        if wait == ExitWait::NoHang {
             options |= rustix::process::WaitIdOptions::NOHANG;
         }
         loop {
@@ -1542,12 +1592,12 @@ impl PtyClient {
     /// `target.links` (the TUI passes `config.capabilities.hyperlinks`): when
     /// `false` no cell carries a `link` and the interning work is skipped
     /// entirely, so a config that disables hyperlinks pays nothing.
-    pub fn snapshot_into(&self, target: &mut TerminalSnapshot, collect_links: bool) -> bool {
+    pub fn snapshot_into(&self, target: &mut TerminalSnapshot, links: Hyperlinks) -> bool {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
         }
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.snapshot_into(target, collect_links);
+        terminal.snapshot_into(target, links);
         true
     }
 
@@ -1559,8 +1609,8 @@ impl PtyClient {
     /// Adjust the scrollback offset by the given amount in the given direction.
     /// Scrolling only moves the VIEW: the reader keeps parsing the child's
     /// output into the grid the whole time.
-    pub fn scroll(&self, up: bool, amount: usize) {
-        self.mutate_scroll(|t| t.scroll(up, amount));
+    pub fn scroll(&self, direction: ScrollDirection, amount: usize) {
+        self.mutate_scroll(|t| t.scroll(direction, amount));
     }
 
     /// The scrollback ring capacity this PTY actually has, in lines. Fixed at
@@ -1746,12 +1796,12 @@ impl PtyClient {
     /// Consume any pending attention signals, returning `true` if the agent
     /// asked for attention since the last call. Both the bell and notification
     /// flags are drained every call (so a suppressed signal never lingers);
-    /// `count_bell` gates whether a plain bell counts (the `attention_on_bell`
+    /// `bells` gates whether a plain bell counts (the `attention_on_bell`
     /// preference). Notifications always count when the feature is enabled.
-    pub fn take_attention(&self, count_bell: bool) -> bool {
+    pub fn take_attention(&self, bells: BellPolicy) -> bool {
         let notify = self.attention_notify.swap(false, Ordering::AcqRel);
         let bell = self.attention_bell.swap(false, Ordering::AcqRel);
-        notify || (count_bell && bell)
+        notify || (bells == BellPolicy::Counts && bell)
     }
 
     /// Drain and return every captured passthrough sequence, oldest first. Mirrors
@@ -1831,7 +1881,7 @@ impl PtyClient {
         // to exit, BEFORE it is reaped: until then its session number still
         // names its session, so a removal never looks in a window where the
         // number proves nothing and nothing is recorded yet.
-        match self.child_exit_unreaped(false) {
+        match self.child_exit_unreaped(ExitWait::NoHang) {
             Some(true) => self.fire_leader_exit_hook(),
             Some(false) => return None,
             None => {}
@@ -2277,7 +2327,7 @@ impl Drop for PtyClient {
         match self.child_to_signal() {
             Some(pid) => {
                 let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-                if self.child_exit_unreaped(true) == Some(true) {
+                if self.child_exit_unreaped(ExitWait::Block) == Some(true) {
                     self.fire_leader_exit_hook();
                 }
             }
@@ -2376,12 +2426,20 @@ enum GroupPlan {
     Deferred,
 }
 
+/// Where the record of what a session left running stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recording {
+    /// Still being written.
+    InFlight,
+    /// Written, or there is none to wait for.
+    Landed,
+}
+
 /// Pure: a record still in flight defers the judgement; a landed one does not.
-fn reaped_group_plan(recording_in_flight: bool) -> GroupPlan {
-    if recording_in_flight {
-        GroupPlan::Deferred
-    } else {
-        GroupPlan::Now
+fn reaped_group_plan(recording: Recording) -> GroupPlan {
+    match recording {
+        Recording::InFlight => GroupPlan::Deferred,
+        Recording::Landed => GroupPlan::Now,
     }
 }
 
@@ -2389,8 +2447,8 @@ fn reaped_group_plan(recording_in_flight: bool) -> GroupPlan {
 /// wait that timed out with the record still unwritten signals nothing,
 /// because nothing can vouch for the group id; otherwise the group is
 /// signalled only while a recorded member holds it.
-fn deferred_group_kill(landed: bool, reserved: impl FnOnce() -> bool) -> bool {
-    landed && reserved()
+fn deferred_group_kill(recording: Recording, reserved: impl FnOnce() -> bool) -> bool {
+    recording == Recording::Landed && reserved()
 }
 
 /// Run one deferred group signal (on the reaper): wait, bounded by
@@ -2408,7 +2466,12 @@ fn run_deferred_group_signal(job: &DeferredGroupSignal) {
             crate::process_sessions::RECORDING_WAIT.as_secs()
         ));
     }
-    let kill = deferred_group_kill(landed, || {
+    let recording = if landed {
+        Recording::Landed
+    } else {
+        Recording::InFlight
+    };
+    let kill = deferred_group_kill(recording, || {
         crate::process_sessions::group_reserved_by(
             job.group,
             &(job.members)(),
@@ -2782,7 +2845,7 @@ impl TerminalState {
 
     fn snapshot(&self) -> TerminalSnapshot {
         let mut snap = TerminalSnapshot::empty();
-        self.snapshot_into(&mut snap, true);
+        self.snapshot_into(&mut snap, crate::pty::Hyperlinks::Collect);
         snap
     }
 
@@ -2790,7 +2853,8 @@ impl TerminalState {
     /// `cells` allocation to avoid per-frame heap churn. When `collect_links` is
     /// false, OSC 8 hyperlink interning is skipped and every cell's `link` is
     /// `None`.
-    fn snapshot_into(&self, target: &mut TerminalSnapshot, collect_links: bool) {
+    fn snapshot_into(&self, target: &mut TerminalSnapshot, links: Hyperlinks) {
+        let collect_links = links == Hyperlinks::Collect;
         let renderable = self.term.renderable_content();
         let display_offset = renderable.display_offset;
         let history_size = self.term.grid().history_size();
@@ -2904,7 +2968,11 @@ impl TerminalState {
 
     fn reconnect_alt_screen_repaint(&self) -> Vec<u8> {
         let snapshot = self.snapshot();
-        let mut out = synthesize_repaint(&snapshot, true, self.scroll_region.region());
+        let mut out = synthesize_repaint(
+            &snapshot,
+            ScreenBuffer::Alternate,
+            self.scroll_region.region(),
+        );
         // A hidden cursor is absent from the snapshot but still has a position
         // that relative movement and output resume from.
         if snapshot.cursor.is_none() {
@@ -3011,7 +3079,12 @@ impl TerminalState {
                 }
                 out.push_str("\r\n");
             }
-            for c in 0..row_emit_width(&row[..], cols, wrapped) {
+            let end = if wrapped {
+                RowEnd::SoftWrapped
+            } else {
+                RowEnd::Ends
+            };
+            for c in 0..row_emit_width(&row[..], cols, end) {
                 push_replay_cell(&mut out, &row[Column(c)], colors, &mut last_style);
             }
             prev_wrapped = wrapped;
@@ -3039,8 +3112,11 @@ impl TerminalState {
         self.term.grid().display_offset()
     }
 
-    fn scroll(&mut self, up: bool, amount: usize) {
-        let delta = if up { amount as i32 } else { -(amount as i32) };
+    fn scroll(&mut self, direction: ScrollDirection, amount: usize) {
+        let delta = match direction {
+            ScrollDirection::Up => amount as i32,
+            ScrollDirection::Down => -(amount as i32),
+        };
         self.term.scroll_display(Scroll::Delta(delta));
     }
 
@@ -3174,8 +3250,17 @@ impl Dimensions for TerminalDimensions {
 /// non-empty cell so a blank screen does not cost a screenful of spaces.
 /// `Cell::is_empty` is false for a colored space, so visible trailing blocks
 /// survive the trim.
-fn row_emit_width(cells: &[Cell], cols: usize, wrapped: bool) -> usize {
-    if wrapped {
+/// Whether a grid row soft-wraps onto the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowEnd {
+    /// The row wraps onto the next.
+    SoftWrapped,
+    /// The row ends here.
+    Ends,
+}
+
+fn row_emit_width(cells: &[Cell], cols: usize, end: RowEnd) -> usize {
+    if end == RowEnd::SoftWrapped {
         return cols;
     }
     cells[..cols]
@@ -3799,7 +3884,7 @@ mod tests {
         let report = client.progress_report().expect("a progress report");
         assert!(report.working, "9;4;1 is a working progress state");
         assert!(
-            client.take_attention(true),
+            client.take_attention(crate::pty::BellPolicy::Counts),
             "the notification and bell must arm attention"
         );
     }
@@ -3928,7 +4013,7 @@ mod tests {
 
         // count_bell = false: the bell does not arm attention (and it is drained).
         assert!(
-            !client.take_attention(false),
+            !client.take_attention(crate::pty::BellPolicy::Ignored),
             "a bell must be ignored when bells are not counted"
         );
     }
@@ -3960,7 +4045,7 @@ mod tests {
             "an untracked companion must record no progress"
         );
         assert!(
-            !client.take_attention(true),
+            !client.take_attention(crate::pty::BellPolicy::Counts),
             "an untracked companion must never arm attention"
         );
     }
@@ -4348,18 +4433,25 @@ mod tests {
         let mut cells = vec![Cell::default(); 6];
         cells[0].c = 'h';
         cells[1].c = 'i';
-        assert_eq!(row_emit_width(&cells, 6, false), 2, "right-trimmed");
-        assert_eq!(row_emit_width(&cells, 6, true), 6, "a wrapped row is whole");
+        assert_eq!(row_emit_width(&cells, 6, RowEnd::Ends), 2, "right-trimmed");
+        assert_eq!(
+            row_emit_width(&cells, 6, RowEnd::SoftWrapped),
+            6,
+            "a wrapped row is whole"
+        );
 
         let mut colored = vec![Cell::default(); 3];
         colored[2].bg = TermColor::Named(NamedColor::Red);
         assert_eq!(
-            row_emit_width(&colored, 3, false),
+            row_emit_width(&colored, 3, RowEnd::Ends),
             3,
             "a colored trailing space is visible, so it survives the trim"
         );
 
-        assert_eq!(row_emit_width(&vec![Cell::default(); 4], 4, false), 0);
+        assert_eq!(
+            row_emit_width(&vec![Cell::default(); 4], 4, RowEnd::Ends),
+            0
+        );
     }
 
     #[test]
@@ -4424,7 +4516,7 @@ mod tests {
         // history: this is exactly the gap this method closes.
         let viewport_only = String::from_utf8(synthesize_repaint(
             &terminal.snapshot(),
-            false,
+            ScreenBuffer::Primary,
             ScrollRegion::full(4),
         ))
         .unwrap();
@@ -4931,7 +5023,7 @@ mod tests {
         let mut terminal = TerminalState::with_scrollback(3, 40, 100);
         terminal.process(b"\x1b]8;;https://example.com\x1b\\X\x1b]8;;\x1b\\Y");
         let mut snap = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut snap, false);
+        terminal.snapshot_into(&mut snap, crate::pty::Hyperlinks::Skip);
         assert!(
             snap.links.is_empty(),
             "no interning when collect_links=false"
@@ -4974,8 +5066,11 @@ mod tests {
         // the cursor/palette baseline a reconnecting client needs
         // (`synthesize_repaint` takes a snapshot, which carries cells and no
         // modes, so it cannot emit those blocks itself).
-        let mut expected =
-            synthesize_repaint(&terminal.snapshot(), true, terminal.scroll_region.region());
+        let mut expected = synthesize_repaint(
+            &terminal.snapshot(),
+            ScreenBuffer::Alternate,
+            terminal.scroll_region.region(),
+        );
         expected.extend_from_slice(mode_restore_sequence(*terminal.term.mode()).as_bytes());
         expected.extend_from_slice(
             cursor_and_palette_restore_sequence(
@@ -5656,7 +5751,7 @@ mod tests {
             "12 rows of history must accept a seed of 10"
         );
 
-        terminal.scroll(true, 3);
+        terminal.scroll(crate::pty::ScrollDirection::Up, 3);
         assert_eq!(
             terminal.scrollback_offset(),
             12,
@@ -5666,7 +5761,7 @@ mod tests {
 
         // And the clamp is the history depth, not the step size: from the top
         // there is nowhere further to go.
-        terminal.scroll(true, 3);
+        terminal.scroll(crate::pty::ScrollDirection::Up, 3);
         assert_eq!(terminal.scrollback_offset(), 12);
     }
 
@@ -6346,19 +6441,19 @@ mod tests {
     /// nothing whatever the group looks like.
     #[test]
     fn a_reaped_groups_signal_is_deferred_while_its_record_is_in_flight() {
-        assert_eq!(reaped_group_plan(true), GroupPlan::Deferred);
-        assert_eq!(reaped_group_plan(false), GroupPlan::Now);
+        assert_eq!(reaped_group_plan(Recording::InFlight), GroupPlan::Deferred);
+        assert_eq!(reaped_group_plan(Recording::Landed), GroupPlan::Now);
         assert!(
-            deferred_group_kill(true, || true),
+            deferred_group_kill(Recording::Landed, || true),
             "landed, held: signalled"
         );
         assert!(
-            !deferred_group_kill(true, || false),
+            !deferred_group_kill(Recording::Landed, || false),
             "landed, nothing recorded holds it: not signalled"
         );
         let mut asked = false;
         assert!(
-            !deferred_group_kill(false, || {
+            !deferred_group_kill(Recording::InFlight, || {
                 asked = true;
                 true
             }),
@@ -7678,7 +7773,7 @@ mod tests {
         );
 
         // User scrolls up to read the plan (scroll up by 5 rows).
-        terminal.scroll(true, 5);
+        terminal.scroll(crate::pty::ScrollDirection::Up, 5);
         assert_eq!(terminal.scrollback_offset(), 5);
 
         // Verify the bottom options are NOT visible while scrolled (they're
@@ -7692,7 +7787,7 @@ mod tests {
         );
 
         // User scrolls back to bottom.
-        terminal.scroll(false, 5);
+        terminal.scroll(crate::pty::ScrollDirection::Down, 5);
         assert_eq!(
             terminal.scrollback_offset(),
             0,
@@ -7754,7 +7849,7 @@ mod tests {
         terminal.process(b"\x1b[10;1H\x1b[2K  Custom input");
 
         // Scroll up by just 1 row.
-        terminal.scroll(true, 1);
+        terminal.scroll(crate::pty::ScrollDirection::Up, 1);
         assert_eq!(terminal.scrollback_offset(), 1);
 
         let scrolled = terminal.snapshot();
@@ -7820,10 +7915,10 @@ mod tests {
 
         // Scroll all the way to the top of history.
         let history = terminal.term.grid().history_size();
-        terminal.scroll(true, history);
+        terminal.scroll(crate::pty::ScrollDirection::Up, history);
 
         // Then scroll all the way back to bottom.
-        terminal.scroll(false, history);
+        terminal.scroll(crate::pty::ScrollDirection::Down, history);
         assert_eq!(terminal.scrollback_offset(), 0);
 
         let after = terminal.snapshot();
@@ -7845,13 +7940,13 @@ mod tests {
         terminal.process(b"hello\r\nworld\r\n");
 
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf, true);
+        terminal.snapshot_into(&mut buf, crate::pty::Hyperlinks::Collect);
         let cap_after_first = buf.cells.capacity();
         assert!(!buf.cells.is_empty(), "first snapshot should have cells");
 
         // Second call should reuse the Vec capacity.
         terminal.process(b"more\r\n");
-        terminal.snapshot_into(&mut buf, true);
+        terminal.snapshot_into(&mut buf, crate::pty::Hyperlinks::Collect);
         assert_eq!(
             buf.cells.capacity(),
             cap_after_first,
@@ -7867,7 +7962,7 @@ mod tests {
 
         let owned = terminal.snapshot();
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf, true);
+        terminal.snapshot_into(&mut buf, crate::pty::Hyperlinks::Collect);
 
         assert_eq!(owned.rows, buf.rows);
         assert_eq!(owned.cols, buf.cols);
@@ -7915,7 +8010,7 @@ mod tests {
         // Simulate first snapshot (dirty=true).
         assert!(dirty.swap(false, Ordering::AcqRel));
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf, true);
+        terminal.snapshot_into(&mut buf, crate::pty::Hyperlinks::Collect);
         assert!(!buf.cells.is_empty());
 
         // Second check without new data: dirty should be false.
@@ -8019,7 +8114,7 @@ mod tests {
             ],
             links: Vec::new(),
         };
-        let bytes = synthesize_repaint(&snapshot, true, ScrollRegion::full(1));
+        let bytes = synthesize_repaint(&snapshot, ScreenBuffer::Alternate, ScrollRegion::full(1));
         let text = String::from_utf8(bytes).expect("utf8");
 
         assert!(
@@ -8047,7 +8142,7 @@ mod tests {
             cells: vec![repaint_cell(0, 0, "x", CellColor::Reset)],
             links: Vec::new(),
         };
-        let bytes = synthesize_repaint(&snapshot, false, ScrollRegion::full(1));
+        let bytes = synthesize_repaint(&snapshot, ScreenBuffer::Primary, ScrollRegion::full(1));
         let text = String::from_utf8(bytes).expect("utf8");
         assert!(
             !text.contains("\x1b[?1049h"),

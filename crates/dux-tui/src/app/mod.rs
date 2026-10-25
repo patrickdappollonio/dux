@@ -3513,11 +3513,7 @@ pub(crate) enum InputTarget {
     MacroText,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ScrollDirection {
-    Up,
-    Down,
-}
+pub(crate) use dux_core::pty::ScrollDirection;
 
 /// A position within the terminal grid (0-based row and column).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6529,7 +6525,11 @@ impl App {
         dux_core::quiet_tail::quiet_tail_forced_open(
             self.active_filter_query().as_deref(),
             self.inactive_search_dismissed.as_deref(),
-            self.visible_inactive_count() > 0,
+            if self.visible_inactive_count() > 0 {
+                dux_core::quiet_tail::QuietHit::Found
+            } else {
+                dux_core::quiet_tail::QuietHit::NotFound
+            },
         )
     }
 
@@ -7934,7 +7934,14 @@ impl App {
             // counter is what lets `drop_drifted_selection` tell "nothing has
             // happened since this selection was stamped" from "the grid has
             // moved and, at saturation, I can no longer say by how much".
-            if provider.snapshot_into(&mut self.snapshot_buf, collect_links) {
+            if provider.snapshot_into(
+                &mut self.snapshot_buf,
+                if collect_links {
+                    dux_core::pty::Hyperlinks::Collect
+                } else {
+                    dux_core::pty::Hyperlinks::Skip
+                },
+            ) {
                 self.grid_generation = self.grid_generation.wrapping_add(1);
             }
             true

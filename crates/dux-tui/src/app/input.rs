@@ -2045,8 +2045,7 @@ impl App {
             Some(provider) => provider,
             None => return,
         };
-        let up = matches!(direction, ScrollDirection::Up);
-        provider.scroll(up, amount);
+        provider.scroll(direction, amount);
         self.note_user_scroll();
     }
 
@@ -10643,7 +10642,11 @@ impl App {
             return;
         };
         provider.scroll(
-            matches!(mouse.kind, MouseEventKind::ScrollUp),
+            if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                dux_core::pty::ScrollDirection::Up
+            } else {
+                dux_core::pty::ScrollDirection::Down
+            },
             MOUSE_WHEEL_LINES,
         );
         // A wheel scroll enters and leaves scroll mode exactly as the keyboard
@@ -21672,7 +21675,7 @@ not_a_real_action = ["x"]
 
         app.selected_terminal_surface_client()
             .expect("provider")
-            .scroll(true, 5);
+            .scroll(dux_core::pty::ScrollDirection::Up, 5);
         app.refresh_snapshot_buf();
         let now = app.snapshot_selection_origin();
         let sel = app.terminal_selection.clone().expect("selection survives");
@@ -22065,7 +22068,7 @@ not_a_real_action = ["x"]
 
         app.selected_terminal_surface_client()
             .expect("provider")
-            .scroll(true, 5);
+            .scroll(dux_core::pty::ScrollDirection::Up, 5);
         draw_frame(&mut app, &mut terminal);
         let after = highlighted_rows(&terminal);
 

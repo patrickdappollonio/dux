@@ -671,13 +671,23 @@ async fn discard(
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
     let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
-        dux_core::git::discard_confirmed(&wt, &path, untracked, confirmed, || match &claim {
-            Some(claim) => check.clear(&[claim], "delete"),
-            None => Err(dux_core::destructive::Refused(format!(
-                "dux did not delete {}: nothing confirmed it as a folder",
-                dux_core::home_path::shorten_home(&target)
-            ))),
-        })
+        dux_core::git::discard_confirmed(
+            &wt,
+            &path,
+            if untracked {
+                dux_core::git::FileTracking::Untracked
+            } else {
+                dux_core::git::FileTracking::Tracked
+            },
+            confirmed,
+            || match &claim {
+                Some(claim) => check.clear(&[claim], "delete"),
+                None => Err(dux_core::destructive::Refused(format!(
+                    "dux did not delete {}: nothing confirmed it as a folder",
+                    dux_core::home_path::shorten_home(&target)
+                ))),
+            },
+        )
     })
     .await
     {

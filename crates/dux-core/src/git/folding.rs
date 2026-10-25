@@ -1457,10 +1457,10 @@ mod tests {
     fn discard_confirmed(
         worktree_path: &Path,
         file_path: &str,
-        is_untracked: bool,
+        tracking: crate::git::FileTracking,
         confirmed: Option<ConfirmedEntry>,
     ) -> Result<usize> {
-        super::discard_confirmed(worktree_path, file_path, is_untracked, confirmed, || {
+        super::discard_confirmed(worktree_path, file_path, tracking, confirmed, || {
             Ok(crate::destructive::Cleared::any_for_tests())
         })
     }
@@ -1870,7 +1870,7 @@ mod tests {
         discard_confirmed(
             root,
             "d",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
@@ -1883,7 +1883,7 @@ mod tests {
         let refusal = discard_confirmed(
             root,
             "top.git",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap_err();
@@ -2020,7 +2020,13 @@ mod tests {
         write(root, "x/b.txt", "b\n");
         assert!(discard_classify(root, "x").unwrap(), "the race is real");
 
-        let refusal = discard_confirmed(root, "x", true, Some(ConfirmedEntry::File)).unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "x",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::File),
+        )
+        .unwrap_err();
 
         assert!(
             refusal.to_string().contains("changed since you looked"),
@@ -2041,9 +2047,13 @@ mod tests {
         write(root, "out/late/d.js", "x\n");
         write(root, "out/late/e.js", "x\n");
 
-        let refusal =
-            discard_confirmed(root, "out", true, Some(ConfirmedEntry::Folder { files: 3 }))
-                .unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "out",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::Folder { files: 3 }),
+        )
+        .unwrap_err();
 
         let text = refusal.to_string();
         assert!(text.contains("changed since you looked"), "{text}");
@@ -2060,9 +2070,13 @@ mod tests {
         write(root, "out/a.js", "x\n");
         write(root, "out/b.js", "x\n");
 
-        let deleted =
-            discard_confirmed(root, "out", true, Some(ConfirmedEntry::Folder { files: 3 }))
-                .unwrap();
+        let deleted = discard_confirmed(
+            root,
+            "out",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::Folder { files: 3 }),
+        )
+        .unwrap();
 
         assert_eq!(deleted, 2);
         assert!(!root.join("out").exists());
@@ -2078,8 +2092,9 @@ mod tests {
         write(root, "loose.txt", "x\n");
         write(root, "dir/a.txt", "a\n");
 
-        discard_confirmed(root, "loose.txt", true, None).unwrap();
-        let refusal = discard_confirmed(root, "dir", true, None).unwrap_err();
+        discard_confirmed(root, "loose.txt", crate::git::FileTracking::Untracked, None).unwrap();
+        let refusal =
+            discard_confirmed(root, "dir", crate::git::FileTracking::Untracked, None).unwrap_err();
 
         assert!(!root.join("loose.txt").exists());
         assert!(root.join("dir/a.txt").exists());
@@ -2275,7 +2290,7 @@ mod tests {
             let refusal = discard_confirmed(
                 root,
                 folder,
-                true,
+                crate::git::FileTracking::Untracked,
                 Some(ConfirmedEntry::Folder { files: usize::MAX }),
             )
             .unwrap_err()
@@ -2969,7 +2984,7 @@ mod tests {
         discard_confirmed(
             root,
             "dist",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
@@ -3004,7 +3019,7 @@ mod tests {
         discard_confirmed(
             root,
             "config",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
@@ -3032,14 +3047,14 @@ mod tests {
         discard_confirmed(
             root,
             "-rf",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
         discard_confirmed(
             root,
             "a*b",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap();
@@ -3067,7 +3082,7 @@ mod tests {
         let refusal = discard_confirmed(
             root,
             "scratch",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap_err();
@@ -3076,10 +3091,18 @@ mod tests {
         assert!(root.join("scratch/secret.env").exists());
         assert!(root.join("scratch/.git").exists());
         // Nothing named it a repository, so nothing may delete it as one.
-        assert!(discard_confirmed(root, "scratch", true, None).is_err());
+        assert!(
+            discard_confirmed(root, "scratch", crate::git::FileTracking::Untracked, None).is_err()
+        );
         assert!(root.join("scratch/.git").exists());
         // Named as what it is, it goes.
-        discard_confirmed(root, "scratch", true, Some(ConfirmedEntry::Repository)).unwrap();
+        discard_confirmed(
+            root,
+            "scratch",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::Repository),
+        )
+        .unwrap();
         assert!(!root.join("scratch").exists());
     }
 
@@ -3090,8 +3113,13 @@ mod tests {
         let root = repo.path();
         write(root, "was-repo/a.js", "a\n");
 
-        let refusal = discard_confirmed(root, "was-repo", true, Some(ConfirmedEntry::Repository))
-            .unwrap_err();
+        let refusal = discard_confirmed(
+            root,
+            "was-repo",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::Repository),
+        )
+        .unwrap_err();
 
         assert!(refusal.to_string().contains("changed since"), "{refusal}");
         assert!(root.join("was-repo/a.js").exists());
@@ -3108,7 +3136,13 @@ mod tests {
         git_in(&nested)(&["init", "-q"]);
         write(&nested, "a.txt", "a\n");
 
-        discard_confirmed(root, "clone", true, Some(ConfirmedEntry::Repository)).unwrap();
+        discard_confirmed(
+            root,
+            "clone",
+            crate::git::FileTracking::Untracked,
+            Some(ConfirmedEntry::Repository),
+        )
+        .unwrap();
 
         assert!(!nested.exists());
     }
@@ -3125,8 +3159,8 @@ mod tests {
         std::os::unix::fs::symlink(".", root.join("self")).unwrap();
         std::os::unix::fs::symlink(".git/hooks", root.join("hooks")).unwrap();
 
-        discard_file(root, "self", true).unwrap();
-        discard_file(root, "hooks", true).unwrap();
+        discard_file(root, "self", crate::git::FileTracking::Untracked).unwrap();
+        discard_file(root, "hooks", crate::git::FileTracking::Untracked).unwrap();
 
         assert!(
             root.join("self").symlink_metadata().is_err(),
@@ -3153,7 +3187,7 @@ mod tests {
         fs::remove_file(root.join("link")).unwrap();
         std::os::unix::fs::symlink(".git", root.join("link")).unwrap();
 
-        discard_file(root, "link", false).unwrap();
+        discard_file(root, "link", crate::git::FileTracking::Tracked).unwrap();
 
         assert_eq!(fs::read_link(root.join("link")).unwrap(), Path::new("src"));
     }
@@ -3164,7 +3198,7 @@ mod tests {
         let root = repo.path();
         std::os::unix::fs::symlink(".git", root.join("dotgit")).unwrap();
 
-        assert!(discard_file(root, "dotgit/HEAD", true).is_err());
+        assert!(discard_file(root, "dotgit/HEAD", crate::git::FileTracking::Untracked).is_err());
         assert!(root.join(".git/HEAD").exists());
     }
 
@@ -3183,7 +3217,7 @@ mod tests {
         let refusal = discard_confirmed(
             root,
             "vendor",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap_err();
@@ -3224,7 +3258,7 @@ mod tests {
         let refusal = discard_confirmed(
             root,
             "inner-wt",
-            true,
+            crate::git::FileTracking::Untracked,
             Some(ConfirmedEntry::Folder { files: usize::MAX }),
         )
         .unwrap_err();
@@ -3296,7 +3330,7 @@ mod tests {
             discard_confirmed(
                 root,
                 folder,
-                true,
+                crate::git::FileTracking::Untracked,
                 Some(ConfirmedEntry::Folder { files: usize::MAX }),
             )
             .unwrap();
@@ -3496,7 +3530,16 @@ mod tests {
         for path in CRAFTED.iter().chain(&[".", "", ".git", "src/.."]) {
             for untracked in [true, false] {
                 assert!(
-                    discard_file(root, path, untracked).is_err(),
+                    discard_file(
+                        root,
+                        path,
+                        if untracked {
+                            crate::git::FileTracking::Untracked
+                        } else {
+                            crate::git::FileTracking::Tracked
+                        }
+                    )
+                    .is_err(),
                     "discarding {path:?} (untracked: {untracked}) must be refused"
                 );
             }

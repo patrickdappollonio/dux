@@ -337,7 +337,14 @@ pub(crate) fn agent_state_word(
     // (cross-language twin of the web's `stateWord`); this surface only maps the
     // typed state to the TUI's word. The busy state is "Working" for an agent.
     use dux_core::row_state::RowState;
-    match dux_core::row_state::agent_row_state(status, working, typing, needs_attention) {
+    match dux_core::row_state::agent_row_state(
+        status,
+        dux_core::row_state::AgentRowFacts {
+            working: working,
+            typing: typing,
+            needs_attention: needs_attention,
+        },
+    ) {
         RowState::NeedsAttention => "Needs you",
         RowState::Typing => "Typing",
         RowState::Busy => AGENT_WORKING_WORD,
@@ -13037,11 +13044,15 @@ fn terminal_row_lines(
     // web's `terminalStateWord`); this surface only words it. The busy word is
     // "Running" (a terminal runs a process; it does not "work" like an agent);
     // agents keep "Working".
-    let word = match dux_core::row_state::terminal_row_state(working, typing) {
-        dux_core::row_state::RowState::Typing => "Typing",
-        dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
-        _ => "Idle",
-    };
+    let word =
+        match dux_core::row_state::terminal_row_state(dux_core::row_state::TerminalRowFacts {
+            working: working,
+            typing: typing,
+        }) {
+            dux_core::row_state::RowState::Typing => "Typing",
+            dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
+            _ => "Idle",
+        };
     // The same working cue the agent row wears: the word pulses toward the muted
     // tone and a cycling ellipsis follows it in a fixed three-cell slot.
     let (word_text, word_color) = if word == TERMINAL_WORKING_WORD {
@@ -19503,7 +19514,7 @@ mod tests {
         );
         app.selected_terminal_surface_client()
             .expect("provider")
-            .scroll(true, 3);
+            .scroll(dux_core::pty::ScrollDirection::Up, 3);
         app.refresh_snapshot_buf();
         assert!(app.center_typeable(), "typeability is not scroll state");
 
@@ -19846,7 +19857,7 @@ mod tests {
         // view the terminal library is holding still.
         app.selected_terminal_surface_client()
             .expect("provider")
-            .scroll(true, 1);
+            .scroll(dux_core::pty::ScrollDirection::Up, 1);
         terminal
             .draw(|frame| app.render(frame))
             .expect("render moved frame");
@@ -19920,7 +19931,7 @@ mod tests {
         // painted and this one does not must be gone.
         app.selected_terminal_surface_client()
             .expect("provider")
-            .scroll(false, 130);
+            .scroll(dux_core::pty::ScrollDirection::Down, 130);
         terminal
             .draw(|frame| app.render(frame))
             .expect("render narrow frame");

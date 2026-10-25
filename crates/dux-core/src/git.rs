@@ -2935,7 +2935,17 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
         fs::symlink_metadata(&target),
         Err(err) if err.kind() == io::ErrorKind::NotFound
     );
-    let owned = add_into_owned_folder(repo_path, &parent, &target, branch, path_was_free)?;
+    let owned = add_into_owned_folder(
+        repo_path,
+        &parent,
+        &target,
+        branch,
+        if path_was_free {
+            AddFolder::DuxCreatesIt
+        } else {
+            AddFolder::AlreadyThere
+        },
+    )?;
     if worktree_is_readable(&target) {
         return Ok(());
     }
@@ -2966,8 +2976,9 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
          was removed during the add), so dux removed the folder and is adding it once more",
         worktree_path.display()
     ));
-    let owned = add_into_owned_folder(repo_path, &parent, &target, branch, true)?
-        .expect("an owned add always returns the folder it made");
+    let owned =
+        add_into_owned_folder(repo_path, &parent, &target, branch, AddFolder::DuxCreatesIt)?
+            .expect("an owned add always returns the folder it made");
     if worktree_is_readable(&target) {
         return Ok(());
     }
@@ -2980,7 +2991,16 @@ fn add_readable_worktree(repo_path: &Path, worktree_path: &Path, branch: &str) -
     })
 }
 
-/// Run the add, into an empty folder dux creates first when `own` is set, and
+/// Whether dux makes the folder a worktree add goes into, or the add finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddFolder {
+    /// dux creates the empty folder first and owns it.
+    DuxCreatesIt,
+    /// The folder is there already (or git makes it); dux owns nothing.
+    AlreadyThere,
+}
+
+/// Run the add, into an empty folder dux creates first when `folder` says so, and
 /// hand that folder back once the add has proved to have filled it. A failed
 /// add discards the folder dux made; a folder found swapped after the add
 /// fails it without anything being deleted.
@@ -2989,11 +3009,11 @@ fn add_into_owned_folder(
     parent: &Path,
     target: &Path,
     branch: &str,
-    own: bool,
+    folder: AddFolder,
 ) -> Result<Option<OwnedFolder>> {
     let mut owned = None;
     let added = add_worktree_retrying_a_pruned_admin_folder(repo_path, target, branch, &mut || {
-        if own {
+        if folder == AddFolder::DuxCreatesIt {
             owned =
                 Some(OwnedFolder::create(parent, target).with_context(|| {
                     format!("failed to create the folder {}", target.display())
@@ -5364,7 +5384,13 @@ fn plan_stage(worktree_path: &Path, file_paths: &[String]) -> Result<StagePlan> 
 
 fn run_stage_plan(worktree_path: &Path, plan: &StagePlan) -> Result<()> {
     if plan.excludes.is_empty() {
-        return run_pathspecs(worktree_path, &["add"], &plan.staged, true, "git add");
+        return run_pathspecs(
+            worktree_path,
+            &["add"],
+            &plan.staged,
+            PathspecMagic::AllLiteral,
+            "git add",
+        );
     }
     // Magic pathspecs, so no global literal flag: each path is `literal` on
     // its own, which keeps a name like a glob to itself all the same.
@@ -5374,7 +5400,13 @@ fn run_stage_plan(worktree_path: &Path, plan: &StagePlan) -> Result<()> {
         .map(|path| format!(":(literal){path}").into_bytes())
         .chain(plan.excludes.iter().cloned())
         .collect();
-    run_pathspecs(worktree_path, &["add"], &specs, false, "git add")
+    run_pathspecs(
+        worktree_path,
+        &["add"],
+        &specs,
+        PathspecMagic::PerSpec,
+        "git add",
+    )
 }
 
 /// The pathspec that leaves `rel` out, in its own bytes: the pathspec file is
@@ -5416,7 +5448,7 @@ fn stages_anything(worktree_path: &Path, path: &str, excludes: &[Vec<u8>]) -> Re
         worktree_path,
         &["add", "--dry-run"],
         &specs,
-        false,
+        PathspecMagic::PerSpec,
         "git add --dry-run",
     )?;
     Ok(out.iter().any(|byte| !byte.is_ascii_whitespace()))
@@ -5478,19 +5510,33 @@ fn run_pathspec_batch(
     for path in file_paths {
         refuse_unplain_path(path, "act on")?;
     }
-    run_pathspecs(worktree_path, subcommand, file_paths, true, what)
+    run_pathspecs(
+        worktree_path,
+        subcommand,
+        file_paths,
+        PathspecMagic::AllLiteral,
+        what,
+    )
 }
 
-/// Run one git command over pathspecs fed on stdin. `literal` adds the global
-/// `--literal-pathspecs`; without it each spec must carry its own magic.
+/// How git reads the pathspecs a command is fed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathspecMagic {
+    /// The global `--literal-pathspecs`: every spec is a plain path.
+    AllLiteral,
+    /// Each spec carries its own magic.
+    PerSpec,
+}
+
+/// Run one git command over pathspecs fed on stdin, read as `magic` says.
 fn run_pathspecs<P: AsRef<[u8]>>(
     worktree_path: &Path,
     subcommand: &[&str],
     file_paths: &[P],
-    literal: bool,
+    magic: PathspecMagic,
     what: &str,
 ) -> Result<()> {
-    run_pathspecs_output(worktree_path, subcommand, file_paths, literal, what).map(|_| ())
+    run_pathspecs_output(worktree_path, subcommand, file_paths, magic, what).map(|_| ())
 }
 
 /// [`run_pathspecs`], answering git's standard output.
@@ -5498,12 +5544,12 @@ fn run_pathspecs_output<P: AsRef<[u8]>>(
     worktree_path: &Path,
     subcommand: &[&str],
     file_paths: &[P],
-    literal: bool,
+    magic: PathspecMagic,
     what: &str,
 ) -> Result<Vec<u8>> {
     let wt = worktree_path.to_string_lossy();
     let mut args: Vec<&str> = Vec::new();
-    if literal {
+    if magic == PathspecMagic::AllLiteral {
         args.push("--literal-pathspecs");
     }
     args.extend_from_slice(&["-C", wt.as_ref()]);
@@ -5698,6 +5744,16 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// Whether git tracks a path being discarded: an untracked one is deleted, a
+/// tracked one restored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileTracking {
+    /// Not in git: discarding deletes it.
+    Untracked,
+    /// In git: discarding restores it.
+    Tracked,
+}
+
 /// [`discard_confirmed`] with nothing confirmed, cleared for any path: what
 /// the discard itself decides, for its own tests. Every real caller goes
 /// through a claim and a clearance.
@@ -5705,9 +5761,9 @@ impl std::error::Error for Refusal {}
 pub(crate) fn discard_file(
     worktree_path: &Path,
     file_path: &str,
-    is_untracked: bool,
+    tracking: FileTracking,
 ) -> Result<()> {
-    discard_confirmed(worktree_path, file_path, is_untracked, None, || {
+    discard_confirmed(worktree_path, file_path, tracking, None, || {
         Ok(crate::destructive::Cleared::any_for_tests())
     })
     .map(|_| ())
@@ -5737,7 +5793,7 @@ pub(crate) fn discard_file(
 pub fn discard_confirmed<'c>(
     worktree_path: &Path,
     file_path: &str,
-    is_untracked: bool,
+    tracking: FileTracking,
     confirmed: Option<ConfirmedEntry>,
     clear: impl FnOnce() -> std::result::Result<
         crate::destructive::Cleared<'c>,
@@ -5780,7 +5836,7 @@ pub fn discard_confirmed<'c>(
             "refusing to discard {file_path:?}: it resolves to the worktree itself or into .git"
         ));
     }
-    if is_untracked {
+    if tracking == FileTracking::Untracked {
         let full = worktree_path.join(file_path);
         // Defense-in-depth before a destructive remove: callers classify the
         // path against live `git status` output (which never yields paths
@@ -7139,7 +7195,7 @@ pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
         // The scp-like spelling is ssh by definition, so GitHub's documented
         // port-443 ssh host is legitimate here.
         let written_host = strip_remote_userinfo(authority).to_ascii_lowercase();
-        let host = remote_api_host(&written_host, true);
+        let host = remote_api_host(&written_host, RemoteTransport::Ssh);
         // Git hands an scp-like path to ssh verbatim, so it is NOT
         // percent-decoded.
         return owner_repo_from_path(strip_boundary_slashes(path))
@@ -7228,7 +7284,14 @@ pub(crate) fn parse_remote_address(url: &str) -> Option<GitHubRemote> {
         // leaves the host's case alone, so lowercase it explicitly: hostnames
         // are case-insensitive and this value is handed to `gh`.
         let written_host = parsed.host_str()?.to_ascii_lowercase();
-        let host = remote_api_host(&written_host, SSH_TRANSPORT_SCHEMES.contains(&raw_scheme));
+        let host = remote_api_host(
+            &written_host,
+            if SSH_TRANSPORT_SCHEMES.contains(&raw_scheme) {
+                RemoteTransport::Ssh
+            } else {
+                RemoteTransport::NotSsh
+            },
+        );
         // An ssh or git port is the transport service's port and has nothing to
         // do with the host's API, so dropping it is right. An http(s) port is part
         // of the server endpoint, and `gh` cannot express one: it refuses a
@@ -7529,10 +7592,19 @@ const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 /// endpoint and inventing one would be guessing at an address on somebody
 /// else's network. And it applies only over ssh, the transport it is documented
 /// for: `https://ssh.github.com/...` is not an endpoint GitHub offers.
-fn remote_api_host(host: &str, ssh_transport: bool) -> String {
+/// Whether a remote is reached over ssh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteTransport {
+    /// An ssh remote (scp-like or an ssh scheme).
+    Ssh,
+    /// Any other transport.
+    NotSsh,
+}
+
+fn remote_api_host(host: &str, transport: RemoteTransport) -> String {
     // `gh` has never heard of `ssh.github.com`, so the name that has to be
     // checked against the policy, and handed onwards, is `github.com`.
-    if ssh_transport && host == GITHUB_SSH_ALT_HOST {
+    if transport == RemoteTransport::Ssh && host == GITHUB_SSH_ALT_HOST {
         "github.com".to_string()
     } else {
         host.to_string()
@@ -8783,7 +8855,7 @@ mod tests {
         fs::remove_file(wt.join("README.md")).unwrap();
         fs::create_dir_all(wt.join("README.md")).unwrap();
         fs::write(wt.join("README.md").join("keep.txt"), "mine\n").unwrap();
-        let refused = discard_file(wt, "README.md", false).unwrap_err();
+        let refused = discard_file(wt, "README.md", crate::git::FileTracking::Tracked).unwrap_err();
         assert!(refused.downcast_ref::<Refusal>().is_some(), "{refused}");
         assert!(refused.to_string().contains("is now a folder"), "{refused}");
         assert!(
@@ -8806,7 +8878,7 @@ mod tests {
         fs::write(elsewhere.path().join("keep.txt"), "mine\n").unwrap();
         fs::remove_file(wt.join("README.md")).unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), wt.join("README.md")).unwrap();
-        discard_file(wt, "README.md", false).unwrap();
+        discard_file(wt, "README.md", crate::git::FileTracking::Tracked).unwrap();
         assert!(
             fs::symlink_metadata(wt.join("README.md"))
                 .unwrap()
@@ -8825,7 +8897,7 @@ mod tests {
         let wt = repo.path();
         write_option_looking_files(wt);
 
-        discard_file(wt, "a*b.txt", false).unwrap();
+        discard_file(wt, "a*b.txt", crate::git::FileTracking::Tracked).unwrap();
 
         assert_eq!(
             fs::read_to_string(wt.join("a*b.txt")).unwrap(),
@@ -9788,15 +9860,24 @@ mod tests {
         );
     }
 
+    /// Which adds the admin-folder strike hits.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Strikes {
+        /// Only the first add.
+        FirstAddOnly,
+        /// Every add.
+        EveryAdd,
+    }
+
     /// A `post-checkout` hook in the fixture repository that deletes the new
     /// worktree's admin folder, which is what another program's prune landing
     /// after git's checkout step does: `worktree add` still exits 0, and the
-    /// copy's `.git` file points at nothing. With `once`, only the first add
-    /// is struck.
-    fn strike_admin_folder_after_checkout(repo: &Path, once: bool) -> tempfile::TempDir {
+    /// copy's `.git` file points at nothing. `strikes` says whether only the
+    /// first add is struck.
+    fn strike_admin_folder_after_checkout(repo: &Path, strikes: Strikes) -> tempfile::TempDir {
         let hooks = tempfile::tempdir().unwrap();
         let marker = hooks.path().join("struck");
-        let guard = if once {
+        let guard = if strikes == Strikes::FirstAddOnly {
             format!("[ -e '{0}' ] && exit 0; : > '{0}'\n", marker.display())
         } else {
             String::new()
@@ -9825,7 +9906,7 @@ mod tests {
     fn a_worktree_git_cannot_read_after_a_successful_add_is_recreated_once() {
         let repo = init_test_repo();
         let head = head_commit(repo.path()).unwrap();
-        let _hooks = strike_admin_folder_after_checkout(repo.path(), true);
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), Strikes::FirstAddOnly);
         let worktrees_root = tempfile::tempdir().unwrap();
 
         let (_, worktree) = create_worktree_from_start_point(
@@ -9846,7 +9927,7 @@ mod tests {
 
         run_git(repo.path(), &["branch", "existing"]);
         let existing = worktrees_root.path().join("proj").join("existing");
-        let _hooks = strike_admin_folder_after_checkout(repo.path(), true);
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), Strikes::FirstAddOnly);
         add_worktree_existing_branch_at(repo.path(), &existing, "existing")
             .expect("the existing-branch path recreates it too");
         assert_eq!(
@@ -9861,7 +9942,7 @@ mod tests {
     #[test]
     fn a_worktree_that_stays_unreadable_fails_loudly_and_removes_only_what_dux_made() {
         let repo = init_test_repo();
-        let _hooks = strike_admin_folder_after_checkout(repo.path(), false);
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), Strikes::EveryAdd);
         let worktrees_root = tempfile::tempdir().unwrap();
         let project = worktrees_root.path().join("proj");
         fs::create_dir_all(&project).unwrap();
@@ -9933,7 +10014,7 @@ mod tests {
     #[test]
     fn an_older_copy_swapped_in_after_the_add_is_never_removed() {
         let repo = init_test_repo();
-        let _hooks = strike_admin_folder_after_checkout(repo.path(), false);
+        let _hooks = strike_admin_folder_after_checkout(repo.path(), Strikes::EveryAdd);
         run_git(repo.path(), &["branch", "older"]);
         run_git(repo.path(), &["branch", "swapped"]);
         let root = tempfile::tempdir().unwrap();

@@ -2574,7 +2574,12 @@ impl Engine {
             }
             // Always drain (consume) the flag so a toggle can't replay a stale
             // signal; only record the hit while the feature is enabled.
-            if provider.take_attention(count_bell) && enabled {
+            if provider.take_attention(if count_bell {
+                crate::pty::BellPolicy::Counts
+            } else {
+                crate::pty::BellPolicy::Ignored
+            }) && enabled
+            {
                 fired.push(tab_id.clone());
             }
         }

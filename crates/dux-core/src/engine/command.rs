@@ -361,7 +361,11 @@ impl Engine {
                 crate::git::discard_confirmed(
                     &worktree_path,
                     &path,
-                    is_untracked,
+                    if is_untracked {
+                        crate::git::FileTracking::Untracked
+                    } else {
+                        crate::git::FileTracking::Tracked
+                    },
                     Some(confirmed),
                     || {
                         Err(crate::destructive::Refused(format!(
@@ -409,7 +413,11 @@ impl Engine {
             let went = crate::git::discard_confirmed(
                 &worktree_path,
                 &path,
-                is_untracked,
+                if is_untracked {
+                    crate::git::FileTracking::Untracked
+                } else {
+                    crate::git::FileTracking::Tracked
+                },
                 Some(confirmed),
                 || check.clear(&[&claim], "delete"),
             )

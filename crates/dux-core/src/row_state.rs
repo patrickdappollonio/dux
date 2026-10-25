@@ -24,14 +24,34 @@ pub enum RowState {
     Exited,
 }
 
+/// What an agent row's live state is decided from, beside its status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgentRowFacts {
+    /// The agent is working.
+    pub working: bool,
+    /// Someone is typing into it.
+    pub typing: bool,
+    /// It asked for attention.
+    pub needs_attention: bool,
+}
+
+/// What a terminal row's live state is decided from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalRowFacts {
+    /// Output is streaming or a foreground app runs in it.
+    pub working: bool,
+    /// Someone is typing into it.
+    pub typing: bool,
+}
+
 /// The agent-row state ladder: needs-attention wins; then an active agent that is
 /// typing outranks working outranks idle; then the non-active statuses.
-pub fn agent_row_state(
-    status: SessionStatus,
-    working: bool,
-    typing: bool,
-    needs_attention: bool,
-) -> RowState {
+pub fn agent_row_state(status: SessionStatus, facts: AgentRowFacts) -> RowState {
+    let AgentRowFacts {
+        working,
+        typing,
+        needs_attention,
+    } = facts;
     if needs_attention {
         return RowState::NeedsAttention;
     }
@@ -46,7 +66,8 @@ pub fn agent_row_state(
 
 /// The terminal-row state ladder: typing outranks busy (running) outranks idle.
 /// A terminal has no needs-attention/detached/exited states.
-pub fn terminal_row_state(working: bool, typing: bool) -> RowState {
+pub fn terminal_row_state(facts: TerminalRowFacts) -> RowState {
+    let TerminalRowFacts { working, typing } = facts;
     if typing {
         RowState::Typing
     } else if working {
@@ -65,26 +86,84 @@ mod tests {
     fn agent_row_state_priority_ladder() {
         use SessionStatus::{Active, Detached, Exited};
         // (status, working, typing, needs_attention)
-        assert_eq!(agent_row_state(Active, true, false, false), RowState::Busy,);
-        assert_eq!(agent_row_state(Active, false, false, false), RowState::Idle,);
         assert_eq!(
-            agent_row_state(Detached, false, false, false),
+            agent_row_state(
+                Active,
+                AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            RowState::Busy,
+        );
+        assert_eq!(
+            agent_row_state(
+                Active,
+                AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            RowState::Idle,
+        );
+        assert_eq!(
+            agent_row_state(
+                Detached,
+                AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
             RowState::Detached,
         );
         assert_eq!(
-            agent_row_state(Exited, false, false, false),
+            agent_row_state(
+                Exited,
+                AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
             RowState::Exited,
         );
         // Typing outranks working for an active agent.
-        assert_eq!(agent_row_state(Active, true, true, false), RowState::Typing);
+        assert_eq!(
+            agent_row_state(
+                Active,
+                AgentRowFacts {
+                    working: true,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            RowState::Typing
+        );
         // Needs-attention wins over every other state, including working and a
         // non-active status.
         assert_eq!(
-            agent_row_state(Active, true, false, true),
+            agent_row_state(
+                Active,
+                AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
             RowState::NeedsAttention,
         );
         assert_eq!(
-            agent_row_state(Detached, false, false, true),
+            agent_row_state(
+                Detached,
+                AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
             RowState::NeedsAttention,
         );
     }
@@ -92,10 +171,34 @@ mod tests {
     // ── SHARED VECTORS with flatTerminals.test.ts `terminalStateWord` ──────────
     #[test]
     fn terminal_row_state_priority_ladder() {
-        assert_eq!(terminal_row_state(false, false), RowState::Idle);
-        assert_eq!(terminal_row_state(true, false), RowState::Busy);
-        assert_eq!(terminal_row_state(false, true), RowState::Typing);
+        assert_eq!(
+            terminal_row_state(TerminalRowFacts {
+                working: false,
+                typing: false
+            }),
+            RowState::Idle
+        );
+        assert_eq!(
+            terminal_row_state(TerminalRowFacts {
+                working: true,
+                typing: false
+            }),
+            RowState::Busy
+        );
+        assert_eq!(
+            terminal_row_state(TerminalRowFacts {
+                working: false,
+                typing: true
+            }),
+            RowState::Typing
+        );
         // Typing outranks running.
-        assert_eq!(terminal_row_state(true, true), RowState::Typing);
+        assert_eq!(
+            terminal_row_state(TerminalRowFacts {
+                working: true,
+                typing: true
+            }),
+            RowState::Typing
+        );
     }
 }

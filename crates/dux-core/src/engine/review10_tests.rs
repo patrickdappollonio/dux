@@ -131,7 +131,7 @@ fn review10_a_project_added_between_the_discard_check_and_the_delete_is_not_dele
     let outcome = crate::git::discard_confirmed(
         &worktree,
         "vendor-lib",
-        true,
+        crate::git::FileTracking::Untracked,
         Some(crate::git::ConfirmedEntry::Repository),
         || check.clear(&[&claim], "delete"),
     );
