@@ -6,56 +6,146 @@
 //! itself (a password, a ban, the no-password warning's dismissal). Only the
 //! first is news.
 
+/// Who a reload is for: somebody who asked for it, or dux alone, after a
+/// write of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asker {
+    Somebody,
+    DuxAfterOwnWrite,
+}
+
+/// When an asked-for reload runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReloadSlot {
+    /// Nothing is reloading, so it runs now.
+    Now,
+    /// A reload is running, so it runs after that one.
+    AfterTheRunningOne,
+}
+
 /// The origin of the reload running now, of the one deferred behind it, and
 /// of the reload that last finished.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ReloadOrigin {
-    /// Set while dux asks for the reload a write of its own owes.
-    asking_after_own_write: bool,
-    /// Whether somebody asked for the reload running now, and for the one
-    /// deferred behind it. Asked for by anybody, a reload announces, however
-    /// many reloads of dux's own it was folded into.
-    running_asked_for: bool,
-    deferred_asked_for: bool,
-    last_was_own: bool,
+    /// Who is asking for a reload at this moment: dux, while it asks for the
+    /// reload a write of its own owes, and otherwise somebody.
+    asking: Asker,
+    /// Who the reload running now, and the one deferred behind it, are for.
+    /// Asked for by anybody, a reload announces, however many reloads of
+    /// dux's own it was folded into.
+    running: Asker,
+    deferred: Asker,
+    last: Asker,
+}
+
+impl Default for ReloadOrigin {
+    fn default() -> Self {
+        Self {
+            asking: Asker::Somebody,
+            running: Asker::DuxAfterOwnWrite,
+            deferred: Asker::DuxAfterOwnWrite,
+            last: Asker::Somebody,
+        }
+    }
 }
 
 impl ReloadOrigin {
     /// Whether the reload that last finished was asked for by dux alone,
     /// after a write of its own, and so is not announced.
     pub fn last_reload_was_own(&self) -> bool {
-        self.last_was_own
+        self.last == Asker::DuxAfterOwnWrite
     }
 
     pub(crate) fn begin_asking_after_own_write(&mut self) {
-        self.asking_after_own_write = true;
+        self.asking = Asker::DuxAfterOwnWrite;
     }
 
     pub(crate) fn end_asking_after_own_write(&mut self) {
-        self.asking_after_own_write = false;
+        self.asking = Asker::Somebody;
     }
 
-    /// A reload is being asked for, to run now or (`deferred`) after the one
-    /// running.
-    pub(crate) fn reload_asked(&mut self, deferred: bool) {
-        let asked_for = !self.asking_after_own_write;
-        if deferred {
-            self.deferred_asked_for |= asked_for;
-        } else {
-            self.running_asked_for = asked_for;
+    /// A reload is being asked for, to run in `slot`.
+    pub(crate) fn reload_asked(&mut self, slot: ReloadSlot) {
+        match slot {
+            ReloadSlot::AfterTheRunningOne => {
+                if self.asking == Asker::Somebody {
+                    self.deferred = Asker::Somebody;
+                }
+            }
+            ReloadSlot::Now => self.running = self.asking,
         }
     }
 
     /// The deferred reload is about to be asked for again, as whoever asked
     /// for it first; [`Self::end_asking_after_own_write`] follows.
     pub(crate) fn deferred_reload_resumes(&mut self) {
-        self.asking_after_own_write = !std::mem::take(&mut self.deferred_asked_for);
+        self.asking = std::mem::replace(&mut self.deferred, Asker::DuxAfterOwnWrite);
     }
 
     /// The running reload finished. Its origin alone decides: a hand edit
     /// made but never reloaded is adopted by dux's own quiet reload without
     /// being announced. It is still applied; that cost is accepted.
     pub(crate) fn reload_finished(&mut self) {
-        self.last_was_own = !std::mem::take(&mut self.running_asked_for);
+        self.last = std::mem::replace(&mut self.running, Asker::DuxAfterOwnWrite);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReloadOrigin, ReloadSlot};
+
+    /// dux's own reload, with a reload somebody asked for deferred behind it:
+    /// the own one is quiet and the deferred one announces.
+    #[test]
+    fn a_reload_asked_for_behind_an_own_one_announces_and_the_own_one_does_not() {
+        let mut origin = ReloadOrigin::default();
+        assert!(!origin.last_reload_was_own());
+        origin.begin_asking_after_own_write();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.end_asking_after_own_write();
+        origin.reload_asked(ReloadSlot::AfterTheRunningOne);
+        origin.reload_finished();
+        assert!(origin.last_reload_was_own());
+        origin.deferred_reload_resumes();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.end_asking_after_own_write();
+        origin.reload_finished();
+        assert!(!origin.last_reload_was_own());
+    }
+
+    /// A reload somebody asked for, with dux's own deferred behind it: the
+    /// first announces and the deferred own one is quiet.
+    #[test]
+    fn an_own_reload_deferred_behind_an_asked_one_stays_quiet() {
+        let mut origin = ReloadOrigin::default();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.begin_asking_after_own_write();
+        origin.reload_asked(ReloadSlot::AfterTheRunningOne);
+        origin.end_asking_after_own_write();
+        origin.reload_finished();
+        assert!(!origin.last_reload_was_own());
+        origin.deferred_reload_resumes();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.end_asking_after_own_write();
+        origin.reload_finished();
+        assert!(origin.last_reload_was_own());
+    }
+
+    /// Deferred asks fold together: one by somebody among dux's own makes
+    /// the follow-up announce.
+    #[test]
+    fn one_asked_for_reload_among_deferred_own_ones_makes_the_follow_up_announce() {
+        let mut origin = ReloadOrigin::default();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.reload_asked(ReloadSlot::AfterTheRunningOne);
+        origin.begin_asking_after_own_write();
+        origin.reload_asked(ReloadSlot::AfterTheRunningOne);
+        origin.end_asking_after_own_write();
+        origin.reload_finished();
+        origin.deferred_reload_resumes();
+        origin.reload_asked(ReloadSlot::Now);
+        origin.end_asking_after_own_write();
+        origin.reload_finished();
+        assert!(!origin.last_reload_was_own());
     }
 }

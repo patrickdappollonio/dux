@@ -1230,7 +1230,11 @@ impl Engine {
                 // it joins the deferred commands and runs as soon as the
                 // current reload closes its barrier. Any number of them
                 // collapse into one follow-up, which reads the latest file.
-                self.reload_origin.reload_asked(self.reloading);
+                self.reload_origin.reload_asked(if self.reloading {
+                    crate::engine::reload_origin::ReloadSlot::AfterTheRunningOne
+                } else {
+                    crate::engine::reload_origin::ReloadSlot::Now
+                });
                 if self.reloading {
                     if !self
                         .deferred_commands

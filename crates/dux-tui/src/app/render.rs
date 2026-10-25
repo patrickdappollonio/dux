@@ -7045,14 +7045,14 @@ impl App {
                 }
                 ProjectWorktreeVisualRow::Entry(index) => {
                     let entry = &prompt.entries[*index];
-                    let style = if entry.is_selectable {
+                    let style = if entry.is_selectable() {
                         Style::default().fg(self.theme.text_fg)
                     } else {
                         Style::default().fg(self.theme.hint_dim_desc_fg)
                     };
                     let kind = if entry.is_project_checkout {
                         "project"
-                    } else if entry.is_external {
+                    } else if entry.is_external() {
                         "external"
                     } else {
                         "managed"
@@ -7062,19 +7062,19 @@ impl App {
                         .as_ref()
                         .map(|id| format!("  agent {id}"))
                         .unwrap_or_default();
-                    let kind_style = if !entry.is_selectable {
+                    let kind_style = if !entry.is_selectable() {
                         Style::default().fg(self.theme.hint_dim_desc_fg)
                     } else if entry.is_managed_by_dux {
                         Style::default().fg(self.theme.branch_fg)
                     } else {
                         Style::default().fg(self.theme.hint_desc_fg)
                     };
-                    let branch_label_style = Style::default().fg(if entry.is_selectable {
+                    let branch_label_style = Style::default().fg(if entry.is_selectable() {
                         self.theme.branch_fg
                     } else {
                         self.theme.hint_dim_desc_fg
                     });
-                    let branch_value_style = Style::default().fg(if entry.is_selectable {
+                    let branch_value_style = Style::default().fg(if entry.is_selectable() {
                         self.theme.hint_desc_fg
                     } else {
                         self.theme.hint_dim_desc_fg

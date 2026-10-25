@@ -41,6 +41,10 @@ const BINARY_SAMPLE_BYTES: usize = 8 * 1024;
 /// The first [`DIFF_HEAD_MAX_LINES`] lines of git's own unified patch for one
 /// file, with an honest account of how much was left behind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one diff, sent to the web client as JSON booleans"
+)]
 pub struct DiffHead {
     /// The kept lines, newline-joined. Always ends at a line boundary.
     pub text: String,

@@ -913,6 +913,10 @@ pub use crate::config_auth::{AddressBlock, AuthRequire, CookieSecure, ServerAuth
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is its own on/off key in config.toml's [server] table, read and written by serde"
+)]
 pub struct ServerConfig {
     /// LOCAL MODE bind host. `dux server` binds `host:port` (plus the machine's
     /// Tailscale address unless `tailscale` is `"no"`). Must be an IP literal such as
@@ -1661,6 +1665,10 @@ pub fn default_true() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is its own on/off key in config.toml's [ui] table, read and written by serde"
+)]
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
@@ -3895,44 +3903,54 @@ pub struct StartProblem {
     /// The settings it is about, each as its path's segments. Empty for the
     /// file as a whole.
     pub keys: Vec<Vec<String>>,
-    /// A rule spanning `keys`, rather than a problem with one value.
-    pub cross_key: bool,
-    /// About one entry of a list value, known by the entry's own text.
-    pub entry: bool,
-    /// Whether the terminal UI will not start (or reload) with the file.
-    pub stops_terminal_ui: bool,
-    /// Whether `dux server` will not start (or reload) with the file.
-    pub stops_dux_server: bool,
+    /// What kind of problem it is: with one value, a rule spanning `keys`, or
+    /// one entry of a list value.
+    pub kind: crate::config_auth::ProblemKind,
+    /// Which surfaces will not start (or reload) with the file.
+    pub stops: Stops,
     /// The `[server]` setting it is about when `dux server`'s command line
     /// can take the file's value out of the picture (see
     /// [`ServerFileSetting::overriding_flags`]), so its own start judges it.
     pub dux_server_override: Option<ServerFileSetting>,
 }
 
+/// Which surfaces a [`StartProblem`] stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stops {
+    /// The terminal UI and `dux server` both.
+    Both,
+    /// The terminal UI alone.
+    TerminalUi,
+    /// `dux server` alone.
+    DuxServer,
+}
+
 impl StartProblem {
     /// Whether this stops `surface`.
     pub fn stops(&self, surface: Surface) -> bool {
-        match surface {
-            Surface::TerminalUi => self.stops_terminal_ui,
-            Surface::DuxServer => self.stops_dux_server,
+        match (self.stops, surface) {
+            (Stops::Both, _)
+            | (Stops::TerminalUi, Surface::TerminalUi)
+            | (Stops::DuxServer, Surface::DuxServer) => true,
+            (Stops::TerminalUi, Surface::DuxServer) | (Stops::DuxServer, Surface::TerminalUi) => {
+                false
+            }
         }
     }
 
-    fn new(problem: crate::config_auth::Problem, terminal_ui: bool, dux_server: bool) -> Self {
-        let who = match (terminal_ui, dux_server) {
-            (true, true) => "the terminal UI and dux server",
-            (true, false) => "the terminal UI",
-            _ => "dux server",
+    fn new(problem: crate::config_auth::Problem, stops: Stops) -> Self {
+        let who = match stops {
+            Stops::Both => "the terminal UI and dux server",
+            Stops::TerminalUi => "the terminal UI",
+            Stops::DuxServer => "dux server",
         };
         Self {
             message: format!("{who} will not start with this file: {}", problem.message),
             detail: problem.message,
             id: problem.id,
             keys: problem.keys,
-            cross_key: problem.cross_key,
-            entry: problem.entry,
-            stops_terminal_ui: terminal_ui,
-            stops_dux_server: dux_server,
+            kind: problem.kind,
+            stops,
             dux_server_override: None,
         }
     }
@@ -4135,7 +4153,7 @@ pub fn terminal_ui_keys(raw: &str) -> Option<toml::Table> {
 pub fn check_start(raw: &str) -> StartCheck {
     use crate::config_auth::Problem;
     let mut check = StartCheck::default();
-    let both = |problem: Problem| StartProblem::new(problem, true, true);
+    let both = |problem: Problem| StartProblem::new(problem, Stops::Both);
     let file: toml::Table = match toml::from_str(raw) {
         Ok(file) => file,
         Err(error) => {
@@ -4171,9 +4189,10 @@ pub fn check_start(raw: &str) -> StartCheck {
     // UI, whose start runs them on the file and refuses it; `dux server`
     // reads such a file unmigrated, which is what the checks below judge.
     for (key, message) in migration_failures {
-        check
-            .problems
-            .push(StartProblem::new(Problem::about(key, message), true, false));
+        check.problems.push(StartProblem::new(
+            Problem::about(key, message),
+            Stops::TerminalUi,
+        ));
     }
     // What `dux server`'s load does about each wrong-typed value is said as
     // it is: the value read as its default, or the entry or section around
@@ -4191,8 +4210,7 @@ pub fn check_start(raw: &str) -> StartCheck {
         // The setting it is about, for attribution only; never printed.
         check.problems.push(StartProblem::new(
             Problem::about(key, format!("{place}: {kind} ({what})")),
-            true,
-            false,
+            Stops::TerminalUi,
         ));
     }
     let mut config = recover_config_table(rest, raw, Report::Quiet);
@@ -4205,8 +4223,7 @@ pub fn check_start(raw: &str) -> StartCheck {
         for message in terminal_ui_check(raw) {
             check.problems.push(StartProblem::new(
                 Problem::about(key_path(&["keys"]), message),
-                true,
-                false,
+                Stops::TerminalUi,
             ));
         }
     }
@@ -4260,9 +4277,9 @@ pub fn problems_added_by_set<'a>(
                 is_new(problem)
             } else if !problem.keys.iter().any(|other| related(other)) {
                 false
-            } else if problem.entry {
+            } else if problem.kind == crate::config_auth::ProblemKind::ListEntry {
                 is_new(problem)
-            } else if problem.cross_key {
+            } else if problem.kind == crate::config_auth::ProblemKind::CrossKeyRule {
                 let was_broken = before.problems.iter().any(|old| old.id == problem.id);
                 let was_unjudgeable = before.unjudgeable_rules.contains(&problem.id);
                 !was_broken && !was_unjudgeable
@@ -4843,8 +4860,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
     if let Err(error) = parse_server_host(&config.server.host) {
         let mut problem = StartProblem::new(
             Problem::about(key_path(&["server", "host"]), error),
-            true,
-            true,
+            Stops::Both,
         );
         problem.dux_server_override = Some(ServerFileSetting::Host);
         problems.push(problem);
@@ -4860,8 +4876,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
                 id: "server.port: 0".to_string(),
                 ..Problem::about(key_path(&["server", "port"]), detail)
             },
-            false,
-            true,
+            Stops::DuxServer,
         );
         problem.message = format!(
             "dux server will not start with this file (the terminal UI starts, and its background \
@@ -4889,8 +4904,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
             };
             problems.push(StartProblem::new(
                 Problem::about(key_path(&["env", name]), format!("{which}: {problem}")),
-                true,
-                false,
+                Stops::TerminalUi,
             ));
         }
     }
@@ -4918,8 +4932,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
                 };
                 problems.push(StartProblem::new(
                     Problem::about(key_path(&["projects"]), format!("{which}: {problem}")),
-                    true,
-                    false,
+                    Stops::TerminalUi,
                 ));
             }
         }
@@ -4940,8 +4953,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
                     duplicate.sentence(&say(duplicate.first), &say(duplicate.second))
                 ),
             ),
-            true,
-            true,
+            Stops::Both,
         ));
     }
     problems
@@ -4952,7 +4964,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
 pub fn start_check_problems(config: &Config) -> Vec<String> {
     config_start_problems(config, config.source_text.as_str())
         .into_iter()
-        .filter(|problem| problem.stops_terminal_ui)
+        .filter(|problem| problem.stops(crate::config::Surface::TerminalUi))
         .map(|problem| {
             problem
                 .message
@@ -5056,8 +5068,7 @@ pub fn log_path_problems(config: &Config, paths: &DuxPaths) -> Vec<StartProblem>
                      be written into it. Give the log a file of its own."
                 ),
             ),
-            true,
-            true,
+            Stops::Both,
         ));
     }
     problems
@@ -7159,7 +7170,10 @@ mod tests {
                 Some((key, file)) => {
                     assert_eq!(problems.len(), 1, "{section} {value}: {problems:?}");
                     let problem = &problems[0];
-                    assert!(problem.stops_terminal_ui && problem.stops_dux_server);
+                    assert!(
+                        problem.stops(crate::config::Surface::TerminalUi)
+                            && problem.stops(crate::config::Surface::DuxServer)
+                    );
                     assert!(problem.message.contains(key), "{}", problem.message);
                     assert!(problem.message.contains(file), "{}", problem.message);
                     assert_eq!(
@@ -8866,7 +8880,7 @@ max_websocket_connections = 16
     #[test]
     fn a_problem_about_no_setting_counts_against_a_set_whenever_it_is_new() {
         let keyless = |message: &str| {
-            StartProblem::new(crate::config_auth::Problem::plain(message), true, true)
+            StartProblem::new(crate::config_auth::Problem::plain(message), Stops::Both)
         };
         let check = |problems: Vec<StartProblem>| StartCheck {
             problems,

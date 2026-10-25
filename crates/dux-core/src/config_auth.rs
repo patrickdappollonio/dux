@@ -297,8 +297,7 @@ impl ServerAuthConfig {
                         index + 1
                     ),
                     keys: vec![key("blocked_addresses")],
-                    cross_key: false,
-                    entry: true,
+                    kind: ProblemKind::ListEntry,
                 });
             }
         }
@@ -321,12 +320,20 @@ pub struct Problem {
     /// "auth", "max_password_bytes"]`), never a dotted string: a name may
     /// hold a dot. Empty for a problem about the file as a whole.
     pub keys: Vec<Vec<String>>,
-    /// Whether it is a rule spanning `keys` rather than a problem with one
-    /// value.
-    pub cross_key: bool,
-    /// Whether it is about one entry of a list value, known by the entry's
-    /// own text rather than by the list.
-    pub entry: bool,
+    /// What kind of problem it is.
+    pub kind: ProblemKind,
+}
+
+/// What a [`Problem`] is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemKind {
+    /// The value of one setting, or the file as a whole.
+    Value,
+    /// A rule spanning its keys, rather than a problem with one value.
+    CrossKeyRule,
+    /// One entry of a list value, known by the entry's own text rather than
+    /// by the list.
+    ListEntry,
 }
 
 impl Problem {
@@ -338,8 +345,7 @@ impl Problem {
             id: message.clone(),
             message,
             keys: Vec::new(),
-            cross_key: false,
-            entry: false,
+            kind: ProblemKind::Value,
         }
     }
 
@@ -350,8 +356,7 @@ impl Problem {
             id: message.clone(),
             message,
             keys: vec![key],
-            cross_key: false,
-            entry: false,
+            kind: ProblemKind::Value,
         }
     }
 
@@ -361,8 +366,7 @@ impl Problem {
             id: id.into(),
             message: message.into(),
             keys,
-            cross_key: true,
-            entry: false,
+            kind: ProblemKind::CrossKeyRule,
         }
     }
 }

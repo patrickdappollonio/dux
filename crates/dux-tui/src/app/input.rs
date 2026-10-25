@@ -8229,7 +8229,7 @@ impl App {
                         if prompt
                             .entries
                             .get(*index)
-                            .is_some_and(|entry| entry.is_selectable) =>
+                            .is_some_and(|entry| entry.is_selectable()) =>
                     {
                         Some(*index)
                     }
@@ -8257,7 +8257,7 @@ impl App {
                     self.set_error("No available worktree is selected.");
                     return Ok(());
                 };
-                if !entry.is_selectable {
+                if !entry.is_selectable() {
                     self.set_error("That worktree already has an agent.");
                     return Ok(());
                 }
@@ -8266,7 +8266,7 @@ impl App {
             _ => return Ok(()),
         };
 
-        let request = if entry.is_external {
+        let request = if entry.is_external() {
             CreateAgentRequest::ForkExternalWorktree {
                 project,
                 source_worktree_path: entry.path.clone(),
@@ -17819,9 +17819,7 @@ not_a_real_action = ["x"]
                 branch: Some("main".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: Some("session-1".to_string()),
-                is_external: false,
                 is_project_checkout: false,
-                is_selectable: false,
             }],
             loading: false,
             selected: None,
@@ -17852,9 +17850,7 @@ not_a_real_action = ["x"]
                 branch: Some("orphan".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: None,
-                is_external: false,
                 is_project_checkout: false,
-                is_selectable: true,
             }],
             loading: false,
             selected: Some(0),
@@ -17904,9 +17900,7 @@ not_a_real_action = ["x"]
                 branch: Some("feature/other-name".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: None,
-                is_external: false,
                 is_project_checkout: false,
-                is_selectable: true,
             }],
             loading: false,
             selected: Some(0),
@@ -18022,9 +18016,7 @@ not_a_real_action = ["x"]
                 branch: Some("feature".to_string()),
                 is_managed_by_dux: false,
                 existing_session_id: None,
-                is_external: true,
                 is_project_checkout: false,
-                is_selectable: true,
             }],
             loading: false,
             selected: Some(0),
@@ -18067,9 +18059,7 @@ not_a_real_action = ["x"]
                 branch: Some("feature".to_string()),
                 is_managed_by_dux: false,
                 existing_session_id: None,
-                is_external: true,
                 is_project_checkout: false,
-                is_selectable: true,
             }],
             loading: false,
             selected: Some(0),

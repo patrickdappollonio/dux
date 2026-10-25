@@ -27,23 +27,41 @@ pub(crate) fn to_ratatui_color(c: CellColor) -> Color {
 
 pub(crate) fn to_ratatui_modifier(m: CellModifier) -> Modifier {
     let mut out = Modifier::empty();
-    if m.bold {
-        out.insert(Modifier::BOLD);
-    }
-    if m.dim {
-        out.insert(Modifier::DIM);
-    }
-    if m.italic {
-        out.insert(Modifier::ITALIC);
-    }
-    if m.underlined {
-        out.insert(Modifier::UNDERLINED);
-    }
-    if m.reversed {
-        out.insert(Modifier::REVERSED);
-    }
-    if m.crossed_out {
-        out.insert(Modifier::CROSSED_OUT);
+    for (attribute, modifier) in [
+        (CellModifier::BOLD, Modifier::BOLD),
+        (CellModifier::DIM, Modifier::DIM),
+        (CellModifier::ITALIC, Modifier::ITALIC),
+        (CellModifier::UNDERLINED, Modifier::UNDERLINED),
+        (CellModifier::REVERSED, Modifier::REVERSED),
+        (CellModifier::CROSSED_OUT, Modifier::CROSSED_OUT),
+    ] {
+        if m.contains(attribute) {
+            out.insert(modifier);
+        }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_cell_attribute_becomes_its_ratatui_modifier() {
+        let pairs = [
+            (CellModifier::BOLD, Modifier::BOLD),
+            (CellModifier::DIM, Modifier::DIM),
+            (CellModifier::ITALIC, Modifier::ITALIC),
+            (CellModifier::UNDERLINED, Modifier::UNDERLINED),
+            (CellModifier::REVERSED, Modifier::REVERSED),
+            (CellModifier::CROSSED_OUT, Modifier::CROSSED_OUT),
+        ];
+        for (cell, expected) in pairs {
+            assert_eq!(to_ratatui_modifier(cell), expected);
+        }
+        assert_eq!(
+            to_ratatui_modifier(CellModifier::default()),
+            Modifier::empty()
+        );
+    }
 }

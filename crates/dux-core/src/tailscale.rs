@@ -554,6 +554,10 @@ impl ServeRoute {
 /// Everything one look at the Tailscale CLI says about how this machine is
 /// named and published on the tailnet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts one look at the Tailscale CLI reports"
+)]
 pub struct TailscaleIdentity {
     pub status: SelfStatus,
     /// The `tailscale serve` routes that end at dux's port.

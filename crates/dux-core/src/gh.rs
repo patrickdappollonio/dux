@@ -242,21 +242,6 @@ struct Planned {
     repo: String,
     branch: String,
     known: Option<StoredPr>,
-    is_terminal: bool,
-    /// Open known PRs also get a by-number alias (robust when the branch was
-    /// deleted on merge). Terminal and undiscovered sessions get the head-ref
-    /// discovery alias and `emit_head` instead.
-    emit_num: bool,
-    /// Whether the head-ref discovery alias is emitted at all. True for every
-    /// remote-derived plan; false for a PINNED session, whose only alias is the
-    /// by-number refresh of the pin (discovery would answer for a PR the user
-    /// deliberately overrode).
-    emit_ref: bool,
-    /// Whether the head-name alias is emitted: a session with no known pull
-    /// request, or only a merged or closed one, whose (next) pull request may
-    /// have been merged and its branch deleted before dux ever saw it. See
-    /// [`select_head_name_match`].
-    emit_head: bool,
     /// The agent's working copy, where a head-name match's commit is looked up.
     worktree_path: String,
     /// When dux minted the branch, for a branch it minted and the agent is
@@ -329,25 +314,6 @@ impl Planned {
         branch: String,
         known: Option<StoredPr>,
     ) -> Self {
-        let is_terminal = stored_pr_is_terminal(known.as_ref());
-        // Open known PRs also get a by-number alias; terminal-but-running and
-        // undiscovered sessions get only the head-ref discovery alias. The
-        // by-number alias fires ONLY when the stored row names the repo being
-        // queried: PR numbers are per-repo, so a row from another repository
-        // (a detached fork pin, a remote that changed under the session) asked
-        // at this target would fetch an unrelated pull request. Such a row
-        // falls back to discovery only; a discovery miss keeps the stored
-        // badge via the merge rule's fallback.
-        let known_matches_target = known.as_ref().is_some_and(|k| {
-            k.owner_repo
-                .eq_ignore_ascii_case(&format!("{owner}/{repo}"))
-                && normalize_github_host(&k.host).eq_ignore_ascii_case(&host)
-        });
-        let emit_num = known_matches_target && !is_terminal;
-        // A merged or closed known pull request does not end the search: a
-        // follow-up on the same branch can be merged and its branch deleted
-        // between two checks, leaving the ref lookup nothing to answer with.
-        let emit_head = known.is_none() || is_terminal;
         Planned {
             session_id,
             host,
@@ -355,10 +321,6 @@ impl Planned {
             repo,
             branch,
             known,
-            is_terminal,
-            emit_num,
-            emit_ref: true,
-            emit_head,
             worktree_path: String::new(),
             branch_minted_at: None,
             pinned: false,
@@ -389,7 +351,6 @@ impl Planned {
         branch: String,
         known: StoredPr,
     ) -> Self {
-        let is_terminal = stored_pr_is_terminal(Some(&known));
         Planned {
             session_id,
             host,
@@ -397,14 +358,55 @@ impl Planned {
             repo,
             branch,
             known: Some(known),
-            is_terminal,
-            emit_num: true,
-            emit_ref: false,
-            emit_head: false,
             worktree_path: String::new(),
             branch_minted_at: None,
             pinned: true,
         }
+    }
+
+    /// Whether the known pull request is merged or closed.
+    fn is_terminal(&self) -> bool {
+        stored_pr_is_terminal(self.known.as_ref())
+    }
+
+    /// Whether the by-number alias is emitted: always for a pin, and for an
+    /// open known pull request (robust when the branch was deleted on merge).
+    /// Terminal and undiscovered sessions get the head-ref discovery alias and
+    /// the head-name alias instead.
+    ///
+    /// For a remote-derived plan it fires ONLY when the stored row names the
+    /// repo being queried: PR numbers are per-repo, so a row from another
+    /// repository (a detached fork pin, a remote that changed under the
+    /// session) asked at this target would fetch an unrelated pull request.
+    /// Such a row falls back to discovery only; a discovery miss keeps the
+    /// stored badge via the merge rule's fallback.
+    fn emit_num(&self) -> bool {
+        if self.pinned {
+            return true;
+        }
+        let known_matches_target = self.known.as_ref().is_some_and(|k| {
+            k.owner_repo
+                .eq_ignore_ascii_case(&format!("{}/{}", self.owner, self.repo))
+                && normalize_github_host(&k.host).eq_ignore_ascii_case(&self.host)
+        });
+        known_matches_target && !self.is_terminal()
+    }
+
+    /// Whether the head-ref discovery alias is emitted at all. True for every
+    /// remote-derived plan; false for a PINNED session, whose only alias is the
+    /// by-number refresh of the pin (discovery would answer for a PR the user
+    /// deliberately overrode).
+    fn emit_ref(&self) -> bool {
+        !self.pinned
+    }
+
+    /// Whether the head-name alias is emitted: a remote-derived session with
+    /// no known pull request, or only a merged or closed one, whose (next)
+    /// pull request may have been merged and its branch deleted before dux
+    /// ever saw it, leaving the ref lookup nothing to answer with. See
+    /// [`select_head_name_match`].
+    fn emit_head(&self) -> bool {
+        !self.pinned && (self.known.is_none() || self.is_terminal())
     }
 }
 
@@ -470,9 +472,9 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = (planned[i].emit_ref as usize)
-                + (planned[i].emit_num as usize)
-                + (planned[i].emit_head as usize);
+            let cost = (planned[i].emit_ref() as usize)
+                + (planned[i].emit_num() as usize)
+                + (planned[i].emit_head() as usize);
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
@@ -1442,7 +1444,7 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
         ));
         for &pos in positions {
             let p = &planned[chunk[pos]];
-            if p.emit_ref {
+            if p.emit_ref() {
                 // Discovery asks for a WINDOW of the branch's pull requests and
                 // picks among them in Rust (`select_discovered_pr`), rather than
                 // for one node in a chosen order.
@@ -1466,7 +1468,7 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                     ref_alias(pos),
                 ));
             }
-            if p.emit_head {
+            if p.emit_head() {
                 // The same question asked by head NAME, which still answers
                 // after a merge deleted the branch and the ref lookup above
                 // came back null. A name is not an identity, so each node
@@ -1478,7 +1480,7 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                     graphql_string(&p.branch),
                 ));
             }
-            if p.emit_num
+            if p.emit_num()
                 && let Some(known) = &p.known
             {
                 q.push_str(&format!(
@@ -1548,7 +1550,7 @@ fn parse_chunk_response(
         // branch exists, the ref lookup is the answer.
         let ref_pr = ref_pr.or_else(|| {
             let ref_value = repo_obj.and_then(|r| r.get(ref_alias(pos).as_str()));
-            if !p.emit_head || !ref_value.is_some_and(serde_json::Value::is_null) {
+            if !p.emit_head() || !ref_value.is_some_and(serde_json::Value::is_null) {
                 return None;
             }
             let nodes = repo_obj
@@ -1557,7 +1559,7 @@ fn parse_chunk_response(
                 .and_then(|n| n.as_array())?;
             select_head_name_match(p, &owner_repo, nodes, in_local_history)
         });
-        let num_pr = if p.emit_num {
+        let num_pr = if p.emit_num() {
             repo_obj
                 .and_then(|r| r.get(num_alias(pos).as_str()))
                 .filter(|v| !v.is_null())
@@ -1789,7 +1791,7 @@ fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) 
     let Some(known) = &p.known else {
         return ref_pr;
     };
-    if p.is_terminal {
+    if p.is_terminal() {
         if let Some(r) = &ref_pr
             && r.number > known.pr_number
         {
@@ -3457,6 +3459,48 @@ mod tests {
             branch.to_string(),
             known,
         )
+    }
+
+    /// Which aliases each kind of plan emits: (terminal, by-number, head-ref,
+    /// head-name).
+    #[test]
+    fn each_kind_of_plan_emits_its_own_aliases() {
+        let flags = |p: &Planned| (p.is_terminal(), p.emit_num(), p.emit_ref(), p.emit_head());
+        let plan = |known| planned("s", "octocat", "Hello-World", "feat/x", known);
+        assert_eq!(flags(&plan(None)), (false, false, true, true));
+        assert_eq!(
+            flags(&plan(Some(stored(7, "OPEN")))),
+            (false, true, true, false)
+        );
+        assert_eq!(
+            flags(&plan(Some(stored(7, "MERGED")))),
+            (true, false, true, true)
+        );
+        assert_eq!(
+            flags(&plan(Some(stored(7, "CLOSED")))),
+            (true, false, true, true)
+        );
+        let foreign = planned(
+            "s",
+            "someone",
+            "Elsewhere",
+            "feat/x",
+            Some(stored(7, "OPEN")),
+        );
+        assert_eq!(flags(&foreign), (false, false, true, false));
+        let pin = |state| {
+            Planned::new_pinned(
+                "s".to_string(),
+                "github.com".to_string(),
+                "octocat".to_string(),
+                "Hello-World".to_string(),
+                "feat/x".to_string(),
+                stored(7, state),
+            )
+        };
+        assert_eq!(flags(&pin("OPEN")), (false, true, false, false));
+        assert_eq!(flags(&pin("MERGED")), (true, true, false, false));
+        assert!(pin("OPEN").pinned && !plan(None).pinned);
     }
 
     /// The head-name check for tests whose response carries no head-name

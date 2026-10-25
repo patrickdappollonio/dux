@@ -4800,7 +4800,7 @@ args = [\"-l\"]
             install_canonical_renderer();
             let listed = dux_core::config::start_problems_of(fixture.text)
                 .iter()
-                .any(|problem| problem.stops_terminal_ui);
+                .any(|problem| problem.stops(dux_core::config::Surface::TerminalUi));
             assert_eq!(
                 refused, fixture.stops_terminal_ui,
                 "{}: start",

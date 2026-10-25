@@ -30,7 +30,7 @@ fn dux_server_starts_exactly_as_the_start_corpus_says() {
         };
         let listed = dux_core::config::start_problems_of(&case.text)
             .iter()
-            .all(|problem| !problem.stops_dux_server);
+            .all(|problem| !problem.stops(dux_core::config::Surface::DuxServer));
         if starts != case.dux_server_starts || listed != case.dux_server_starts {
             wrong.push(format!(
                 "{:?}: starts {starts}, the list says {listed}, the corpus says {}",

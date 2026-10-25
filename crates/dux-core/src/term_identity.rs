@@ -106,6 +106,10 @@ impl TerminalIdentity {
 /// function of this struct (rather than reading `std::env` directly) is what makes
 /// the see-through matrix unit-testable.
 #[derive(Clone, Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool records whether one inherited environment variable is set"
+)]
 pub struct HostEnvProbe {
     /// `TMUX` is set and non-empty: dux itself is running inside tmux.
     pub tmux: bool,

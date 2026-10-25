@@ -3662,7 +3662,10 @@ port = 3890
             .expect_err("dux refuses to start with duplicate project ids");
         let problems = crate::config::start_problems_of(body);
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].stops_terminal_ui && problems[0].stops_dux_server);
+        assert!(
+            problems[0].stops(crate::config::Surface::TerminalUi)
+                && problems[0].stops(crate::config::Surface::DuxServer)
+        );
         let got = get(body, &lookup("server.port").unwrap()).unwrap();
         assert!(matches!(got, GetValue::Unknown { .. }), "{got:?}");
     }

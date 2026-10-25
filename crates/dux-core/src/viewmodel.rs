@@ -41,6 +41,10 @@ pub struct SpineView {
 /// signals the client to refetch with a `config.changed` event (see
 /// [`Engine::bootstrap`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent settings and facts sent to the web client as JSON booleans"
+)]
 pub struct BootstrapView {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
@@ -614,6 +618,10 @@ fn folder_repo_status_wire(status: crate::git::FolderRepoStatus) -> &'static str
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about an agent sent to the web client as JSON booleans"
+)]
 pub struct SessionView {
     pub id: String,
     pub title: Option<String>,
@@ -839,6 +847,10 @@ impl TabRunVerdictView {
 /// resume, which is decided per provider by liveness at launch (see
 /// `Engine::tab_resume_decision`) rather than by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a tab sent to the web client as JSON booleans"
+)]
 pub struct AgentTabView {
     /// Tab id. Matches `SessionView::slot_tab_id` for the session-slot tab.
     pub id: String,

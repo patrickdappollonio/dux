@@ -57,16 +57,36 @@ pub enum CellColor {
     Indexed(u8),
 }
 
-/// The subset of text attributes the terminal grid carries. Mirrors the
-/// `ratatui::style::Modifier` flags the snapshot sets.
+/// The subset of text attributes the terminal grid carries, as a set of
+/// flags. Mirrors the `ratatui::style::Modifier` flags the snapshot sets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CellModifier {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underlined: bool,
-    pub reversed: bool,
-    pub crossed_out: bool,
+pub struct CellModifier(u8);
+
+impl CellModifier {
+    pub const BOLD: Self = Self(1);
+    pub const DIM: Self = Self(1 << 1);
+    pub const ITALIC: Self = Self(1 << 2);
+    pub const UNDERLINED: Self = Self(1 << 3);
+    pub const REVERSED: Self = Self(1 << 4);
+    pub const CROSSED_OUT: Self = Self(1 << 5);
+
+    /// Whether every attribute in `other` is set here.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Set every attribute in `other`.
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl std::ops::BitOr for CellModifier {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -407,23 +427,17 @@ fn osc_color(rgb: alacritty_terminal::vte::ansi::Rgb) -> String {
 
 fn sgr_sequence(fg: CellColor, bg: CellColor, modifier: CellModifier) -> String {
     let mut params: Vec<String> = Vec::new();
-    if modifier.bold {
-        params.push("1".to_string());
-    }
-    if modifier.dim {
-        params.push("2".to_string());
-    }
-    if modifier.italic {
-        params.push("3".to_string());
-    }
-    if modifier.underlined {
-        params.push("4".to_string());
-    }
-    if modifier.reversed {
-        params.push("7".to_string());
-    }
-    if modifier.crossed_out {
-        params.push("9".to_string());
+    for (attribute, code) in [
+        (CellModifier::BOLD, "1"),
+        (CellModifier::DIM, "2"),
+        (CellModifier::ITALIC, "3"),
+        (CellModifier::UNDERLINED, "4"),
+        (CellModifier::REVERSED, "7"),
+        (CellModifier::CROSSED_OUT, "9"),
+    ] {
+        if modifier.contains(attribute) {
+            params.push(code.to_string());
+        }
     }
     params.push(fg_sgr(fg));
     params.push(bg_sgr(bg));
@@ -3210,22 +3224,22 @@ fn push_replay_cell(
 fn cell_modifier(cell: &Cell) -> CellModifier {
     let mut modifier = CellModifier::default();
     if cell.flags.contains(Flags::BOLD) {
-        modifier.bold = true;
+        modifier.insert(CellModifier::BOLD);
     }
     if cell.flags.contains(Flags::ITALIC) {
-        modifier.italic = true;
+        modifier.insert(CellModifier::ITALIC);
     }
     if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-        modifier.underlined = true;
+        modifier.insert(CellModifier::UNDERLINED);
     }
     if cell.flags.contains(Flags::INVERSE) {
-        modifier.reversed = true;
+        modifier.insert(CellModifier::REVERSED);
     }
     if cell.flags.contains(Flags::DIM) {
-        modifier.dim = true;
+        modifier.insert(CellModifier::DIM);
     }
     if cell.flags.contains(Flags::STRIKEOUT) {
-        modifier.crossed_out = true;
+        modifier.insert(CellModifier::CROSSED_OUT);
     }
     modifier
 }
@@ -7960,6 +7974,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_text_attribute_reaches_the_sgr_sequence_in_order() {
+        let bold_and_struck = CellModifier::BOLD | CellModifier::CROSSED_OUT;
+        let all = CellModifier::BOLD
+            | CellModifier::DIM
+            | CellModifier::ITALIC
+            | CellModifier::UNDERLINED
+            | CellModifier::REVERSED
+            | CellModifier::CROSSED_OUT;
+        assert_eq!(
+            sgr_sequence(CellColor::Red, CellColor::Reset, bold_and_struck),
+            "\x1b[1;9;31;49m"
+        );
+        assert_eq!(
+            sgr_sequence(CellColor::Reset, CellColor::Reset, all),
+            "\x1b[1;2;3;4;7;9;39;49m"
+        );
+    }
+
     fn repaint_cell(row: u16, col: u16, symbol: &str, fg: CellColor) -> SnapshotCell {
         SnapshotCell {
             row,
@@ -7967,14 +8000,7 @@ mod tests {
             symbol: CompactString::from(symbol),
             fg,
             bg: CellColor::Reset,
-            modifier: CellModifier {
-                bold: false,
-                dim: false,
-                italic: false,
-                underlined: false,
-                reversed: false,
-                crossed_out: false,
-            },
+            modifier: CellModifier::default(),
             link: None,
         }
     }

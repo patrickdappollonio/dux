@@ -5444,7 +5444,7 @@ impl Engine {
             worktrees,
         )
         .into_iter()
-        .filter(|entry| entry.is_selectable && entry.is_managed_by_dux)
+        .filter(|entry| entry.is_selectable() && entry.is_managed_by_dux)
         .collect())
     }
 }

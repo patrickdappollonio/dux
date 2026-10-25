@@ -215,9 +215,7 @@ fn project_worktree_entry(name: &str) -> ProjectWorktreeEntry {
         branch: Some(name.to_string()),
         is_managed_by_dux: true,
         existing_session_id: None,
-        is_external: false,
         is_project_checkout: false,
-        is_selectable: true,
     }
 }
 

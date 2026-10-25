@@ -9565,7 +9565,7 @@ mod tests {
             };
             let listed = dux_core::config::start_problems_of(fixture.text)
                 .iter()
-                .any(|problem| problem.stops_dux_server);
+                .any(|problem| problem.stops(dux_core::config::Surface::DuxServer));
             assert_eq!(refused, fixture.stops_dux_server, "{}: start", fixture.name);
             assert_eq!(
                 listed, fixture.stops_dux_server,

@@ -24,12 +24,21 @@ pub struct ProjectWorktreeEntry {
     pub branch: Option<String>,
     pub is_managed_by_dux: bool,
     pub existing_session_id: Option<String>,
-    pub is_external: bool,
     pub is_project_checkout: bool,
-    pub is_selectable: bool,
 }
 
 impl ProjectWorktreeEntry {
+    /// Whether the worktree lives outside dux's managed folder for its project.
+    pub fn is_external(&self) -> bool {
+        !self.is_managed_by_dux
+    }
+
+    /// Whether an agent can be started on it: no agent holds it already, and
+    /// it is not the project's own checkout.
+    pub fn is_selectable(&self) -> bool {
+        self.existing_session_id.is_none() && !self.is_project_checkout
+    }
+
     pub fn display_name(&self) -> String {
         self.path
             .file_name()

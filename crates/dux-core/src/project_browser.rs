@@ -232,24 +232,20 @@ pub fn classify_project_worktrees(
             let existing_session_id = session_by_path.get(&canonical_path).cloned();
             let is_project_checkout = canonical_path == project_checkout_path;
             let is_managed_by_dux = git::is_under(&managed_project_root, &worktree.path);
-            let is_external = !is_managed_by_dux;
-            let is_selectable = existing_session_id.is_none() && !is_project_checkout;
             ProjectWorktreeEntry {
                 path: canonical_path,
                 branch_name: worktree.label(),
                 branch: worktree.branch_name.clone(),
                 is_managed_by_dux,
                 existing_session_id,
-                is_external,
                 is_project_checkout,
-                is_selectable,
             }
         })
         .collect::<Vec<_>>();
 
     entries.sort_by(|a, b| {
-        a.is_selectable
-            .cmp(&b.is_selectable)
+        a.is_selectable()
+            .cmp(&b.is_selectable())
             .reverse()
             .then_with(|| a.is_project_checkout.cmp(&b.is_project_checkout))
             .then_with(|| {
@@ -863,16 +859,16 @@ mod tests {
             .find(|entry| entry.path == managed.canonicalize().unwrap())
             .unwrap();
         assert!(managed_entry.is_managed_by_dux);
-        assert!(!managed_entry.is_external);
-        assert!(managed_entry.is_selectable);
+        assert!(!managed_entry.is_external());
+        assert!(managed_entry.is_selectable());
 
         let external_entry = entries
             .iter()
             .find(|entry| entry.path == external.canonicalize().unwrap())
             .unwrap();
         assert!(!external_entry.is_managed_by_dux);
-        assert!(external_entry.is_external);
-        assert!(external_entry.is_selectable);
+        assert!(external_entry.is_external());
+        assert!(external_entry.is_selectable());
 
         let existing_entry = entries
             .iter()
@@ -882,14 +878,14 @@ mod tests {
             existing_entry.existing_session_id.as_deref(),
             Some("session-1")
         );
-        assert!(!existing_entry.is_selectable);
+        assert!(!existing_entry.is_selectable());
 
         let project_checkout_entry = entries
             .iter()
             .find(|entry| entry.path == repo.canonicalize().unwrap())
             .unwrap();
         assert!(project_checkout_entry.is_project_checkout);
-        assert!(!project_checkout_entry.is_selectable);
+        assert!(!project_checkout_entry.is_selectable());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -969,7 +965,7 @@ mod tests {
             "a standalone agent occupies this directory and must be seen doing so"
         );
         assert!(
-            !entry.is_selectable,
+            !entry.is_selectable(),
             "the manager must not offer to remove a directory an agent is living in"
         );
     }

@@ -3223,7 +3223,7 @@ pub(crate) fn project_worktree_visual_rows(
     let available = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.is_selectable)
+        .filter(|(_, entry)| entry.is_selectable())
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let project_checkout = entries
@@ -3235,7 +3235,7 @@ pub(crate) fn project_worktree_visual_rows(
     let disabled = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| !entry.is_selectable && !entry.is_project_checkout)
+        .filter(|(_, entry)| !entry.is_selectable() && !entry.is_project_checkout)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
 
@@ -3345,7 +3345,7 @@ pub(crate) fn selectable_project_worktree_indices(entries: &[ProjectWorktreeEntr
     entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| entry.is_selectable.then_some(index))
+        .filter_map(|(index, entry)| entry.is_selectable().then_some(index))
         .collect()
 }
 
@@ -9929,9 +9929,7 @@ leading_branch = "main"
                 branch: Some("feature".to_string()),
                 is_managed_by_dux: true,
                 existing_session_id: None,
-                is_external: false,
                 is_project_checkout: false,
-                is_selectable: true,
             },
             ProjectWorktreeEntry {
                 path: PathBuf::from("/repo/main"),
@@ -9939,9 +9937,7 @@ leading_branch = "main"
                 branch: Some("main".to_string()),
                 is_managed_by_dux: false,
                 existing_session_id: None,
-                is_external: true,
                 is_project_checkout: true,
-                is_selectable: false,
             },
         ];
 

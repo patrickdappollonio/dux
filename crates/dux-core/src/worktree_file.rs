@@ -48,6 +48,10 @@ impl std::fmt::Display for SaveTooLarge {
 impl std::error::Error for SaveTooLarge {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a file sent to the web editor as JSON booleans"
+)]
 pub struct WorktreeFile {
     pub path: String,
     /// True when the working copy is binary (see [`crate::text_encoding::decode`]);
