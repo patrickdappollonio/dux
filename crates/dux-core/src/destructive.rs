@@ -75,6 +75,7 @@ impl DestructiveCheck {
     }
 
     /// One check covering the paths of both (both ends of a move).
+    #[must_use]
     pub fn and(mut self, other: DestructiveCheck) -> Self {
         self.targets.extend(other.targets);
         self

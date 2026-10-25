@@ -148,6 +148,7 @@ impl StatusText {
     }
 
     /// This sentence, marked as a question to put to the user.
+    #[must_use]
     pub fn with_ask(mut self, ask: StatusAsk) -> Self {
         self.ask = Some(ask);
         self

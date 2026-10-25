@@ -228,6 +228,7 @@ impl PrBannerPosition {
     }
 
     /// The other position, for the toggle.
+    #[must_use]
     pub fn flipped(self) -> Self {
         match self {
             Self::Top => Self::Bottom,

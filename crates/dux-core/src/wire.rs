@@ -1099,6 +1099,7 @@ impl WireStatus {
     /// [`dux_core::statusline::KeyedWireStatus::sticky`] for when to use it.
     ///
     /// [`dux_core::statusline::KeyedWireStatus::sticky`]: crate::statusline::KeyedWireStatus::sticky
+    #[must_use]
     pub fn sticky(mut self) -> Self {
         self.sticky = true;
         self
@@ -1107,18 +1108,21 @@ impl WireStatus {
     /// Builder that keeps this status as the command's answer while raising no
     /// notification for it on the WEB. See [`WireStatus::quiet_on`] for when
     /// that is right.
+    #[must_use]
     pub fn quiet_web(mut self) -> Self {
         self.quiet_on.web = true;
         self
     }
 
     /// Builder that attaches a correlation key to an existing status.
+    #[must_use]
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
     }
 
     /// Builder that sets the delivery [`StatusScope`] on an existing status.
+    #[must_use]
     pub fn with_scope(mut self, scope: StatusScope) -> Self {
         self.scope = scope;
         self

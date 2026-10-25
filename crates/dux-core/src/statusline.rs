@@ -603,6 +603,7 @@ impl KeyedStatusController {
     /// form). Every surface that renders engine statuses must call it: without
     /// it the controller is back to guessing that a silent operation is a
     /// stranded one.
+    #[must_use]
     pub fn with_live_keys(mut self, live: LiveStatusKeys) -> Self {
         self.live = live;
         self

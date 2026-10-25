@@ -67,6 +67,7 @@ impl MacroSurface {
     }
 
     /// Cycle to the next variant: Agent -> Terminal -> Both -> Agent.
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             Self::Agent => Self::Terminal,
@@ -76,6 +77,7 @@ impl MacroSurface {
     }
 
     /// Cycle to the previous variant: Agent -> Both -> Terminal -> Agent.
+    #[must_use]
     pub fn prev(self) -> Self {
         match self {
             Self::Agent => Self::Both,
@@ -2502,6 +2504,7 @@ impl DuxPaths {
 
     /// These paths with the control socket the `[server] control_socket`
     /// setting names.
+    #[must_use]
     pub fn with_control_socket(mut self, setting: &str) -> Self {
         self.socket_path = resolve_control_socket(&self.root, setting);
         self

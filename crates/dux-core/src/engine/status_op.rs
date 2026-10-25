@@ -108,6 +108,7 @@ impl Final {
     /// no message to keep and is returned unchanged. Reserve it for outcomes
     /// where the user must act outside the toast to recover, or where something
     /// may have been lost or left half-done.
+    #[must_use]
     pub fn sticky(self) -> Self {
         match self {
             Final::Message {
@@ -131,6 +132,7 @@ impl Final {
 
     /// Withhold this outcome from the named surfaces (builder form). A
     /// [`Final::Clear`] has no message to withhold and is returned unchanged.
+    #[must_use]
     pub fn quiet_on(self, quiet_on: QuietSurfaces) -> Self {
         match self {
             Final::Message {
@@ -189,6 +191,7 @@ impl ResolvedFinal {
 
     /// Attach a delivery [`StatusScope`] (builder form). Used by the deferred-op
     /// mint sites to carry `current_origin` across the worker channel.
+    #[must_use]
     pub fn with_scope(mut self, scope: StatusScope) -> Self {
         self.scope = scope;
         self
@@ -298,6 +301,7 @@ impl<O> HandlerStatusOp<O> {
     /// Attach a delivery [`StatusScope`] (builder form). Stamped by the deferred-op
     /// dispatch sites with `Engine::current_origin` so the op's busy/progress/final
     /// stay scoped to the originating connection.
+    #[must_use]
     pub fn with_scope(mut self, scope: StatusScope) -> Self {
         self.scope = scope;
         self

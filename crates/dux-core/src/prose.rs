@@ -50,24 +50,28 @@ impl Prose {
     }
 
     /// Constant words.
+    #[must_use]
     pub fn text(mut self, text: impl AsRef<str>) -> Self {
         self.push_text(text);
         self
     }
 
     /// A name the plain-text spelling leaves bare.
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.push_name(name);
         self
     }
 
     /// A name the plain-text spelling wraps in straight double quotes.
+    #[must_use]
     pub fn quoted(mut self, name: impl Into<String>) -> Self {
         self.push_quoted(name);
         self
     }
 
     /// Another sentence, appended segment by segment.
+    #[must_use]
     pub fn then(mut self, other: Prose) -> Self {
         for segment in other.segments {
             match segment {

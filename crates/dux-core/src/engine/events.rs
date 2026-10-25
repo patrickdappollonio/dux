@@ -193,6 +193,7 @@ impl StatusUpdate {
     /// Mark this status as one that waits for the user (builder form). Reserved
     /// for the small set of outcomes where the user must act outside the toast
     /// to recover, or where something may have been lost or left half-done.
+    #[must_use]
     pub fn sticky(mut self) -> Self {
         self.sticky = true;
         self
@@ -200,6 +201,7 @@ impl StatusUpdate {
 
     /// Attach a correlation key to this update (builder form). Lets callers
     /// start from one of the tone helpers and then chain `.with_key(k)`.
+    #[must_use]
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
         self
@@ -207,6 +209,7 @@ impl StatusUpdate {
 
     /// Set this update's delivery [`StatusScope`] (builder form). Used by the
     /// engine mint sites to stamp `current_origin` onto a freshly-minted status.
+    #[must_use]
     pub fn with_scope(mut self, scope: StatusScope) -> Self {
         self.scope = scope;
         self
@@ -215,6 +218,7 @@ impl StatusUpdate {
     /// Withhold this message from the named surfaces (builder form). The
     /// surfaces decide separately, so the caller states both halves at once and
     /// says which tenet case the quieted half fails.
+    #[must_use]
     pub fn quiet_on(mut self, quiet_on: QuietSurfaces) -> Self {
         self.quiet_on = quiet_on;
         self
