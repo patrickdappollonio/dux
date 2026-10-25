@@ -536,6 +536,16 @@ pub fn slugify_drop_name(name: &str, name_max: usize) -> String {
     format!("{dot}{stem}{ext}")
 }
 
+/// Whether a newly made upload directory is seeded with its self-ignoring
+/// `.gitignore`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadGitignore {
+    /// Write the `.gitignore` when dux creates it (none is there yet).
+    Write,
+    /// Write none.
+    Skip,
+}
+
 /// A PINNED handle to the directory a dropped file will be written into.
 ///
 /// The handle, not the path, is the thing that matters. Resolving a directory to
@@ -576,7 +586,7 @@ impl DropDir {
 
     /// Pin the AGENT UPLOAD DIRECTORY inside `worktree`, creating it (and every
     /// missing parent) if it is not there yet, and seeding its self-ignoring
-    /// `.gitignore` in the same step when `write_gitignore` is on.
+    /// `.gitignore` in the same step when `gitignore` says to.
     ///
     /// This is the ONE place the upload directory comes into existence.
     ///
@@ -596,7 +606,7 @@ impl DropDir {
     pub fn open_uploads(
         worktree: &Path,
         relative: &str,
-        write_gitignore: bool,
+        gitignore: UploadGitignore,
     ) -> Result<Self, DropDirError> {
         let mut fd = rustix::fs::open(
             worktree,
@@ -647,7 +657,7 @@ impl DropDir {
             opened_as.push(name);
         }
 
-        if write_gitignore {
+        if gitignore == UploadGitignore::Write {
             seed_uploads_gitignore(&fd);
         }
 
@@ -1142,7 +1152,15 @@ impl FileDropDestination {
                 worktree,
                 relative,
                 write_gitignore,
-            } => DropDir::open_uploads(worktree, relative, *write_gitignore),
+            } => DropDir::open_uploads(
+                worktree,
+                relative,
+                if *write_gitignore {
+                    UploadGitignore::Write
+                } else {
+                    UploadGitignore::Skip
+                },
+            ),
             Self::WorktreeDirectory { worktree, relative } => {
                 DropDir::open_tree_dir(worktree, relative)
             }
@@ -3463,7 +3481,8 @@ mod uploads_dir {
     #[test]
     fn the_upload_directory_is_created_with_its_parents_and_a_self_ignoring_gitignore() {
         let wt = worktree();
-        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("open uploads");
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
+            .expect("open uploads");
 
         let expected = wt.path().join(".dux").join("uploads");
         assert_eq!(
@@ -3485,7 +3504,8 @@ mod uploads_dir {
         // The opt-out is for a user who INTENDS to commit what they drop, so
         // the directory still has to exist and the file must stay visible.
         let wt = worktree();
-        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", false).expect("open uploads");
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Skip)
+            .expect("open uploads");
         assert!(dir.path().is_dir());
         assert!(
             !wt.path().join(".dux/uploads/.gitignore").exists(),
@@ -3502,7 +3522,7 @@ mod uploads_dir {
         std::fs::create_dir_all(&uploads).unwrap();
         std::fs::write(uploads.join(".gitignore"), "!keep-me\n").unwrap();
 
-        DropDir::open_uploads(wt.path(), "uploads", true).expect("open uploads");
+        DropDir::open_uploads(wt.path(), "uploads", UploadGitignore::Write).expect("open uploads");
 
         assert_eq!(
             std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
@@ -3516,10 +3536,12 @@ mod uploads_dir {
         // must not fail, must not move the directory, and must not disturb a
         // file already sitting in it.
         let wt = worktree();
-        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("first");
+        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
+            .expect("first");
         std::fs::write(first.path().join("already-here.png"), b"x").unwrap();
 
-        let second = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("second");
+        let second = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
+            .expect("second");
 
         assert_eq!(first.path(), second.path());
         assert_eq!(
@@ -3541,11 +3563,12 @@ mod uploads_dir {
         // was off) and every upload from then on would be visible to git while
         // the config still said otherwise.
         let wt = worktree();
-        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("first");
+        let first = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
+            .expect("first");
         let ignore = first.path().join(".gitignore");
         std::fs::remove_file(&ignore).expect("remove the ignore file");
 
-        DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("second");
+        DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write).expect("second");
 
         assert_eq!(std::fs::read_to_string(&ignore).unwrap(), UPLOADS_GITIGNORE);
     }
@@ -3556,10 +3579,12 @@ mod uploads_dir {
         // hits: they dropped a file with `upload_write_gitignore = false`, saw
         // the untracked screenshot, and turned the setting on.
         let wt = worktree();
-        let first = DropDir::open_uploads(wt.path(), "uploads", false).expect("first");
+        let first =
+            DropDir::open_uploads(wt.path(), "uploads", UploadGitignore::Skip).expect("first");
         assert!(!first.path().join(".gitignore").exists());
 
-        let second = DropDir::open_uploads(wt.path(), "uploads", true).expect("second");
+        let second =
+            DropDir::open_uploads(wt.path(), "uploads", UploadGitignore::Write).expect("second");
 
         assert_eq!(
             std::fs::read_to_string(second.path().join(".gitignore")).unwrap(),
@@ -3584,7 +3609,7 @@ mod uploads_dir {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    DropDir::open_uploads(&root, ".dux/uploads", true)
+                    DropDir::open_uploads(&root, ".dux/uploads", UploadGitignore::Write)
                         .map(|dir| dir.path().to_path_buf())
                 })
             })
@@ -3612,7 +3637,7 @@ mod uploads_dir {
         let outside = tempfile::tempdir().expect("outside");
         std::os::unix::fs::symlink(outside.path(), wt.path().join(".dux")).unwrap();
 
-        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", true)
+        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
             .expect_err("a symlinked component must be refused");
         assert!(
             matches!(&err, DropDirError::UploadPathBlocked { component } if component == ".dux"),
@@ -3631,7 +3656,7 @@ mod uploads_dir {
         let wt = worktree();
         std::fs::write(wt.path().join(".dux"), b"not a directory").unwrap();
 
-        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", true)
+        let err = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
             .expect_err("a file in the way must be refused");
         assert!(
             matches!(&err, DropDirError::UploadPathBlocked { component } if component == ".dux"),
@@ -3646,7 +3671,8 @@ mod uploads_dir {
         // and the file is still inside the worktree so the Changes pane refresh
         // check keeps answering yes.
         let wt = worktree();
-        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", true).expect("open uploads");
+        let dir = DropDir::open_uploads(wt.path(), ".dux/uploads", UploadGitignore::Write)
+            .expect("open uploads");
         let saved = save_drop(
             &dir,
             "shot.png",
