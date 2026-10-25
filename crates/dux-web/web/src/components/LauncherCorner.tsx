@@ -43,7 +43,7 @@ export function LauncherCorner({ className }: { className?: string }) {
               key={label}
               data-shown={i === index ? "" : undefined}
               className={cn(
-                "flex justify-center whitespace-nowrap transition-[transform,opacity] duration-[125ms] ease-out motion-reduce:transition-none",
+                "flex justify-center whitespace-nowrap transition-[translate,opacity] duration-[125ms] ease-out motion-reduce:transition-none",
                 i === index
                   ? "translate-y-0 opacity-100"
                   : i === previous
