@@ -593,7 +593,8 @@ mod tests {
 
     #[test]
     fn handler_status_op_progress_reuses_the_id_without_consuming() {
-        let op = status_op("Creating worktree\u{2026}").resolve_in_handler(|_: &()| Final::clear());
+        let op =
+            status_op("Creating worktree\u{2026}").resolve_in_handler(|(): &()| Final::clear());
         let id = op.id().to_string();
         // Progress updates re-emit a busy on the SAME id and don't consume the op.
         let p1 = op.progress("Launching session\u{2026}");

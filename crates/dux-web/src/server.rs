@@ -4314,7 +4314,7 @@ impl Drop for AbortOnDrop {
 async fn until_expired<F: std::future::Future>(socket: F, expired: &tokio::sync::Notify) -> bool {
     tokio::select! {
         _ = socket => false,
-        _ = expired.notified() => true,
+        () = expired.notified() => true,
     }
 }
 

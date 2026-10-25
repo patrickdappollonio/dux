@@ -3398,7 +3398,7 @@ impl App {
         let op = dux_core::engine::status_op(format!(
             "Rerunning startup command for agent \"{branch}\"..."
         ))
-        .on_success(move |_: &()| {
+        .on_success(move |(): &()| {
             dux_core::engine::Final::info(format!(
                 "Startup command completed for project \"{success_name}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
             ))

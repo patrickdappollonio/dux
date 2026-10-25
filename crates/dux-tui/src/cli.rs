@@ -616,7 +616,7 @@ fn regenerate_password_note(current: &str) -> Option<&'static str> {
         let value = value.trim();
         !value.is_empty() && !value.starts_with("\"\"") && !value.starts_with("''")
     });
-    (loaded || written).then_some(()).map(|_| {
+    (loaded || written).then_some(()).map(|()| {
         "Note: this removes the web UI password (server.auth.password_hash). Set it again \
              afterwards with `dux config set server.auth.password`."
     })

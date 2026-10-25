@@ -3319,8 +3319,8 @@ async fn next_terminate_signal(
         }
     }
     tokio::select! {
-        _ = recv(interrupt) => {},
-        _ = recv(terminate) => {},
+        () = recv(interrupt) => {},
+        () = recv(terminate) => {},
     }
 }
 

@@ -180,7 +180,7 @@ async fn follow(
         tokio::select! {
             biased;
             _ = auth.revoked() => return,
-            _ = tx.closed() => return,
+            () = tx.closed() => return,
             _ = sleep.tick() => {}
         }
         let Ok((lines, back)) = tokio::task::spawn_blocking(move || {

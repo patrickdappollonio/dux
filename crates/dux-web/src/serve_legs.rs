@@ -469,8 +469,8 @@ pub(crate) async fn wait_for_leg_shutdown(
     leg: tokio::sync::watch::Receiver<bool>,
 ) {
     tokio::select! {
-        _ = wait_for_shutdown(parent) => {},
-        _ = wait_for_shutdown(leg) => {},
+        () = wait_for_shutdown(parent) => {},
+        () = wait_for_shutdown(leg) => {},
     }
 }
 

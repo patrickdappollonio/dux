@@ -1088,7 +1088,7 @@ impl Engine {
                     }
                 };
                 let op = crate::engine::status_op("Committing the staged changes\u{2026}")
-                    .on_success(move |_: &()| crate::engine::Final::info(success_message.clone()))
+                    .on_success(move |(): &()| crate::engine::Final::info(success_message.clone()))
                     // Commit failures leave the index and typed message intact, so
                     // recovery stays inside the UI and does not require a sticky
                     // status.
@@ -1112,7 +1112,7 @@ impl Engine {
 
             Command::Push { worktree_path } => {
                 let op = crate::engine::status_op("Pushing to remote\u{2026}")
-                    .on_success(|_: &()| {
+                    .on_success(|(): &()| {
                         crate::engine::Final::info(
                             "Pushed to remote successfully. Your changes are now available to collaborators.",
                         )
@@ -1156,7 +1156,7 @@ impl Engine {
                     format!("Opening {}: ", target),
                     n(display)
                 ])
-                .on_success(move |_: &()| crate::engine::Final::info(format!("Opened {t_ok}.")))
+                .on_success(move |(): &()| crate::engine::Final::info(format!("Opened {t_ok}.")))
                 .on_failure(move |e: &String| {
                     crate::engine::Final::error(format!("Could not open {t_err}: {e}"))
                 });
@@ -1606,7 +1606,7 @@ impl Engine {
                         run_project_refresh(&repo_path, leading_branch.clone(), &guard)
                     }
                     PullTarget::Session => crate::git::pull_current_branch(&repo_path, &guard)
-                        .map(|_| PullOutcome::Pulled {
+                        .map(|()| PullOutcome::Pulled {
                             current_branch: None,
                         })
                         .map_err(|error| error.to_string()),

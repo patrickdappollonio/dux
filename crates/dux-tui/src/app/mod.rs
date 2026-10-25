@@ -5544,7 +5544,7 @@ impl App {
         let opener = Arc::clone(&self.url_opener);
         let failed_url = url.clone();
         let op = dux_core::engine::status_op(format!("Opening {url} in your default browser..."))
-            .on_success(move |_: &()| dux_core::engine::Final::info(success))
+            .on_success(move |(): &()| dux_core::engine::Final::info(success))
             .on_failure(move |error: &String| {
                 dux_core::engine::Final::error(format!(
                     "Could not open {failed_url} in your default browser: {error}. Copy the \

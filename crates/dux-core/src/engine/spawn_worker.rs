@@ -269,7 +269,7 @@ impl Engine {
 
         match spawn_result {
             // Apply the pending Busy now; the worker will follow with its final.
-            Ok(_) => EventReaction::Status(pending),
+            Ok(()) => EventReaction::Status(pending),
             Err(err) => {
                 // Spawn failed and the Busy rides the returned reaction being
                 // replaced here, so a keyed error must go out in its place and

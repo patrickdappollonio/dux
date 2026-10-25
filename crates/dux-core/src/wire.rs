@@ -3145,7 +3145,7 @@ impl Engine {
             q(branch),
             "..."
         ])
-        .on_success(move |_: &()| {
+        .on_success(move |(): &()| {
             crate::engine::Final::info(crate::status_text![
                 "Startup command completed for project ",
                 q(success_name),

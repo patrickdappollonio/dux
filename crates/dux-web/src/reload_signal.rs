@@ -35,7 +35,7 @@ pub(crate) async fn reload_on_signal(
     tokio::pin!(stopped);
     loop {
         tokio::select! {
-            _ = &mut stopped => return,
+            () = &mut stopped => return,
             received = signals.recv() => {
                 if received.is_none() {
                     return;

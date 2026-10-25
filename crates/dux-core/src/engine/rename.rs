@@ -221,7 +221,7 @@ impl Engine {
             q(new_branch),
             "\u{2026}"
         ])
-        .on_success(move |_: &()| {
+        .on_success(move |(): &()| {
             Final::info(crate::status_text![
                 "Renamed agent and its git branch to ",
                 q(success_new),

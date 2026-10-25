@@ -58,7 +58,7 @@ async fn get_operation(
             return Json(view).into_response();
         }
         tokio::select! {
-            _ = tokio::time::sleep(POLL) => {}
+            () = tokio::time::sleep(POLL) => {}
             _ = handing_over.changed() => {}
         }
     }

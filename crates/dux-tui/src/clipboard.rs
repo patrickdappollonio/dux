@@ -56,7 +56,7 @@ impl Clipboard {
         // label; the failure message matches the engine's prior wording.
         let success_label = label.to_string();
         let op = status_op("Copying path to clipboard\u{2026}")
-            .on_success(move |_: &()| Final::info(success_label.clone()))
+            .on_success(move |(): &()| Final::info(success_label.clone()))
             .on_failure(|e: &String| Final::error(format!("Clipboard copy failed: {e}")));
         let pending = op.pending_status();
         self.tx
