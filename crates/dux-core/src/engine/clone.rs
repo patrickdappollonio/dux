@@ -492,7 +492,7 @@ impl Engine {
                 // holding the new project the way a create's own record does.
                 self.operations.hold(
                     &op_id,
-                    crate::operations::Hold::shared(InFlightKey::Project(project.id.clone())),
+                    &crate::operations::Hold::shared(InFlightKey::Project(project.id.clone())),
                 );
                 self.operations.hand_off(&op_id, &create);
                 EventReaction::Multi(vec![

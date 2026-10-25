@@ -1061,12 +1061,7 @@ mod tests {
     fn the_action_list_header_chips_the_folder() {
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        app.open_project_actions(
-            ProjectActionsTarget::Project {
-                id: project.id.clone(),
-            },
-            None,
-        );
+        app.open_project_actions(ProjectActionsTarget::Project { id: project.id }, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
         let buffer = terminal.backend().buffer().clone();
@@ -1107,9 +1102,7 @@ mod tests {
             None,
         );
         let rows = app
-            .project_action_rows(&ProjectActionsTarget::Project {
-                id: project.id.clone(),
-            })
+            .project_action_rows(&ProjectActionsTarget::Project { id: project.id })
             .len();
         for _ in 0..rows {
             press(&mut app, KeyCode::Down);

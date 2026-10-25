@@ -2028,7 +2028,7 @@ impl Engine {
                     review_copy_warned,
                     review_copy_by_flag,
                 );
-                let status = self.create_agent_from_pr(&project_id, &pr, name, consent, ask_id)?;
+                let status = self.create_agent_from_pr(&project_id, &pr, &name, consent, ask_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2846,7 +2846,7 @@ impl Engine {
             ));
         }
 
-        let outcome = self.change_agent_provider(session_id, provider.clone())?;
+        let outcome = self.change_agent_provider(session_id, &provider)?;
 
         if outcome.running {
             Ok(WireStatus::new(
@@ -2906,7 +2906,7 @@ impl Engine {
         let outcome = self.close_tab(session_id, tab_id)?;
         self.note_operation(
             None,
-            crate::operations::OperationNotes {
+            &crate::operations::OperationNotes {
                 removed: vec![tab_id.to_string()],
                 ..Default::default()
             },
@@ -2991,7 +2991,7 @@ impl Engine {
             anyhow::bail!("{}", crate::provider::provider_not_configured(provider));
         }
         let provider = ProviderKind::new(provider);
-        let outcome = self.change_tab_provider(session_id, tab_id, provider.clone())?;
+        let outcome = self.change_tab_provider(session_id, tab_id, &provider)?;
         if outcome.running {
             Ok(WireStatus::new(
                 "warning",
@@ -3336,7 +3336,7 @@ impl Engine {
             if std::panic::catch_unwind(AssertUnwindSafe(|| {
                 crate::project_browser::run_checkout_project_default_branch_inspection_job(
                     project,
-                    worker_tx,
+                    &worker_tx,
                     Some(op_id),
                 );
             }))
@@ -3470,7 +3470,7 @@ impl Engine {
                 crate::project_browser::run_add_project_checkout_job(
                     action,
                     default_branch,
-                    worker_tx,
+                    &worker_tx,
                     Some(op_id),
                     &guard,
                 );
@@ -3602,7 +3602,7 @@ impl Engine {
             let add_panic = add.clone();
             let op_id_panic = op_id.clone();
             if std::panic::catch_unwind(AssertUnwindSafe(|| {
-                crate::project_browser::run_create_initial_commit_job(add, worker_tx, Some(op_id));
+                crate::project_browser::run_create_initial_commit_job(add, &worker_tx, Some(op_id));
             }))
             .is_err()
             {
@@ -3686,7 +3686,7 @@ impl Engine {
             let add_panic = add.clone();
             let op_id_panic = op_id.clone();
             if std::panic::catch_unwind(AssertUnwindSafe(|| {
-                crate::project_browser::run_init_repo_job(add, worker_tx, Some(op_id));
+                crate::project_browser::run_init_repo_job(add, &worker_tx, Some(op_id));
             }))
             .is_err()
             {
@@ -3716,7 +3716,7 @@ impl Engine {
         &mut self,
         project_id: &str,
         pr: &str,
-        name: String,
+        name: &str,
         review_copy: crate::worker::ReviewCopyConsent,
         ask_id: Option<String>,
     ) -> anyhow::Result<WireStatus> {
@@ -3801,13 +3801,13 @@ impl Engine {
             if std::panic::catch_unwind(AssertUnwindSafe(|| {
                 crate::gh::run_pull_request_lookup_job(
                     project,
-                    raw_input,
+                    &raw_input,
                     custom_name,
                     review_copy,
                     ask_id,
-                    worker_tx,
+                    &worker_tx,
                     Some(op_id),
-                    policy,
+                    &policy,
                 );
             }))
             .is_err()
@@ -4211,7 +4211,7 @@ impl Engine {
                 {
                     self.operations.note(
                         key,
-                        crate::operations::OperationNotes {
+                        &crate::operations::OperationNotes {
                             created: vec![project_id.clone()],
                             ..Default::default()
                         },
@@ -4266,7 +4266,7 @@ impl Engine {
                         status_op_id,
                         |action, branch, tx, id| {
                             crate::project_browser::run_add_project_checkout_job(
-                                action, branch, tx, id, &guard,
+                                action, branch, &tx, id, &guard,
                             );
                         },
                     );
@@ -4490,7 +4490,7 @@ impl Engine {
             .map(|op| op.id().to_string());
         self.note_operation(
             key.as_deref(),
-            crate::operations::OperationNotes {
+            &crate::operations::OperationNotes {
                 parts,
                 ..Default::default()
             },
@@ -4541,7 +4541,7 @@ impl Engine {
                         // SESSION id, not the tab id.
                         self.resolve_web_launch_op_or(
                             &outcome.session.id,
-                            crate::engine::LaunchOutcome::Ready {
+                            &crate::engine::LaunchOutcome::Ready {
                                 status_message: status_message.clone(),
                                 quiet_on: outcome.status_quiet,
                             },
@@ -4563,7 +4563,7 @@ impl Engine {
                 }
                 AgentLaunchReadyView::SessionMissing => self.resolve_web_launch_op_or(
                     &outcome.session.id,
-                    crate::engine::LaunchOutcome::Missing,
+                    &crate::engine::LaunchOutcome::Missing,
                 ),
                 // StartupAutoReopen success is silent (mirrors the TUI). A create
                 // commit/persist-fail final is resolved engine-side, not here.
@@ -4580,7 +4580,7 @@ impl Engine {
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
-                    crate::engine::LaunchOutcome::ReconnectFailed {
+                    &crate::engine::LaunchOutcome::ReconnectFailed {
                         branch_name: agent_label.clone(),
                         message: message.clone(),
                     },
@@ -4591,7 +4591,7 @@ impl Engine {
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
-                    crate::engine::LaunchOutcome::ForceReconnectFailed {
+                    &crate::engine::LaunchOutcome::ForceReconnectFailed {
                         branch_name: agent_label.clone(),
                         message: message.clone(),
                     },
@@ -4660,10 +4660,10 @@ impl Engine {
     fn resolve_web_launch_op_or(
         &mut self,
         session_id: &str,
-        outcome: crate::engine::LaunchOutcome,
+        outcome: &crate::engine::LaunchOutcome,
     ) -> WebFollowupStatuses {
         match self.pending_web_launch_ops.remove(session_id) {
-            Some(op) => match op.resolve(&outcome).into_reaction() {
+            Some(op) => match op.resolve(outcome).into_reaction() {
                 EventReaction::Status(update) => WebFollowupStatuses {
                     statuses: vec![WireStatus::from_update(&update)],
                     clear_keys: Vec::new(),
@@ -4674,7 +4674,7 @@ impl Engine {
                 },
                 _ => WebFollowupStatuses::default(),
             },
-            None => match crate::engine::launch_outcome_final(&outcome) {
+            None => match crate::engine::launch_outcome_final(outcome) {
                 crate::engine::Final::Message {
                     tone,
                     text,
@@ -5025,8 +5025,8 @@ impl Engine {
 
     fn create_agent_command(
         &self,
-        project_id: String,
-        name: String,
+        project_id: &str,
+        name: &str,
         copy_uncommitted_changes: Option<bool>,
         use_existing_branch: bool,
     ) -> anyhow::Result<Command> {
@@ -5076,10 +5076,10 @@ impl Engine {
         })
     }
 
-    fn fork_session_command(&self, session_id: String, name: String) -> anyhow::Result<Command> {
+    fn fork_session_command(&self, session_id: &str, name: &str) -> anyhow::Result<Command> {
         let managed = self
             .branch_git_workspace(
-                &session_id,
+                session_id,
                 "fork",
                 crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
             )?
@@ -5128,9 +5128,9 @@ impl Engine {
 
     fn adopt_worktree_command(
         &self,
-        project_id: String,
-        worktree_path: String,
-        name: String,
+        project_id: &str,
+        worktree_path: &str,
+        name: &str,
     ) -> anyhow::Result<Command> {
         let project = self
             .projects
@@ -5202,19 +5202,19 @@ impl Engine {
                 copy_uncommitted_changes,
                 use_existing_branch,
             } => self.create_agent_command(
-                project_id,
-                name,
+                &project_id,
+                &name,
                 copy_uncommitted_changes,
                 use_existing_branch,
             )?,
             WireCommand::ForkSession { session_id, name } => {
-                self.fork_session_command(session_id, name)?
+                self.fork_session_command(&session_id, &name)?
             }
             WireCommand::CreateAgentFromWorktree {
                 project_id,
                 worktree_path,
                 name,
-            } => self.adopt_worktree_command(project_id, worktree_path, name)?,
+            } => self.adopt_worktree_command(&project_id, &worktree_path, &name)?,
             command => return Ok(WireCommandMapping::Unhandled(command)),
         };
         Ok(WireCommandMapping::Mapped(mapped))
@@ -11049,9 +11049,8 @@ mod tests {
         // optimistic "added project" success. A dead writer fails every save.
         let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
         let (mut engine, _tmp) = test_engine();
-        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-            engine.paths.config_path.clone(),
-        );
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
 
         // The switch worker still runs (it does not touch config), so the
         // checkout busy status is produced as usual.
@@ -11871,9 +11870,8 @@ mod tests {
             &gh_prints(&pull_request_json("pr-branch")),
         );
         serve_pull_requests(&mut engine, &gh_add, &remote);
-        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-            engine.paths.config_path.clone(),
-        );
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
         let folder = checkout_of_widget(&root, "dest-add-fails", &remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &folder, None))
@@ -12039,7 +12037,7 @@ mod tests {
             serve_pull_requests(&mut engine, program, from);
             if what == "a project that could not be added" {
                 engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-                    engine.paths.config_path.clone(),
+                    &engine.paths.config_path,
                 );
             }
             let first = root.join(format!("first-{index}"));
@@ -12826,9 +12824,8 @@ mod tests {
         // an error Status; apply_wire must surface THAT, not the optimistic success.
         let repo = init_repo_with_commit();
         let (mut engine, _tmp) = test_engine();
-        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-            engine.paths.config_path.clone(),
-        );
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
         let outcome = engine
             .apply_wire(WireCommand::AddProject {
                 path: repo.path().to_string_lossy().into_owned(),

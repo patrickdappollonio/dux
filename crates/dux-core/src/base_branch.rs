@@ -642,7 +642,7 @@ mod tests {
             crate::engine::test_support::sample_project("p1", repo.path().to_str().unwrap());
         project.leading_branch = Some("develop".to_string());
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::project_browser::run_project_branch_status_job(project, tx);
+        crate::project_browser::run_project_branch_status_job(project, &tx);
         let crate::worker::WorkerEvent::ProjectBranchStatusReady { result, .. } =
             rx.recv().unwrap()
         else {

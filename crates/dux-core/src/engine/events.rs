@@ -876,7 +876,7 @@ pub(crate) fn perform_deferred_removal(
         })
     }))
     .unwrap_or_else(|payload| {
-        let reason = crate::engine::spawn_worker::format_panic_payload(payload);
+        let reason = crate::engine::spawn_worker::format_panic_payload(&*payload);
         crate::logger::error(&format!(
             "deferred worktree-remove worker panicked for session {session_id}: {reason}"
         ));
@@ -1604,11 +1604,11 @@ impl Engine {
     fn resolve_create_op(
         &mut self,
         status_op_id: &str,
-        outcome: CreateLaunchOutcome,
+        outcome: &CreateLaunchOutcome,
     ) -> Option<ResolvedFinal> {
         self.pending_create_ops
             .remove(status_op_id)
-            .map(|op| op.resolve(&outcome))
+            .map(|op| op.resolve(outcome))
     }
 
     /// Put a freshly launched provider under its tab id, unless a LIVE one is
@@ -1732,7 +1732,7 @@ impl Engine {
                 );
                 let create_final = self.resolve_create_op(
                     &status_op_id,
-                    CreateLaunchOutcome::Failed {
+                    &CreateLaunchOutcome::Failed {
                         message: message.clone(),
                         attempted_name: Some(session.display_label()),
                     },
@@ -1762,7 +1762,7 @@ impl Engine {
                 ));
                 let create_final = self.resolve_create_op(
                     &status_op_id,
-                    CreateLaunchOutcome::PersistFailed {
+                    &CreateLaunchOutcome::PersistFailed {
                         error: err.to_string(),
                         attempted_name: Some(session.display_label()),
                     },
@@ -1897,7 +1897,7 @@ impl Engine {
                     warns: status_warns,
                 },
             };
-            let create_final = self.resolve_create_op(&status_op_id, create_outcome);
+            let create_final = self.resolve_create_op(&status_op_id, &create_outcome);
 
             return (
                 AgentLaunchReadyOutcome {
@@ -2878,7 +2878,7 @@ impl Engine {
                 // surfaces replace the create busy in place with the same message.
                 let create_final = self.resolve_create_op(
                     &status_op_id,
-                    CreateLaunchOutcome::Failed {
+                    &CreateLaunchOutcome::Failed {
                         message: message.clone().into(),
                         attempted_name: Some(session.display_label()),
                     },
@@ -3262,7 +3262,7 @@ impl Engine {
             ),
             String,
         >,
-        worktree: std::path::PathBuf,
+        worktree: &std::path::Path,
     ) -> EventReaction {
         // Poll results can outlive their watch and must not replace another
         // worktree's files, nor report a failure about a watch that has moved
@@ -3308,8 +3308,8 @@ impl Engine {
     fn process_pull_completed(
         &mut self,
         repo_path: String,
-        target: PullTarget,
-        result: Result<crate::worker::PullOutcome, String>,
+        target: &PullTarget,
+        result: &Result<crate::worker::PullOutcome, String>,
         status: ResolvedFinal,
     ) -> EventReaction {
         match &target {
@@ -3450,9 +3450,9 @@ impl Engine {
     fn process_worktree_remove_waiting(
         &mut self,
         session_id: String,
-        waiting_for: String,
+        waiting_for: &str,
     ) -> EventReaction {
-        if let Some(reaction) = self.cascade_removal_waiting(&session_id, &waiting_for) {
+        if let Some(reaction) = self.cascade_removal_waiting(&session_id, waiting_for) {
             return reaction;
         }
         let label = self
@@ -3462,17 +3462,17 @@ impl Engine {
             .cloned()
             .unwrap_or_else(|| session_id.clone());
         EventReaction::WorktreeRemoveWaiting {
-            message: crate::engine::removal_waiting_message(&label, &waiting_for),
+            message: crate::engine::removal_waiting_message(&label, waiting_for),
             session_id,
         }
     }
 
     fn process_branch_rename_completed(
         &mut self,
-        session_id: String,
-        new_branch: String,
+        session_id: &str,
+        new_branch: &str,
         previous_title: Option<String>,
-        result: Result<(), String>,
+        result: &Result<(), String>,
         mut status: ResolvedFinal,
     ) -> EventReaction {
         match &result {
@@ -3480,7 +3480,7 @@ impl Engine {
                 // A rename moves a branch rather than switching to another one, so
                 // the branch dux minted is still the one dux minted under its new
                 // name, and the pull-request age guard must keep holding for it.
-                let renamed_from = self.minted_branch_rename(&session_id);
+                let renamed_from = self.minted_branch_rename(session_id);
                 let was_minted = self
                     .sessions
                     .iter()
@@ -3491,9 +3491,9 @@ impl Engine {
                 // a marker left from an earlier rename must not carry over to it.
                 let recorded = if was_minted {
                     self.session_store
-                        .set_minted_branch_rename(&session_id, &new_branch)
+                        .set_minted_branch_rename(session_id, new_branch)
                 } else {
-                    self.session_store.delete_minted_branch_rename(&session_id)
+                    self.session_store.delete_minted_branch_rename(session_id)
                 };
                 if let Err(err) = recorded {
                     logger::error(&format!(
@@ -3509,17 +3509,17 @@ impl Engine {
                         logger::info(&branch_rename_log_line(
                             &session.id,
                             &label,
-                            &new_branch,
+                            new_branch,
                             &previous,
                             &original,
                         ));
-                        managed.branch_name = new_branch.clone();
+                        managed.branch_name = new_branch.to_string();
                     }
                     // The optimistic title was the new branch name. Kept as a
                     // custom title it would pin the label to a copy of that
                     // name, so a later rename of the branch would leave the
                     // label behind; without one the label follows the branch.
-                    if session.title.as_deref() == Some(new_branch.as_str()) {
+                    if session.title.as_deref() == Some(new_branch) {
                         session.title = None;
                     }
                     session.updated_at = Utc::now();
@@ -3537,7 +3537,7 @@ impl Engine {
                             "Renamed git branch ",
                             q(old_branch),
                             " to ",
-                            q(new_branch.clone()),
+                            q(new_branch),
                             format!(
                                 ", but dux could not save the agent's new branch name: {err:#}. \
                                  dux saves it the next time it checks the agent's branch, once \
@@ -3552,7 +3552,7 @@ impl Engine {
                 // So does the pull-request plan, which asks GitHub by branch, and
                 // the renamed branch is asked about once now.
                 self.update_pr_sync_sessions();
-                self.request_branch_pr_check(&session_id);
+                self.request_branch_pr_check(session_id);
             }
             Err(err) => {
                 logger::warn(&format!(
@@ -3572,12 +3572,12 @@ impl Engine {
                         *session = saved;
                         status.outcome = crate::engine::Final::error(crate::status_text![
                             "Could not rename the agent's git branch to ",
-                            q(new_branch.clone()),
+                            q(new_branch),
                             format!(
                                 ": {err}. dux could not put the agent's old name back either: \
                                  {save_err:#}, so it keeps showing "
                             ),
-                            q(new_branch.clone()),
+                            q(new_branch),
                             ". Rename it again once dux can write its database; check that \
                              the disk has room, and see dux.log."
                         ]);
@@ -3589,21 +3589,21 @@ impl Engine {
         // the old name; record the new one for it before the hold is released,
         // so it deletes the branch by the name it has now.
         if result.is_ok()
-            && let Some(expected) = self.rename_expected.get(&session_id)
+            && let Some(expected) = self.rename_expected.get(session_id)
         {
             self.removal_coordination.ops.record_branch_rename(
                 &crate::worktree_ops::HoldOwner::InFlight(InFlightKey::BranchRename(
-                    session_id.clone(),
+                    session_id.to_string(),
                 )),
                 &expected.old_branch,
-                &new_branch,
+                new_branch,
             );
             // And into the recorded request, so a removal a later start
             // finishes after a crash deletes the branch by its new name too.
             if let Err(err) = self.session_store.rename_pending_removal_branch(
-                &session_id,
+                session_id,
                 &expected.old_branch,
-                &new_branch,
+                new_branch,
             ) {
                 logger::warn(&format!(
                     "could not follow the rename of {} into its pending removal: {err:#}",
@@ -3611,8 +3611,8 @@ impl Engine {
                 ));
             }
         }
-        self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
-        self.rename_expected.remove(&session_id);
+        self.clear_in_flight(&InFlightKey::BranchRename(session_id.to_string()));
+        self.rename_expected.remove(session_id);
         EventReaction::Multi(vec![
             EventReaction::RebuildLeftItems,
             status.into_reaction(),
@@ -3898,10 +3898,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map_or_else(
-                || session_id.to_string(),
-                |session| session.display_label().clone(),
-            );
+            .map_or_else(|| session_id.to_string(), |session| session.display_label());
         self.post_status(crate::poller_status::pr_status_not_saved(
             session_id, &label, error,
         ));
@@ -4021,7 +4018,7 @@ impl Engine {
 
     fn process_project_branch_status_ready(
         &mut self,
-        project_id: String,
+        project_id: &str,
         result: Result<(String, ProjectBranchStatus), String>,
     ) -> EventReaction {
         match result {
@@ -4450,10 +4447,10 @@ impl Engine {
 
     fn process_create_agent_progress(
         &self,
-        status_op_id: String,
+        status_op_id: &str,
         message: StatusText,
     ) -> EventReaction {
-        match self.pending_create_ops.get(&status_op_id) {
+        match self.pending_create_ops.get(status_op_id) {
             Some(op) => EventReaction::Status(op.progress(message)),
             None => EventReaction::Nothing,
         }
@@ -4543,10 +4540,10 @@ impl Engine {
 
     fn process_folder_repo_status_ready(
         &mut self,
-        session_id: String,
+        session_id: &str,
         status: crate::git::FolderRepoStatus,
     ) -> EventReaction {
-        self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.clone()));
+        self.clear_in_flight(&InFlightKey::FolderRepoProbe(session_id.to_string()));
         if !self.sessions.iter().any(|session| session.id == session_id) {
             return EventReaction::Nothing;
         }
@@ -4554,8 +4551,9 @@ impl Engine {
         // entry: a managed agent answers WorkingRepo before its first probe
         // lands, so comparing against an absent entry would report a change on
         // every first probe and re-arm the watch for nothing.
-        let changed = self.folder_repo_status(&session_id) != status;
-        self.folder_repo_statuses.insert(session_id.clone(), status);
+        let changed = self.folder_repo_status(session_id) != status;
+        self.folder_repo_statuses
+            .insert(session_id.to_string(), status);
         if changed {
             // Both enumerators gate on this verdict, so a change to it is what
             // takes an agent out of them or puts it back. Without this the
@@ -4564,10 +4562,10 @@ impl Engine {
             self.update_branch_sync_sessions();
             self.update_pr_sync_sessions();
         }
-        if !changed || self.watched_session_id.as_deref() != Some(session_id.as_str()) {
+        if !changed || self.watched_session_id.as_deref() != Some(session_id) {
             return EventReaction::Nothing;
         }
-        if let Some(worktree) = self.set_watched_session(Some(&session_id)) {
+        if let Some(worktree) = self.set_watched_session(Some(session_id)) {
             self.spawn_changed_files_refresh(worktree);
         }
         EventReaction::ClampFilesCursor
@@ -4587,7 +4585,7 @@ impl Engine {
             WorkerEvent::CreateAgentProgress {
                 status_op_id,
                 message,
-            } => self.process_create_agent_progress(status_op_id, message),
+            } => self.process_create_agent_progress(&status_op_id, message),
             WorkerEvent::CreateAgentFailed {
                 status_op_id,
                 message,
@@ -4613,10 +4611,10 @@ impl Engine {
                 )
             }
             WorkerEvent::ChangedFilesReady { outcome, worktree } => {
-                self.process_changed_files_ready(outcome, worktree)
+                self.process_changed_files_ready(outcome, &worktree)
             }
             WorkerEvent::FolderRepoStatusReady { session_id, status } => {
-                self.process_folder_repo_status_ready(session_id, status)
+                self.process_folder_repo_status_ready(&session_id, status)
             }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
             WorkerEvent::WorktreeFilesChanged => EventReaction::ReloadChangedFiles,
@@ -4625,7 +4623,7 @@ impl Engine {
                 target,
                 result,
                 status,
-            } => self.process_pull_completed(repo_path, target, result, status),
+            } => self.process_pull_completed(repo_path, &target, &result, status),
             WorkerEvent::ClipboardCopyCompleted {
                 label: _,
                 result: _,
@@ -4642,10 +4640,10 @@ impl Engine {
                 result,
                 status,
             } => self.process_branch_rename_completed(
-                session_id,
-                new_branch,
+                &session_id,
+                &new_branch,
                 previous_title,
-                result,
+                &result,
                 status,
             ),
             WorkerEvent::BranchSyncReady(updates) => self.process_branch_sync_ready(updates),
@@ -4702,7 +4700,7 @@ impl Engine {
             WorkerEvent::WorktreeRemoveWaiting {
                 session_id,
                 waiting_for,
-            } => self.process_worktree_remove_waiting(session_id, waiting_for),
+            } => self.process_worktree_remove_waiting(session_id, &waiting_for),
             WorkerEvent::ProjectDeletionContinue { project_id } => {
                 self.process_project_deletion_continue(&project_id)
             }
@@ -4749,7 +4747,7 @@ impl Engine {
                 status_op_id: _,
             } => self.process_create_agent_branch_inspected(project, result),
             WorkerEvent::ProjectBranchStatusReady { project_id, result } => {
-                self.process_project_branch_status_ready(project_id, result)
+                self.process_project_branch_status_ready(&project_id, result)
             }
             WorkerEvent::CheckoutProjectDefaultBranchInspected {
                 project,
@@ -4765,7 +4763,7 @@ impl Engine {
                 branch,
                 result,
                 status_op_id,
-            } => self.process_project_base_branch_changed(project, branch, result, status_op_id),
+            } => self.process_project_base_branch_changed(&project, branch, result, status_op_id),
             WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
             WorkerEvent::ProjectPersistenceCompleted {
                 action,
@@ -7394,7 +7392,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         crate::project_browser::run_checkout_project_default_branch_inspection_job(
-            project, tx, None,
+            project, &tx, None,
         );
         let reaction = engine.process_worker_event(rx.recv().unwrap());
 
@@ -7607,10 +7605,8 @@ mod tests {
             owner_repo: "octo/repo".to_string(),
             url: "https://github.com/octo/repo/pull/42".to_string(),
         };
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), Some(pr.clone()))],
-        ));
+        let reaction = engine
+            .process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), Some(pr))]));
 
         // changed -> RebuildLeftItems (engine writes the timestamp directly).
         assert!(
@@ -8593,12 +8589,7 @@ mod tests {
                     .into(),
             }),
         );
-        controller.set(
-            now,
-            progress.key.clone(),
-            Tone::Busy,
-            progress.message.clone(),
-        );
+        controller.set(now, progress.key.clone(), Tone::Busy, progress.message);
         assert_eq!(controller.snapshot().len(), 1);
         assert_eq!(controller.snapshot()[0].tone, "busy");
 
@@ -8608,12 +8599,7 @@ mod tests {
             message: "Failed to create a new worktree.".to_string().into(),
         });
         let failure = unwrap_status(failure);
-        controller.set(
-            now,
-            failure.key.clone(),
-            Tone::Error,
-            failure.message.clone(),
-        );
+        controller.set(now, failure.key.clone(), Tone::Error, failure.message);
         // Still one entry on the same id: the busy was replaced, not stacked.
         let snap = controller.snapshot();
         assert_eq!(snap.len(), 1);
@@ -10437,9 +10423,7 @@ mod tests {
             .expect("record");
         let live_writer = std::mem::replace(
             &mut engine.config_writer,
-            crate::config_queue::ConfigWriteQueue::with_dead_writer(
-                engine.paths.config_path.clone(),
-            ),
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path),
         );
         while let Some(event) = try_recv_worker_event(&engine) {
             if matches!(event, WorkerEvent::ConfigReloadReady(_)) {
@@ -11570,7 +11554,7 @@ mod tests {
                 },
             ))
             .unwrap_or_else(|payload| {
-                let reason = crate::engine::format_panic_payload(payload);
+                let reason = crate::engine::format_panic_payload(&*payload);
                 Err(format!("Worker panicked: {reason}"))
             });
             let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {

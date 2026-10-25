@@ -176,7 +176,7 @@ fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
     }
 }
 
-fn assert_removed_cleanly(fx: &Fixture, result: Result<RemovedBranches, String>) {
+fn assert_removed_cleanly(fx: &Fixture, result: &Result<RemovedBranches, String>) {
     assert!(
         result.is_ok(),
         "the removal must wait for every process in the worktree: {result:?}"
@@ -214,7 +214,7 @@ fn removal_waits_for_a_child_the_provider_left_running() {
     wait_for_writers(&fx.pidfile, 1);
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// A companion terminal of the agent is closed by the delete, and the removal
@@ -236,7 +236,7 @@ fn removal_waits_for_a_companion_terminal() {
     wait_for_writers(&fx.pidfile, 1);
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// A job-controlled background job sits in a process group of its own, which
@@ -264,7 +264,7 @@ fn removal_waits_for_a_background_job_in_its_own_process_group() {
     );
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// A child that called `setsid` has left the PTY's session, so only its
@@ -283,7 +283,7 @@ fn removal_waits_for_a_child_that_left_the_session() {
     wait_for_writers(&fx.pidfile, 1);
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// Several tabs and a terminal at once: nothing is removed until the last of
@@ -315,7 +315,7 @@ fn removal_waits_for_every_tab_and_terminal_of_the_agent() {
     wait_for_writers(&fx.pidfile, 3);
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// Something dux did not start and cannot see (a daemon in a session of its
@@ -509,7 +509,7 @@ fn removal_ends_a_startup_command_still_running_in_the_worktree() {
         }
     }
     let startup = handle.join().expect("startup thread");
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
     let err = startup.status.expect_err("the run reports the deletion");
     assert!(err.contains("was deleted"), "{err}");
 }
@@ -563,7 +563,7 @@ fn a_removal_waits_for_a_startup_command_spawned_before_it_registered() {
         }
     }
     let _ = handle.join().expect("startup thread");
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// The flake, made deterministic. A startup command whose shell does not
@@ -632,7 +632,7 @@ fn a_removal_finds_a_job_whose_command_exited_before_it_was_recorded() {
         }
     }
     let _ = handle.join().expect("startup thread");
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 fn pending_rows(engine: &Engine) -> Vec<crate::storage::PendingWorktreeRemoval> {
@@ -690,7 +690,7 @@ fn a_removal_is_recorded_until_it_has_run() {
         assert!(Instant::now() < deadline, "the removal never reported");
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
     assert!(
         pending_rows(&fx.engine).is_empty(),
         "cleared once it has run"
@@ -1019,7 +1019,7 @@ fn a_job_left_by_a_shell_that_exited_is_ended_through_what_was_recorded_at_its_e
     assert!(process_alive(job), "the job outlived its shell");
 
     let result = delete_and_wait(&mut fx.engine);
-    assert_removed_cleanly(&fx, result);
+    assert_removed_cleanly(&fx, &result);
 }
 
 /// Review 7: a startup command that backgrounds a job WITHOUT redirecting its

@@ -140,7 +140,7 @@ impl Engine {
     /// folder is on the new branch, and resolve the op into its final.
     pub(crate) fn process_project_base_branch_changed(
         &mut self,
-        project: Project,
+        project: &Project,
         branch: String,
         result: Result<
             crate::base_branch::BaseBranchSwitched,
@@ -155,7 +155,7 @@ impl Engine {
                     existing.current_branch = branch.clone();
                     existing.branch_status = ProjectBranchStatus::Leading;
                 }
-                let base = self.adopt_project_base(&project, &branch);
+                let base = self.adopt_project_base(project, &branch);
                 ChangeBaseOutcome::Changed {
                     branch,
                     folder_was_on_it: switched.folder_was_on_it,
@@ -200,7 +200,7 @@ fn switch_reporting_panics(
     >,
 ) -> Result<crate::base_branch::BaseBranchSwitched, crate::base_branch::BaseBranchChangeFailure> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(switch)).unwrap_or_else(|payload| {
-        let reason = crate::engine::format_panic_payload(payload);
+        let reason = crate::engine::format_panic_payload(&*payload);
         crate::logger::error(&format!("change-base-branch worker panicked: {reason}"));
         Err(crate::base_branch::BaseBranchChangeFailure::SwitchFailed(
             format!("the change-base-branch worker panicked: {reason}"),

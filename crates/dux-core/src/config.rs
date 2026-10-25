@@ -5216,7 +5216,7 @@ fn is_stock_provider(name: &str) -> bool {
 /// What the field-level recovery does to `doc` (see [`recover_config_table`]),
 /// in order. Empty for a document that reads as it is.
 fn recovery_plan(doc: &toml::Table) -> Vec<Recovery> {
-    if table_into_config(doc.clone()).is_ok() {
+    if table_into_config(doc).is_ok() {
         return Vec::new();
     }
     // A section that deserializes in isolation is fine (missing sections use
@@ -5257,7 +5257,7 @@ fn recover_config_table(doc: toml::Table, raw: &str, report: Report) -> Config {
     };
     let plan = recovery_plan(&doc);
     if plan.is_empty()
-        && let Ok(cfg) = table_into_config(doc.clone())
+        && let Ok(cfg) = table_into_config(&doc)
     {
         return cfg;
     }
@@ -5288,7 +5288,7 @@ fn recover_config_table(doc: toml::Table, raw: &str, report: Report) -> Config {
             }
         }
     }
-    match table_into_config(pruned) {
+    match table_into_config(&pruned) {
         Ok(cfg) => cfg,
         Err(e) => {
             // The kind of problem only: the parser's own message can quote a
@@ -5341,7 +5341,7 @@ fn prune_invalid_fields(section: &str, tbl: &toml::Table) -> Option<(toml::Table
 fn section_solo_ok(section: &str, value: toml::Value) -> bool {
     let mut t = toml::Table::new();
     t.insert(section.to_string(), value);
-    table_into_config(t).is_ok()
+    table_into_config(&t).is_ok()
 }
 
 /// What is wrong with a document containing only `section = value`, as the
@@ -5359,8 +5359,8 @@ fn section_solo_problem(section: &str, value: toml::Value) -> String {
 /// Deserialize a `toml::Table` into a `Config`, round-tripping through a string so
 /// this uses the exact same path as `toml::from_str` everywhere else (no reliance
 /// on a `Value::try_into` API that varies across toml versions).
-fn table_into_config(table: toml::Table) -> Result<Config, String> {
-    let s = toml::to_string(&table).map_err(|e| e.to_string())?;
+fn table_into_config(table: &toml::Table) -> Result<Config, String> {
+    let s = toml::to_string(table).map_err(|e| e.to_string())?;
     toml::from_str::<Config>(&s).map_err(|e| e.to_string())
 }
 

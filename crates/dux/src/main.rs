@@ -354,7 +354,7 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
             let warning = undetected.map(|reason| {
                 dux_core::tailscale::undetected_warning(
                     tailscale_mode,
-                    reason,
+                    &reason,
                     "the configured host",
                 )
             });
@@ -370,7 +370,7 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
         startup_warnings.push(dux_web::StartupWarning {
             text: dux_core::tailscale::undetected_warning(
                 tailscale_mode,
-                reason,
+                &reason,
                 serving_without_tailscale(&plan),
             ),
             already_on_stderr: false,

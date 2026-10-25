@@ -258,6 +258,10 @@ fn startup_log_path(paths: &DuxPaths, run: &StartupCommandRun) -> PathBuf {
 /// one run, on its own thread, so a second request cannot slip in between the
 /// claim and the worker starting. The surfaces' reruns claim on the engine
 /// thread and refuse there, with a sentence, when the claim is taken.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the caller hands over its claim on the run, and the claim is released when the run ends here"
+)]
 pub fn run_claimed_startup_command(
     paths: &DuxPaths,
     run: StartupCommandRun,
@@ -604,7 +608,7 @@ impl OutputDrain {
         let drain = std::sync::Arc::clone(&shared);
         let spawned = std::thread::Builder::new()
             .name("startup-output".to_string())
-            .spawn(move || Self::read_until_done(fd, wake_read, &drain));
+            .spawn(move || Self::read_until_done(fd, wake_read.as_ref(), &drain));
         match spawned {
             Ok(reader) => Self {
                 shared: Some(shared),
@@ -621,7 +625,7 @@ impl OutputDrain {
     /// while this runs, so a read never waits.
     fn read_until_done(
         fd: std::os::fd::OwnedFd,
-        wake: Option<std::os::fd::OwnedFd>,
+        wake: Option<&std::os::fd::OwnedFd>,
         drain: &DrainShared,
     ) -> Option<std::os::fd::OwnedFd> {
         use rustix::event::{PollFd, PollFlags};
@@ -629,7 +633,7 @@ impl OutputDrain {
         loop {
             let (pipe_ready, woken) = {
                 let mut fds = vec![PollFd::new(&fd, PollFlags::IN)];
-                if let Some(wake) = &wake {
+                if let Some(wake) = wake {
                     fds.push(PollFd::new(wake, PollFlags::IN));
                 }
                 match rustix::event::poll(&mut fds, None) {

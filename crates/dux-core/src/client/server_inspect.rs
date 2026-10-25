@@ -245,7 +245,7 @@ pub fn log_file(paths: &DuxPaths) -> Result<PathBuf, CliError> {
     Ok(crate::logger::server_log_file(&config.server, paths))
 }
 
-fn unreadable(error: LogError) -> CliError {
+fn unreadable(error: &LogError) -> CliError {
     CliError::new(Exit::Failed, error.to_string())
 }
 
@@ -255,7 +255,7 @@ pub fn file_tail(
     path: &std::path::Path,
     lines: usize,
 ) -> Result<(Vec<String>, Option<String>), CliError> {
-    let (read, _) = open_log(path, None, lines, MAX_LINES).map_err(unreadable)?;
+    let (read, _) = open_log(path, None, lines, MAX_LINES).map_err(|error| unreadable(&error))?;
     Ok((read.lines, read.note))
 }
 
@@ -270,7 +270,8 @@ pub fn file_follow(
     lines: usize,
     on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,
 ) -> Result<(), CliError> {
-    let (first, mut follower) = open_log(path, None, lines, usize::MAX).map_err(unreadable)?;
+    let (first, mut follower) =
+        open_log(path, None, lines, usize::MAX).map_err(|error| unreadable(&error))?;
     for line in first.lines {
         if on_line(&line).is_break() {
             return Ok(());
@@ -284,7 +285,7 @@ pub fn file_follow(
             }
         }
         if follower.refused() {
-            return Err(unreadable(LogError::Symlink(path.to_path_buf())));
+            return Err(unreadable(&LogError::Symlink(path.to_path_buf())));
         }
     }
 }

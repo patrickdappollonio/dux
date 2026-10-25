@@ -501,7 +501,7 @@ fn change_on_dux(
     } else {
         Some(wait::wait_timeout(flags.wait_timeout, &paths.config_path))
     };
-    workspace::perform(&client, planned, wait)
+    workspace::perform(&client, &planned, wait)
 }
 
 /// A guarded change: the same, going ahead over whoever is attached only

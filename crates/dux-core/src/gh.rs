@@ -2051,17 +2051,17 @@ pub fn parse_pull_request_lookup(
 #[allow(clippy::too_many_arguments)]
 pub fn run_pull_request_lookup_job(
     project: Project,
-    raw_input: String,
+    raw_input: &str,
     custom_name: Option<String>,
     review_copy: crate::worker::ReviewCopyConsent,
     ask_id: Option<String>,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
-    policy: GithubHostPolicy,
+    policy: &GithubHostPolicy,
 ) {
-    let lookup = match git::remote_github_repo(Path::new(&project.path), &policy) {
+    let lookup = match git::remote_github_repo(Path::new(&project.path), policy) {
         Some(remote) => {
-            parse_pull_request_lookup(&raw_input, &remote.host, &remote.owner_repo, &policy)
+            parse_pull_request_lookup(raw_input, &remote.host, &remote.owner_repo, policy)
         }
         None => Err(format!(
             "Project \"{}\" does not have a GitHub origin remote.",
@@ -2190,15 +2190,15 @@ pub fn parse_attach_pull_request_lookup(
 pub fn run_attach_pull_request_lookup_job(
     project: Project,
     session_id: String,
-    raw_input: String,
-    worker_tx: Sender<WorkerEvent>,
+    raw_input: &str,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
-    policy: GithubHostPolicy,
+    policy: &GithubHostPolicy,
 ) {
-    let resolution = git::resolve_remote_github_repo(Path::new(&project.path), &policy);
+    let resolution = git::resolve_remote_github_repo(Path::new(&project.path), policy);
     let purpose = PrLookupPurpose::Attach { session_id };
     let lookup =
-        match parse_attach_pull_request_lookup(&raw_input, &resolution, &project.name, &policy) {
+        match parse_attach_pull_request_lookup(raw_input, &resolution, &project.name, policy) {
             Ok(lookup) => lookup,
             Err(message) => {
                 let _ = worker_tx.send(WorkerEvent::PullRequestResolved {

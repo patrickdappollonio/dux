@@ -768,17 +768,17 @@ impl App {
             let raw_panic = raw_input.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::pr_reference::run_reference_resolution_job(
-                    reference,
+                    &reference,
                     raw_input,
-                    projects,
-                    policy,
-                    protocols,
-                    gh_program,
-                    worker_tx,
+                    &projects,
+                    &policy,
+                    &protocols,
+                    &gh_program,
+                    &worker_tx,
                     Some(op_id),
                 );
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!(
                     "pull-request-reference resolution worker panicked: {reason}"
                 ));
@@ -929,16 +929,16 @@ impl App {
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::gh::run_pull_request_lookup_job(
                     project,
-                    raw_input,
+                    &raw_input,
                     None,
                     Default::default(),
                     None,
-                    worker_tx,
+                    &worker_tx,
                     Some(op_id),
-                    policy,
+                    &policy,
                 );
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
@@ -1222,7 +1222,7 @@ impl App {
                 Some(status_op_id),
                 |action, branch, tx, id| {
                     dux_core::project_browser::run_add_project_checkout_job(
-                        action, branch, tx, id, &guard,
+                        action, branch, &tx, id, &guard,
                     );
                 },
             );
@@ -1311,11 +1311,11 @@ impl App {
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::project_browser::run_create_initial_commit_job(
                     add,
-                    worker_tx,
+                    &worker_tx,
                     Some(status_op_id),
                 );
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!("initial-commit worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::InitialCommitCreated {
                     add: add_panic,
@@ -1372,9 +1372,9 @@ impl App {
             let add_panic = add.clone();
             let op_id_panic = status_op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                dux_core::project_browser::run_init_repo_job(add, worker_tx, Some(status_op_id));
+                dux_core::project_browser::run_init_repo_job(add, &worker_tx, Some(status_op_id));
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!(
                     "repository-initialization worker panicked: {reason}"
                 ));
@@ -1417,7 +1417,7 @@ impl App {
                     Some(status_op_id),
                 );
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!(
                     "create-agent-branch-inspection worker panicked for project \"{}\": {reason}",
                     project_panic.name
@@ -1502,11 +1502,11 @@ impl App {
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
                     project,
-                    worker_tx,
+                    &worker_tx,
                     Some(status_op_id),
                 );
             })) {
-                let reason = dux_core::engine::format_panic_payload(payload);
+                let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!(
                     "checkout-default-branch-inspection worker panicked for project \"{}\": \
                      {reason}",
@@ -2690,11 +2690,9 @@ impl App {
 
         let session_id = self.engine.sessions[session_index].id.clone();
         // Retarget the focused tab (Main delegates to the session-level change).
-        let outcome = self.engine.change_tab_provider(
-            &session_id,
-            &prompt.tab_id,
-            selected.provider.clone(),
-        )?;
+        let outcome =
+            self.engine
+                .change_tab_provider(&session_id, &prompt.tab_id, &selected.provider)?;
         self.rebuild_left_items();
 
         let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
@@ -4945,7 +4943,7 @@ impl App {
                     Err(reason) => (
                         None,
                         Some(dux_core::tailscale::undetected_warning(
-                            tailscale, reason, "loopback",
+                            tailscale, &reason, "loopback",
                         )),
                     ),
                 }
@@ -5899,7 +5897,7 @@ mod tests {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
 
-        app.add_project(path.clone(), "Fresh".to_string())
+        app.add_project(path, "Fresh".to_string())
             .expect("add_project");
 
         assert!(

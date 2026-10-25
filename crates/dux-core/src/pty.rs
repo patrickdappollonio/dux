@@ -1218,7 +1218,7 @@ impl PtyClient {
             passthrough: Arc::clone(&passthrough),
             track_agent_signals,
         };
-        let reader_thread = thread::spawn(move || Self::reader_loop(reader, reader_state));
+        let reader_thread = thread::spawn(move || Self::reader_loop(reader, &reader_state));
         let process_session = child
             .process_id()
             .map(crate::process_sessions::ProcessSession::started_now);
@@ -1362,7 +1362,7 @@ impl PtyClient {
         }
     }
 
-    fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: ReaderLoopState) {
+    fn reader_loop(mut reader: Box<dyn std::io::Read + Send>, state: &ReaderLoopState) {
         let mut buf = [0u8; 4096];
         let mut scanner = crate::attention::AttentionScanner::new();
         let mut overflow_seen = 0u64;
@@ -2382,7 +2382,7 @@ fn deferred_group_kill(landed: bool, reserved: impl FnOnce() -> bool) -> bool {
 /// Run one deferred group signal (on the reaper): wait, bounded by
 /// [`crate::process_sessions::RECORDING_WAIT`], for the session's record,
 /// then SIGKILL the group only while a recorded member holds it.
-fn run_deferred_group_signal(job: DeferredGroupSignal) {
+fn run_deferred_group_signal(job: &DeferredGroupSignal) {
     job.registry
         .wait_for_recordings(&[job.session], crate::process_sessions::RECORDING_WAIT);
     let landed = !job.registry.recording_in_flight(job.session);
@@ -2417,7 +2417,7 @@ static READER_REAPER: std::sync::LazyLock<Option<std::sync::mpsc::Sender<ReaperJ
                 while let Ok(job) = rx.recv() {
                     match job {
                         ReaperJob::Reader(reader) => join_reader_bounded(reader),
-                        ReaperJob::GroupSignal(signal) => run_deferred_group_signal(signal),
+                        ReaperJob::GroupSignal(signal) => run_deferred_group_signal(&signal),
                     }
                 }
             })
@@ -3285,6 +3285,7 @@ fn named_color_to_tui(color: NamedColor) -> CellColor {
 /// folded into a struct so the argument list stays readable as it grows.
 /// Borrows so the common `spawn_with_env` path passes a temporary empty identity
 /// with no allocation.
+#[derive(Clone, Copy)]
 pub struct PtySpawnOptions<'a> {
     /// The caller's `[env]` overrides, applied last so a user value always wins.
     pub env: &'a [(String, String)],
@@ -5779,7 +5780,7 @@ mod tests {
     #[test]
     fn a_read_error_is_recorded_apart_from_a_clean_end_of_input() {
         let (state, exited, read_error, _writer_rx) = reader_loop_probe();
-        PtyClient::reader_loop(Box::new(FailingReader), state);
+        PtyClient::reader_loop(Box::new(FailingReader), &state);
         assert!(
             exited.load(Ordering::Acquire),
             "a failed read still ends the PTY's read side"
@@ -5791,7 +5792,7 @@ mod tests {
         );
 
         let (state, exited, read_error, _writer_rx) = reader_loop_probe();
-        PtyClient::reader_loop(Box::new(EofReader), state);
+        PtyClient::reader_loop(Box::new(EofReader), &state);
         assert!(exited.load(Ordering::Acquire));
         assert_eq!(
             read_error.get(),

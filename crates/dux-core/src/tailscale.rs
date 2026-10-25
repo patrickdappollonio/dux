@@ -89,7 +89,7 @@ impl TailscaleUnavailable {
 /// over the enum so a fourth mode is a compile error.
 pub fn undetected_warning(
     mode: crate::config::TailscaleMode,
-    reason: TailscaleUnavailable,
+    reason: &TailscaleUnavailable,
     serving: &str,
 ) -> String {
     use crate::config::TailscaleMode;

@@ -262,7 +262,7 @@ pub fn classify_project_worktrees(
     entries
 }
 
-pub fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerEvent>) {
+pub fn run_project_branch_status_job(project: Project, worker_tx: &Sender<WorkerEvent>) {
     let repo_path = PathBuf::from(&project.path);
     // Use current_branch_opt so a detached HEAD is treated as "no current
     // branch" (empty string) rather than a hard error.
@@ -290,7 +290,7 @@ pub fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerE
 
 pub fn run_checkout_project_default_branch_inspection_job(
     project: Project,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
@@ -340,7 +340,7 @@ pub fn run_checkout_project_default_branch_inspection_job(
 pub fn run_add_project_checkout_job(
     action: NonDefaultBranchAction,
     target_branch: String,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) {
@@ -375,7 +375,7 @@ pub fn run_checkout_job_reporting_panics(
     if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
         job(action, target_branch, worker_tx, status_op_id);
     })) {
-        let reason = crate::engine::format_panic_payload(payload);
+        let reason = crate::engine::format_panic_payload(&*payload);
         crate::logger::error(&format!(
             "non-default-branch-checkout worker panicked: {reason}"
         ));
@@ -394,7 +394,7 @@ pub fn run_checkout_job_reporting_panics(
 /// commit runs off the UI/reactor thread.
 pub fn run_create_initial_commit_job(
     mut add: crate::worker::InitialCommitAdd,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let result = match git::create_initial_commit(Path::new(&add.path)) {
@@ -430,7 +430,7 @@ pub fn run_create_initial_commit_job(
 /// the web so the git work runs off the UI/reactor thread.
 pub fn run_init_repo_job(
     add: crate::worker::InitialCommitAdd,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let (add, result) = init_repo_and_commit(add, git::create_initial_commit);
@@ -695,7 +695,7 @@ mod tests {
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 
-        run_checkout_project_default_branch_inspection_job(project, worker_tx, None);
+        run_checkout_project_default_branch_inspection_job(project, &worker_tx, None);
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {
@@ -753,7 +753,7 @@ mod tests {
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 
-        run_checkout_project_default_branch_inspection_job(project, worker_tx, None);
+        run_checkout_project_default_branch_inspection_job(project, &worker_tx, None);
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {
@@ -1056,7 +1056,7 @@ mod tests {
                 seeded_gitignore: false,
                 seed_warning: None,
             },
-            tx,
+            &tx,
             None,
         );
         match rx.recv().unwrap() {

@@ -126,10 +126,10 @@ impl ConfigWriteQueue {
                 move || {
                     writer_loop(
                         rx,
-                        config_path,
+                        &config_path,
                         base,
-                        lazy_inflight,
-                        status_lane,
+                        &lazy_inflight,
+                        status_lane.as_ref(),
                         last_written,
                     );
                 }
@@ -271,7 +271,7 @@ impl ConfigWriteQueue {
     /// Test-only: a queue whose writer thread has already exited, so `save_eager`
     /// deterministically hits the dead-writer path.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_dead_writer(config_path: PathBuf) -> Self {
+    pub fn with_dead_writer(config_path: &std::path::Path) -> Self {
         let (tx, rx) = mpsc::channel::<WriteMsg>();
         drop(rx); // receiver gone → the writer is effectively dead
         let _ = config_path;
@@ -342,15 +342,12 @@ fn decr_inflight(counter: &AtomicUsize) {
 
 fn writer_loop(
     rx: Receiver<WriteMsg>,
-    path: PathBuf,
+    path: &std::path::Path,
     base: Option<Base>,
-    lazy_inflight: Arc<AtomicUsize>,
-    status_lane: Option<Sender<WorkerEvent>>,
+    lazy_inflight: &Arc<AtomicUsize>,
+    status_lane: Option<&Sender<WorkerEvent>>,
     last_written: LastWritten,
 ) {
-    // Clone the counter before moving the original into the inner loop, so the
-    // panic handler below still has a handle to reset it after the loop exits.
-    let counter = lazy_inflight.clone();
     // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         writer_loop_inner(rx, path, base, lazy_inflight, status_lane, last_written);
@@ -365,7 +362,7 @@ fn writer_loop(
         // Reset so save_lazy's cap gate can't latch shut and silently drop every
         // future lazy write: with the writer gone, save_lazy will then reach the
         // (failing) send and surface the dead-writer state like the other ops do.
-        counter.store(0, Ordering::Relaxed);
+        lazy_inflight.store(0, Ordering::Relaxed);
     }
 }
 
@@ -376,12 +373,16 @@ enum WriterControl {
     Stop,
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the loop owns the receiver so a panic drops it while unwinding, before writer_loop resets the in-flight counter, and every later send fails"
+)]
 fn writer_loop_inner(
     rx: Receiver<WriteMsg>,
-    path: PathBuf,
+    path: &std::path::Path,
     base: Option<Base>,
-    lazy_inflight: Arc<AtomicUsize>,
-    status_lane: Option<Sender<WorkerEvent>>,
+    lazy_inflight: &AtomicUsize,
+    status_lane: Option<&Sender<WorkerEvent>>,
     last_written: LastWritten,
 ) {
     let mut state = WriterState {
@@ -394,14 +395,7 @@ fn writer_loop_inner(
     loop {
         let input = receive_writer_input(&rx, state.deadline);
         if matches!(
-            handle_writer_input(
-                input,
-                &rx,
-                &path,
-                &lazy_inflight,
-                &mut state,
-                status_lane.as_ref(),
-            ),
+            handle_writer_input(input, &rx, path, lazy_inflight, &mut state, status_lane,),
             WriterControl::Stop
         ) {
             break;
@@ -1040,7 +1034,7 @@ mod tests {
     fn save_eager_after_writer_gone_errors_not_hangs() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let q = ConfigWriteQueue::with_dead_writer(path);
+        let q = ConfigWriteQueue::with_dead_writer(&path);
         let err = q.save_eager(Config::default()).unwrap_err();
         assert!(err.to_lowercase().contains("writer"), "got: {err}");
     }
@@ -1222,7 +1216,7 @@ mod tests {
     fn quiesce_not_acknowledged_on_dead_writer() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        let q = ConfigWriteQueue::with_dead_writer(path);
+        let q = ConfigWriteQueue::with_dead_writer(&path);
         let guard = q.quiesce();
         assert!(
             !guard.is_acknowledged(),

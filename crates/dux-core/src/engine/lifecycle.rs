@@ -164,9 +164,9 @@ pub fn refused_resume_excerpt(
 /// look is a walk over the process table.
 fn log_session_survivors_after_close(
     session: crate::process_sessions::ProcessSession,
-    label: String,
+    label: &str,
 ) {
-    let thread_label = label.clone();
+    let thread_label = label.to_string();
     let spawned = std::thread::Builder::new()
         .name("pty-close-survivors".to_string())
         .spawn(move || {
@@ -1841,7 +1841,7 @@ impl Engine {
             // are resolved below once every PTY they wait for has reaped.
             reaped_ids.push(entry.id.clone());
             if let Some(session) = entry.client.process_session() {
-                log_session_survivors_after_close(session, entry.label.clone());
+                log_session_survivors_after_close(session, &entry.label.clone());
             }
         }
         self.terminating_ptys = remaining;

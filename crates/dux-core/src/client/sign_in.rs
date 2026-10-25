@@ -10,9 +10,9 @@ use super::{CliError, Exit};
 /// The label a remote records for this sign-in.
 const LABEL: &str = "dux CLI";
 
-fn send(name: &str, remote: &Remote, request: Request) -> Result<Response, CliError> {
+fn send(name: &str, remote: &Remote, request: &Request) -> Result<Response, CliError> {
     HttpTransport::new(&remote.url, remote.insecure)
-        .send(&request)
+        .send(request)
         .map_err(|error| match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why),
             _ => CliError::new(
@@ -33,7 +33,7 @@ pub struct RemoteDux {
 
 /// Whether the remote has a password at all, and which dux it is.
 pub fn look(name: &str, remote: &Remote) -> Result<RemoteDux, CliError> {
-    let reply = send(name, remote, Request::get("/api/v1/auth/status"))?;
+    let reply = send(name, remote, &Request::get("/api/v1/auth/status"))?;
     let status = super::connect::read_auth_status(&format!("{name} ({})", remote.url), &reply)?;
     Ok(RemoteDux {
         password_set: status.password_set,
@@ -80,7 +80,7 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, Cl
     let reply = send(
         name,
         remote,
-        Request {
+        &Request {
             method: Method::Post,
             path: "/api/v1/auth/cli-login".to_string(),
             body: Some(body.to_string().into_bytes()),
@@ -167,7 +167,7 @@ fn end_sign_in(name: &str, remote: &Remote, token: &str) -> Result<Response, Cli
     send(
         name,
         remote,
-        Request {
+        &Request {
             method: Method::Post,
             path: "/api/v1/auth/cli-logout".to_string(),
             body: None,

@@ -38017,7 +38017,7 @@ cyan = "#00ffff"
         // reference the user actually typed.
         assert_eq!(
             app.dispatched_pr_lookups,
-            vec![(project.id.clone(), "acme/widget#7".to_string())]
+            vec![(project.id, "acme/widget#7".to_string())]
         );
     }
 
@@ -38283,7 +38283,7 @@ cyan = "#00ffff"
         app.confirm_project_chooser_selection().expect("pick");
         assert_eq!(
             app.dispatched_pr_lookups.last(),
-            Some(&(project.id.clone(), PR_REFERENCE.to_string()))
+            Some(&(project.id, PR_REFERENCE.to_string()))
         );
     }
 
@@ -38407,7 +38407,7 @@ cyan = "#00ffff"
 
         assert_eq!(
             app.dispatched_pr_lookups,
-            vec![(project.id.clone(), "acme/widget#1".to_string())]
+            vec![(project.id, "acme/widget#1".to_string())]
         );
         assert!(
             app.pending_pr_reference_op.is_none(),
@@ -38787,7 +38787,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        let mut prompt = project_default_provider_prompt(project.id.clone(), project.name.clone());
+        let mut prompt = project_default_provider_prompt(project.id.clone(), project.name);
         prompt.selected = 1;
         app.prompt = PromptState::ChangeProjectDefaultProvider(prompt);
         app.handle_key(confirm).expect("confirm");

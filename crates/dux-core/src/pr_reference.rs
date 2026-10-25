@@ -1016,20 +1016,20 @@ pub fn resolve_reference_projects(
 /// that fails is carried as its own sentence beside the empty match list.
 #[allow(clippy::too_many_arguments)]
 pub fn run_reference_resolution_job(
-    reference: TypedReference,
+    reference: &TypedReference,
     raw_input: String,
-    projects: Vec<crate::model::Project>,
-    policy: crate::gh::GithubHostPolicy,
-    protocols: BTreeMap<String, GitProtocol>,
-    gh_program: std::ffi::OsString,
-    worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+    projects: &[crate::model::Project],
+    policy: &crate::gh::GithubHostPolicy,
+    protocols: &BTreeMap<String, GitProtocol>,
+    gh_program: &std::ffi::OsStr,
+    worker_tx: &std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let repository = reference.repository_label().unwrap_or_default();
-    let resolution = resolve_reference_projects(&reference, &projects, &policy);
-    let lookup = match pull_request_clone_offer(&reference, &policy, &protocols) {
+    let resolution = resolve_reference_projects(reference, projects, policy);
+    let lookup = match pull_request_clone_offer(reference, policy, protocols) {
         Some(offer) if resolution.matches.is_empty() => {
-            Some(look_up_clone_offer(&gh_program, offer))
+            Some(look_up_clone_offer(gh_program, offer))
         }
         _ => None,
     };
@@ -2151,18 +2151,18 @@ mod resolution_tests {
     /// `gh`, and return the one event it posts.
     fn resolution_event(
         text: &str,
-        projects: Vec<Project>,
+        projects: &[Project],
         gh_program: &std::path::Path,
     ) -> crate::worker::WorkerEvent {
         let (tx, rx) = std::sync::mpsc::channel();
         run_reference_resolution_job(
-            parse_typed_reference(text).unwrap(),
+            &parse_typed_reference(text).unwrap(),
             text.to_string(),
             projects,
-            allowed(&["github.com"]),
-            BTreeMap::new(),
-            gh_program.as_os_str().to_owned(),
-            tx,
+            &allowed(&["github.com"]),
+            &BTreeMap::new(),
+            gh_program.as_os_str(),
+            &tx,
             Some("op".to_string()),
         );
         rx.try_recv().expect("the job posts its answer")
@@ -2182,7 +2182,7 @@ mod resolution_tests {
             offer,
             clone_unavailable,
             ..
-        } = resolution_event("acme/widget#3", Vec::new(), &found)
+        } = resolution_event("acme/widget#3", &Vec::new(), &found)
         else {
             panic!("wrong event");
         };
@@ -2204,7 +2204,7 @@ mod resolution_tests {
             offer,
             clone_unavailable,
             ..
-        } = resolution_event("acme/widget#3", Vec::new(), &missing)
+        } = resolution_event("acme/widget#3", &Vec::new(), &missing)
         else {
             panic!("wrong event");
         };
@@ -2221,7 +2221,7 @@ mod resolution_tests {
             offer,
             clone_unavailable,
             ..
-        } = resolution_event("acme/widget#3", vec![widget], &missing)
+        } = resolution_event("acme/widget#3", &vec![widget], &missing)
         else {
             panic!("wrong event");
         };

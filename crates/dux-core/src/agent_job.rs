@@ -898,32 +898,32 @@ impl CreatePlanContext<'_> {
                 agents,
                 cloned: _,
             } => self.plan_pull_request(
-                project,
-                host,
-                owner_repo,
+                &project,
+                &host,
+                &owner_repo,
                 number,
-                title,
-                state,
-                head_branch,
+                &title,
+                &state,
+                &head_branch,
                 custom_name,
                 use_existing_branch,
-                review_copy,
-                ask_id,
-                agents,
+                &review_copy,
+                ask_id.as_deref(),
+                &agents,
             ),
             CreateAgentRequest::ForkSession {
                 project,
                 source_session,
                 source_label,
                 custom_name,
-            } => self.plan_fork_session(project, source_session, source_label, custom_name),
+            } => self.plan_fork_session(project, source_session, &source_label, custom_name),
             CreateAgentRequest::ExistingManagedWorktree {
                 project,
                 worktree_path,
                 branch_name,
                 custom_name,
             } => {
-                Some(self.plan_existing_worktree(project, worktree_path, branch_name, custom_name))
+                Some(self.plan_existing_worktree(&project, worktree_path, branch_name, custom_name))
             }
             CreateAgentRequest::ForkExternalWorktree {
                 project,
@@ -932,9 +932,9 @@ impl CreatePlanContext<'_> {
                 source_branch,
                 custom_name,
             } => self.plan_external_worktree(
-                project,
+                &project,
                 source_worktree_path,
-                source_label,
+                &source_label,
                 source_branch,
                 custom_name,
             ),
@@ -1675,18 +1675,18 @@ impl CreatePlanContext<'_> {
     #[allow(clippy::too_many_arguments)]
     fn plan_pull_request(
         &mut self,
-        project: crate::model::Project,
-        host: String,
-        owner_repo: String,
+        project: &crate::model::Project,
+        host: &str,
+        owner_repo: &str,
         number: u64,
-        title: String,
-        state: String,
-        head_branch: String,
+        title: &str,
+        state: &str,
+        head_branch: &str,
         custom_name: Option<String>,
         use_existing_branch: bool,
-        review_copy: crate::worker::ReviewCopyConsent,
-        ask_id: Option<String>,
-        agents: Vec<crate::worker::AgentAtWorktree>,
+        review_copy: &crate::worker::ReviewCopyConsent,
+        ask_id: Option<&str>,
+        agents: &[crate::worker::AgentAtWorktree],
     ) -> Option<ManagedCreatePlan> {
         Some({
             let repo_path = PathBuf::from(&project.path);
@@ -1694,7 +1694,7 @@ impl CreatePlanContext<'_> {
             // head branch means no user-authored name, so leave title empty.
             // (Named `agent_title` to avoid shadowing the PR `title` above.)
             let mut agent_title = custom_name.clone();
-            let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.to_string());
             // From here on a failure names the agent that was being made.
             self.attempted_name = Some(resolved_name.clone());
             // A local branch is reused only when it holds the pull request's
@@ -1750,15 +1750,15 @@ impl CreatePlanContext<'_> {
             };
             let mut fast_forward: Option<(String, String)> = None;
             let fresh_copy = match self.check_busy_pr_branch(
-                &project,
+                project,
                 &repo_path,
                 &resolved_name,
-                &head_branch,
+                head_branch,
                 number,
-                &agents,
+                agents,
                 head_commit.as_deref(),
                 &containment,
-                &review_copy,
+                review_copy,
                 ask_id.as_deref(),
             ) {
                 BusyBranchCheck::Refused => return None,
@@ -1935,11 +1935,11 @@ impl CreatePlanContext<'_> {
                 Some(copy) => {
                     let lead = self.announce_fresh_copy(&repo_path, copy);
                     let pin = crate::worker::PullRequestPin {
-                        host: host.clone(),
-                        owner_repo: owner_repo.clone(),
+                        host: host.to_string(),
+                        owner_repo: owner_repo.to_string(),
                         number,
-                        title: title.clone(),
-                        state: state.clone(),
+                        title: title.to_string(),
+                        state: state.to_string(),
                         busy_branch: copy.busy_branch.clone(),
                         new_branch: copy.new_branch.clone(),
                     };
@@ -1950,7 +1950,7 @@ impl CreatePlanContext<'_> {
                 "created PR worktree from {} #{} ({state}) {}",
                 owner_repo,
                 number,
-                gh::pull_request_url(&host, &owner_repo, number)
+                gh::pull_request_url(host, owner_repo, number)
             ));
             ManagedCreatePlan {
                 project: project.clone(),
@@ -1987,7 +1987,7 @@ impl CreatePlanContext<'_> {
         &self,
         project: crate::model::Project,
         source_session: Box<AgentSession>,
-        source_label: String,
+        source_label: &str,
         custom_name: Option<String>,
     ) -> Option<ManagedCreatePlan> {
         Some({
@@ -2121,7 +2121,7 @@ impl CreatePlanContext<'_> {
 
     fn plan_existing_worktree(
         &self,
-        project: crate::model::Project,
+        project: &crate::model::Project,
         worktree_path: PathBuf,
         branch_name: String,
         custom_name: Option<String>,
@@ -2170,9 +2170,9 @@ impl CreatePlanContext<'_> {
 
     fn plan_external_worktree(
         &self,
-        project: crate::model::Project,
+        project: &crate::model::Project,
         source_worktree_path: PathBuf,
-        source_label: String,
+        source_label: &str,
         source_branch: String,
         custom_name: Option<String>,
     ) -> Option<ManagedCreatePlan> {
@@ -2477,18 +2477,18 @@ fn apply_pending_copy(
 /// It performs no worktree provisioning, and rollback never touches the folder.
 #[allow(clippy::too_many_arguments)]
 fn run_create_standalone_agent_job(
-    folder: PathBuf,
-    title: String,
-    provider: crate::model::ProviderKind,
+    folder: &Path,
+    title: &str,
+    provider: &crate::model::ProviderKind,
     _paths: DuxPaths,
-    config: Config,
-    worker_tx: Sender<WorkerEvent>,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
     term_size: (u16, u16),
     create_key: String,
     identity: crate::term_identity::TerminalIdentity,
     gate: &crate::process_sessions::SpawnGate,
 ) {
-    let folder_label = crate::home_path::shorten_home(&folder);
+    let folder_label = crate::home_path::shorten_home(folder);
     if !folder.is_dir() {
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: create_key,
@@ -2513,7 +2513,7 @@ fn run_create_standalone_agent_job(
         // Always set. Every row label falls back through the branch name when
         // there is no title, and this agent has no branch, so a title-less
         // standalone agent would render as a nameless row.
-        title: Some(title.clone()),
+        title: Some(title.to_string()),
         started_providers: Vec::new(),
         desired_running: true,
         auto_reopen_enabled: true,
@@ -2522,7 +2522,7 @@ fn run_create_standalone_agent_job(
         updated_at: Utc::now(),
         last_focused_tab: None,
     };
-    let provider_cfg = provider_config(&config, &session.provider);
+    let provider_cfg = provider_config(config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         // Nothing to roll back: no directory was created, no branch was minted.
@@ -2612,11 +2612,11 @@ fn run_create_standalone_agent_job(
 #[allow(clippy::too_many_arguments)]
 fn launch_managed_create(
     plan: ManagedCreatePlan,
-    paths: DuxPaths,
-    config: Config,
-    worker_tx: Sender<WorkerEvent>,
+    paths: &DuxPaths,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
     term_size: (u16, u16),
-    create_key: String,
+    create_key: &str,
     identity: crate::term_identity::TerminalIdentity,
     mut creation_notes: Vec<crate::status_text::StatusText>,
     registries: CreateJobRegistries,
@@ -2625,7 +2625,7 @@ fn launch_managed_create(
     let rollback = Rollback {
         moved_forward: plan.moved_forward.clone(),
         registries,
-        create_key: create_key.clone(),
+        create_key: create_key.to_string(),
         grace: crate::config::shutdown_grace(config.shutdown_timeout_seconds),
         wait: std::time::Duration::from_secs(u64::from(config.removal_wait_seconds)),
         worker_tx: worker_tx.clone(),
@@ -2696,14 +2696,14 @@ fn launch_managed_create(
         updated_at: Utc::now(),
         last_focused_tab: None,
     };
-    let provider_cfg = provider_config(&config, &session.provider);
+    let provider_cfg = provider_config(config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         if owns_worktree && let Some(managed) = session.workspace.as_managed() {
             rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-            status_op_id: create_key.clone(),
+            status_op_id: create_key.to_string(),
             attempted_name: Some(session.display_label()),
             message: hint.into(),
         });
@@ -2718,8 +2718,8 @@ fn launch_managed_create(
             &session,
             &repo_path,
             owns_worktree,
-            &worker_tx,
-            &create_key,
+            worker_tx,
+            create_key,
             &mut creation_notes,
             &rollback,
         )
@@ -2767,7 +2767,7 @@ fn launch_managed_create(
                 rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
             }
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                status_op_id: create_key.clone(),
+                status_op_id: create_key.to_string(),
                 attempted_name: Some(session.display_label()),
                 message: crate::status_text![
                     "Invalid environment variables for project ",
@@ -2785,7 +2785,7 @@ fn launch_managed_create(
         .filter(|command| !command.is_empty())
         .map(|command| {
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
+                status_op_id: create_key.to_string(),
                 message: crate::status_text![
                     "Running startup command for agent ",
                     q(session.display_label()),
@@ -2793,7 +2793,7 @@ fn launch_managed_create(
                 ],
             });
             run_startup_command(
-                &paths,
+                paths,
                 StartupCommandRun {
                     project: project.clone(),
                     session: session.clone(),
@@ -2831,7 +2831,7 @@ fn launch_managed_create(
         )
     };
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-        status_op_id: create_key.clone(),
+        status_op_id: create_key.to_string(),
         message: launch_message.into(),
     });
     // crossterm::terminal::size() returns (cols, rows).
@@ -2856,7 +2856,7 @@ fn launch_managed_create(
             repo_path: repo_path.to_string_lossy().to_string(),
             owns_worktree,
             startup_result,
-            status_op_id: create_key.clone(),
+            status_op_id: create_key.to_string(),
         },
         // A freshly created agent lands focused-but-minimized;
         // only fullscreen-seeking gestures set this, and create is never one.
@@ -2886,8 +2886,8 @@ pub struct CreateJobRegistries {
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
     paths: DuxPaths,
-    config: Config,
-    worker_tx: Sender<WorkerEvent>,
+    config: &Config,
+    worker_tx: &Sender<WorkerEvent>,
     term_size: (u16, u16),
     status_op_id: String,
     identity: crate::term_identity::TerminalIdentity,
@@ -2915,7 +2915,7 @@ pub fn run_create_agent_job(
     {
         let gate = crate::process_sessions::SpawnGate::new(registry.clone(), worktrees.clone());
         run_create_standalone_agent_job(
-            folder, title, provider, paths, config, worker_tx, term_size, create_key, identity,
+            &folder, &title, &provider, paths, config, worker_tx, term_size, create_key, identity,
             &gate,
         );
         return;
@@ -2923,7 +2923,7 @@ pub fn run_create_agent_job(
     let plan = {
         let mut context = CreatePlanContext {
             paths: &paths,
-            worker_tx: &worker_tx,
+            worker_tx: worker_tx,
             create_key: &create_key,
             creation_notes: &mut creation_notes,
             worktrees: &worktrees,
@@ -2937,11 +2937,11 @@ pub fn run_create_agent_job(
     };
     launch_managed_create(
         plan,
-        paths,
+        &paths,
         config,
         worker_tx,
         term_size,
-        create_key,
+        &create_key,
         identity,
         creation_notes,
         CreateJobRegistries {
@@ -2953,7 +2953,7 @@ pub fn run_create_agent_job(
 }
 pub fn run_agent_launch_job(
     request: AgentLaunchRequest,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     gate: &crate::process_sessions::SpawnGate,
 ) {
     run_agent_launch_job_with(request, worker_tx, None, gate);
@@ -2963,7 +2963,7 @@ pub fn run_agent_launch_job(
 /// worktree back if the launch fails.
 fn run_agent_launch_job_with(
     request: AgentLaunchRequest,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     rollback: Option<&Rollback>,
     gate: &crate::process_sessions::SpawnGate,
 ) {
@@ -3194,8 +3194,8 @@ mod tests {
         run_create_agent_job(
             request,
             paths,
-            Config::default(),
-            tx,
+            &Config::default(),
+            &tx,
             (80, 24),
             "op-1".to_string(),
             crate::term_identity::TerminalIdentity::default(),
@@ -3451,7 +3451,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let run = drive_standalone_job(folder.path(), config);
+        let run = drive_standalone_job(folder.path(), &config);
 
         assert!(
             run.failure.is_some(),
@@ -3488,7 +3488,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let run = drive_standalone_job(folder.path(), config);
+        let run = drive_standalone_job(folder.path(), &config);
 
         let env = run.launch_env.expect("the launch request carries an env");
         assert!(
@@ -3525,7 +3525,7 @@ mod tests {
     }
 
     /// Drive a standalone create to completion and collect what came back.
-    fn drive_standalone_job(folder: &Path, config: Config) -> StandaloneRun {
+    fn drive_standalone_job(folder: &Path, config: &Config) -> StandaloneRun {
         let tmp = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             config_path: tmp.path().join("config.toml"),
@@ -3544,7 +3544,7 @@ mod tests {
             },
             paths,
             config,
-            tx,
+            &tx,
             (80, 24),
             "op-standalone".to_string(),
             crate::term_identity::TerminalIdentity::default(),

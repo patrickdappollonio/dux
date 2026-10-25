@@ -2454,7 +2454,7 @@ mod tests {
         // and a reload somebody asks for later answers.
         let writer = std::mem::replace(
             &mut app.engine.config_writer,
-            dux_core::config_queue::ConfigWriteQueue::with_dead_writer(paths.config_path.clone()),
+            dux_core::config_queue::ConfigWriteQueue::with_dead_writer(&paths.config_path),
         );
         dismiss_and_reload(&mut app, false);
         assert!(!app.engine.reloading, "the reload never started");
@@ -2663,8 +2663,7 @@ mod tests {
         // a provider that never came up, which keeps the row for a reason that has
         // nothing to do with what is under test here.
         app.engine.note_pty_input("tab-x");
-        app.focused_tabs
-            .insert(session_id.clone(), "tab-x".to_string());
+        app.focused_tabs.insert(session_id, "tab-x".to_string());
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
         app.input_target = InputTarget::Agent;
@@ -3592,7 +3591,7 @@ mod tests {
             status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
-        dux_core::agent_job::run_agent_launch_job(request, worker_tx, &Default::default());
+        dux_core::agent_job::run_agent_launch_job(request, &worker_tx, &Default::default());
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::AgentLaunchFailed(data) => {
@@ -3773,8 +3772,8 @@ mod tests {
                 custom_name: None,
             },
             paths,
-            dux_core::test_provider::harmless_config(),
-            worker_tx,
+            &dux_core::test_provider::harmless_config(),
+            &worker_tx,
             (80, 24),
             "op-test".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
@@ -4071,8 +4070,8 @@ mod tests {
                 cloned: None,
             },
             paths,
-            dux_core::test_provider::harmless_config(),
-            worker_tx,
+            &dux_core::test_provider::harmless_config(),
+            &worker_tx,
             (80, 24),
             "op-create-1".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),

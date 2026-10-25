@@ -425,7 +425,7 @@ impl App {
                     Err(reason) => (
                         None,
                         Some(dux_core::tailscale::undetected_warning(
-                            tailscale, reason, "loopback",
+                            tailscale, &reason, "loopback",
                         )),
                     ),
                 }

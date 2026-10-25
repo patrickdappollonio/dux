@@ -387,15 +387,11 @@ impl Engine {
         if let Some(refused) = check.refused_now("delete") {
             return Err(anyhow::Error::new(refused));
         }
-        let op = crate::engine::status_op(crate::status_text![
-            "Deleting ",
-            q(path.clone()),
-            "\u{2026}"
-        ])
-        .on_success(|message: &crate::status_text::StatusText| {
-            crate::engine::Final::info(message.clone())
-        })
-        .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
+        let op = crate::engine::status_op(crate::status_text!["Deleting ", q(path), "\u{2026}"])
+            .on_success(|message: &crate::status_text::StatusText| {
+                crate::engine::Final::info(message.clone())
+            })
+            .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
         Ok(self.spawn_changes_op(op, move || {
             let _hold = hold;
             let is_untracked = classify()?;
@@ -829,8 +825,8 @@ impl Engine {
                         crate::agent_job::run_create_agent_job(
                             *request,
                             paths,
-                            config,
-                            tx,
+                            &config,
+                            &tx,
                             term_size,
                             op_id_for_job,
                             identity,
@@ -1004,7 +1000,7 @@ impl Engine {
                             )));
                             return;
                         }
-                        crate::agent_job::run_agent_launch_job(*request, tx, &gate);
+                        crate::agent_job::run_agent_launch_job(*request, &tx, &gate);
                     },
                 );
                 // Wrap the primitive's return into the View variant so App
@@ -1674,7 +1670,7 @@ impl Engine {
             .collect();
         self.note_operation(
             None,
-            crate::operations::OperationNotes {
+            &crate::operations::OperationNotes {
                 parts: kept,
                 ..Default::default()
             },
@@ -1797,7 +1793,7 @@ impl Engine {
         match self.persist_projects_to_config() {
             Ok(()) => Ok(project_added_reaction(project, project_id, status_message)),
             Err(error) => {
-                Ok(self.rollback_project_add(&project_id, previous_config_projects, error))
+                Ok(self.rollback_project_add(&project_id, previous_config_projects, &error))
             }
         }
     }
@@ -1806,7 +1802,7 @@ impl Engine {
         &mut self,
         project_id: &str,
         previous_config_projects: Vec<crate::config::ProjectConfig>,
-        config_error: anyhow::Error,
+        config_error: &anyhow::Error,
     ) -> EventReaction {
         self.projects.retain(|project| project.id != project_id);
         self.config.projects = previous_config_projects;
@@ -3761,9 +3757,8 @@ mod tests {
         let original = "[defaults]\nprovider = \"claude\"\n\n[env]\nSEED = \"keep-me\"\n";
         std::fs::write(&engine.paths.config_path, original).expect("seed config");
 
-        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-            engine.paths.config_path.clone(),
-        );
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
         let mut macros = crate::config::MacrosConfig::default();
         macros.entries.insert(
             "greet".to_string(),

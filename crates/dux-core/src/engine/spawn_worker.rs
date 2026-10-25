@@ -38,7 +38,7 @@ pub struct CommandWorkerSpec {
 
 /// Format a `Box<dyn Any + Send>` panic payload as a human-readable string,
 /// matching the `&str` and `String` cases the default panic hook surfaces.
-pub fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+pub fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -120,7 +120,7 @@ impl Engine {
                     job(tx_for_job);
                 }));
                 if let Err(payload) = result {
-                    let reason = format_panic_payload(payload);
+                    let reason = format_panic_payload(&*payload);
                     crate::logger::error(&format!(
                         "spawn_command_worker[{label_for_log}] panicked: {reason}",
                     ));
@@ -250,7 +250,7 @@ impl Engine {
                     })) {
                         Ok(r) => r,
                         Err(payload) => {
-                            let reason = format_panic_payload(payload);
+                            let reason = format_panic_payload(&*payload);
                             crate::logger::error(&format!("status-op worker panicked: {reason}"));
                             crate::engine::ResolvedFinal::error(
                                 key_for_panic,
@@ -400,7 +400,7 @@ impl Engine {
                     job(tx_for_job);
                 }));
                 if let Err(payload) = result {
-                    let reason = format_panic_payload(payload);
+                    let reason = format_panic_payload(&*payload);
                     crate::logger::error(&format!(
                         "spawn_background_worker[{label_for_log}] panicked: {reason}",
                     ));
@@ -546,7 +546,7 @@ impl Engine {
                         Ok(LoopControl::Break) => break,
                         Err(payload) => {
                             clean_iterations = 0;
-                            let reason = format_panic_payload(payload);
+                            let reason = format_panic_payload(&*payload);
                             crate::logger::error(&format!(
                                 "spawn_loop_worker[{label}] iteration panicked, continuing: {reason}",
                             ));
@@ -597,4 +597,23 @@ pub fn fail_next_worker_spawn() {
 #[cfg(any(test, feature = "test-support"))]
 fn take_injected_spawn_failure() -> bool {
     FAIL_NEXT_SPAWN.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+mod format_panic_payload_tests {
+    use super::format_panic_payload;
+
+    fn payload_of(f: impl FnOnce() + std::panic::UnwindSafe) -> Box<dyn std::any::Any + Send> {
+        std::panic::catch_unwind(f).expect_err("the closure panics")
+    }
+
+    #[test]
+    fn a_panic_payload_reads_as_its_message_or_says_it_has_none() {
+        let literal = payload_of(|| panic!("a literal message"));
+        let formatted = payload_of(|| panic!("a {} message", "formatted"));
+        let other = payload_of(|| std::panic::panic_any(7_u8));
+        assert_eq!(format_panic_payload(&*literal), "a literal message");
+        assert_eq!(format_panic_payload(&*formatted), "a formatted message");
+        assert_eq!(format_panic_payload(&*other), "non-string panic payload");
+    }
 }

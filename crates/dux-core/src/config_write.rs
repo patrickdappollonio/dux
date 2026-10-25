@@ -2964,7 +2964,7 @@ pub fn merge_unmanaged_keys(
 
     for leaf in carry {
         let display = path_display(&raw, &leaf.path);
-        if insert_at_path(rendered, &leaf.path, leaf.key, leaf.item) {
+        if insert_at_path(rendered, &leaf.path, &leaf.key, leaf.item) {
             report.preserved.push(display);
         } else {
             // Neither preserved nor deliberately dropped: the key is GONE and
@@ -3055,7 +3055,7 @@ fn collect_unmanaged(
 /// Returns false when the path cannot be materialized: the only such case is an
 /// array-of-tables index the rendered document does not have (dux cannot invent
 /// a `[[projects]]` entry that the canonical renderer did not emit).
-fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item) -> bool {
+fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: &Key, item: Item) -> bool {
     let Some((PathSeg::Key(_), parents)) = path.split_last() else {
         return false;
     };
@@ -3101,7 +3101,7 @@ fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item)
 
     // `insert_formatted` (rather than `insert`) is what carries the key's own
     // decor (including any comment written above it) into the restored file.
-    table.insert_formatted(&key, item);
+    table.insert_formatted(key, item);
     true
 }
 

@@ -306,6 +306,7 @@ pub fn themes_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 // ---------------------------------------------------------------------------
 
 /// Where a change goes, and how long it waits for a running dux.
+#[derive(Clone, Copy)]
 pub enum Writer<'a> {
     /// No dux is running on this machine: the change edits `config.toml`.
     File(&'a DuxPaths),
@@ -340,7 +341,7 @@ fn through_dux(
 /// What a file edit adds about when it takes effect.
 const APPLIES_AT_START: &str = "dux is not running, so it applies the next time dux starts.";
 
-fn edit_failed(error: anyhow::Error) -> CliError {
+fn edit_failed(error: &anyhow::Error) -> CliError {
     failed(format!("{error:#}"))
 }
 
@@ -372,7 +373,7 @@ pub fn set_macro(
         )
         .map(|said| own_outcome(said, wait, format!("Saved macro {label}.\n"))),
         Writer::File(paths) => resources::set_macro_in_file(paths, name, text, surface)
-            .map_err(edit_failed)
+            .map_err(|error| edit_failed(&error))
             .map(|_| {
                 format!(
                     "Saved macro {label} in {}. {APPLIES_AT_START}\n",
@@ -396,7 +397,7 @@ pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> 
         )
         .map(|said| own_outcome(said, wait, format!("Removed macro {label}.\n"))),
         Writer::File(paths) => resources::remove_macro_in_file(paths, name)
-            .map_err(edit_failed)
+            .map_err(|error| edit_failed(&error))
             .map(|()| {
                 format!(
                     "Removed macro {label} from {}. {APPLIES_AT_START}\n",
@@ -453,7 +454,7 @@ fn file_text(paths: &DuxPaths) -> String {
 /// sends anything, without repeating it.
 pub fn check_env_name(name: &str) -> Result<(), CliError> {
     // An empty value passes every value check, so only the name is judged.
-    crate::config::check_global_env_var(name, "").map_err(edit_failed)
+    crate::config::check_global_env_var(name, "").map_err(|error| edit_failed(&error))
 }
 
 /// `dux env set`. The value is never printed.
@@ -468,7 +469,7 @@ pub fn set_env(writer: Writer<'_>, name: &str, value: &str) -> Result<String, Cl
             Some(serde_json::json!({ "value": value })),
         ),
         Writer::File(paths) => {
-            resources::set_env_in_file(paths, name, value).map_err(edit_failed)?;
+            resources::set_env_in_file(paths, name, value).map_err(|error| edit_failed(&error))?;
             Ok(format!(
                 "Saved global environment variable {name} in {} (the value is not shown). \
                  {APPLIES_AT_START}\n",
@@ -490,7 +491,7 @@ pub fn remove_env(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
         ),
         Writer::File(paths) => {
             let label = resources::env_label(&file_text(paths), name);
-            resources::remove_env_in_file(paths, name).map_err(edit_failed)?;
+            resources::remove_env_in_file(paths, name).map_err(|error| edit_failed(&error))?;
             Ok(format!(
                 "Removed {label} from the global environment in {}. {APPLIES_AT_START}\n",
                 paths.config_path.display()

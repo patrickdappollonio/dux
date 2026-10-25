@@ -2851,7 +2851,7 @@ mod tests {
         their_child.start_time = UNKNOWN_START;
         let mut leader = row(100, 1, 100);
         leader.start_time = UNKNOWN_START;
-        let table = vec![leader.clone(), theirs.clone(), their_child.clone()];
+        let table = vec![leader, theirs.clone(), their_child.clone()];
         assert_eq!(
             pids(&members(&table, &[session(100)], &[], 9)),
             vec![100, 101, 102],

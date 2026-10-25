@@ -88,7 +88,7 @@ impl ResourceCollector {
     /// TUI's `~` prefix) must key the marker on this flag rather than on its own
     /// first sample: a monitor reopened inside [`STALE_BASELINE`] does not
     /// re-baseline.
-    pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> (Vec<ResourceStats>, bool) {
+    pub fn sample(&mut self, targets: &[ResourceTarget]) -> (Vec<ResourceStats>, bool) {
         use sysinfo::Pid;
 
         let needs_baseline = needs_baseline(self.last_refresh, Instant::now());
@@ -125,7 +125,7 @@ impl ResourceCollector {
         // Rows: each labeled target (agent tabs and companion terminals). The
         // target's identity is carried through verbatim so the caller can join
         // the row back to its spine entity by id.
-        for target in &targets {
+        for target in targets {
             let (cpu, rss, count, children) = aggregate_tree(sys, Pid::from_u32(target.pid));
             rows.push(ResourceStats {
                 id: Some(target.id.clone()),
@@ -284,7 +284,7 @@ mod tests {
         let (stop, handle) = burn_a_core();
 
         let mut collector = ResourceCollector::new();
-        let (first, first_was_baseline) = collector.sample(Vec::new());
+        let (first, first_was_baseline) = collector.sample(&Vec::new());
         let first_cpu = first
             .iter()
             .find(|r| r.label == "dux (this process)")
@@ -292,7 +292,7 @@ mod tests {
             .cpu_percent;
 
         std::thread::sleep(Duration::from_millis(300));
-        let (second, second_was_baseline) = collector.sample(Vec::new());
+        let (second, second_was_baseline) = collector.sample(&Vec::new());
         let second_cpu = second
             .iter()
             .find(|r| r.label == "dux (this process)")
@@ -327,13 +327,13 @@ mod tests {
     fn sample_reports_was_baseline_accurately() {
         let mut collector = ResourceCollector::new();
 
-        let (_, first_was_baseline) = collector.sample(Vec::new());
+        let (_, first_was_baseline) = collector.sample(&Vec::new());
         assert!(
             first_was_baseline,
             "the very first sample has no prior refresh and must baseline"
         );
 
-        let (_, second_was_baseline) = collector.sample(Vec::new());
+        let (_, second_was_baseline) = collector.sample(&Vec::new());
         assert!(
             !second_was_baseline,
             "a sample taken immediately after must not re-baseline"
@@ -342,7 +342,7 @@ mod tests {
         // Simulate the monitor being closed and reopened after a gap longer
         // than STALE_BASELINE, with no sampling in between.
         collector.last_refresh = Some(Instant::now() - STALE_BASELINE - Duration::from_millis(1));
-        let (_, third_was_baseline) = collector.sample(Vec::new());
+        let (_, third_was_baseline) = collector.sample(&Vec::new());
         assert!(
             third_was_baseline,
             "a sample after a stale gap must re-baseline"
@@ -363,9 +363,9 @@ mod tests {
         let burners: Vec<_> = (0..3).map(|_| burn_a_core()).collect();
 
         let mut collector = ResourceCollector::new();
-        let _ = collector.sample(Vec::new());
+        let _ = collector.sample(&Vec::new());
         std::thread::sleep(Duration::from_millis(400));
-        let (rows, _) = collector.sample(Vec::new());
+        let (rows, _) = collector.sample(&Vec::new());
         let cpu = rows
             .iter()
             .find(|r| r.label == "dux (this process)")

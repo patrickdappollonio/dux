@@ -1427,7 +1427,7 @@ impl Engine {
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.tab_needs_attention(id.as_str()));
         // Tabs, session-slot first, then extras in creation order.
-        let mut tabs = vec![self.tab_view(s.slot_tab_id(), self.running_provider_for(s), 0)];
+        let mut tabs = vec![self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), 0)];
         let mut extras: Vec<_> = extra_tabs.to_vec();
         extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
         for (i, t) in extras.into_iter().enumerate() {
@@ -1436,7 +1436,7 @@ impl Engine {
                 .get(TabIdRef::new(&t.id))
                 .cloned()
                 .unwrap_or_else(|| t.provider.clone());
-            tabs.push(self.tab_view(TabIdRef::new(&t.id), effective, (i + 1) as u32));
+            tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, (i + 1) as u32));
         }
         SessionView::from_session(
             s,
@@ -1461,7 +1461,7 @@ impl Engine {
 
     /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.
     /// `order` is display position only; no tab is privileged.
-    fn tab_view(&self, id: &TabIdRef, provider: ProviderKind, order: u32) -> AgentTabView {
+    fn tab_view(&self, id: &TabIdRef, provider: &ProviderKind, order: u32) -> AgentTabView {
         AgentTabView {
             // The wire keeps plain strings: an id leaving the engine is bytes a
             // browser stores, not an id dux is still reasoning about.

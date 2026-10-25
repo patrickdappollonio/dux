@@ -4595,13 +4595,13 @@ fn handle_request(
                     Ok((tab_id, _)) => {
                         engine.operations.hold(
                             &ticket.id,
-                            dux_core::operations::Hold::exclusive(
+                            &dux_core::operations::Hold::exclusive(
                                 dux_core::engine::InFlightKey::Tab(TabId::new(tab_id.clone())),
                             ),
                         );
                         engine.operations.note(
                             &ticket.id,
-                            dux_core::operations::OperationNotes {
+                            &dux_core::operations::OperationNotes {
                                 created: vec![tab_id.clone()],
                                 ..Default::default()
                             },
@@ -5139,7 +5139,7 @@ fn create_terminal_operation(
             Ok((terminal_id, _)) => {
                 engine.operations.note(
                     &ticket.id,
-                    dux_core::operations::OperationNotes {
+                    &dux_core::operations::OperationNotes {
                         created: vec![terminal_id.clone()],
                         ..Default::default()
                     },

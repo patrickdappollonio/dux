@@ -2191,7 +2191,7 @@ impl Engine {
         // the agent the create made before its final lands.
         self.operations.note(
             &op_id,
-            crate::operations::OperationNotes {
+            &crate::operations::OperationNotes {
                 created: vec![session_id.clone()],
                 ..Default::default()
             },
@@ -2200,7 +2200,7 @@ impl Engine {
         // changes the agent while it is still coming up.
         self.operations.hold(
             &op_id,
-            crate::operations::Hold::exclusive(InFlightKey::Agent(session_id.clone())),
+            &crate::operations::Hold::exclusive(InFlightKey::Agent(session_id.clone())),
         );
         map.insert(op_id, (session_id, now));
     }
@@ -3856,10 +3856,7 @@ impl Engine {
                     dir.display(),
                     entries.len()
                 ));
-                let _ = tx.send(WorkerEvent::BrowserEntriesReady {
-                    dir: dir.clone(),
-                    entries,
-                });
+                let _ = tx.send(WorkerEvent::BrowserEntriesReady { dir: dir, entries });
             },
         );
     }
@@ -3994,7 +3991,7 @@ impl Engine {
                     panic_event: None,
                 },
                 move |tx| {
-                    crate::project_browser::run_project_branch_status_job(project, tx);
+                    crate::project_browser::run_project_branch_status_job(project, &tx);
                 },
             );
         }
@@ -4405,7 +4402,7 @@ impl Engine {
                 let mut collector = collector
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (rows, was_baseline) = collector.sample(targets);
+                let (rows, was_baseline) = collector.sample(&targets);
                 let _ = tx.send(WorkerEvent::ResourceStatsReady(rows, was_baseline));
             },
         );
@@ -5421,13 +5418,13 @@ impl Engine {
                 crate::gh::run_attach_pull_request_lookup_job(
                     project,
                     sid,
-                    raw,
-                    worker_tx,
+                    &raw,
+                    &worker_tx,
                     Some(op_id_for_worker),
-                    policy,
+                    &policy,
                 );
             })) {
-                let reason = crate::engine::format_panic_payload(payload);
+                let reason = crate::engine::format_panic_payload(&*payload);
                 crate::logger::error(&format!("pr-attach lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
@@ -6131,7 +6128,7 @@ impl Engine {
     pub fn change_agent_provider(
         &mut self,
         session_id: &str,
-        provider: ProviderKind,
+        provider: &ProviderKind,
     ) -> anyhow::Result<ChangeAgentProviderOutcome> {
         let index = self
             .sessions
@@ -6166,7 +6163,7 @@ impl Engine {
         // The resume decision is asked of a TAB, compared against this session's
         // sibling tab ids: the tab being retargeted is the session-slot one.
         let resume_available =
-            self.tab_resume_decision(&updated, updated.slot_tab_id(), &provider, true);
+            self.tab_resume_decision(&updated, updated.slot_tab_id(), provider, true);
 
         Ok(ChangeAgentProviderOutcome {
             previous,
@@ -6542,7 +6539,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         tab_id: &str,
-        provider: ProviderKind,
+        provider: &ProviderKind,
     ) -> anyhow::Result<ChangeAgentProviderOutcome> {
         // Transport-facing, exactly as in `close_tab`: name the two segments.
         if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id)) {
@@ -6596,7 +6593,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .is_some_and(|session| self.tab_resume_decision(session, tab_id_ref, &provider, true));
+            .is_some_and(|session| self.tab_resume_decision(session, tab_id_ref, provider, true));
 
         Ok(ChangeAgentProviderOutcome {
             previous,
@@ -9447,9 +9444,8 @@ mod tests {
         // so it never diverges from disk.
         let (mut engine, _tmp) = test_engine();
         engine.config.env.insert("OLD".into(), "v".into());
-        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
-            engine.paths.config_path.clone(),
-        );
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
         let mut env = std::collections::BTreeMap::new();
         env.insert("NEW".into(), "x".into());
 
@@ -10571,7 +10567,7 @@ mod tests {
         engine.sessions.push(session);
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .change_agent_provider("s1", &ProviderKind::new("codex"))
             .expect("swap provider");
 
         assert!(!outcome.running, "no PTY is running for this session");
@@ -10600,7 +10596,7 @@ mod tests {
         engine.sessions.push(session);
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .change_agent_provider("s1", &ProviderKind::new("codex"))
             .expect("swap provider");
         assert!(
             outcome.resume_available,
@@ -11408,7 +11404,7 @@ mod tests {
         engine.providers.insert(TabId::new("s1-slot"), client);
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .change_agent_provider("s1", &ProviderKind::new("codex"))
             .expect("swap provider while running");
 
         assert!(outcome.running, "a PTY is live for this session");
@@ -11436,7 +11432,7 @@ mod tests {
         // A second swap while still running must NOT overwrite the pin: the PTY
         // is still the original provider until the user relaunches.
         engine
-            .change_agent_provider("s1", ProviderKind::new("gemini"))
+            .change_agent_provider("s1", &ProviderKind::new("gemini"))
             .expect("second swap while running");
         assert_eq!(
             engine
@@ -11455,7 +11451,7 @@ mod tests {
     fn change_agent_provider_unknown_session_errors() {
         let (mut engine, _tmp) = test_engine();
         let err = engine
-            .change_agent_provider("ghost", ProviderKind::new("codex"))
+            .change_agent_provider("ghost", &ProviderKind::new("codex"))
             .map(|_| ())
             .unwrap_err();
         assert!(err.to_string().contains("unknown session"), "err: {err}");
@@ -11840,7 +11836,7 @@ mod tab_ops_tests {
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-x")));
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("claude"))
+            .change_agent_provider("s1", &ProviderKind::new("claude"))
             .unwrap();
 
         assert!(
@@ -11888,7 +11884,7 @@ mod tab_ops_tests {
         }
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("claude"))
+            .change_agent_provider("s1", &ProviderKind::new("claude"))
             .expect("swap to the same provider");
         assert!(
             outcome.resume_available,
@@ -11963,7 +11959,7 @@ mod tab_ops_tests {
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let slot = engine.slot_tab_id_of(SessionIdRef::new("s1")).to_string();
         engine
-            .change_tab_provider("s1", &slot, ProviderKind::new("codex"))
+            .change_tab_provider("s1", &slot, &ProviderKind::new("codex"))
             .unwrap();
         // Delegation mutates the session's own provider (the session-slot tab).
         assert_eq!(engine.sessions[0].provider.as_str(), "codex");
@@ -11978,7 +11974,7 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         engine
-            .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
+            .change_tab_provider("s1", "tab-1", &ProviderKind::new("codex"))
             .unwrap();
         assert_eq!(
             engine.agent_tabs[TabIdRef::new("tab-1")].provider.as_str(),
@@ -12001,7 +11997,7 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let outcome = engine
-            .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
+            .change_tab_provider("s1", "tab-1", &ProviderKind::new("codex"))
             .unwrap();
 
         assert!(outcome.resume_available);
@@ -12018,7 +12014,7 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
         let outcome = engine
-            .change_tab_provider("s1", "tab-1", ProviderKind::new("codex"))
+            .change_tab_provider("s1", "tab-1", &ProviderKind::new("codex"))
             .unwrap();
 
         assert!(!outcome.resume_available);
@@ -12623,7 +12619,7 @@ mod tab_ops_tests {
         );
         engine.operations.note(
             "op-t2",
-            crate::operations::OperationNotes {
+            &crate::operations::OperationNotes {
                 created: vec!["t2".to_string()],
                 ..Default::default()
             },
@@ -13033,7 +13029,7 @@ mod tab_ops_tests {
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("opencode"))
+            .change_agent_provider("s1", &ProviderKind::new("opencode"))
             .expect("retarget");
 
         assert_eq!(outcome.previous.as_str(), "codex");
@@ -13072,7 +13068,7 @@ mod tab_ops_tests {
             .insert(TabId::new("t2"), spawn_cat(tmp.path()));
 
         let outcome = engine
-            .change_agent_provider("s1", ProviderKind::new("opencode"))
+            .change_agent_provider("s1", &ProviderKind::new("opencode"))
             .expect("retarget");
 
         assert!(outcome.running, "the promoted tab's PTY is the agent's PTY");
@@ -13397,7 +13393,7 @@ mod resource_monitor_targets_tests {
     #[test]
     fn collect_resource_stats_marks_kinds_and_ids() {
         let mut collector = crate::resource_stats::ResourceCollector::new();
-        let (rows, _) = collector.sample(vec![ResourceTarget {
+        let (rows, _) = collector.sample(&vec![ResourceTarget {
             id: "term-1".to_string(),
             kind: ResourceKind::Terminal,
             label: "Terminal (npm): dev server".to_string(),
@@ -13435,7 +13431,7 @@ mod resource_monitor_targets_tests {
     #[test]
     fn collect_resource_stats_with_empty_targets_returns_dux_and_total_only() {
         let mut collector = crate::resource_stats::ResourceCollector::new();
-        let (rows, _) = collector.sample(Vec::new());
+        let (rows, _) = collector.sample(&Vec::new());
         let kinds: Vec<ResourceKind> = rows.iter().map(|r| r.kind).collect();
         assert_eq!(kinds, vec![ResourceKind::Dux, ResourceKind::Total]);
     }

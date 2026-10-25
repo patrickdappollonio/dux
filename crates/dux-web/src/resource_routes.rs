@@ -190,7 +190,7 @@ impl ResourceService {
         // of sleep when the collector has to re-establish its CPU baseline.
         self.collect_count.fetch_add(1, Ordering::SeqCst);
         let collector = Arc::clone(&self.collector);
-        let sampled = tokio::task::spawn_blocking(move || lock(&collector).sample(targets)).await;
+        let sampled = tokio::task::spawn_blocking(move || lock(&collector).sample(&targets)).await;
 
         match sampled {
             // `was_baseline` (a short-window sample) is a TUI-only concern

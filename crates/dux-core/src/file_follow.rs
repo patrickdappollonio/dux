@@ -237,7 +237,7 @@ pub fn open_log(
                     return Ok(finish(
                         path,
                         file,
-                        scanned,
+                        &scanned,
                         old.lines,
                         cursor,
                         Some(capped_note(cap)),
@@ -265,13 +265,13 @@ pub fn open_log(
             (lines, format!("{current}:{end}"), scanned)
         }
     };
-    Ok(finish(path, file, scanned, lines, end, note))
+    Ok(finish(path, file, &scanned, lines, end, note))
 }
 
 fn finish(
     path: &Path,
     file: std::fs::File,
-    scanned: Scan,
+    scanned: &Scan,
     lines: Vec<String>,
     cursor: String,
     note: Option<String>,

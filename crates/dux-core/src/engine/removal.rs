@@ -420,7 +420,7 @@ impl Engine {
             removed.extend(session_ids.iter().cloned());
             self.operations.note(
                 op.id(),
-                crate::operations::OperationNotes {
+                &crate::operations::OperationNotes {
                     removed,
                     ..Default::default()
                 },
@@ -543,7 +543,7 @@ impl Engine {
             if let Some(op) = deletion.op.as_ref() {
                 self.operations.note(
                     op.id(),
-                    crate::operations::OperationNotes {
+                    &crate::operations::OperationNotes {
                         parts: vec![crate::operations::OperationPart {
                             part: crate::operations::PartKind::Worktree,
                             subject: deletion.paths.get(session_id).cloned().unwrap_or_default(),

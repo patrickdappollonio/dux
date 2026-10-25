@@ -644,12 +644,12 @@ impl Operations {
 
     /// Add `hold` to the records waiting on `key` or whose id it is: a change
     /// that made a thing holds it from then on.
-    pub fn hold(&self, key: &str, hold: Hold) {
+    pub fn hold(&self, key: &str, hold: &Hold) {
         self.with(|registry| {
             for (id, record) in &mut registry.records {
                 if record.end.is_none()
                     && (id.as_str() == key || record.awaiting.as_deref() == Some(key))
-                    && !record.holds.contains(&hold)
+                    && !record.holds.contains(hold)
                 {
                     record.holds.push(hold.clone());
                 }
@@ -888,7 +888,7 @@ impl Operations {
 
     /// Add facts to the records waiting on `key`, or to the record whose id it
     /// is.
-    pub fn note(&self, key: &str, notes: OperationNotes) {
+    pub fn note(&self, key: &str, notes: &OperationNotes) {
         if notes.is_empty() {
             return;
         }
@@ -1215,7 +1215,7 @@ impl crate::engine::Engine {
             provisional
         } else {
             self.operations
-                .note(&provisional, before.changes_to(&IdSnapshot::of(self)));
+                .note(&provisional, &before.changes_to(&IdSnapshot::of(self)));
             let settled = outcome.settled.clone();
             self.settle_operation(
                 &provisional,
@@ -1261,7 +1261,7 @@ impl crate::engine::Engine {
         match &result {
             Ok(reaction) => {
                 self.operations
-                    .note(&id, before.changes_to(&IdSnapshot::of(self)));
+                    .note(&id, &before.changes_to(&IdSnapshot::of(self)));
                 let mut status = crate::wire::added_status_message(reaction)
                     .map(|message| crate::wire::WireStatus::new("info", message))
                     .or_else(|| crate::wire::wire_status_from_reaction(reaction));
@@ -1359,7 +1359,7 @@ impl crate::engine::Engine {
 
     /// Add facts to the record waiting on `key`, or, with no key, to the record
     /// being dispatched right now; a no-op when neither names a record.
-    pub fn note_operation(&self, key: Option<&str>, notes: OperationNotes) {
+    pub fn note_operation(&self, key: Option<&str>, notes: &OperationNotes) {
         if let Some(key) = key.or(self.operation_in_dispatch.as_deref()) {
             self.operations.note(key, notes);
         }
@@ -1570,7 +1570,7 @@ mod tests {
             let ops = Operations::default();
             let t0 = Instant::now();
             ops.open("op-1", OperationKind::AgentDelete, POLICY, t0);
-            ops.note("op-1", notes);
+            ops.note("op-1", &notes);
             ops.finish_by_key("op-1", tone, "x", None, t0);
             assert_eq!(state_of(&ops, "op-1", t0), expected, "{name}");
         }
@@ -1628,7 +1628,7 @@ mod tests {
 
         ops.note(
             "op-create",
-            OperationNotes {
+            &OperationNotes {
                 created: vec!["s9".to_string()],
                 ..Default::default()
             },
@@ -1646,7 +1646,7 @@ mod tests {
         ops.open("op-tmp", OperationKind::AgentDelete, POLICY, t0);
         ops.note(
             "op-tmp",
-            OperationNotes {
+            &OperationNotes {
                 removed: vec!["s1".to_string()],
                 ..Default::default()
             },
@@ -1682,7 +1682,7 @@ mod tests {
         ops.open("op-1", OperationKind::TabCreate, POLICY, t0);
         ops.note(
             "op-1",
-            OperationNotes {
+            &OperationNotes {
                 created: vec!["t1".to_string()],
                 ..Default::default()
             },
@@ -1817,7 +1817,7 @@ mod tests {
 
         ops.hold(
             "op-create",
-            Hold::exclusive(InFlightKey::Agent("s9".to_string())),
+            &Hold::exclusive(InFlightKey::Agent("s9".to_string())),
         );
 
         let refusal = ops
@@ -2135,7 +2135,7 @@ mod tests {
         ops.open("op-1", OperationKind::AgentDelete, POLICY, t0);
         ops.note(
             "op-1",
-            OperationNotes {
+            &OperationNotes {
                 removed: vec!["s1".to_string()],
                 parts: vec![OperationPart {
                     part: PartKind::Branch,

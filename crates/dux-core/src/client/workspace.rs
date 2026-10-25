@@ -642,7 +642,7 @@ const CREATE_RETRY_PAUSE: Duration = Duration::from_millis(500);
 /// create is refused as any other change is.
 pub fn perform(
     client: &Client,
-    planned: Planned,
+    planned: &Planned,
     wait: Option<Duration>,
 ) -> Result<String, CliError> {
     let deadline = wait.map(wait::deadline_after);
@@ -651,7 +651,7 @@ pub fn perform(
         Ok(record) => record,
         Err(refused) => match deadline {
             Some(deadline) if refused.error.message == CREATE_IN_FLIGHT_REFUSAL => {
-                retry_after_other_create(client, &planned, refused, deadline)?
+                retry_after_other_create(client, planned, refused, deadline)?
             }
             _ => return Err(refused.error),
         },
@@ -1605,7 +1605,7 @@ mod create_wait_tests {
     fn a_create_refused_for_another_create_waits_for_it_and_tries_again() {
         let dir = private_dir();
         let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED]));
-        let out = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap();
+        let out = perform(&client, &add(&client), Some(Duration::from_secs(5))).unwrap();
         assert_eq!(out, "Created agent second.\ns2\n");
         assert_eq!(posts(&fake), 2);
         assert!(
@@ -1620,7 +1620,7 @@ mod create_wait_tests {
     fn a_create_refused_for_another_create_without_an_operation_is_retried_until_accepted() {
         let dir = private_dir();
         let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![SENTENCE, SENTENCE]));
-        let out = perform(&client, add(&client), Some(Duration::from_secs(10))).unwrap();
+        let out = perform(&client, &add(&client), Some(Duration::from_secs(10))).unwrap();
         assert_eq!(out, "Created agent second.\ns2\n");
         assert_eq!(posts(&fake), 3);
     }
@@ -1629,7 +1629,7 @@ mod create_wait_tests {
     fn with_no_wait_a_create_refused_for_another_create_is_not_retried() {
         let dir = private_dir();
         let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED]));
-        let error = perform(&client, add(&client), None).unwrap_err();
+        let error = perform(&client, &add(&client), None).unwrap_err();
         assert_eq!(error.exit, Exit::Refused);
         assert_eq!(error.message, SENTENCE);
         assert_eq!(posts(&fake), 1);
@@ -1639,7 +1639,7 @@ mod create_wait_tests {
     fn a_create_refused_again_after_waiting_fails_with_the_refusal() {
         let dir = private_dir();
         let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![NAMED, NAMED]));
-        let error = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap_err();
+        let error = perform(&client, &add(&client), Some(Duration::from_secs(5))).unwrap_err();
         assert_eq!(error.exit, Exit::Refused);
         assert_eq!(error.message, SENTENCE);
         assert_eq!(posts(&fake), 2);
@@ -1652,7 +1652,7 @@ mod create_wait_tests {
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![(404, r#"{"error":"unknown_operation"}"#)];
         let (fake, _lock, client) = dux_running(dir.path(), script);
-        assert!(perform(&client, add(&client), Some(Duration::from_secs(5))).is_ok());
+        assert!(perform(&client, &add(&client), Some(Duration::from_secs(5))).is_ok());
         assert_eq!(posts(&fake), 2);
 
         // A server error is read again within the time, then the answer counts.
@@ -1660,7 +1660,7 @@ mod create_wait_tests {
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![(500, "boom"), (200, OTHER_DONE)];
         let (fake, _lock, client) = dux_running(dir.path(), script);
-        assert!(perform(&client, add(&client), Some(Duration::from_secs(5))).is_ok());
+        assert!(perform(&client, &add(&client), Some(Duration::from_secs(5))).is_ok());
         assert_eq!(posts(&fake), 2);
 
         // Any other refusal of the read is the command's error, and nothing is sent again.
@@ -1668,7 +1668,7 @@ mod create_wait_tests {
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![(400, r#"{"error":"bad request"}"#)];
         let (fake, _lock, client) = dux_running(dir.path(), script);
-        let error = perform(&client, add(&client), Some(Duration::from_secs(5))).unwrap_err();
+        let error = perform(&client, &add(&client), Some(Duration::from_secs(5))).unwrap_err();
         assert_eq!(error.exit, Exit::Failed);
         assert_eq!(error.message, "bad request");
         assert_eq!(posts(&fake), 1);
@@ -1690,7 +1690,7 @@ mod create_wait_tests {
         script.accepted = MINE_RUNNING;
         let (_fake, _lock, client) = dux_running(dir.path(), script);
         let started = Instant::now();
-        let error = perform(&client, add(&client), Some(Duration::from_secs(3))).unwrap_err();
+        let error = perform(&client, &add(&client), Some(Duration::from_secs(3))).unwrap_err();
         assert_eq!(error.exit, Exit::Unknown);
         assert!(
             started.elapsed() < Duration::from_millis(3600),
@@ -1707,7 +1707,7 @@ mod create_wait_tests {
         let mut script = Script::new(vec![NAMED]);
         script.other = vec![(200, OTHER_RUNNING)];
         let (fake, _lock, client) = dux_running(dir.path(), script);
-        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        let error = perform(&client, &add(&client), Some(Duration::from_secs(1))).unwrap_err();
         assert_eq!(error.exit, Exit::Refused);
         assert_eq!(error.message, SENTENCE);
         assert_eq!(posts(&fake), 1);
@@ -1716,7 +1716,7 @@ mod create_wait_tests {
         let dir = private_dir();
         let (fake, _lock, client) = dux_running(dir.path(), Script::new(vec![SENTENCE; 100]));
         let started = Instant::now();
-        let error = perform(&client, add(&client), Some(Duration::from_secs(1))).unwrap_err();
+        let error = perform(&client, &add(&client), Some(Duration::from_secs(1))).unwrap_err();
         assert_eq!(error.exit, Exit::Refused);
         assert!(started.elapsed() < Duration::from_millis(1400));
         assert!(posts(&fake) <= 3, "{} creates", posts(&fake));

@@ -41,7 +41,7 @@ struct DeprecatedConfigKey {
 #[allow(dead_code)]
 enum DeprecatedConfigKeyAction {
     Replace {
-        migrate: fn(&mut DocumentMut, DeprecatedConfigKey, Item) -> Result<()>,
+        migrate: fn(&mut DocumentMut, DeprecatedConfigKey, &Item) -> Result<()>,
     },
     Remove,
     Fail {
@@ -237,7 +237,7 @@ fn apply_config_deprecations_with(
         };
         match rule.action {
             DeprecatedConfigKeyAction::Replace { migrate } => {
-                migrate(doc, rule.old, old_item)?;
+                migrate(doc, rule.old, &old_item)?;
             }
             DeprecatedConfigKeyAction::Remove => {}
             DeprecatedConfigKeyAction::Fail { message } => {
@@ -257,7 +257,7 @@ fn apply_config_deprecations_with(
 fn migrate_prompt_for_name(
     doc: &mut DocumentMut,
     old: DeprecatedConfigKey,
-    old_item: Item,
+    old_item: &Item,
 ) -> Result<()> {
     let Some(prompt_for_name) = old_item.as_value().and_then(Value::as_bool) else {
         bail!(
@@ -284,7 +284,7 @@ fn migrate_prompt_for_name(
 fn migrate_server_bind(
     doc: &mut DocumentMut,
     old: DeprecatedConfigKey,
-    old_item: Item,
+    old_item: &Item,
 ) -> Result<()> {
     let Some(raw) = old_item.as_value().and_then(Value::as_str) else {
         bail!(
@@ -352,7 +352,7 @@ fn migrate_server_bind(
 fn migrate_tailscale_enabled(
     doc: &mut DocumentMut,
     _old: DeprecatedConfigKey,
-    old_item: Item,
+    old_item: &Item,
 ) -> Result<()> {
     let Some(enabled) = old_item.as_value().and_then(Value::as_bool) else {
         return Ok(());
