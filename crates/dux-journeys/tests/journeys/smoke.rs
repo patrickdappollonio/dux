@@ -155,7 +155,7 @@ async fn smoke_every_published_port_binds_the_hosts_loopback_only() {
             ),
         ] {
             let mut ports: Vec<&str> = bindings.iter().map(|(p, _, _)| p.as_str()).collect();
-            ports.sort();
+            ports.sort_unstable();
             ports.dedup();
             assert_eq!(
                 ports, expected,
