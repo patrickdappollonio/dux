@@ -7395,7 +7395,7 @@ impl App {
             .iter()
             .map(|row| {
                 let mut spans = vec![Span::raw(" ")];
-                if row.unavailable == None {
+                if row.unavailable.is_none() {
                     spans.push(Span::styled(row.label.clone(), text_style));
                 } else {
                     let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
