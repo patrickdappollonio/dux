@@ -1336,8 +1336,7 @@ mod tests {
             let rejoined: String = wrapped
                 .iter()
                 .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("")
+                .collect::<String>()
                 .replace("  1 │ ", "")
                 .replace("    │ ", "");
             assert_eq!(
