@@ -107,6 +107,17 @@ impl Document {
         best
     }
 
+    /// Score this document against already-deduplicated query tokens, or `None`
+    /// when the prefix-AND rule refuses it.
+    fn score(&self, tokens: &[(String, u32)]) -> Option<u32> {
+        let mut total: u32 = 0;
+        for (token, idf) in tokens {
+            let weight = self.weight_for(token)?;
+            total = total.saturating_add(idf.saturating_mul(weight));
+        }
+        Some(total)
+    }
+
     /// Whether any token of this document starts with `token`.
     fn contains_prefix(&self, token: &str) -> bool {
         self.name
@@ -149,17 +160,6 @@ impl Corpus {
         (idf * 1000.0).round().max(0.0) as u32
     }
 
-    /// Score one document against already-deduplicated query tokens, or `None`
-    /// when the prefix-AND rule refuses it.
-    fn score(&self, document: &Document, tokens: &[(String, u32)]) -> Option<u32> {
-        let mut total: u32 = 0;
-        for (token, idf) in tokens {
-            let weight = document.weight_for(token)?;
-            total = total.saturating_add(idf.saturating_mul(weight));
-        }
-        Some(total)
-    }
-
     /// Every match, best first, ties in table order.
     fn ranked(&self, query: &str) -> Vec<ScoredCommand> {
         let tokens = unique_tokens(query)
@@ -177,7 +177,8 @@ impl Corpus {
             .iter()
             .enumerate()
             .filter_map(|(index, document)| {
-                self.score(document, &tokens)
+                document
+                    .score(&tokens)
                     .map(|score| ScoredCommand { index, score })
             })
             .collect::<Vec<_>>();

@@ -314,25 +314,21 @@ impl Engine {
         &mut self,
         project_id: &str,
         project_name: &str,
-    ) -> anyhow::Result<EventReaction> {
+    ) -> EventReaction {
         if self.project_is_being_deleted(project_id) {
-            return Ok(EventReaction::Status(StatusUpdate::warning(
-                crate::status_text![
-                    "Project ",
-                    q(project_name),
-                    " is already being deleted. The status line says when it is done."
-                ],
-            )));
+            return EventReaction::Status(StatusUpdate::warning(crate::status_text![
+                "Project ",
+                q(project_name),
+                " is already being deleted. The status line says when it is done."
+            ]));
         }
         if self.project_has_launching_tab(project_id) {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "Cannot delete project ",
-                    q(project_name),
-                    " while an agent tab is still launching. \
+            return EventReaction::Status(StatusUpdate::error(crate::status_text![
+                "Cannot delete project ",
+                q(project_name),
+                " while an agent tab is still launching. \
                  Wait a moment, then try again."
-                ],
-            )));
+            ]));
         }
         let awaiting_create = self.project_has_create_in_flight(project_id);
         let busy = if awaiting_create {
@@ -382,11 +378,11 @@ impl Engine {
                 std::thread::sleep(wait);
                 let _ = tx.send(WorkerEvent::ProjectDeletionContinue { project_id });
             });
-            return Ok(EventReaction::Status(pending));
+            return EventReaction::Status(pending);
         }
         let mut reactions = vec![EventReaction::Status(pending)];
         reactions.extend(self.proceed_project_deletion(project_id));
-        Ok(EventReaction::Multi(reactions))
+        EventReaction::Multi(reactions)
     }
 
     /// `WorkerEvent::ProjectDeletionContinue`: the create a deletion waited for

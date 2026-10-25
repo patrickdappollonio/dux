@@ -345,6 +345,10 @@ fn migrate_server_bind(
 /// A non-boolean value is dropped silently rather than failing the load: the key
 /// no longer exists, so there is nothing to be strict about, and the new key's
 /// own default (`auto`) is a safe answer.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "its signature is the migration table's fn pointer type, which other migrations fail through"
+)]
 fn migrate_tailscale_enabled(
     doc: &mut DocumentMut,
     _old: DeprecatedConfigKey,

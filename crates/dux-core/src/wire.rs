@@ -1032,6 +1032,10 @@ mod quiet_web_wire {
     use super::QuietSurfaces;
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's serialize_with hands the function a reference to the field"
+    )]
     pub fn serialize<S: Serializer>(value: &QuietSurfaces, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bool(value.web)
     }

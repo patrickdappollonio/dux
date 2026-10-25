@@ -1160,8 +1160,8 @@ mod tests {
     }
     use crate::model::BranchKeptReason;
 
-    fn kept() -> RemovalResult {
-        Ok(RemovedBranches::Kept(BranchKeptReason::UserDeclined))
+    fn kept() -> RemovedBranches {
+        RemovedBranches::Kept(BranchKeptReason::UserDeclined)
     }
 
     #[test]
@@ -1236,7 +1236,7 @@ mod tests {
             second.wait_for_overlapping_removals(Duration::from_secs(10))
         });
         std::thread::sleep(Duration::from_millis(50));
-        first.finish(kept());
+        first.finish(Ok(kept()));
         assert!(waiter.join().unwrap(), "and goes once it has finished");
         // An unrelated sibling never waits.
         let RemovalClaim::Lead(_a) = ops.announce_removal(dir.path().join("x")) else {
@@ -1303,7 +1303,7 @@ mod tests {
         );
         drop(guard);
         assert!(rx.recv_timeout(Duration::from_secs(20)).unwrap());
-        waiter.join().unwrap().finish(kept());
+        waiter.join().unwrap().finish(Ok(kept()));
         assert!(!ops.is_being_removed(&wt));
         assert!(ops.hold(&wt, WorktreeOpKind::Pull).is_ok());
     }

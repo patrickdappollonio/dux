@@ -544,15 +544,15 @@ fn base_of_loaded(loaded: &Config) -> Option<Base> {
 
 /// The base for a config a reload adopted: the text it was read from, or,
 /// for a config read from no file, that config and the file as it is now.
-fn base_adopted(path: &std::path::Path, config: Config) -> Option<Base> {
+fn base_adopted(path: &std::path::Path, config: Config) -> Base {
     if let Some(base) = base_from_source(&config) {
-        return Some(base);
+        return base;
     }
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    Some(Base {
+    Base {
         seen: crate::config_write::seen_of_read(&text, &config.projects),
         config,
-    })
+    }
 }
 
 /// What the writer thread carries between messages: the base its three-way
@@ -568,7 +568,7 @@ impl WriterState {
     /// A save wrote `config` as `written`: the next base, and the text the
     /// engine can ask for.
     fn record_write(&mut self, config: Config, written: &str) {
-        let base = written_base(&self.base, config, written);
+        let base = written_base(self.base.as_ref(), config, written);
         if let Ok(mut last) = self.last_written.lock() {
             *last = (
                 last.0 + 1,
@@ -603,7 +603,7 @@ fn handle_writer_input(
         Ok(Some(WriteMsg::Eager { config, reply })) => {
             state.pending = None;
             state.deadline = None;
-            let result = save_against_base(path, &state.base, &config, Durability::Fsync)
+            let result = save_against_base(path, state.base.as_ref(), &config, Durability::Fsync)
                 .map_err(|e| format!("{e:#}"));
             match &result {
                 Ok(text) => state.record_write(config, text),
@@ -638,15 +638,15 @@ fn handle_writer_input(
 /// setting the user deleted by hand stays seen and stays deleted; projects
 /// gone from both memory and the file are still forgotten.
 fn adopt_base(path: &std::path::Path, base: &mut Option<Base>, config: Config) {
-    let adopted = base_adopted(path, config);
-    *base = match (base.take(), adopted) {
-        (Some(old), Some(mut new)) => {
-            new.seen =
-                crate::config_write::union_seen(Some(&old.seen), &new.seen, &new.config.projects);
-            Some(new)
-        }
-        (_, new) => new,
-    };
+    let mut adopted = base_adopted(path, config);
+    if let Some(old) = base.take() {
+        adopted.seen = crate::config_write::union_seen(
+            Some(&old.seen),
+            &adopted.seen,
+            &adopted.config.projects,
+        );
+    }
+    *base = Some(adopted);
 }
 
 fn run_paused_writer(
@@ -685,20 +685,15 @@ fn run_paused_writer(
 /// to become the next base.
 fn save_against_base(
     path: &std::path::Path,
-    base: &Option<Base>,
+    base: Option<&Base>,
     config: &Config,
     durability: Durability,
 ) -> anyhow::Result<String> {
-    save_config_three_way(
-        path,
-        base.as_ref().map(Base::as_save_base),
-        config,
-        durability,
-    )
+    save_config_three_way(path, base.map(Base::as_save_base), config, durability)
 }
 
 /// The base after a save wrote `config` as `written`.
-fn written_base(base: &Option<Base>, mut config: Config, written: &str) -> Base {
+fn written_base(base: Option<&Base>, mut config: Config, written: &str) -> Base {
     // The base keeps the config, not the text it came from.
     config.source_text = crate::config::SourceText::default();
     match base {
@@ -719,7 +714,7 @@ fn flush_pending(
     let Some(cfg) = state.pending.take() else {
         return;
     };
-    let result = save_against_base(path, &state.base, &cfg, Durability::NoFsync);
+    let result = save_against_base(path, state.base.as_ref(), &cfg, Durability::NoFsync);
     let result = match result {
         Ok(text) => {
             state.record_write(cfg, &text);

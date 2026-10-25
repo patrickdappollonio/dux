@@ -45,10 +45,10 @@ pub fn short_project_id(id: &str) -> String {
 /// zero agents, so a project the user is working in never sinks. Sessions whose
 /// project no longer exists become `orphaned` groups appended after the
 /// agent-bearing projects, so neither surface silently drops them.
-pub fn build_sidebar(
+pub fn build_sidebar<S: std::hash::BuildHasher>(
     projects: &[Project],
     sessions: &[AgentSession],
-    projects_with_terminals: &std::collections::HashSet<String>,
+    projects_with_terminals: &std::collections::HashSet<String, S>,
     empty_separator_min_projects: u16,
 ) -> SidebarModel {
     use std::collections::{HashMap, HashSet};
@@ -150,7 +150,7 @@ mod tests {
             sample_session("s1", "p1", "b1"),
             sample_standalone_session("sa1", "/home/someone/notes"),
         ];
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 0);
         assert_eq!(model.groups.len(), 1, "no orphan group may appear");
         assert_eq!(model.groups[0].project_id, "p1");
         assert_eq!(model.groups[0].session_ids, vec!["s1".to_string()]);
@@ -161,7 +161,7 @@ mod tests {
         let projects = vec![sample_project("p1", "/a"), sample_project("p2", "/b")];
         let sessions = vec![sample_session("s1", "p1", "feat")];
         // Threshold disabled (0): no split, projects stay in stored order.
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 0);
         assert_eq!(model.agentless_start, None);
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
@@ -175,7 +175,7 @@ mod tests {
         let projects = vec![sample_project("p1", "/a"), sample_project("p2", "/b")];
         let sessions = vec![sample_session("s1", "p1", "feat")];
         // Threshold 2, two projects, one agent-less -> split.
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 2);
         assert_eq!(model.agentless_start, Some(1));
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
@@ -188,7 +188,7 @@ mod tests {
             sample_session("s1", "p1", "feat"),
             sample_session("s2", "p2", "feat"),
         ];
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 2);
         assert_eq!(model.agentless_start, None);
     }
 
@@ -200,7 +200,7 @@ mod tests {
             sample_session("s2", "3fc34174-4561-4ac6-98fb-5f1434c101c2", "feat"),
             sample_session("s3", "3fc34174-4561-4ac6-98fb-5f1434c101c2", "feat"),
         ];
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 0);
         assert_eq!(model.groups.len(), 2);
         let orphan = &model.groups[1];
         assert!(orphan.orphaned);
@@ -216,7 +216,7 @@ mod tests {
             sample_session("s2", "ghost-id", "feat"),
         ];
         // Split (threshold 2): p1 has agents, p2 has none, plus an orphan group.
-        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
+        let model = build_sidebar(&projects, &sessions, &std::collections::HashSet::new(), 2);
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         // Agent-bearing project, then orphan, then the separator, then p2.
         assert_eq!(ids, vec!["p1", "ghost-id", "p2"]);

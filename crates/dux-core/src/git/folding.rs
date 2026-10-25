@@ -1347,7 +1347,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
                 deletions: 0,
                 binary: false,
                 diff_excluded: false,
-                renamed_from: rename_source(entry.index_status, &entry.renamed_from),
+                renamed_from: rename_source(entry.index_status, entry.renamed_from.as_ref()),
                 kind: match link {
                     Some(UntrackedDirectoryKind::LinkedWorktree) => ChangedFileKind::LinkedWorktree,
                     Some(_) => ChangedFileKind::NestedRepository,

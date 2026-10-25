@@ -4087,7 +4087,7 @@ pub struct WorktreeFileList {
 /// backs that). Returns at most `max_files` entries and sets `truncated` if more
 /// exist; `max_files == 0` disables the cap entirely.
 pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
-    walk_files(worktree_path, max_files, DotDirectories::Walked)
+    Ok(walk_files(worktree_path, max_files, DotDirectories::Walked))
 }
 
 /// The same flat walk for a root that is NOT a worktree: the directory a
@@ -4106,7 +4106,7 @@ pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<Worktree
 /// single-tenant trusted-access model: a client that reaches this can already
 /// browse the filesystem.
 pub fn rooted_files(root: &Path, max_files: usize) -> Result<WorktreeFileList> {
-    walk_files(root, max_files, DotDirectories::Pruned)
+    Ok(walk_files(root, max_files, DotDirectories::Pruned))
 }
 
 /// Whether a flat walk descends into directories whose name starts with a dot.
@@ -4122,7 +4122,7 @@ fn walk_files(
     worktree_path: &Path,
     max_files: usize,
     dot_dirs: DotDirectories,
-) -> Result<WorktreeFileList> {
+) -> WorktreeFileList {
     use walkdir::WalkDir;
 
     let wt = worktree_path.to_path_buf();
@@ -4181,7 +4181,7 @@ fn walk_files(
     }
 
     files.sort();
-    Ok(WorktreeFileList { files, truncated })
+    WorktreeFileList { files, truncated }
 }
 
 /// One entry in a single-directory listing for the web editor's lazy file tree.
@@ -4305,9 +4305,9 @@ fn drop_lossy_duplicates(entries: &mut Vec<DirEntryInfo>) {
 
 /// The source path a row carries, which is only ever a rename's or a copy's:
 /// the other side of the same record may be an ordinary modification.
-fn rename_source(status: char, source: &Option<String>) -> Option<String> {
+fn rename_source(status: char, source: Option<&String>) -> Option<String> {
     if matches!(status, 'R' | 'C') {
-        source.clone()
+        source.cloned()
     } else {
         None
     }
@@ -4415,7 +4415,7 @@ fn changed_files_with(
                 deletions: 0,
                 binary: false,
                 diff_excluded: false,
-                renamed_from: rename_source(index_status, &source),
+                renamed_from: rename_source(index_status, source.as_ref()),
                 kind: crate::model::ChangedFileKind::File,
             });
         }
@@ -4428,7 +4428,7 @@ fn changed_files_with(
                 deletions: 0,
                 binary: false,
                 diff_excluded: false,
-                renamed_from: rename_source(worktree_status, &source),
+                renamed_from: rename_source(worktree_status, source.as_ref()),
                 kind: crate::model::ChangedFileKind::File,
             });
         }

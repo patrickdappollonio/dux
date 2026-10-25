@@ -65,10 +65,6 @@ fn names_and_notes(text: &str) -> Vec<(Option<String>, Option<String>)> {
         .unwrap_or_default()
 }
 
-fn some(text: &str) -> Option<String> {
-    Some(text.to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Inline sections the user deleted or rewrote by hand
 // ---------------------------------------------------------------------------
@@ -164,7 +160,10 @@ fn renaming_the_first_of_two_projects_at_one_path_to_the_seconds_name_never_swap
     {
         assert_eq!(
             names_and_notes(&text),
-            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("two".to_string()), Some("n2".to_string()))
+            ],
             "{text}"
         );
     }
@@ -181,7 +180,10 @@ fn renaming_the_second_of_two_projects_at_one_path_to_the_firsts_name_never_swap
     {
         assert_eq!(
             names_and_notes(&text),
-            vec![(some("one"), some("n1")), (some("one"), some("n2"))],
+            vec![
+                (Some("one".to_string()), Some("n1".to_string())),
+                (Some("one".to_string()), Some("n2".to_string()))
+            ],
             "{text}"
         );
     }
@@ -196,28 +198,37 @@ fn renaming_or_removing_projects_at_one_path_keeps_each_entrys_own_keys() {
     let cases: [(Edit, Rows); 4] = [
         (
             |memory| memory.projects[0].name = Some("two".into()),
-            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("two".to_string()), Some("n2".to_string())),
+            ],
         ),
         (
             |memory| {
                 memory.projects[0].name = Some("two".into());
                 memory.projects[1].name = Some("three".into());
             },
-            vec![(some("two"), some("n1")), (some("three"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("three".to_string()), Some("n2".to_string())),
+            ],
         ),
         (
             |memory| {
                 memory.projects[0].name = Some("two".into());
                 memory.projects[1].name = Some("one".into());
             },
-            vec![(some("two"), some("n1")), (some("one"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("one".to_string()), Some("n2".to_string())),
+            ],
         ),
         (
             |memory| {
                 memory.projects.remove(1);
                 memory.projects[0].name = Some("two".into());
             },
-            vec![(some("two"), some("n1"))],
+            vec![(Some("two".to_string()), Some("n1".to_string()))],
         ),
     ];
     for (edit, expected) in cases {
@@ -1560,7 +1571,10 @@ fn a_hand_edited_user_key_survives_dux_renaming_its_project() {
     {
         assert_eq!(
             names_and_notes(&text),
-            vec![(some("uno"), some("edited")), (some("two"), some("n2"))],
+            vec![
+                (Some("uno".to_string()), Some("edited".to_string())),
+                (Some("two".to_string()), Some("n2".to_string()))
+            ],
             "{text}"
         );
     }
@@ -1584,7 +1598,10 @@ fn an_id_added_by_hand_does_not_move_keys_between_projects_at_one_path() {
     {
         assert_eq!(
             names_and_notes(&text),
-            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("two".to_string()), Some("n2".to_string()))
+            ],
             "{text}"
         );
     }
@@ -1610,7 +1627,10 @@ fn projects_at_one_path_reordered_by_hand_keep_their_keys_through_a_rename() {
         rows.sort();
         assert_eq!(
             rows,
-            vec![(some("two"), some("n1")), (some("two"), some("n2"))],
+            vec![
+                (Some("two".to_string()), Some("n1".to_string())),
+                (Some("two".to_string()), Some("n2".to_string()))
+            ],
             "{text}"
         );
     }

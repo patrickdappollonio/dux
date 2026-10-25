@@ -145,27 +145,27 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // prompt. Both at once is a prompt the user did not ask for on top of
             // an agent that is already being created.
             EventReaction::OpenNewAgentPromptForPr { status_op_id, .. } => {
-                owner_by_id(status_op_id, |id| ops.has_pr_lookup(id))
+                owner_by_id(status_op_id.as_deref(), |id| ops.has_pr_lookup(id))
             }
 
             // Worker 2's `git switch` landed and the project is ready to add.
             // Adding it twice is two workspace entries for one directory.
             EventReaction::AddProjectAfterBranchCheckout { status_op_id, .. }
             | EventReaction::AddProjectAfterInitialCommit { status_op_id, .. } => {
-                owner_by_id(status_op_id, |id| ops.has_add_project(id))
+                owner_by_id(status_op_id.as_deref(), |id| ops.has_add_project(id))
             }
 
             // A clone is ready to add as a project, and the follow-up dispatches
             // its agent create. Twice is two projects and two agents.
             EventReaction::AddProjectAfterClone(done) => {
-                owner_by_id(&done.status_op_id, |id| ops.has_web_clone(id))
+                owner_by_id(done.status_op_id.as_deref(), |id| ops.has_web_clone(id))
             }
 
             // Worker 1 inspected the default branch and the follow-up SPAWNS
             // worker 2. Two spawns are two concurrent `git switch` runs in one
             // repository.
             EventReaction::DispatchProjectDefaultBranchCheckout { status_op_id, .. } => {
-                owner_by_id(status_op_id, |id| ops.has_checkout(id))
+                owner_by_id(status_op_id.as_deref(), |id| ops.has_checkout(id))
             }
 
             // A `Multi` is applied leaf by leaf (the TUI's `apply_reaction`
@@ -254,8 +254,8 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
 /// A missing id is `Drainer` rather than an error: the TUI paths pass `None`
 /// for operations they never keyed, and a worker that started something on its
 /// own has no originating request at all.
-fn owner_by_id(status_op_id: &Option<String>, in_web_map: impl Fn(&str) -> bool) -> FollowupOwner {
-    match status_op_id.as_deref() {
+fn owner_by_id(status_op_id: Option<&str>, in_web_map: impl Fn(&str) -> bool) -> FollowupOwner {
+    match status_op_id {
         Some(id) if in_web_map(id) => FollowupOwner::Web,
         _ => FollowupOwner::Drainer,
     }

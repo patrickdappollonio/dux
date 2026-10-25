@@ -605,7 +605,7 @@ impl Engine {
             Command::DeleteProject {
                 project_id,
                 project_name,
-            } => self.delete_project_with_worktrees(&project_id, &project_name),
+            } => Ok(self.delete_project_with_worktrees(&project_id, &project_name)),
 
             Command::DispatchCreateAgentRequest {
                 mut request,

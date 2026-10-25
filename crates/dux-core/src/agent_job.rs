@@ -353,7 +353,7 @@ impl FreshCopy {
     /// Where the busy branch is held, finishing a sentence that has just named
     /// it: a listed worktree whose folder is gone still reserves the branch
     /// until git prunes it, and the project folder is named as such.
-    fn busy_clause(&self, holder: &git::BranchHolder) -> crate::status_text::StatusText {
+    fn busy_clause(holder: &git::BranchHolder) -> crate::status_text::StatusText {
         let label = crate::home_path::shorten_home(&holder.worktree.path);
         if std::fs::symlink_metadata(&holder.worktree.path).is_err() {
             crate::status_text![
@@ -520,7 +520,11 @@ fn review_copy_warning_after(
 fn review_copy_warning(copy: &FreshCopy, number: u64) -> crate::status_text::StatusText {
     let why = match &copy.reason {
         FreshCopyReason::Busy(holder) => {
-            crate::status_text!["Branch ", q(&copy.busy_branch), copy.busy_clause(holder)]
+            crate::status_text![
+                "Branch ",
+                q(&copy.busy_branch),
+                FreshCopy::busy_clause(holder)
+            ]
         }
         FreshCopyReason::Diverged => crate::status_text![
             "Branch ",
@@ -918,7 +922,9 @@ impl CreatePlanContext<'_> {
                 worktree_path,
                 branch_name,
                 custom_name,
-            } => self.plan_existing_worktree(project, worktree_path, branch_name, custom_name),
+            } => {
+                Some(self.plan_existing_worktree(project, worktree_path, branch_name, custom_name))
+            }
             CreateAgentRequest::ForkExternalWorktree {
                 project,
                 source_worktree_path,
@@ -1285,7 +1291,7 @@ impl CreatePlanContext<'_> {
         // no way around it.
         if let Some(commit) = head_commit
             && let Some((agent, branch, folder)) =
-                self.agent_with_head_commit(repo_path, agents, head_branch, commit)
+                Self::agent_with_head_commit(repo_path, agents, head_branch, commit)
         {
             self.send_failure(crate::status_text![
                 "Agent ",
@@ -1434,7 +1440,6 @@ impl CreatePlanContext<'_> {
     /// request's head.
     #[allow(clippy::too_many_arguments)]
     fn confirm_reused_branch(
-        &self,
         repo_path: &Path,
         worktree: &Path,
         name: &str,
@@ -1541,7 +1546,6 @@ impl CreatePlanContext<'_> {
     /// An agent whose folder is gone is skipped: it is not one to point the
     /// user to. Answers `None` when git cannot list the worktrees (logged).
     fn agent_with_head_commit(
-        &self,
         repo_path: &Path,
         agents: &[crate::worker::AgentAtWorktree],
         head_branch: &str,
@@ -1615,7 +1619,7 @@ impl CreatePlanContext<'_> {
         if !matches!(copy.reason, FreshCopyReason::Busy(_)) {
             return None;
         }
-        let missing = self.commits_the_copy_lacks(repo_path, copy);
+        let missing = Self::commits_the_copy_lacks(repo_path, copy);
         if missing == 0 {
             return None;
         }
@@ -1638,7 +1642,7 @@ impl CreatePlanContext<'_> {
     /// commits one has and the other lacks are not "missing" from anything.
     /// Zero stands for "nothing to warn about", including when git cannot
     /// answer (logged).
-    fn commits_the_copy_lacks(&self, repo_path: &Path, copy: &FreshCopy) -> u32 {
+    fn commits_the_copy_lacks(repo_path: &Path, copy: &FreshCopy) -> u32 {
         match git::branch_is_ancestor(repo_path, &copy.new_branch, &copy.busy_branch) {
             Ok(true) => {}
             Ok(false) => {
@@ -1880,7 +1884,7 @@ impl CreatePlanContext<'_> {
             // files, for the same reason.
             let mut moved_forward = None;
             if attach_existing && fresh_copy.is_none() {
-                match self.confirm_reused_branch(
+                match Self::confirm_reused_branch(
                     &repo_path,
                     &worktree_path,
                     &resolved_name,
@@ -2121,49 +2125,47 @@ impl CreatePlanContext<'_> {
         worktree_path: PathBuf,
         branch_name: String,
         custom_name: Option<String>,
-    ) -> Option<ManagedCreatePlan> {
-        Some({
-            let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
-            let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: self.create_key.to_string(),
-                message: crate::status_text![
-                    "Launching ",
-                    n(project.default_provider.as_str()),
-                    " in existing worktree ",
-                    q(worktree_path.display()),
-                    "..."
-                ],
-            });
-            let status_message = crate::status_text![
-                "Imported ",
+    ) -> ManagedCreatePlan {
+        let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+            status_op_id: self.create_key.to_string(),
+            message: crate::status_text![
+                "Launching ",
                 n(project.default_provider.as_str()),
-                " agent ",
-                q(agent_name),
-                " from existing managed worktree for project ",
-                q(project.name),
-                "."
-            ];
-            ManagedCreatePlan {
-                project: project.clone(),
-                provider: project.default_provider.clone(),
-                source_branch: branch_name.clone(),
-                status_message,
-                // Quiet on the web: the new row appears and its pane launches.
-                status_quiet: ROW_AND_PANE_CREATE_QUIET,
-                branch_name,
-                worktree_path,
-                owns_worktree: false,
-                title: custom_name,
-                launch_with_resume: true,
-                pending_copy: None,
-                status_lead: None,
-                pull_request_pin: None,
-                // Adopting an existing worktree adopts its branch too: it
-                // predates the agent and is not dux's to delete.
-                branch_provenance: BranchProvenance::Adopted,
-                moved_forward: None,
-            }
-        })
+                " in existing worktree ",
+                q(worktree_path.display()),
+                "..."
+            ],
+        });
+        let status_message = crate::status_text![
+            "Imported ",
+            n(project.default_provider.as_str()),
+            " agent ",
+            q(agent_name),
+            " from existing managed worktree for project ",
+            q(project.name),
+            "."
+        ];
+        ManagedCreatePlan {
+            project: project.clone(),
+            provider: project.default_provider.clone(),
+            source_branch: branch_name.clone(),
+            status_message,
+            // Quiet on the web: the new row appears and its pane launches.
+            status_quiet: ROW_AND_PANE_CREATE_QUIET,
+            branch_name,
+            worktree_path,
+            owns_worktree: false,
+            title: custom_name,
+            launch_with_resume: true,
+            pending_copy: None,
+            status_lead: None,
+            pull_request_pin: None,
+            // Adopting an existing worktree adopts its branch too: it
+            // predates the agent and is not dux's to delete.
+            branch_provenance: BranchProvenance::Adopted,
+            moved_forward: None,
+        }
     }
 
     fn plan_external_worktree(

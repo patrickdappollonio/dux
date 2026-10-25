@@ -137,9 +137,9 @@ pub fn project_base_for_add(
 /// Each project gets its path expanded, its provider resolved (falling back to the global
 /// default), and its current branch read from git. Missing or non-git paths are flagged
 /// with `path_missing = true` and receive an empty `current_branch`.
-pub fn load_projects(
+pub fn load_projects<S: std::hash::BuildHasher>(
     project_configs: &[ProjectConfig],
-    created_ats: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    created_ats: &HashMap<String, chrono::DateTime<chrono::Utc>, S>,
     config: &Config,
 ) -> Vec<Project> {
     let mut projects = Vec::new();

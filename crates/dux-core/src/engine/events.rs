@@ -3835,7 +3835,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         branch_generation: u64,
-        maybe_pr: &Option<crate::model::PrInfo>,
+        maybe_pr: Option<&crate::model::PrInfo>,
         checked_at: Instant,
     ) -> bool {
         self.clear_in_flight(&InFlightKey::PrCheck(session_id.to_string()));
@@ -3871,7 +3871,7 @@ impl Engine {
             return false;
         }
         if let Some(pin) = self.pr_overrides.get(session_id) {
-            let matches_pin = maybe_pr.as_ref().is_some_and(|pr| {
+            let matches_pin = maybe_pr.is_some_and(|pr| {
                 pr.number == pin.pr_number
                     && pr.owner_repo.eq_ignore_ascii_case(&pin.owner_repo)
                     && pr.host.eq_ignore_ascii_case(&pin.host)
@@ -3974,7 +3974,7 @@ impl Engine {
             if self.pr_status_result_is_current(
                 &session_id,
                 branch_generation,
-                &maybe_pr,
+                maybe_pr.as_ref(),
                 checked_at,
             ) {
                 changed |= self.apply_pr_status_result(session_id, maybe_pr);
