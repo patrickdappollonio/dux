@@ -1239,7 +1239,7 @@ mod tests {
 
     // ── Fix 2: bounded join in Drop ────────────────────────────────────────
 
-    /// Dropping a live queue completes in well under FLUSH_TIMEOUT, proving the
+    /// Dropping a live queue completes in well under `FLUSH_TIMEOUT`, proving the
     /// bounded join does not break the happy path.
     #[test]
     fn drop_completes_quickly_on_clean_writer() {

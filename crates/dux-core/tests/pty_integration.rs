@@ -30,7 +30,7 @@ fn pty_spawn_and_detect_exit() {
     assert!(status.success());
 }
 
-/// Verify that PTY output can be read and parsed by alacritty_terminal.
+/// Verify that PTY output can be read and parsed by `alacritty_terminal`.
 #[test]
 fn pty_read_output_into_alacritty_terminal() {
     use alacritty_terminal::event::VoidListener;

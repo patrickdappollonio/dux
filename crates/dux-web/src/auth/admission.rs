@@ -1061,7 +1061,7 @@ mod tests {
     // ── IPv6 prefixes and the tailnet ─────────────────────────────────────────
 
     /// Every Tailscale node's IPv6 address lies in one /64 (the ULA
-    /// fd7a:115c:a1e0:ab12:4843:cd96::/96, or fd7a:115c:a1e0::/96 on newer
+    /// `fd7a:115c:a1e0:ab12:4843:cd96::/96`, or `fd7a:115c:a1e0::/96` on newer
     /// tailnets), so counting verified IPv6 failures per /64 puts the WHOLE
     /// tailnet in one bucket: one tailnet device's guesses slow every other
     /// tailnet device, and the owner's single typo after them writes the

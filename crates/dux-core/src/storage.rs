@@ -1685,7 +1685,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load all known PRs for a session, ordered by pr_number descending (latest first).
+    /// Load all known PRs for a session, ordered by `pr_number` descending (latest first).
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r#"
@@ -5340,7 +5340,7 @@ mod immediate_transaction_tests {
     }
 
     /// The bug, on purpose: a DEFERRED transaction reads, another connection
-    /// commits, and the write is refused at once with SQLITE_BUSY_SNAPSHOT
+    /// commits, and the write is refused at once with `SQLITE_BUSY_SNAPSHOT`
     /// (517), however long the busy timeout.
     #[test]
     fn a_deferred_transaction_is_refused_when_another_connection_commits_in_between() {

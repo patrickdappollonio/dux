@@ -896,7 +896,7 @@ pub(crate) fn bootstrap_or_report(
 /// What the status-screen tick asks `serve_with_engine` to do after the current
 /// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
 /// (server torn down, PTYs preserved); `QuitProcess` exits the whole process
-/// (server torn down, agents SIGTERMed).
+/// (server torn down, agents `SIGTERMed`).
 pub enum ServerTick {
     Continue,
     ReturnToTui,
@@ -1055,7 +1055,7 @@ pub(crate) struct TailscaleLoop {
     /// The Tailscale address probe. Injected so the loop's mode transitions are
     /// testable without a Tailscale binary.
     detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
-    /// The name probe: this machine's MagicDNS name and the `tailscale serve`
+    /// The name probe: this machine's `MagicDNS` name and the `tailscale serve`
     /// routes that end at dux. Injected for the same reason as `detect`.
     identify: IdentityProbe,
     /// The identity this serve holds. Written only here; the URL lists read it.
@@ -1370,7 +1370,7 @@ impl TailscaleLoop {
     /// reads it), and show the QR codes again when the URLs they carry changed:
     /// on the loop's
     /// first turn, when the leg binds or drops, and when the name or a serve
-    /// route changes. The pair is the Tailscale IP URL and the MagicDNS one (the
+    /// route changes. The pair is the Tailscale IP URL and the `MagicDNS` one (the
     /// HTTPS serve URL when there is one). `legs` is `None` when the leg
     /// registry could not be read, which shows nothing new rather than a guess.
     ///
@@ -1560,7 +1560,7 @@ impl TailscaleLoop {
 
     /// A thread dux cannot start is not a reason to refuse to serve; it is a
     /// reason to say the Tailscale leg is now static for this run, and to stop
-    /// answering to the MagicDNS name, whose Funnel state nothing would watch.
+    /// answering to the `MagicDNS` name, whose Funnel state nothing would watch.
     fn watcher_failed_to_start(&mut self) {
         self.identity_lost();
         // Nothing will look again, so the Funnel state cannot be known until a
@@ -2659,7 +2659,7 @@ impl ServeCore {
     /// The Tailscale leg comes and goes under a running serve, so a list captured
     /// at start goes stale the first time the interface moves.
     ///
-    /// This machine's MagicDNS URL and its `tailscale serve` routes follow the
+    /// This machine's `MagicDNS` URL and its `tailscale serve` routes follow the
     /// listener addresses, read from what the Tailscale watcher last saw, so the
     /// first entry is always a listener (the loopback one) and a rename or a new
     /// serve route shows up here with no restart.
@@ -2764,7 +2764,7 @@ impl ServeCore {
 ///   and returns `(engine, QuitProcess)`.
 ///
 /// `on_shutdown_status` is called with a human-readable teardown message (e.g.
-/// "Stopping 2 agents...") once QuitProcess teardown starts. This crate has no
+/// "Stopping 2 agents...") once `QuitProcess` teardown starts. This crate has no
 /// terminal of its own, so it hands the message to the caller instead of
 /// printing it directly; the binary's implementation feeds it to the dux-tui
 /// status screen, which renders it on its own themed line rather than raw text
@@ -5012,7 +5012,7 @@ mod live_tailscale_mode_tests {
 
     /// A Funnel this machine has to ANOTHER port may be the operator's own
     /// relay to dux, and that deliberate setup is theirs: dux keeps serving,
-    /// withdraws its MagicDNS name and warns, but does not lock.
+    /// withdraws its `MagicDNS` name and warns, but does not lock.
     #[tokio::test]
     async fn a_funnel_to_another_port_withdraws_the_name_but_never_locks() {
         use axum::http::StatusCode;
@@ -5943,7 +5943,7 @@ mod live_tailscale_mode_tests {
         }
     }
 
-    /// The flip's header URL list follows the serve live: the MagicDNS URL (the
+    /// The flip's header URL list follows the serve live: the `MagicDNS` URL (the
     /// https serve URL when a route points at dux) arrives when the name is
     /// read, moves with a rename, and goes when the mode says `no`.
     #[tokio::test]
@@ -6575,7 +6575,7 @@ mod config_surface_tests {
     use std::sync::mpsc::{self, Sender};
 
     /// Minimal web-layer `ConfigSurface`: reload re-reads config (here a default)
-    /// and posts `ConfigReloadReady`; recover_render produces a plain config text.
+    /// and posts `ConfigReloadReady`; `recover_render` produces a plain config text.
     struct WebConfigSurface;
 
     impl ConfigSurface for WebConfigSurface {

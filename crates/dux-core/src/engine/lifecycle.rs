@@ -2,7 +2,7 @@
 //! up exited PTY child processes, both agent providers and companion terminals.
 //! The headless-safe cleanup every engine loop calls each tick, so an exited
 //! agent or terminal does not linger in `providers` or `companion_terminals`,
-//! and therefore in the ViewModel.
+//! and therefore in the `ViewModel`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -360,7 +360,7 @@ impl Drop for PtyGoneNotice {
     }
 }
 
-/// A PTY that was SIGTERMed by an individual delete/close and is being given a
+/// A PTY that was `SIGTERMed` by an individual delete/close and is being given a
 /// grace period to exit before being force-killed. Held (not dropped) because
 /// `PtyClient::drop` hard-kills with no grace; `reap_terminating_ptys` drops it
 /// once it exits or its deadline passes. This is the non-blocking, per-PTY
@@ -642,7 +642,7 @@ pub struct GroupWorktreeRemoval {
 }
 
 /// A detach asked for from outside the agent's own app: every live tab of one
-/// session was SIGTERMed together and the session is already marked `Detached`.
+/// session was `SIGTERMed` together and the session is already marked `Detached`.
 ///
 /// The barrier that keeps ONE outcome sentence per detach however many tabs the
 /// agent had, the same shape [`GroupWorktreeRemoval`] uses for a multi-tab
@@ -674,7 +674,7 @@ pub struct PendingDetach {
 }
 
 /// The tabs a recreate is restarting so they continue in the recreated copy:
-/// every one was SIGTERMed together when the checkout landed, and none starts
+/// every one was `SIGTERMed` together when the checkout landed, and none starts
 /// again until the last of them has reaped, so a sibling of the same CLI still
 /// shutting down cannot take the conversation from the one that should get it.
 ///
@@ -904,9 +904,9 @@ pub fn detach_confirm_prose(
 pub struct ShutdownReport {
     pub agents_total: usize,
     pub terminals_total: usize,
-    /// Agents that exited within the grace period (the rest were SIGKILLed).
+    /// Agents that exited within the grace period (the rest were `SIGKILLed`).
     pub agents_exited: usize,
-    /// Terminals that exited within the grace period (the rest were SIGKILLed).
+    /// Terminals that exited within the grace period (the rest were `SIGKILLed`).
     pub terminals_exited: usize,
     pub elapsed: std::time::Duration,
     /// True when at least one child had to be force-killed (SIGKILL) because it
@@ -1412,7 +1412,7 @@ impl Engine {
     /// Behavior, in order:
     /// - No live provider for `tab_id` gives `killed: false` and changes
     ///   nothing, so a double-tap or a kill racing a natural exit is a no-op.
-    /// - Otherwise `clear_tab_runtime` drops the provider, SIGKILLing it through
+    /// - Otherwise `clear_tab_runtime` drops the provider, `SIGKILLing` it through
     ///   `PtyClient::drop`, and clears every runtime map keyed by the tab, the
     ///   in-flight `AgentLaunch` key included.
     /// - The agent detaches only when this was its last live tab
@@ -1613,7 +1613,7 @@ impl Engine {
     /// surfaces get the same behavior and the same words.
     ///
     /// Deliberately the polite path rather than [`Engine::kill_tab_runtime`]'s
-    /// SIGKILL-on-drop: every live tab is SIGTERMed and moved into the
+    /// SIGKILL-on-drop: every live tab is `SIGTERMed` and moved into the
     /// terminating set, and the background reaper force-kills whatever is left
     /// once [`Engine::individual_close_grace`] has elapsed.
     ///
@@ -2045,7 +2045,7 @@ impl Engine {
     /// child so agents save state for a later resume, wait up to `grace`, and
     /// mark agent sessions Detached. `desired_running` is left untouched,
     /// because a server shutdown is not the user stopping the agent. Any child
-    /// still alive when `grace` elapses is SIGKILLed on the spot so the logged
+    /// still alive when `grace` elapses is `SIGKILLed` on the spot so the logged
     /// result is truthful. Returns a [`ShutdownReport`] so callers can echo the
     /// logged lines onto their own surface. A grace of `0` force-kills
     /// immediately, and with nothing running this is a silent no-op.
@@ -4374,7 +4374,7 @@ mod tests {
                                 Your most recent conversation is running in the background.\\n\
                                 Use `agents` to attach to it.\\n";
 
-    /// Spawn a real `cat`-backed PtyClient in the given working directory.
+    /// Spawn a real `cat`-backed `PtyClient` in the given working directory.
     /// `cat` echoes stdin and exits 0 on EOF, and exits on SIGTERM, making it
     /// a safe stand-in for both clean-exit and shutdown tests.
     fn spawn_cat(cwd: &Path) -> PtyClient {
@@ -5456,7 +5456,7 @@ mod tests {
         );
     }
 
-    /// End to end: the refusal's words ride out on the PrunedPty, off the same
+    /// End to end: the refusal's words ride out on the `PrunedPty`, off the same
     /// once-only screen read the tab's verdict takes.
     #[test]
     fn prune_carries_a_refused_resume_excerpt_for_a_resumed_run() {
@@ -6463,7 +6463,7 @@ mod tests {
     }
 
     /// Engine with the global auto-reopen switch ON and one session that meets
-    /// EVERY eligibility condition: desired_running, per-agent auto-reopen on,
+    /// EVERY eligibility condition: `desired_running`, per-agent auto-reopen on,
     /// a worktree that exists on disk (the tempdir), a project with no opt-out,
     /// and a resume-capable provider (claude). Each matrix test flips exactly
     /// one condition off and asserts the candidate disappears.
@@ -6932,7 +6932,7 @@ mod tests {
     }
 
     /// A child that ignores the whole graceful-shutdown salvo (SIGTERM and
-    /// SIGHUP, which `terminate()` sends back to back) so it must be SIGKILLed,
+    /// SIGHUP, which `terminate()` sends back to back) so it must be `SIGKILLed`,
     /// and never exits on its own. The `trap` makes the shell ignore both; the
     /// `echo` then emits a marker AFTER the trap is installed, so a caller can
     /// poll `has_output()` to know the trap is live before signalling.
@@ -8557,7 +8557,7 @@ mod tests {
     }
 
     /// The polite path: every live tab leaves `providers` for the terminating
-    /// set (SIGTERMed, not SIGKILLed by a drop), and the agent is already
+    /// set (`SIGTERMed`, not `SIGKILLed` by a drop), and the agent is already
     /// Detached in the list rather than waiting for the reaper to say so.
     #[test]
     fn begin_detach_session_terminates_every_live_tab_and_detaches_at_once() {

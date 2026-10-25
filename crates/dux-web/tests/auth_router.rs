@@ -8,7 +8,7 @@
 //! Requests reach the router two ways. Plain HTTP goes through `oneshot` with
 //! the connection's two ends set by hand ([`Arrival`]), which is exactly what a
 //! serve leg records for each accepted connection, so a test can be a client
-//! from the network, the tailnet or this machine. WebSockets go over a real
+//! from the network, the tailnet or this machine. `WebSockets` go over a real
 //! loopback listener served the way every leg is; a forwarding header makes
 //! such a client the network.
 
@@ -2677,7 +2677,7 @@ async fn concurrent_guesses_from_one_address_are_not_all_checked() {
 /// address (a browser or a relay on this machine opening the serve URL). The
 /// one own-address rule says such a peer is the network, never banned and
 /// never written to config.toml. Failed sign-ins from it must not put this
-/// machine's own Tailscale address into blocked_addresses.
+/// machine's own Tailscale address into `blocked_addresses`.
 #[tokio::test]
 async fn serve_from_this_machines_own_tailscale_address_is_never_written_to_the_blocklist() {
     use dux_web::exposure::FunnelState;
@@ -3020,7 +3020,7 @@ async fn the_first_password_refusal_never_says_loopback_for_a_connection_that_wa
 // ── The tailnet over IPv6 ─────────────────────────────────────────────────
 
 /// Every Tailscale node's IPv6 address shares one /64
-/// (fd7a:115c:a1e0:ab12:4843:cd96::/96), and verified IPv6 failures are
+/// (`fd7a:115c:a1e0:ab12:4843:cd96::/96`), and verified IPv6 failures are
 /// counted per /64, so the whole tailnet is ONE failure counter over IPv6:
 /// four wrong guesses from any tailnet device (a shared node, a guest's
 /// laptop) and the owner's single typo from their own tailnet device write

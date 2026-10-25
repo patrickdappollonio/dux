@@ -276,8 +276,8 @@ mod tests {
     /// fresh listing (a cold cache) and against the cached one. Ignored: it
     /// needs a prepared repository and prints numbers rather than asserting.
     ///
-    /// DUX_FOLD_BENCH_REPO=<repo with a 30,000-file node_modules> \
-    ///   cargo test --release -p dux-web --lib measure_folder_children -- --ignored --nocapture
+    /// `DUX_FOLD_BENCH_REPO`=<repo with a 30,000-file `node_modules`> \
+    ///   cargo test --release -p dux-web --lib `measure_folder_children` -- --ignored --nocapture
     #[test]
     #[ignore]
     fn measure_folder_children_against_a_prepared_repository() {

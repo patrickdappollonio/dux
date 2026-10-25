@@ -190,7 +190,7 @@ pub fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
 ///   (the caller must set `read_only = true`).
 /// - `is_outside`: true when the canonical real path escapes the worktree via ANY
 ///   symlink, intermediate or leaf. The caller must set `read_only = true` and
-///   skip the normal O_NOFOLLOW branch, reading from the resolved target instead.
+///   skip the normal `O_NOFOLLOW` branch, reading from the resolved target instead.
 ///   A dangling symlink whose parent cannot be canonicalized is an error.
 ///
 /// Traversal attacks (absolute paths, `..`) are still rejected with an error.
@@ -2936,8 +2936,8 @@ mod tests {
         }
 
         /// A conversion is judged by the encoding the file was READ in: UTF-8
-        /// `あ燐` has an exact Shift_JIS form, though its UTF-8 bytes, misread
-        /// as Shift_JIS, hold the `87 90` that does not round-trip.
+        /// `あ燐` has an exact `Shift_JIS` form, though its UTF-8 bytes, misread
+        /// as `Shift_JIS`, hold the `87 90` that does not round-trip.
         #[test]
         fn a_conversion_is_judged_by_the_encoding_the_file_was_read_in() {
             let dir = worktree();
@@ -3204,7 +3204,7 @@ mod tests {
         }
 
         /// The read says unwritable; the server must not take the client's word
-        /// for it. A guarded save in Shift_JIS over `87 90 0A` would write
+        /// for it. A guarded save in `Shift_JIS` over `87 90 0A` would write
         /// `81 E0 0A`, so it is refused and the bytes survive.
         #[test]
         fn a_save_in_an_encoding_that_cannot_write_the_file_back_is_refused() {

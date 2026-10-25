@@ -674,7 +674,7 @@ pub(crate) struct Watch<'a> {
 ///
 /// An identity the serve loop does not have yet is looked up BEFORE the first
 /// park even on a watcher that otherwise sleeps first: the address was answered
-/// by the startup bind, the name was not, and a browser on the MagicDNS name
+/// by the startup bind, the name was not, and a browser on the `MagicDNS` name
 /// must not be refused for a whole period because of it.
 ///
 /// `stop` is consulted again after each probe and before its emit: a detection
@@ -772,7 +772,7 @@ fn park(period: Duration, stop: &dyn Fn() -> bool) -> bool {
 /// coalesced against a flapping interface and a rename is not a flap.
 pub(crate) const TAILSCALE_IDENTITY_KEY: &str = "tailscale-identity";
 
-/// The name the Host guard admits for this identity: this machine's MagicDNS
+/// The name the Host guard admits for this identity: this machine's `MagicDNS`
 /// name, only when Tailscale assigned it (under the tailnet's `.ts.net`
 /// suffix), and never while Funnel is switched on for ANYTHING on this machine
 /// with no password set.
@@ -811,7 +811,7 @@ pub(crate) struct TailnetUrls {
 }
 
 impl TailnetUrls {
-    /// The MagicDNS URL worth handing a phone: the HTTPS serve route when there
+    /// The `MagicDNS` URL worth handing a phone: the HTTPS serve route when there
     /// is one, otherwise the plain name.
     pub(crate) fn magic_dns(&self) -> Option<&str> {
         self.serve
@@ -831,7 +831,7 @@ impl TailnetUrls {
 /// identity the watcher last read, and whether the mode wants Tailscale at all.
 ///
 /// - `ip`: the first leg on a Tailscale address.
-/// - `name`: the MagicDNS name, when the mode wants Tailscale, MagicDNS is on,
+/// - `name`: the `MagicDNS` name, when the mode wants Tailscale, `MagicDNS` is on,
 ///   the Host guard admits the name, and some leg listens where the name
 ///   resolves (a Tailscale address, or every address).
 /// - `serve`: the serve routes, under the same mode and guard conditions but
@@ -876,7 +876,7 @@ pub(crate) fn tailnet_urls(
 }
 
 /// The one-time tip that `tailscale serve` would give dux an HTTPS address,
-/// when MagicDNS is on and no serve route ends at dux yet.
+/// when `MagicDNS` is on and no serve route ends at dux yet.
 ///
 /// The tip names the exact command and says that dux never runs it: serving is
 /// a persistent change to the machine, and the choice belongs to whoever owns
@@ -1268,7 +1268,7 @@ pub struct TailscaleModeControl {
     /// The identity the Tailscale watcher last read. The serve loop is its only
     /// writer; the URL lists every surface shows read it.
     identity: IdentityCell,
-    /// The MagicDNS name the Host guard admits (rule 6). The serve loop is its
+    /// The `MagicDNS` name the Host guard admits (rule 6). The serve loop is its
     /// only writer; the guard reads it per request.
     own_name: crate::host_guard::LiveHostNames,
     /// What the serve knows about a Funnel or forward to dux. Starts CHECKING
@@ -1324,7 +1324,7 @@ impl TailscaleModeControl {
         Arc::clone(&self.host_literals)
     }
 
-    /// The set the Host guard reads rule 6 (this machine's own MagicDNS name)
+    /// The set the Host guard reads rule 6 (this machine's own `MagicDNS` name)
     /// from.
     pub fn own_magicdns_name(&self) -> crate::host_guard::LiveHostNames {
         self.own_name.clone()

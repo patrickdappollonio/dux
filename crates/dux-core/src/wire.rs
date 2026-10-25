@@ -152,7 +152,7 @@ pub enum WireCommand {
     RecoverConfig {},
     /// Persist the Changes (git) pane's visibility to `config.toml`
     /// (`ui.show_changes_pane`). Sent by the web's hide/show toggle so the
-    /// choice sticks across restarts; the next ViewModel broadcast carries the
+    /// choice sticks across restarts; the next `ViewModel` broadcast carries the
     /// new value, and the client reconciles its optimistic override against it.
     SetChangesPaneVisible {
         visible: bool,
@@ -183,7 +183,7 @@ pub enum WireCommand {
     /// banner lane. Low-stakes preference, lazy write.
     TogglePrBannerPosition {},
     /// Set `ui.agent_sort` to an explicit mode ("active" | "updated" | "created"
-    /// | "name" | "name_desc" | "manual") and persist it. Unlike the toggles, this carries a
+    /// | "name" | "`name_desc`" | "manual") and persist it. Unlike the toggles, this carries a
     /// value: the web sidebar's sort control sets it directly, and a drag-reorder
     /// sets it to "manual". The next `config.changed` refetch carries the new value
     /// so every client's sort control agrees. Unknown values are rejected. Low-stakes
@@ -644,7 +644,7 @@ pub enum WireCommand {
     },
     /// Wholesale-replace the `[macros]` config, mirroring the TUI macro editor's
     /// save semantics. `entries` is an ORDERED list of `(name, {text, surface})`
-    /// and the order is preserved into the config map and the ViewModel's
+    /// and the order is preserved into the config map and the `ViewModel`'s
     /// `macros`. Persisted through the engine's config writer, so user comments
     /// survive the in-place patch. Validated server-side, never trusting the
     /// client: empty names, duplicate names, empty text and unknown surface
@@ -948,7 +948,7 @@ pub fn is_stale_set(message: &str) -> bool {
 
 /// A single macro in a [`WireCommand::UpdateMacros`] payload. `surface` is the
 /// canonical lowercase string ("agent" | "terminal" | "both"), matching the
-/// `MacroSurface` serde casing and the ViewModel's `MacroView::surface`.
+/// `MacroSurface` serde casing and the `ViewModel`'s `MacroView::surface`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct WireMacroEntry {
     pub name: String,
@@ -2209,7 +2209,7 @@ impl Engine {
     /// Persist the Changes (git) pane's visibility to `config.toml`
     /// (`ui.show_changes_pane`) so the choice survives a restart, mirroring the
     /// TUI's persist-on-toggle. The field is the single persisted source of
-    /// truth: the next ViewModel broadcast carries it, and the web clears its
+    /// truth: the next `ViewModel` broadcast carries it, and the web clears its
     /// optimistic override once they match. Visibility is a low-stakes
     /// preference, so the write is lazy: the queue coalesces concurrent toggles
     /// and logs any disk failure; no rollback is needed.
@@ -2466,7 +2466,7 @@ impl Engine {
     /// preference, lazy write.
     ///
     /// The shared value set is "active" (default), "updated", "created", "name"
-    /// (ascending), "name_desc" (descending) and "manual" (the hand-placed order,
+    /// (ascending), "`name_desc`" (descending) and "manual" (the hand-placed order,
     /// which a drag on the web or a `move-agent-*` / `move-terminal-*` command in
     /// the TUI stamps). Each surface OFFERS its own subset in its picker but
     /// DISPLAYS any value the other one sets. `pub` so the TUI's `sort-agents`
@@ -3193,7 +3193,7 @@ impl Engine {
     ///
     /// It kicks off the TUI's two-worker chain rather than working inline:
     /// `git switch` rewrites the working tree and blocks indefinitely on a held
-    /// `index.lock`, and the web engine loop thread also drives every ViewModel
+    /// `index.lock`, and the web engine loop thread also drives every `ViewModel`
     /// push and PTY route, so a synchronous checkout would freeze every connected
     /// browser.
     ///
@@ -3981,7 +3981,7 @@ impl Engine {
     /// applies the project-add INLINE (SQLite plus a config.toml write through
     /// the eager queue, with SQLite rollback on failure), so the new project is
     /// in the engine's in-memory list by the time this returns and appears in the
-    /// same ViewModel push.
+    /// same `ViewModel` push.
     ///
     /// On success it returns the combined "checked out X and added project Y"
     /// status; on a rolled-back add it relays the engine's error `Status`. A
@@ -4490,7 +4490,7 @@ impl Engine {
     }
 
     /// Pop the web delete op for `session_id` and resolve it into its keyed final
-    /// WireStatus. Returns `[]` when no op is stashed (the TUI path, or a
+    /// `WireStatus`. Returns `[]` when no op is stashed (the TUI path, or a
     /// synthetic completion event with no preceding `AsyncStarted`).
     fn resolve_web_delete_op(
         &mut self,

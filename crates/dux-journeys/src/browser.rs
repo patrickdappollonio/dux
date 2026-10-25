@@ -1,5 +1,5 @@
 //! A real browser for the journeys that are about what a person SEES: headless
-//! Chromium driven over WebDriver by `chromedriver`, both from the journey image
+//! Chromium driven over `WebDriver` by `chromedriver`, both from the journey image
 //! (Arch's chromium package ships the driver), in a container of its own.
 //!
 //! Where the browser sits decides who dux thinks it is:
@@ -163,7 +163,7 @@ impl Browser {
         }
     }
 
-    /// End the WebDriver session.
+    /// End the `WebDriver` session.
     pub async fn quit(self) {
         let _ = self.driver.clone().close().await;
     }

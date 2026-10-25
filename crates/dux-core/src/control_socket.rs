@@ -311,9 +311,9 @@ fn probe(stream: &mut UnixStream) -> Probe {
     }
 }
 
-/// The process that called listen() on the socket `stream` is connected to,
+/// The process that called `listen()` on the socket `stream` is connected to,
 /// even while nothing has accepted the connection: Linux copies the listener's
-/// credentials, taken at listen(), into the connecting socket, and macOS hands
+/// credentials, taken at `listen()`, into the connecting socket, and macOS hands
 /// the embryonic connection the listener's last owner, the process that last
 /// listened, accepted or polled on it. A process that merely inherited the
 /// listener and never touched it is neither. A dead listener's pid that has

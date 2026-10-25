@@ -973,7 +973,7 @@ mod tests {
         );
     }
 
-    /// A PTY-class id (AgentPty or TerminalPty) must fall back to All: PTY
+    /// A PTY-class id (`AgentPty` or `TerminalPty`) must fall back to All: PTY
     /// connection ids are never disclosed to clients and must not scope toasts.
     #[test]
     fn pty_class_id_falls_back_to_all_scope() {
@@ -995,7 +995,7 @@ mod tests {
         );
     }
 
-    /// An id longer than MAX_ID_LEN characters must fall back to All without a
+    /// An id longer than `MAX_ID_LEN` characters must fall back to All without a
     /// registry lookup.
     #[test]
     fn over_long_id_falls_back_to_all_scope() {

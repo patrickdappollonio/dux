@@ -339,7 +339,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
 }
 
 /// A `QuitProcess` tick stops serving and runs the quit teardown
-/// (`shutdown_ptys`), so a live agent/terminal child is SIGTERMed. We assert
+/// (`shutdown_ptys`), so a live agent/terminal child is `SIGTERMed`. We assert
 /// the exit reason is `QuitProcess` and the previously-live terminal is now
 /// marked exited on the returned engine.
 #[tokio::test]
@@ -476,13 +476,13 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
 }
 
 /// Regression for the flip hang: a subscribed PTY forwarder must not wedge the
-/// runtime teardown on ReturnToTui. A ws client subscribes to a live `cat`
+/// runtime teardown on `ReturnToTui`. A ws client subscribes to a live `cat`
 /// companion terminal and gets an echoed binary frame (so the forwarder is live
 /// and parked on its blocking `recv_timeout`, with the engine (and thus the
-/// PtyClient `Sender`) still alive). Then a `ReturnToTui` tick stops serving,
+/// `PtyClient` `Sender`) still alive). Then a `ReturnToTui` tick stops serving,
 /// and the serve thread must JOIN within a tight bound. Before the fix the
 /// forwarder parked on `recv()` forever (the Sender never dropped on
-/// ReturnToTui), so dropping the multi-thread runtime hung indefinitely.
+/// `ReturnToTui`), so dropping the multi-thread runtime hung indefinitely.
 #[tokio::test]
 async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     let (mut engine, _tmp) = build_engine();

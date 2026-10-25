@@ -316,7 +316,7 @@ pub struct Classification {
     /// failures are slowed under it in memory, and never written anywhere.
     pub claimed_ip: Option<IpAddr>,
     /// Whether the path from the browser to dux is known to be encrypted:
-    /// loopback never leaves the machine, the tailnet is WireGuard end to end,
+    /// loopback never leaves the machine, the tailnet is `WireGuard` end to end,
     /// and a Funnel is HTTPS.
     pub transport_encrypted: bool,
     /// Whether the request came through a confirmed `tailscale serve` route

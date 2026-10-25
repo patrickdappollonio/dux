@@ -2010,7 +2010,7 @@ mod names_fields_and_per_surface_get_tests {
         );
     }
 
-    /// `get ui` on a file whose ui.terminal_font_size dux corrects at load
+    /// `get ui` on a file whose `ui.terminal_font_size` dux corrects at load
     /// prints the file's 999 as the value, and says nothing of the default
     /// dux uses in its place.
     #[test]

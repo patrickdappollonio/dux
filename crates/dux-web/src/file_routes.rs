@@ -220,7 +220,7 @@ struct OpenedEditor {
 ///
 /// Not simply the read cap, because the content travels as decoded text in a JSON
 /// string, and both grow it. A byte of a single-byte code page can decode to a
-/// character three bytes long in UTF-8 (every € in windows-1252), and serde_json
+/// character three bytes long in UTF-8 (every € in windows-1252), and `serde_json`
 /// escapes a control character to six bytes (`\u0001`); six bytes per byte read is
 /// the worst any supported encoding reaches, so six times the read cap covers any
 /// file the reader opens, and the extra room is the envelope and the path.

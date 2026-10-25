@@ -275,7 +275,7 @@ pub enum Command {
     RunMacro { target_id: String, name: String },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
-    /// into the running `config.macros` immediately, so the ViewModel refreshes
+    /// into the running `config.macros` immediately, so the `ViewModel` refreshes
     /// without a reload, then eager-saves through `Engine::config_writer` and
     /// reports the result synchronously. Keep and report: a failed write leaves
     /// the new macros active for the session.
@@ -295,7 +295,7 @@ pub enum Command {
     /// setting `watched_worktree` and `watched_session_id` and emptying the
     /// lists are synchronous, then a one-shot worker computes the staged and
     /// unstaged lists and its `ChangedFilesReady` populates the pane on a later
-    /// drain. Returns `EventReaction::Nothing`, because the refreshed ViewModel
+    /// drain. Returns `EventReaction::Nothing`, because the refreshed `ViewModel`
     /// broadcast is the feedback rather than a toast on every selection.
     WatchChangedFiles { session_id: Option<String> },
 }
@@ -3465,7 +3465,7 @@ mod tests {
 
     /// Spawn a `cat -v` PTY in raw mode (control bytes render as caret notation:
     /// ESC → `^[`, CR → `^M`), the same fixture the TUI macro-bar PTY test uses,
-    /// so a RunMacro write can be observed in the terminal snapshot.
+    /// so a `RunMacro` write can be observed in the terminal snapshot.
     fn spawn_cat_v_pty() -> PtyClient {
         let client = PtyClient::spawn(
             "sh",

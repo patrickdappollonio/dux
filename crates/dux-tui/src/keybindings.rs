@@ -1827,7 +1827,7 @@ impl RuntimeBindings {
     }
 
     /// Display label for the first key combo of an action.
-    /// Uses natural casing (e.g. "PgDn", "shift-Tab") suitable for UI display.
+    /// Uses natural casing (e.g. "`PgDn`", "shift-Tab") suitable for UI display.
     pub fn label_for(&self, action: Action) -> String {
         self.bindings
             .iter()
@@ -1996,7 +1996,7 @@ impl RuntimeBindings {
                 .is_none()
     }
 
-    /// Combined label for two related actions (e.g. MoveDown + MoveUp → "j/k").
+    /// Combined label for two related actions (e.g. `MoveDown` + `MoveUp` → "j/k").
     /// Takes the first key from each action.
     pub fn combined_label(&self, a: Action, b: Action) -> String {
         let la = self.label_for(a);
@@ -2891,7 +2891,7 @@ mod tests {
     }
 
     /// An action that ships with no default key but still carries a help entry
-    /// (SelectTab4) must not render a broken row with an empty key badge:
+    /// (`SelectTab4`) must not render a broken row with an empty key badge:
     /// `help_sections` skips label-less entries.
     #[test]
     fn help_sections_skips_unbound_actions_instead_of_rendering_empty_keys() {

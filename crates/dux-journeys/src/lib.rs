@@ -1,5 +1,5 @@
 //! The container journey harness: the real `dux` binary in Docker, driven the
-//! way a person drives it, over HTTP with a cookie jar, WebSockets and a real
+//! way a person drives it, over HTTP with a cookie jar, `WebSockets` and a real
 //! browser, with nginx, Caddy and a stand-in Tailscale where a journey needs
 //! them.
 //!
@@ -19,7 +19,7 @@
 //!   jar, an `Origin` on every mutation, and the plain responses.
 //! - [`ws`] opens the events and PTY sockets with that person's cookie.
 //! - [`sidecars`] runs nginx and Caddy in front of a dux.
-//! - [`browser::Browser`] is Chromium over WebDriver, in a container of its own.
+//! - [`browser::Browser`] is Chromium over `WebDriver`, in a container of its own.
 //! - [`container`] is what every container has in common: labels, a reaper,
 //!   and ports published on the host's loopback only.
 //! - [`run`] is this test process's run: its heartbeat, its Ctrl-C cleanup,

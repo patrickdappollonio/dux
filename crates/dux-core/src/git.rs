@@ -3359,7 +3359,7 @@ struct UncommittedCopyPlan {
 /// Copies exactly what `git status --porcelain=v1 -z --untracked-files=all`
 /// reports in `source` into `destination`. Nothing gitignored travels.
 /// PRECONDITION: both worktrees are at the SAME HEAD commit; callers enforce
-/// this with the HEAD-equality guard (agent_job.rs), because status deltas
+/// this with the HEAD-equality guard (`agent_job.rs`), because status deltas
 /// are relative to the HEAD commit's tree.
 pub fn copy_uncommitted_changes(
     source: &Path,
@@ -8111,7 +8111,7 @@ mod tests {
         }
     }
 
-    /// list_dir is structurally immune to a huge sibling subtree: it does a
+    /// `list_dir` is structurally immune to a huge sibling subtree: it does a
     /// single `read_dir` on exactly the requested directory, never recurses,
     /// and never caps. A 1000-file sibling can't discriminate that property
     /// on its own (any number would pass); it just exercises the shape.
@@ -9578,7 +9578,7 @@ mod tests {
 
     /// The create-agent branch preflight (the single-source decision both
     /// surfaces consume): a name matching no existing branch is Fresh, and a
-    /// name matching a local branch is ExistingBranch (so the surface can ask
+    /// name matching a local branch is `ExistingBranch` (so the surface can ask
     /// for consent before attaching to that branch's history).
     #[test]
     fn create_agent_branch_preflight_reports_fresh_for_a_new_name() {

@@ -227,8 +227,8 @@ pub const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
 
 /// What the App must do after the Engine processed a `WorkerEvent`. The Engine
 /// handles all domain-state mutations (sessions, projects, providers,
-/// session_store, sync entries, in-flight maps, env, etc.); anything that
-/// touches view state (status line, prompt, focus, input_target, derived caches
+/// `session_store`, sync entries, in-flight maps, env, etc.); anything that
+/// touches view state (status line, prompt, focus, `input_target`, derived caches
 /// like `left_items_cache` and `files_index`) is described here.
 pub enum EventReaction {
     /// Engine fully handled the event; no view follow-up needed.
@@ -463,9 +463,9 @@ pub struct DetachedSession {
 
 /// View-only follow-up for `WorkerEvent::AgentLaunchReady`. The Engine has
 /// already performed all domain-state mutations (the `in_flight` set,
-/// sessions, providers, session_store, mark_session_* helpers,
-/// resume_fallback_*, update_branch_sync_sessions, and the pure-engine
-/// portion of detach_conflicting_worktree_session). The App applies
+/// sessions, providers, `session_store`, `mark_session`_* helpers,
+/// `resume_fallback`_*, `update_branch_sync_sessions`, and the pure-engine
+/// portion of `detach_conflicting_worktree_session`). The App applies
 /// `last_pty_size`, clears the engine's `pty_activity` entry for any
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
@@ -499,24 +499,24 @@ pub enum AgentLaunchReadyView {
     /// Non-Create launch found the session vanished. App does nothing
     /// (Engine has already logged the "dropping launched PTY" line).
     SessionMissing,
-    /// Reconnect / ForceReconnect: App shows the agent surface + sets info.
+    /// Reconnect / `ForceReconnect`: App shows the agent surface + sets info.
     Reconnect {
         status_message: crate::status_text::StatusText,
     },
-    /// ResumeFallback: App shows the agent surface only if `session_id` is
+    /// `ResumeFallback`: App shows the agent surface only if `session_id` is
     /// the currently selected session, and always sets info.
     ResumeFallback {
         session_id: String,
         status_message: crate::status_text::StatusText,
     },
-    /// StartupAutoReopen: App does nothing.
+    /// `StartupAutoReopen`: App does nothing.
     StartupAutoReopen,
 }
 
 /// View-only follow-up for `WorkerEvent::AgentLaunchFailed`. Engine has
 /// already cleared `InFlightKey::AgentLaunch(session_id)`, cleared
 /// `InFlightKey::CreateAgent` for Create-kind failures, logged the
-/// ResumeFallback / StartupAutoReopen cases, and marked ResumeFallback
+/// `ResumeFallback` / `StartupAutoReopen` cases, and marked `ResumeFallback`
 /// sessions Detached. The App only formats the status message.
 pub enum AgentLaunchFailedOutcome {
     Create {
@@ -1414,7 +1414,7 @@ pub enum BeginDeleteSessionOutcome {
     /// the still-spawning process. The caller shows a "try again" error and does
     /// NOT delete.
     TabLaunching,
-    /// Worktree-removing delete: the Engine has already SIGTERMed the agent PTY
+    /// Worktree-removing delete: the Engine has already `SIGTERMed` the agent PTY
     /// and the session's terminals and moved them to the terminating set,
     /// capturing the worktree removal to run once the agent exits. The caller
     /// vanishes the session now, through `finish_delete_session` with
@@ -8093,7 +8093,7 @@ mod tests {
     }
 
     /// The identity guard, in both directions. While a session is pinned, a
-    /// sync result is accepted ONLY when its (host, owner_repo, number) matches
+    /// sync result is accepted ONLY when its (host, `owner_repo`, number) matches
     /// the pin: a `Some(other_pr)` (the one-shot check racing an attach, or an
     /// early-return path answering from a stale `known_pr`) must not overwrite
     /// the pin, and a `None` must not clear it.
@@ -8705,7 +8705,7 @@ mod tests {
     /// candidate is about the process that was launched, and that process is
     /// gone; the child left in the tab is the OLD one, which was never resuming.
     /// Left armed, a survivor that simply stayed quiet past its resume wait was
-    /// read as a hung resume, and the sweep tore the tab down and SIGKILLed a
+    /// read as a hung resume, and the sweep tore the tab down and `SIGKILLed` a
     /// healthy agent.
     #[test]
     fn a_dropped_launch_arms_no_resume_fallback_and_leaves_the_survivor_running() {

@@ -115,7 +115,7 @@ struct CommitOp {
 }
 
 /// Maximum number of Unicode scalar values in a commit message.
-/// Git itself accepts messages up to ARG_MAX (~2 MiB on Linux), but very long
+/// Git itself accepts messages up to `ARG_MAX` (~2 MiB on Linux), but very long
 /// messages are almost always accidental. 64 KiB is generous for any real
 /// commit message and guards against runaway clients.
 const MAX_COMMIT_MSG_LEN: usize = 65_536;
@@ -1399,7 +1399,7 @@ mod tests {
         );
     }
 
-    /// A commit message of exactly MAX_COMMIT_MSG_LEN MULTI-BYTE characters must
+    /// A commit message of exactly `MAX_COMMIT_MSG_LEN` MULTI-BYTE characters must
     /// not be rejected with 400. Proves the cap uses `.chars().count()` rather than
     /// `.len()` (a 2-byte char like 'e with acute' has byte length > char count).
     #[tokio::test]

@@ -2855,7 +2855,7 @@ mod tests {
         assert!(!app.create_agent_started_here);
     }
 
-    /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a StatusOp)
+    /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a `StatusOp`)
     /// must remove the keyed entry with no replacement.
     #[test]
     fn clear_status_reaction_dismisses_the_keyed_entry() {
@@ -3174,7 +3174,7 @@ mod tests {
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
-    /// A create is never fullscreen-seeking: the CreateCommitted ready of a
+    /// A create is never fullscreen-seeking: the `CreateCommitted` ready of a
     /// create started here lands the fresh agent focused-but-minimized.
     #[test]
     fn create_committed_ready_lands_minimized() {

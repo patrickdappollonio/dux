@@ -374,7 +374,7 @@ impl TextInput {
         }
     }
 
-    /// Get the effective wrap width. `None` means no wrapping (use usize::MAX).
+    /// Get the effective wrap width. `None` means no wrapping (use `usize::MAX`).
     fn wrap_width(&self) -> Option<usize> {
         self.multiline.as_ref().and_then(|m| m.display_width)
     }

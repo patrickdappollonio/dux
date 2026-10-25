@@ -12,7 +12,7 @@
 //! survive, so it must not park the watcher forever.
 //!
 //! The same watcher also asks the CLI how this machine is NAMED: its own
-//! MagicDNS name (`tailscale status --json`), which the Host guard admits, and
+//! `MagicDNS` name (`tailscale status --json`), which the Host guard admits, and
 //! the `tailscale serve` routes that end at dux's port (`tailscale serve status
 //! --json`), whose HTTPS URL dux shows. Both reads are bounded the same way, and
 //! dux only ever reads the serve configuration: it never runs `tailscale serve`
@@ -217,7 +217,7 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
 /// interface: one named `tailscale*` (Linux's `tailscale0`), or any interface
 /// (a macOS `utun`, a custom tun name) carrying an address Tailscale itself
 /// reported in `known`. A bare 100.64.0.0/10 address is not enough: Cloudflare
-/// WARP (100.96.0.0/12) and NetBird use the same block.
+/// WARP (100.96.0.0/12) and `NetBird` use the same block.
 pub fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) -> bool {
     ifaces.iter().any(|(name, ip)| {
         let in_range = match ip {
@@ -228,7 +228,7 @@ pub fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) ->
     })
 }
 
-/// Where a `tailscaled` keeps its LocalAPI socket by default (Tailscale's
+/// Where a `tailscaled` keeps its `LocalAPI` socket by default (Tailscale's
 /// `paths.DefaultTailscaledSocket` and the official container image), checked
 /// so a daemon running in userspace networking, which has no interface, is
 /// still seen. `$TS_SOCKET` is checked as well.
@@ -506,15 +506,15 @@ pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
 /// What `tailscale status --json` says about THIS machine's name on the tailnet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SelfStatus {
-    /// This machine's MagicDNS name (`Self.DNSName`), lowercased with its
+    /// This machine's `MagicDNS` name (`Self.DNSName`), lowercased with its
     /// trailing dot removed. `None` when the daemon is not running, the field is
     /// missing or empty, or it is not a plain DNS name.
     pub dns_name: Option<String>,
-    /// Whether MagicDNS is switched on for the tailnet. Read from
+    /// Whether `MagicDNS` is switched on for the tailnet. Read from
     /// `CurrentTailnet.MagicDNSEnabled`; a CLI too old to report it counts as on
-    /// when it reports a MagicDNS suffix at all.
+    /// when it reports a `MagicDNS` suffix at all.
     pub magic_dns_enabled: bool,
-    /// The tailnet's MagicDNS suffix (`example.ts.net`), when reported.
+    /// The tailnet's `MagicDNS` suffix (`example.ts.net`), when reported.
     pub magic_dns_suffix: Option<String>,
     /// The names Tailscale can issue an HTTPS certificate for. Empty when HTTPS
     /// certificates are switched off for the tailnet.
@@ -1035,7 +1035,7 @@ fn any_funnel(value: &serde_json::Value) -> bool {
 
 impl SelfStatus {
     /// This machine's name, but only when Tailscale itself assigned it: it ends
-    /// with the tailnet's MagicDNS suffix, and that suffix is under `ts.net`.
+    /// with the tailnet's `MagicDNS` suffix, and that suffix is under `ts.net`.
     /// A name from another control server (Headscale, say) sits in a domain
     /// its operator chose, so it is not one dux admits by itself.
     pub fn tailscale_assigned_name(&self) -> Option<&str> {

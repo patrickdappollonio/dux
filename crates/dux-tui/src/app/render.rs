@@ -19168,7 +19168,7 @@ mod tests {
         app
     }
 
-    /// Draw a frame and return (terminal, term_area).
+    /// Draw a frame and return (terminal, `term_area`).
     fn draw_caret_frame(
         app: &mut App,
     ) -> (

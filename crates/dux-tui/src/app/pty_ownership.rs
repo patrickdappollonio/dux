@@ -1756,7 +1756,7 @@ mod tests {
         );
     }
 
-    /// The FocusAgent binding presses the button, and so does Space:
+    /// The `FocusAgent` binding presses the button, and so does Space:
     /// activating the focused control is the universal convention and the card
     /// has exactly one control.
     #[test]
@@ -2453,10 +2453,10 @@ mod tests {
         assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
     }
 
-    /// Ctrl-g in interactive mode: the default ToggleFullscreen binding, which
+    /// Ctrl-g in interactive mode: the default `ToggleFullscreen` binding, which
     /// leaves fullscreen and writes NOTHING to the child.
     const TOGGLE_FULLSCREEN_BYTES: &[u8] = &[0x07];
-    /// The PageUp key as the host sends it, which is the default ScrollPageUp
+    /// The `PageUp` key as the host sends it, which is the default `ScrollPageUp`
     /// binding.
     const PAGE_UP_BYTES: &[u8] = b"\x1b[5~";
 

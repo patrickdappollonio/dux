@@ -745,7 +745,7 @@ mod tests {
 
     /// Read a process's resident set size straight from the kernel, in bytes.
     /// `VmRSS` in `/proc/<pid>/status` is reported in kB and is precisely the
-    /// field `top` shows as RES and `htop` shows as M_RESIDENT, so it is the
+    /// field `top` shows as RES and `htop` shows as `M_RESIDENT`, so it is the
     /// ground truth a user comparing dux against their system monitor is
     /// looking at.
     #[cfg(target_os = "linux")]

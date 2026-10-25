@@ -163,7 +163,7 @@ fn a_job_an_agent_left_running_before_a_clean_quit_is_not_removed_from_under() {
 /// never removes a folder something it started is still using. A standalone
 /// agent lives, running, in an untracked folder inside a managed agent's
 /// worktree. The changes pane lists that folder as untracked, and its "delete
-/// the folder" (Command::DiscardFile with a folder confirmation) removes the
+/// the folder" (`Command::DiscardFile` with a folder confirmation) removes the
 /// standalone agent's files out from under its running process: the only thing
 /// it asks of the path registry is a hold on the worktree, and nothing asks
 /// what occupies the folder it deletes.

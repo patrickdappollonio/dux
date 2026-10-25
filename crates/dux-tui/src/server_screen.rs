@@ -1064,7 +1064,7 @@ fn qr_style(theme: &Theme) -> Style {
 }
 
 /// The URLs the header lists: the serve's live list once it has published one
-/// (its listeners, this machine's MagicDNS URL, any `tailscale serve` route),
+/// (its listeners, this machine's `MagicDNS` URL, any `tailscale serve` route),
 /// and the addresses captured as the flip started until then.
 fn header_urls(live: &[String], captured: &[String]) -> Vec<String> {
     if live.is_empty() {

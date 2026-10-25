@@ -482,7 +482,7 @@ fn bg_sgr(color: CellColor) -> String {
 /// `agent_scrollback_lines` is an unbounded user value; this bounds the one-time
 /// buffer a connect builds (under the terminal lock) so a pathological config
 /// can't stall the engine thread or balloon memory. The default scrollback
-/// (10_000) is far below this, so normal use is never truncated; when it is, the
+/// (`10_000`) is far below this, so normal use is never truncated; when it is, the
 /// most recent lines are kept and the drop is logged.
 const MAX_RECONNECT_REPLAY_LINES: i32 = 100_000;
 
@@ -1871,7 +1871,7 @@ impl PtyClient {
     /// arrive in either order and neither implies the other (see
     /// [`crate::engine::REAPED_DRAIN_GRACE`]), so taking the later one would
     /// charge the run for however long the missing half took to show up. A run
-    /// that has EOFed without ever being reaped still has a duration, which is
+    /// that has `EOFed` without ever being reaped still has a duration, which is
     /// what lets a caller judge a launch that died instantly even when no exit
     /// status was ever available for it.
     pub fn run_duration(&self) -> Option<std::time::Duration> {
@@ -3473,7 +3473,7 @@ mod tests {
     /// engine thread in production: on macOS `tcgetpgrp` returns 0 for a PTY
     /// whose foreground process group is gone, and rustix 1.1.4 only guards
     /// that case on Linux before feeding the value to `from_raw_unchecked`
-    /// (a debug-build assertion failure, an invalid NonZeroI32 in release).
+    /// (a debug-build assertion failure, an invalid `NonZeroI32` in release).
     #[test]
     fn valid_pgid_rejects_zero_and_negative_ids() {
         assert_eq!(valid_pgid(0), None);

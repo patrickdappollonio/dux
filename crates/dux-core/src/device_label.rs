@@ -55,7 +55,7 @@ fn detect_os(ua: &str) -> Option<&'static str> {
 /// Order matters, and it matches `deviceLabel.ts`: Edge and Chrome both carry a
 /// "Chrome/" token and Chrome and Safari both carry a "Safari/" token, so each
 /// check excludes the engines layered above it. Edge's token is platform
-/// specific ("Edg/", "EdgA/", "EdgiOS/") and the mobile spellings must be matched
+/// specific ("Edg/", "`EdgA`/", "`EdgiOS`/") and the mobile spellings must be matched
 /// explicitly or they fall through to Chrome, into which the other
 /// Chromium-based browsers are deliberately folded.
 fn detect_browser(ua: &str) -> Option<&'static str> {

@@ -6,13 +6,13 @@
 //! anything else is read as windows-1252 (the WHATWG name ISO-8859-1 resolves
 //! to), which maps every byte to a character and so loses nothing, and the
 //! answer says that it was a fallback rather than a finding. The person reading
-//! the file is the one who can tell it is really Shift_JIS, so a client may ask
+//! the file is the one who can tell it is really `Shift_JIS`, so a client may ask
 //! for a specific encoding instead, and then exactly that one is used: a file
 //! that does not decode cleanly in it is refused, because replacement
 //! characters on screen would be written back over the real bytes by a save.
 //!
 //! A decode is only half the promise. Some encodings do not write back what
-//! they read (Shift_JIS spells some characters two ways, ISO-2022-JP moves its
+//! they read (`Shift_JIS` spells some characters two ways, ISO-2022-JP moves its
 //! escapes), so every text answer is checked by encoding it again, and a file
 //! that would not come back byte for byte is marked unwritable in that encoding:
 //! the editor shows it read-only, and another encoding is the way out.
@@ -487,7 +487,7 @@ fn decode_reporting(bytes: &[u8], encoding: &'static Encoding) -> Result<String,
 
 /// Encode editor text into `encoding`, with the byte-order mark when `bom`.
 ///
-/// UTF-16 is encoded by hand: encoding_rs's encoder writes UTF-8 for it, the
+/// UTF-16 is encoded by hand: `encoding_rs`'s encoder writes UTF-8 for it, the
 /// way a browser submits a form, which is right for the web and wrong for a
 /// file. Line endings are whatever the text holds; nothing is normalised.
 pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Result<Vec<u8>> {
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(t.unwritable, None);
     }
 
-    /// encoding_rs decodes some sequences to a character it encodes back as
+    /// `encoding_rs` decodes some sequences to a character it encodes back as
     /// different bytes (NEC row 13 "≒" 87 90 comes back as 81 E0), and some it
     /// cannot encode at all (the user-defined rows from F0). A save of such a
     /// file would change bytes nobody touched, so it opens read-only.

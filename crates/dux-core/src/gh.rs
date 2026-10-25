@@ -318,7 +318,7 @@ fn pinned_exited_entry_needs_no_network(known: &StoredPr, trigger: SyncTrigger) 
 }
 
 impl Planned {
-    /// Build a planned lookup, deriving the terminal/emit_num eligibility from
+    /// Build a planned lookup, deriving the `terminal/emit_num` eligibility from
     /// the known PR so the single rule lives in one place (production and tests
     /// both go through here and can't drift).
     fn new(
@@ -1849,7 +1849,7 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
     })
 }
 
-/// Reconstruct a PrInfo from stored data without a network call.
+/// Reconstruct a `PrInfo` from stored data without a network call.
 /// Used wherever a call is skipped or failed and the stored row is the answer.
 /// Reconstruct a live [`PrInfo`] from a stored PR row's decoded state, or `None`
 /// when the stored state string is unrecognized. Shared by the PR-sync
@@ -1885,7 +1885,7 @@ fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<PrIn
     parse_pr_json_value(&obj, host, owner_repo)
 }
 
-/// Extract PrInfo from a serde_json::Value.
+/// Extract `PrInfo` from a `serde_json::Value`.
 fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) -> Option<PrInfo> {
     let number = obj.get("number")?.as_u64()?;
     let state_str = obj.get("state")?.as_str()?;

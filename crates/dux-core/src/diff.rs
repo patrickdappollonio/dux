@@ -1,7 +1,7 @@
 //! Headless, serializable diff source shared by web clients. Returns the two raw
 //! sides of a single file (its content at HEAD and its working-copy content) as
 //! whole text, decoded by the editor's encoding rules (`text_encoding`), leaving
-//! the actual diff rendering to the client. The web UI runs Monaco's DiffEditor
+//! the actual diff rendering to the client. The web UI runs Monaco's `DiffEditor`
 //! over these two sides; binary content is reported as `binary: true` with empty
 //! sides. No syntax highlighting, no
 //! terminal/ratatui types: the TUI keeps its own syntect+ratatui diff renderer
@@ -587,7 +587,7 @@ fn decode_diff_side(
 mod tests {
     use super::*;
 
-    /// content_inspector only sniffs for NUL bytes and magic numbers, so on its
+    /// `content_inspector` only sniffs for NUL bytes and magic numbers, so on its
     /// own it calls Latin-1 and Shift-JIS "UTF-8". Those must not be text, or
     /// every reader that decodes after this check decodes them to nothing.
     #[test]
@@ -771,7 +771,7 @@ mod tests {
     }
 
     /// A UTF-8 byte stream that nonetheless contains a NUL must be treated as
-    /// binary (matching the TUI's content_inspector check), not rendered as text.
+    /// binary (matching the TUI's `content_inspector` check), not rendered as text.
     #[test]
     fn utf8_with_nul_is_binary() {
         let repo = init_repo();

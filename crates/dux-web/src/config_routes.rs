@@ -1882,7 +1882,7 @@ mod tests {
     /// `settingsDescriptors.test.ts` ("the settings-PATCH key set matches the
     /// server's accepted fields").
     ///
-    /// This PATCHes every key that modal can emit, in one body, across all
+    /// This `PATCHes` every key that modal can emit, in one body, across all
     /// three groups. Because `SettingsBody` is `deny_unknown_fields`, a key the
     /// modal sends but the server dropped fails here with a 400 rather than
     /// being silently ignored. Each value is asserted to land, so a key that

@@ -58,7 +58,7 @@ pub struct BootstrapView {
     /// [`AgentTabView::drop_paste`]. A provider name absent from this map
     /// resolves to the default form (`bare`) and no length limit.
     pub provider_drop_paste: BTreeMap<String, DropPasteView>,
-    /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
+    /// Text macros from `[macros]` in `config.toml`, in config (`IndexMap`) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
     /// by the focused target's surface and runs one via `RunMacro`, and the
     /// macro-editor dialog lists/edits them (which is why `text` is exposed: the
@@ -458,7 +458,7 @@ pub struct ProjectView {
     pub startup_command: Option<String>,
     pub env: std::collections::BTreeMap<String, String>,
     pub current_branch: String,
-    /// "leading" | "not_leading" | "unknown"
+    /// "leading" | "`not_leading`" | "unknown"
     pub branch_status: String,
     pub path_missing: bool,
     /// The project's configured leading/default branch, if known. Surfaced so a
@@ -527,8 +527,8 @@ pub enum AgentWorkspaceView {
         /// display. Computed here because the browser may not be on the
         /// server's machine and so cannot shorten it correctly itself.
         folder_label: String,
-        /// The live repository verdict for the folder: "working_repo" |
-        /// "inside_repo_rooted_elsewhere" | "no_repo" | "indeterminate" |
+        /// The live repository verdict for the folder: "`working_repo`" |
+        /// "`inside_repo_rooted_elsewhere`" | "`no_repo`" | "indeterminate" |
         /// "unprobed" (nobody has looked yet; it gates as "indeterminate" does,
         /// but its quiet reason reads as a wait rather than a fault). The changes
         /// region renders a real repository view for the first and its quiet copy

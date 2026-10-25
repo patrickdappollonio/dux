@@ -383,7 +383,7 @@ pub struct KeyedWireStatus {
     pub sticky: bool,
 }
 
-/// What `tick` changed, so the web actor can broadcast precise StatusCleared /
+/// What `tick` changed, so the web actor can broadcast precise `StatusCleared` /
 /// status frames and the TUI can re-render.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusTickChanges {

@@ -558,7 +558,7 @@ pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
 /// without the drain the crash excerpt comes off a half-filled buffer, and
 /// without the status `exit_success` is `None`, which stops a clean exit from
 /// closing its tab row. Break on `is_exited` alone and the test lands inside the
-/// window where the reader has EOFed but the child is not yet waitable (the
+/// window where the reader has `EOFed` but the child is not yet waitable (the
 /// kernel closes a dying task's descriptors before it makes the task waitable),
 /// one drain sees nothing, and the prune assertion fires: that is the roughly
 /// 1-in-40 flake this helper exists to remove.

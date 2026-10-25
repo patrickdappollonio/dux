@@ -310,7 +310,7 @@ mod tests {
     /// With `path` omitted, the picker must open at the configured
     /// `defaults.start_directory` (resolved through the live engine), not `$HOME`.
     /// This is the web side of the start-directory wiring (the TUI already honored
-    /// it). Boots a real engine from a config.toml that points start_directory at a
+    /// it). Boots a real engine from a config.toml that points `start_directory` at a
     /// temp dir and asserts the no-path browse echoes that dir.
     /// The no-path browse of an engine whose `defaults.start_directory` is `start`.
     async fn browse_with_start_directory(start: &str) -> serde_json::Value {

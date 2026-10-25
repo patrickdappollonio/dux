@@ -1024,7 +1024,7 @@ pub struct EngineHandle {
     /// handle, mirroring `status_snapshot_rx`: a `watch` channel with no live
     /// receiver would make every publish a no-op, and connections come and go.
     workspace_rx: watch::Receiver<Option<Arc<WorkspaceDoc>>>,
-    /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
+    /// Tripped when the server is tearing down (`ReturnToTui`, `QuitProcess`, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
     /// `recv_timeout` loop exits promptly even when the engine, and therefore
     /// the std-mpsc `Sender` in the `PtyClient` reader thread, stays alive
@@ -1094,7 +1094,7 @@ impl EngineHandle {
     /// The teardown flag PTY forwarders poll. Cloned into each forwarder so a
     /// blocking `recv_timeout` loop can break within one timeout window once the
     /// server starts winding down, even though the underlying `PtyClient`'s
-    /// `Sender` outlives the flip (ReturnToTui keeps PTYs alive). The same flag
+    /// `Sender` outlives the flip (`ReturnToTui` keeps PTYs alive). The same flag
     /// is held loop-side ([`ActorLoopEnds`]) and by `serve_with_engine`, which
     /// trips it the instant the engine loop returns.
     pub(crate) fn shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -3517,7 +3517,7 @@ impl EngineService {
 ///
 /// `control` is consulted once at the top of each outer iteration: `Exit` stops
 /// the loop and returns the engine WITHOUT shutting down any PTYs (the flip's
-/// ReturnToTui path relies on this). The inline `Shutdown` request still stops
+/// `ReturnToTui` path relies on this). The inline `Shutdown` request still stops
 /// the loop too, and it SIGTERMs the children (the CLI/quit teardown).
 pub(crate) fn run_engine_loop(
     mut engine: Engine,

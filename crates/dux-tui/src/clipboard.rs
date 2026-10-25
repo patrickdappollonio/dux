@@ -6,7 +6,7 @@ use dux_core::engine::{Final, StatusUpdate, status_op};
 use crate::app::WorkerEvent;
 
 /// Request sent from the main thread to the clipboard worker. Carries the
-/// op's success and failure finals (already keyed by the StatusOp minted at
+/// op's success and failure finals (already keyed by the `StatusOp` minted at
 /// the call site), so the worker can ship back the resolved `status` without
 /// the engine having to know the per-call label.
 struct CopyRequest {

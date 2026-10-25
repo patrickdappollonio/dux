@@ -355,8 +355,8 @@ pub struct App {
     pub(crate) session_surface: SessionSurface,
     pub(crate) clipboard: Clipboard,
     pub(crate) active_terminal_id: Option<String>,
-    /// Which tab is focused in the center pane, per session (session_id →
-    /// tab_id). A missing or unusable entry resolves to the session's slot tab
+    /// Which tab is focused in the center pane, per session (`session_id` →
+    /// `tab_id`). A missing or unusable entry resolves to the session's slot tab
     /// (`AgentSession::resolved_focused_tab`). Only the center pane resolves the
     /// focused tab; sidebar and session labels stay agent-scoped. Pruned when a
     /// session is torn down.
@@ -371,7 +371,7 @@ pub struct App {
     /// every tick. `None` until the first failure.
     pub(crate) host_forward_error_logged_at: Option<Instant>,
     /// Click hit-boxes for the agent tab strip, rebuilt each frame while the
-    /// strip is drawn: (tab_id, cell rect) for each tab, plus the `+` add rect.
+    /// strip is drawn: (`tab_id`, cell rect) for each tab, plus the `+` add rect.
     /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
     /// renderer, empty when the strip is hidden (< 2 tabs) or in fullscreen.
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
@@ -502,7 +502,7 @@ pub struct App {
     /// the tail, the tail renders open as DERIVED state (the collapse
     /// preference is untouched); collapsing it during that query is an explicit
     /// act recorded here, winning until the query changes (a changed or cleared
-    /// query expires it in `rebuild_left_items`). Mirrors the web QuietTail's
+    /// query expires it in `rebuild_left_items`). Mirrors the web `QuietTail`'s
     /// `dismissedQuery`.
     pub(crate) inactive_search_dismissed: Option<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
@@ -542,7 +542,7 @@ pub struct App {
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     pub(crate) raw_input_buf: Vec<u8>,
-    /// Separate buffer for scanning ToggleFullscreen during the loading phase.
+    /// Separate buffer for scanning `ToggleFullscreen` during the loading phase.
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
@@ -738,7 +738,7 @@ pub struct App {
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
     /// pending busy, and stashes it here keyed by that id. The matching
     /// `ProjectPersistenceOutcome` carries the id back; the handler removes the
-    /// op, builds a [`PersistFinalOutcome`] (Saved / DbFailed / ConfigWriteFailed)
+    /// op, builds a [`PersistFinalOutcome`] (Saved / `DbFailed` / `ConfigWriteFailed`)
     /// and resolves it into the keyed final. The op encapsulates the per-action
     /// success and db-failure message text declared at dispatch, so the handler
     /// only supplies which branch fired and any error string.
@@ -1327,7 +1327,7 @@ pub(crate) enum RightSection {
 
 impl RightSection {
     /// Returns the next section, or `None` to exit the pane.
-    /// Order: Unstaged → Staged → CommitInput.
+    /// Order: Unstaged → Staged → `CommitInput`.
     pub(crate) fn next(self, has_staged: bool) -> Option<Self> {
         match self {
             Self::Unstaged if has_staged => Some(Self::Staged),
@@ -1496,10 +1496,10 @@ pub(crate) enum KillRunningFocus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeAgentProviderMode {
-    /// The ctrl+p retarget of an existing focused tab (change_tab_provider).
+    /// The ctrl+p retarget of an existing focused tab (`change_tab_provider`).
     Retarget,
     /// The new-agent-tab picker: create a fresh tab with the chosen provider
-    /// (create_tab). There is no existing tab to retarget yet, so `tab_id` on
+    /// (`create_tab`). There is no existing tab to retarget yet, so `tab_id` on
     /// the prompt is unused in this mode.
     NewTab,
 }
@@ -7315,7 +7315,7 @@ impl App {
     }
 
     /// Derives a companion terminal status for a session from the multi-terminal map.
-    /// Running if any terminal exists for this session, NotLaunched otherwise.
+    /// Running if any terminal exists for this session, `NotLaunched` otherwise.
     pub(crate) fn companion_terminal_status(&self, session_id: &str) -> CompanionTerminalStatus {
         if self.session_terminal_count(session_id) > 0 {
             CompanionTerminalStatus::Running
@@ -7493,7 +7493,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Returns all running companion terminals as (terminal_id, terminal) pairs,
+    /// Returns all running companion terminals as (`terminal_id`, terminal) pairs,
     /// ordered by the shared active sort mode (`config.ui.agent_sort`), mirroring
     /// the agent comparators in [`build_left_items`]. Unfiltered: the sidebar's
     /// visible list is [`Self::terminal_items`].
@@ -7723,7 +7723,7 @@ impl App {
     /// no longer exists, so every seam that resolves the focused tab is safe
     /// after a tab close.
     ///
-    /// The in-process `focused_tabs` HashMap is the live value and wins when it
+    /// The in-process `focused_tabs` `HashMap` is the live value and wins when it
     /// has an entry for this session. When it has none (e.g. right after a
     /// restart, before this process has focused anything itself), falls back to
     /// the engine's persisted `AgentSession.last_focused_tab` via the shared

@@ -449,13 +449,13 @@ pub struct RouterParams {
     /// while dux serves moves the guard with the listener. `None` in tests and on
     /// any path with no live mode control.
     pub live_tailscale_host_literals: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// The set the serve loop writes this machine's own MagicDNS name into, when
+    /// The set the serve loop writes this machine's own `MagicDNS` name into, when
     /// a serve is behind this router. The Host guard admits that one name while
     /// the Tailscale mode is not `no` (rule 6). `None` admits no tailnet name.
     pub live_own_magicdns_name: Option<crate::host_guard::LiveHostNames>,
     /// What the serve knows about a Funnel or forward to dux, which decides
     /// how a loopback request is classified and whether a Funnel withdraws the
-    /// MagicDNS name. `None` in tests and on any path with no serve loop behind
+    /// `MagicDNS` name. `None` in tests and on any path with no serve loop behind
     /// it, which reads as nothing published.
     pub live_exposure: Option<crate::exposure::ExposureCell>,
     /// What the auth layer calls after dux wrote `config.toml` itself (a password,
@@ -729,14 +729,14 @@ impl RouterParams {
         self
     }
 
-    /// Let the Host guard admit this machine's own MagicDNS name from the set the
+    /// Let the Host guard admit this machine's own `MagicDNS` name from the set the
     /// serve loop keeps up to date, so a tailnet rename applies with no restart.
     pub fn with_live_own_magicdns_name(mut self, names: crate::host_guard::LiveHostNames) -> Self {
         self.live_own_magicdns_name = Some(names);
         self
     }
 
-    /// Classify requests and admit the MagicDNS name by the serve's live
+    /// Classify requests and admit the `MagicDNS` name by the serve's live
     /// exposure.
     pub fn with_live_exposure(mut self, cell: crate::exposure::ExposureCell) -> Self {
         self.live_exposure = Some(cell);
@@ -1255,7 +1255,7 @@ const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250
 /// prunes that stale subscriber on its next read.
 ///
 /// The blocking reader parks on a bounded `recv_timeout` rather than `recv` so it can also exit on
-/// `shutdown`: the std-mpsc `Sender` lives in the `PtyClient` reader thread and, on a ReturnToTui
+/// `shutdown`: the std-mpsc `Sender` lives in the `PtyClient` reader thread and, on a `ReturnToTui`
 /// flip, the engine (and thus that `Sender`) stays alive, so `recv` would never return Disconnected
 /// and would wedge the tokio blocking pool, hanging the runtime teardown. Polling `shutdown` every
 /// `FORWARDER_POLL` lets the task exit within one window of any teardown even with the engine alive.
@@ -6706,7 +6706,7 @@ mod tests {
 
     /// With auth off the gate passes; `GET /api/v1/bootstrap` returns 200 with a
     /// JSON object carrying EXACTLY the build-/config-static fields the frontend
-    /// expects (the 11 fields moved off the per-tick ViewModel).
+    /// expects (the 11 fields moved off the per-tick `ViewModel`).
     #[tokio::test]
     async fn bootstrap_route_returns_expected_fields() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
@@ -6957,7 +6957,7 @@ mod tests {
 
     // ── Host guard serve-level tests ───────────────────────────────────────
 
-    /// When the host guard is active (bound_ips set), an unknown Host is rejected
+    /// When the host guard is active (`bound_ips` set), an unknown Host is rejected
     /// with 403 before reaching any handler; `localhost` passes through.
     #[tokio::test]
     async fn host_guard_rejects_unknown_host_and_allows_localhost() {
@@ -7068,7 +7068,7 @@ mod tests {
     }
 
     /// Rule 6 end to end, on one router for the whole journey: this machine's
-    /// own MagicDNS name is served, a sibling on the same tailnet is not, a
+    /// own `MagicDNS` name is served, a sibling on the same tailnet is not, a
     /// tailnet rename moves the allowed name under the running router, and a
     /// mode change to `no` closes it with the literals.
     #[tokio::test]
@@ -7423,10 +7423,10 @@ mod tests {
 
     // --- subscribe catch-up ---
 
-    /// Subscribing to `session:<id>:changes` when the ChangesService cache is
+    /// Subscribing to `session:<id>:changes` when the `ChangesService` cache is
     /// warm (`peek_rev` returns `Some(N)`) causes `apply_events_frame` to return
     /// the newly-inserted fine topic, and `catchup_frames` (the REAL production
-    /// helper, not a manual WireEvent build) produces a frame carrying rev N.
+    /// helper, not a manual `WireEvent` build) produces a frame carrying rev N.
     /// This exercises the topic-parse + rev-read integration path.
     #[tokio::test]
     async fn subscribe_emits_catchup_with_current_rev() {

@@ -48,7 +48,7 @@ struct ActivityInner {
     /// the bounded part: a reader that sees it move reads everything again.
     pin_version: AtomicU64,
     /// Every URL the serve can be opened at right now: its listeners, then this
-    /// machine's MagicDNS URL and `tailscale serve` routes. Empty until the
+    /// machine's `MagicDNS` URL and `tailscale serve` routes. Empty until the
     /// serve publishes them, which the status screen reads as "show the
     /// addresses captured at start".
     serve_urls: Mutex<Vec<String>>,

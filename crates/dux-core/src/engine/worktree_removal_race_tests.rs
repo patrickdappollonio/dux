@@ -19,7 +19,7 @@ use crate::pty::PtyClient;
 use crate::test_scratch::ScratchDir;
 
 /// A writer that ignores SIGTERM and SIGHUP, records its pid, and keeps
-/// recreating files in its working directory until it is SIGKILLed: a busy
+/// recreating files in its working directory until it is `SIGKILLed`: a busy
 /// loop of shell builtins over a few dozen names, so something reappears
 /// behind git however git orders its deletes, without the folder growing.
 /// Written to a file so no quoting layer can expand it early.

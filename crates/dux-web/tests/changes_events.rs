@@ -287,7 +287,7 @@ async fn connected_frame_is_first_and_carries_an_id() {
 
 /// A non-pull REST action (`POST /api/v1/projects/:id/checkout-default`, a deferred
 /// `HandlerStatusOp`) mints a busy scoped to the originating connection (via the
-/// `X-Connection-Id` header): A sees it, B does not, proving the HandlerStatusOp
+/// `X-Connection-Id` header): A sees it, B does not, proving the `HandlerStatusOp`
 /// scoping on `/ws/events`, not just the pull path.
 #[tokio::test]
 async fn non_pull_command_status_is_scoped_to_origin() {

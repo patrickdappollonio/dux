@@ -253,7 +253,7 @@ fn providers_joined(names: &[String], last: &str) -> Prose {
 /// going, and once one exists at the same path again it keeps working in it with
 /// its conversation intact. The Codex CLI answers every turn with "invalid cwd"
 /// from the moment the directory goes and stays stuck there after the recreate,
-/// until it is quit and resumed in the new folder. OpenCode and Copilot have not
+/// until it is quit and resumed in the new folder. `OpenCode` and Copilot have not
 /// been measured, so they get the cautious answer rather than a promise, and so
 /// does any other CLI configured as a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

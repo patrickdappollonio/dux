@@ -1,7 +1,7 @@
 //! The `Action` enum: dux's transport-agnostic command vocabulary.
 //!
 //! Every bindable or invokable action is an `Action`. `config_name` returns the
-//! stable snake_case identifier used as the `[keys]` config key. The TUI's key
+//! stable `snake_case` identifier used as the `[keys]` config key. The TUI's key
 //! parsing, default key tables and runtime binding lookup live in the binary's
 //! `keybindings` module, not here.
 
@@ -224,7 +224,7 @@ pub enum Action {
 }
 
 impl Action {
-    /// The snake_case config key for this action.
+    /// The `snake_case` config key for this action.
     pub fn config_name(self) -> &'static str {
         match self {
             Action::MoveDown => "move_down",

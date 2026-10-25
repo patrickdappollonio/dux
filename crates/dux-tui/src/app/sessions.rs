@@ -6733,7 +6733,7 @@ mod tests {
         }
     }
 
-    /// Inserts a dummy PtyClient placeholder into `app.engine.providers` so that the
+    /// Inserts a dummy `PtyClient` placeholder into `app.engine.providers` so that the
     /// session appears "active" without actually spawning a process. `providers`
     /// is tab-keyed, so the client lands under the agent's slot tab, which the
     /// resolver names.
@@ -7737,7 +7737,7 @@ mod tests {
         );
     }
 
-    /// Graceful delete vanishes the session immediately: its PTY is SIGTERMed and
+    /// Graceful delete vanishes the session immediately: its PTY is `SIGTERMed` and
     /// held for a background reap, and the worktree is removed in the background
     /// only after the agent exits. The session never lingers until the worker
     /// reports, the user-chosen tradeoff for a snappy, non-blocking delete.
@@ -7870,7 +7870,7 @@ mod tests {
         );
     }
 
-    /// The inline (no-git) path completes immediately, so pending_deletions
+    /// The inline (no-git) path completes immediately, so `pending_deletions`
     /// should never gain the session in the first place.
     #[test]
     fn begin_delete_session_inline_does_not_track() {

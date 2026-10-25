@@ -49,7 +49,7 @@ fn get_agent_sort_reports_the_sort_the_terminal_ui_uses() {
 }
 
 /// `dux config set` refuses an unknown value for every enum-like setting
-/// it validates (agent_sort, compose_bar, tailscale, ...), but writes any
+/// it validates (`agent_sort`, `compose_bar`, tailscale, ...), but writes any
 /// string to logging.level, which dux then silently reads as info.
 #[test]
 fn set_logging_level_refuses_a_level_dux_does_not_know() {
@@ -112,8 +112,8 @@ fn a_macro_missing_its_surface_is_blamed_on_the_right_field() {
     );
 }
 
-/// dux clamps shutdown_timeout_seconds to 600 (see `shutdown_grace`), the
-/// same kind of in-memory correction `get` reports for terminal_font_size.
+/// dux clamps `shutdown_timeout_seconds` to 600 (see `shutdown_grace`), the
+/// same kind of in-memory correction `get` reports for `terminal_font_size`.
 #[test]
 fn get_shutdown_timeout_reports_the_clamped_wait_dux_uses() {
     crate::config::install_canonical_renderer();

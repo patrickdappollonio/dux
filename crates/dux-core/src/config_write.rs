@@ -3123,7 +3123,7 @@ mod tests {
     /// meaningful (the macro bar, quick-picker, and web editor all render in
     /// declaration order), and the web editor now reorders by drag-and-drop
     /// through the same wholesale `update_macros` save. Writing an existing key
-    /// with `table[name] = ...` keeps its old toml_edit position, so before this
+    /// with `table[name] = ...` keeps its old `toml_edit` position, so before this
     /// was pinned a reorder round-tripped through the in-memory config but the
     /// file kept the old order and a dux restart silently undid the drag.
     #[test]

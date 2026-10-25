@@ -296,7 +296,7 @@ impl Engine {
     /// For a managed worktree the configured preference decides, and the
     /// directory is inside a repository anyway.
     ///
-    /// A standalone agent's folder is the user's, so the preference is ANDed
+    /// A standalone agent's folder is the user's, so the preference is `ANDed`
     /// with whether git can see the path at all. The rule is git visibility
     /// rather than "is this a working repository", because a folder sitting
     /// inside somebody else's repository is exactly where untracked uploads

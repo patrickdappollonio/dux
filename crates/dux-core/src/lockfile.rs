@@ -400,7 +400,7 @@ mod tests {
         std::mem::forget(listener);
     }
 
-    /// Call listen() on `listener` again from a forked child, then reap it, so
+    /// Call `listen()` on `listener` again from a forked child, then reap it, so
     /// the process the kernel names as the listener is one that has exited.
     fn listen_from_a_child_that_exits(listener: &std::os::unix::net::UnixListener) {
         use std::os::fd::AsRawFd;

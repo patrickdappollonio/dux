@@ -3160,7 +3160,7 @@ port = 3890
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 
-    /// The rule that minimum_password_length fits in max_password_bytes is
+    /// The rule that `minimum_password_length` fits in `max_password_bytes` is
     /// checked against the file's own values with the new one applied,
     /// never the defaults, in both directions.
     #[test]

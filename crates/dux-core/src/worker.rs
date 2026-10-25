@@ -168,7 +168,7 @@ pub enum PrLookupPurpose {
     },
 }
 
-/// A parsed PR-lookup target: the host/owner_repo the PR belongs to and its
+/// A parsed PR-lookup target: the `host/owner_repo` the PR belongs to and its
 /// number. Produced by [`crate::gh::parse_pull_request_lookup`] from a raw URL
 /// or `#N`/`N` string and consumed by the `gh pr view` lookup. Shared by the
 /// TUI's new-agent-from-pr prompt and the web's `CreateAgentFromPr` wire flow.
@@ -628,7 +628,7 @@ pub enum WorkerEvent {
         repo_path: String,
         target: PullTarget,
         result: Result<PullOutcome, String>,
-        /// The status final resolved by the dispatch-site StatusOp (the success
+        /// The status final resolved by the dispatch-site `StatusOp` (the success
         /// or failure message, already keyed). The handler still uses `result`
         /// for its domain mutations and emits this for the user-facing status.
         status: crate::engine::ResolvedFinal,
@@ -661,7 +661,7 @@ pub enum WorkerEvent {
         /// Human-readable success message shown in the status bar.
         label: String,
         result: Result<(), String>,
-        /// Status final resolved at the call site by the clipboard StatusOp:
+        /// Status final resolved at the call site by the clipboard `StatusOp`:
         /// the success (`label`) or failure message, already keyed. The handler
         /// emits this for the user-facing status.
         status: crate::engine::ResolvedFinal,
@@ -672,7 +672,7 @@ pub enum WorkerEvent {
         new_branch: String,
         previous_title: Option<String>,
         result: Result<(), String>,
-        /// Status final resolved at dispatch by the rename StatusOp; the handler
+        /// Status final resolved at dispatch by the rename `StatusOp`; the handler
         /// runs its domain revert/persist and emits this for the user message.
         status: crate::engine::ResolvedFinal,
     },

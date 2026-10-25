@@ -261,7 +261,7 @@ impl PtySizeOwners {
     ///   - no current owner -> `conn_id` claims it, as an uncontested first
     ///     writer, reported via `claimed_new` so the caller emits exactly one
     ///     `pty.owner` handover
-    ///   - owner == conn_id -> allowed, no handover
+    ///   - owner == `conn_id` -> allowed, no handover
     ///   - a different owner -> denied, the stdin is dropped
     ///
     /// Writing never steals from another owner, and neither does a plain resize:

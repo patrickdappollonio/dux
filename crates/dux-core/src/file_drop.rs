@@ -5,7 +5,7 @@
 //! No agent CLI reads a file from its input stream: they take a PATH, or they read
 //! the clipboard of the machine they run on, which for a browser user is the wrong
 //! computer. Every terminal emulator whose source was read (Alacritty, kitty,
-//! WezTerm, Ghostty, GNOME Terminal, Konsole, iTerm2) answers a drop by inserting
+//! `WezTerm`, Ghostty, GNOME Terminal, Konsole, iTerm2) answers a drop by inserting
 //! the path as text, so dux saves the file and lets the browser paste its path.
 //!
 //! This module owns the saving half. The pasting half is the browser's, over its

@@ -28,7 +28,7 @@
 //!    [`HostAllowlist::with_live_tailscale_literals`], so a mode change while dux
 //!    serves moves this rule with the listener.
 //! 6. **`[server] tailscale` is not `"no"` and the Host case-insensitively equals
-//!    THIS machine's own MagicDNS name**, on any port, within the limits listed
+//!    THIS machine's own `MagicDNS` name**, on any port, within the limits listed
 //!    below. The name is what `tailscale status --json` reports for this
 //!    machine, kept current by the Tailscale watcher on every mode but `no`, so a
 //!    tailnet rename moves it with no restart; it rides
@@ -44,7 +44,7 @@
 //! - One name, this machine's: every other `*.ts.net` (another machine on the
 //!   same tailnet, a subdomain of this one, the tailnet suffix itself) is
 //!   refused.
-//! - Only a name Tailscale assigned: it must sit under the daemon's MagicDNS
+//! - Only a name Tailscale assigned: it must sit under the daemon's `MagicDNS`
 //!   suffix, and that suffix under `.ts.net`. A name from another control server
 //!   (Headscale, say) is in a domain its operator chose and needs
 //!   `allowed_hosts`.
@@ -186,7 +186,7 @@ pub struct HostAllowlist {
     /// not that leg is bound right now. Rule 5; see the module doc for why it is
     /// structural and why a serve reads it live. Rule 6 is gated on it too.
     tailscale_literals: TailscaleLiterals,
-    /// This machine's own MagicDNS name, at most one, written by the serve loop
+    /// This machine's own `MagicDNS` name, at most one, written by the serve loop
     /// whenever the Tailscale watcher reads a different one. Rule 6.
     own_magicdns_name: LiveHostNames,
     /// What the serve knows about a Funnel, which withdraws rule 6's name while
@@ -205,7 +205,7 @@ pub type PasswordSet = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// A set of Host names a running serve can replace in place: the configured
 /// `allowed_hosts` (rule 4), which a config reload rewrites, and this machine's
-/// own MagicDNS name (rule 6), which the Tailscale watcher rewrites when the
+/// own `MagicDNS` name (rule 6), which the Tailscale watcher rewrites when the
 /// tailnet is renamed.
 ///
 /// Names are normalized as they are stored, so a request pays one lowercase
@@ -330,7 +330,7 @@ impl HostAllowlist {
         self
     }
 
-    /// Read rule 6 from the set the serve loop writes this machine's MagicDNS
+    /// Read rule 6 from the set the serve loop writes this machine's `MagicDNS`
     /// name into. Without it the guard admits no tailnet name of its own accord.
     pub fn with_live_own_magicdns_name(mut self, names: LiveHostNames) -> Self {
         self.own_magicdns_name = names;
@@ -435,7 +435,7 @@ async fn host_allowlist_middleware(
 /// allowed host set. This layer must sit OUTSIDE the access-log layer, so rejected
 /// probes are not access-logged. The caller builds the allowlist with whichever
 /// live sets its serve keeps (the Tailscale mode, the configured hosts, this
-/// machine's own MagicDNS name), so each rule follows its own writer.
+/// machine's own `MagicDNS` name), so each rule follows its own writer.
 pub fn host_allowlist_layer(router: Router, allowlist: HostAllowlist) -> Router {
     router.layer(axum::middleware::from_fn_with_state(
         Arc::new(allowlist),
@@ -526,7 +526,7 @@ mod tests {
     }
 
     /// Rule 2: when ANY bound IP is unspecified (0.0.0.0 or ::), accept any
-    /// Host that parses as an IpAddr. This covers LAN IPs when the server binds
+    /// Host that parses as an `IpAddr`. This covers LAN IPs when the server binds
     /// to the wildcard address.
     #[test]
     fn unspecified_bind_accepts_any_ip_literal() {
@@ -673,7 +673,7 @@ mod tests {
 
     /// The rule widens IP literals only. Names are still the DNS-rebinding
     /// surface: rule 6 admits this machine's own name and nothing else, and
-    /// without it a MagicDNS name needs `allowed_hosts`.
+    /// without it a `MagicDNS` name needs `allowed_hosts`.
     #[test]
     fn the_tailscale_rule_does_not_admit_any_hostname() {
         let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);

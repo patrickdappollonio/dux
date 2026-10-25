@@ -3,7 +3,7 @@
 //! `discover_root`) and the env-expansion helpers (`expand_env_vars`,
 //! `expand_path`, `resolve_project_env`, …). The keybinding-aware *renderer* of
 //! the documented config, plus `ensure_config`/`save_config` orchestration and
-//! the toml_edit patching, live in the binary's `config` module, not here.
+//! the `toml_edit` patching, live in the binary's `config` module, not here.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -429,7 +429,7 @@ pub const DEFAULT_FILE_DROP_MAX_BYTES: usize = 100 * 1024 * 1024;
 /// Disabling file drop is what the size cap's `0` is for.
 pub const DEFAULT_FILE_DROP_MAX_CONCURRENCY: u32 = 2;
 
-/// Default seconds to wait for SIGTERMed agents/terminals to exit before
+/// Default seconds to wait for `SIGTERMed` agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
 /// [`ServerConfig::shutdown_timeout_seconds`] (web/`dux server`).
@@ -937,7 +937,7 @@ pub struct ServerConfig {
     /// dux is trusted-local: it always serves on `host:port` (loopback by default)
     /// and accepts same-origin requests. List any additional hostnames a reverse
     /// proxy forwards under (e.g. `dux.example.com`) so those requests are not
-    /// rejected by the host guard. This machine's own MagicDNS name needs no entry
+    /// rejected by the host guard. This machine's own `MagicDNS` name needs no entry
     /// while `tailscale` is not `"no"`: the guard admits it by itself. A config
     /// reload applies a change to a running server. Empty by default.
     pub allowed_hosts: Vec<String>,
@@ -978,7 +978,7 @@ pub struct ServerConfig {
     /// background. Default true. Read when a serve starts.
     pub log_compress: bool,
     /// Whether `dux server` and the start-web-server flip show QR codes for
-    /// this machine's tailnet addresses (its Tailscale IP and its MagicDNS
+    /// this machine's tailnet addresses (its Tailscale IP and its `MagicDNS`
     /// name, the `tailscale serve` HTTPS URL when one ends at dux), so a phone
     /// can open dux by pointing its camera. Shown when the serve starts and
     /// again whenever those addresses become known or change. `dux server`
@@ -1375,7 +1375,7 @@ pub struct ProviderCommandConfig {
 /// | Claude Code 2.1.220 | Trims, strips ONE surrounding matching quote pair, unescapes `\X`, then  | `bare`          |
 /// |                     | matches the extension. Never splits on whitespace, so a space is        |                 |
 /// |                     | harmless bare.                                                          |                 |
-/// | OpenCode            | Strips ALL leading and trailing quote characters, resolves `file://`,   | `bare`          |
+/// | `OpenCode`            | Strips ALL leading and trailing quote characters, resolves `file://`,   | `bare`          |
 /// |                     | unescapes `\X`. No shell splitting, so a space is harmless bare.        |                 |
 /// | Codex (shlex 1.3.0) | Strips one matching quote pair, resolves `file://`, otherwise runs the   | `single_quoted` |
 /// |                     | text through POSIX shell lexing and accepts it ONLY if it comes out as  |                 |
@@ -1403,14 +1403,14 @@ pub struct ProviderCommandConfig {
 /// A new form is one more variant plus one more arm in
 /// [`WebDragDropPaste::parse`], [`WebDragDropPaste::as_str`] and the web's
 /// `pastePayload`, with no rework anywhere else. A `file://` URL is deliberately
-/// absent: Codex and OpenCode both resolve one, but whether Claude Code does on
+/// absent: Codex and `OpenCode` both resolve one, but whether Claude Code does on
 /// its paste path is unverified, and a form should not ship on an unmeasured
 /// assumption.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WebDragDropPaste {
     /// The path exactly as it is on disk: nothing added, nothing escaped.
     ///
-    /// What Claude Code and OpenCode want. Both take the whole pasted string and
+    /// What Claude Code and `OpenCode` want. Both take the whole pasted string and
     /// never split on whitespace, so a space needs no protection. This is the
     /// default for every provider not listed otherwise.
     #[default]
@@ -1432,7 +1432,7 @@ pub enum WebDragDropPaste {
     /// No quotes, with shell-significant characters escaped by a backslash, so
     /// `My File.png` goes out as `My\ File.png`.
     ///
-    /// Codex accepts it (it lexes to one token) and OpenCode unescapes it back. It
+    /// Codex accepts it (it lexes to one token) and `OpenCode` unescapes it back. It
     /// is also what several real terminal emulators emit when you drop a file on
     /// them, so it is the closest thing here to "what a normal terminal does".
     /// Note the failure above: Claude Code's unescape step mangles it.
@@ -1836,7 +1836,7 @@ pub struct UiConfig {
     pub attention_indicator: bool,
     /// Also treat a plain terminal bell as an attention request. The bell is the
     /// most compatible signal (Codex falls back to it; Claude Code emits it in
-    /// terminal_bell mode) but can occasionally ring for mundane reasons, so this
+    /// `terminal_bell` mode) but can occasionally ring for mundane reasons, so this
     /// switch turns it off independently of `attention_indicator`. Default true.
     pub attention_on_bell: bool,
     /// Suppress the AUTOMATIC first-run welcome screen. Default false (the
@@ -1854,7 +1854,7 @@ pub struct UiConfig {
     /// The agent-list sort mode, persisted so a chosen order (and the manual
     /// drag order it enables) survives restarts and is shared across clients:
     /// "active" (working/attention float up, the default), "updated", "created",
-    /// "name", "name_desc", or "manual" (the raw persisted order, which
+    /// "name", "`name_desc`", or "manual" (the raw persisted order, which
     /// hand-placing a row stamps).
     ///
     /// One setting for both surfaces. The TUI orders its sidebar by it and has
@@ -4283,7 +4283,7 @@ type MigrationFailures = Vec<(Vec<String>, String)>;
 /// with.
 ///
 /// Each read is the surface's own pipeline, on the representation it runs on:
-/// the file parsed as the toml_edit document it is written as, through the
+/// the file parsed as the `toml_edit` document it is written as, through the
 /// same migration functions in the same order, and only then read as a table.
 /// Never a re-print of the file: re-printing turns an inline table into a
 /// `[section]`, which the migrations then act on where a start's do not.

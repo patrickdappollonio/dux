@@ -638,7 +638,7 @@ impl Console {
             .store(columns, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// QR codes for `urls` (the Tailscale IP URL, then the MagicDNS one), as
+    /// QR codes for `urls` (the Tailscale IP URL, then the `MagicDNS` one), as
     /// log lines built by [`dux_core::serve_log::qr_lines`], so `dux server`
     /// prints them and the flip's viewer shows them identically. Laid out for
     /// the terminal's width (less the viewer's chrome for the flip's console).
@@ -662,7 +662,7 @@ impl Console {
     }
 
     /// Listener rows for addresses that became known after the banner (this
-    /// machine's MagicDNS URL, a `tailscale serve` route), drawn exactly like
+    /// machine's `MagicDNS` URL, a `tailscale serve` route), drawn exactly like
     /// the banner's own rows on both surfaces.
     pub fn tailnet_rows(&self, rows: &[ListenerRow]) {
         if !self.is_recording() {

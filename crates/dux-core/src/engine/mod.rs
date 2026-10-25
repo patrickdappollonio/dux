@@ -421,7 +421,7 @@ pub struct Engine {
     /// it is reached through the session's stored pointer (see `AgentSession::slot_tab_id`). Seeded
     /// from `session_store.load_extra_agent_tabs()` at construction.
     pub agent_tabs: HashMap<TabId, AgentTab>,
-    /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
+    /// Agent/terminal PTYs that have been `SIGTERMed` on an individual delete or
     /// close and are being given a grace period to exit before they are
     /// force-killed (SIGKILL): the non-blocking, per-PTY analogue of
     /// `shutdown_ptys`. They live here (not dropped from their maps) because
@@ -620,7 +620,7 @@ pub struct Engine {
     pub changed_files_refresh: Arc<Mutex<ChangedFilesRefreshQueue>>,
     /// The session id whose worktree is currently watched for changed files.
     /// Runtime state only (never config/persisted): paired with
-    /// `watched_worktree` so the ViewModel can tell a client which session the
+    /// `watched_worktree` so the `ViewModel` can tell a client which session the
     /// global `staged_files`/`unstaged_files` belong to. A web client viewing a
     /// DIFFERENT session than this global watch shows a loading state rather than
     /// the wrong session's files (cross-tab safety). Written exclusively by
@@ -1053,7 +1053,7 @@ pub struct PendingRecreate {
 /// Handler-computed outcome for a web async worktree-deletion op (see
 /// [`Engine::pending_delete_ops_web`]). The completion event knows whether the
 /// git removal succeeded; the followup additionally observes whether the session
-/// record is still present (driving the FinishDeleteSession cascade vs the
+/// record is still present (driving the `FinishDeleteSession` cascade vs the
 /// already-gone fallback). The resolver (declared at dispatch) maps this to the
 /// final user message, byte-identical to the pre-op web wording.
 pub enum WebDeleteOutcome {
@@ -1629,12 +1629,12 @@ pub fn pr_attach_final(outcome: &PrAttachOutcome) -> Final {
 }
 
 /// How recently an agent must have emitted PTY output to count as actively
-/// streaming ("working"). Shared by the TUI spinner and the web ViewModel so
+/// streaming ("working"). Shared by the TUI spinner and the web `ViewModel` so
 /// both surfaces use an identical window.
 ///
 /// This is a *hysteresis* window, not a precise timestamp exposure: the
 /// `working` boolean stays stable while an agent streams steadily, so the
-/// change-only ViewModel watch channel only pushes on transitions (idle→working
+/// change-only `ViewModel` watch channel only pushes on transitions (idle→working
 /// and working→idle), never on every byte. See [`crate::viewmodel::SessionView`].
 pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 
@@ -1645,7 +1645,7 @@ pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 /// The window is slightly longer than the output hysteresis so the trailing
 /// echo of the last keystroke fully ages out before the indicator can return;
 /// genuine agent output continuing past it re-lights the indicator on the next
-/// tick. Shared by the TUI spinner and the web ViewModel through
+/// tick. Shared by the TUI spinner and the web `ViewModel` through
 /// [`Engine::is_agent_streaming`].
 pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
 
@@ -2447,7 +2447,7 @@ impl Engine {
     /// A forwarded pointer report is NOT typing and never reaches this map; it
     /// stamps `pty_pointer` instead (see [`Engine::note_pty_write`]).
     /// It is exactly the suppression predicate `is_agent_streaming` uses to void
-    /// streaming, surfaced so the ViewModel can render a distinct Typing cue.
+    /// streaming, surfaced so the `ViewModel` can render a distinct Typing cue.
     pub fn is_typing(&self, id: &str) -> bool {
         self.pty_input
             .get(id)
@@ -3252,7 +3252,7 @@ fn report_missing_directory(
 impl Engine {
     /// Whether the new-agent-from-PR flow is available: GitHub integration is
     /// enabled in config AND the `gh` CLI is installed and authenticated. Mirrors
-    /// the TUI's `github_pr_agent_command_available`. Surfaced on the ViewModel
+    /// the TUI's `github_pr_agent_command_available`. Surfaced on the `ViewModel`
     /// (`gh_available`) so the web dialog can hide/disable the PR mode rather
     /// than letting the user submit a command that the server will reject.
     pub fn pr_agent_command_available(&self) -> bool {

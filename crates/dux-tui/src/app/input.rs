@@ -144,7 +144,7 @@ fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut Tex
 }
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
-/// accumulate bytes only to detect a (possibly multi-byte) ToggleFullscreen
+/// accumulate bytes only to detect a (possibly multi-byte) `ToggleFullscreen`
 /// binding. Since any realistic binding fits in well under this cap, we
 /// truncate to the trailing window to bound memory and scan cost even when
 /// the user pastes large amounts of text while the agent is starting.
@@ -9263,7 +9263,7 @@ impl App {
     /// modal's inline refusals); a non-empty one closes the modal and hands the
     /// text to the engine's one keyed resolve→attach op, whose pending busy is
     /// applied here as a reaction. The final (info/error) arrives through the
-    /// normal drain_events path, so no per-op bookkeeping lives in the TUI.
+    /// normal `drain_events` path, so no per-op bookkeeping lives in the TUI.
     pub(crate) fn confirm_attach_pull_request_input(&mut self) -> Result<()> {
         let (session_id, raw_input) = match &self.prompt {
             PromptState::AttachPullRequestInput {
@@ -11025,7 +11025,7 @@ impl App {
     /// Handle a left-click on the agent tab strip. Returns true if the click
     /// landed on a tab (focus it). There is deliberately no "+" add button:
     /// new tabs are created via the `new-agent-tab` palette command or the
-    /// NewTab keybinding, keeping the strip free of extra chrome.
+    /// `NewTab` keybinding, keeping the strip free of extra chrome.
     fn handle_agent_tab_strip_click(&mut self, column: u16, row: u16) -> bool {
         if let Some((tab_id, _)) = self
             .agent_tab_regions
@@ -12143,7 +12143,7 @@ impl App {
     }
 
     /// Reset all state associated with interactive mode (agent or terminal)
-    /// and show a status message. Used by ToggleFullscreen key handling,
+    /// and show a status message. Used by `ToggleFullscreen` key handling,
     /// mouse-click-outside-overlay, and the loading-phase exit path.
     pub(crate) fn exit_interactive_mode(&mut self) {
         let return_to_terminal_list =
@@ -12202,7 +12202,7 @@ impl App {
         }
     }
 
-    /// Scan `loading_input_buf` for a ToggleFullscreen key sequence or a
+    /// Scan `loading_input_buf` for a `ToggleFullscreen` key sequence or a
     /// mouse left-click outside the fullscreen overlay. Returns `true` if
     /// either was found and interactive mode was exited. Used during the
     /// loading phase when all other input is suppressed.
@@ -12267,8 +12267,8 @@ impl App {
 
     /// Feed newly-read loading-phase bytes through the shared
     /// `raw_input_parser`, then scan for a focus report and an
-    /// ToggleFullscreen trigger. Focus is applied first so a focus report
-    /// bundled in the same read as a ToggleFullscreen trigger is still
+    /// `ToggleFullscreen` trigger. Focus is applied first so a focus report
+    /// bundled in the same read as a `ToggleFullscreen` trigger is still
     /// observed even though `scan_loading_phase_exit` returns early on a
     /// match. Returns whether interactive mode was exited.
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
@@ -26860,7 +26860,7 @@ cyan = "#00ffff"
 
     /// A relaunch initiated FROM the fullscreen relaunch screen keeps the
     /// user fullscreen: the dispatched request is fullscreen-seeking even
-    /// though ReconnectAgent itself is a minimized-seeking action.
+    /// though `ReconnectAgent` itself is a minimized-seeking action.
     #[test]
     fn reconnect_from_the_fullscreen_relaunch_screen_seeks_fullscreen() {
         let mut app = test_app(default_bindings());
@@ -26926,7 +26926,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// Tab (FocusNext) while a non-interactive fullscreen overlay is up must
+    /// Tab (`FocusNext`) while a non-interactive fullscreen overlay is up must
     /// minimize it: moving focus under a still-rendered fullscreen surface
     /// looks like the key did nothing and traps the user.
     #[test]
@@ -27300,7 +27300,7 @@ cyan = "#00ffff"
     /// #8 regression: TUI terminal spawn now routes through the shared core
     /// creator, so every terminal gets a DISTINCT monotonic `sort_order` (the old
     /// TUI copy hardcoded `sort_order: 1`, leaving the default drag order at the
-    /// mercy of HashMap iteration order) and the canonical "Terminal N" identity
+    /// mercy of `HashMap` iteration order) and the canonical "Terminal N" identity
     /// label (the old copy never assigned one).
     #[test]
     fn tui_terminal_spawn_stamps_distinct_sort_order_and_identity_label() {
@@ -29818,7 +29818,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// The PICKER half of the same rule: the StartupCommandLogs prompt keeps a
+    /// The PICKER half of the same rule: the `StartupCommandLogs` prompt keeps a
     /// scroll offset and a body selection that are indices into text wrapped at
     /// one width, so a width change must clamp the one and retire the other.
     #[test]
@@ -32584,10 +32584,10 @@ cyan = "#00ffff"
 
     /// A batch that ends in an intercepted action which LEAVES the function
     /// early still has to stamp the bytes it flushed on the way out. The
-    /// ToggleFullscreen arm flushes the pending forward batch to the PTY and then
+    /// `ToggleFullscreen` arm flushes the pending forward batch to the PTY and then
     /// returns before the tail, so without an explicit stamp those keystrokes
     /// reached the child and recorded nothing, and their echo read as the agent
-    /// working. ToggleFullscreen's default binding is Ctrl-g (0x07).
+    /// working. `ToggleFullscreen`'s default binding is Ctrl-g (0x07).
     #[test]
     fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
         let (mut app, slot_tab) = app_with_live_agent_pty();
@@ -33117,7 +33117,7 @@ cyan = "#00ffff"
 
     /// An open prompt makes the pane non-typeable, so the bypass never runs and
     /// a dialog resolves Tab in its own scope whatever the option says: the
-    /// delete confirmation's ToggleSelection still moves between Cancel and
+    /// delete confirmation's `ToggleSelection` still moves between Cancel and
     /// Delete over what was a typeable pane a keystroke ago.
     #[test]
     fn a_dialogs_tab_still_toggles_selection_when_the_option_is_on() {
@@ -33374,7 +33374,7 @@ cyan = "#00ffff"
     }
 
     /// Esc with nothing to close forwards to the agent. Before
-    /// this, the Global CloseOverlay lookup swallowed Esc even when no overlay
+    /// this, the Global `CloseOverlay` lookup swallowed Esc even when no overlay
     /// closed, so agent TUIs never saw their menu-dismiss key minimized.
     #[test]
     fn esc_with_nothing_to_close_forwards_to_the_agent() {
@@ -33408,7 +33408,7 @@ cyan = "#00ffff"
     /// A key the option handed to the agent is a TYPED key, and while scrolled
     /// back every typed key is suppressed. Tab used to be the one exception:
     /// the scroll-mode gate sent it back down the Global ladder, where
-    /// FocusNext moved the focus out from under a frozen view.
+    /// `FocusNext` moved the focus out from under a frozen view.
     #[test]
     fn scrolled_back_tab_neither_types_nor_moves_focus_when_the_option_is_on() {
         let mut app = app_with_minimized_typeable_agent();
@@ -33491,7 +33491,7 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
     }
 
-    /// PgUp minimized follows the fullscreen forwarding policy: a child that
+    /// `PgUp` minimized follows the fullscreen forwarding policy: a child that
     /// owns page keys (per `forward_scroll` / the alt screen) gets the bytes.
     #[test]
     fn pgup_minimized_forwards_to_a_page_owning_child() {

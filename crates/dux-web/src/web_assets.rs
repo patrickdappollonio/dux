@@ -160,7 +160,7 @@ fn cache_policy(path: &str) -> &'static str {
     }
 }
 
-/// Weak ETag derived from rust-embed's build-time sha256 of the file. Weak
+/// Weak `ETag` derived from rust-embed's build-time sha256 of the file. Weak
 /// (`W/`) on purpose: the same URL serves Brotli or decompressed bytes depending
 /// on `Accept-Encoding`, and a weak validator asserts semantic equivalence
 /// across those representations.
@@ -209,7 +209,7 @@ pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
 
 /// Answer a request for an embedded file: `304 Not Modified` when the client
 /// already holds the current bytes (matching `If-None-Match`), the full body
-/// otherwise. Both carry the ETag and the path's cache policy.
+/// otherwise. Both carry the `ETag` and the path's cache policy.
 fn serve_embedded(
     content_type: &str,
     path: &str,

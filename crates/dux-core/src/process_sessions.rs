@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long a purge waits for a SIGKILL to land once it has been sent, on top
-/// of the configured grace. A SIGKILLed process is gone as soon as the kernel
+/// of the configured grace. A `SIGKILLed` process is gone as soon as the kernel
 /// schedules it, so this only bounds the pathological case (a process stuck in
 /// uninterruptible I/O) rather than an ordinary shutdown. Not a user setting:
 /// the user's knob is the grace, and this is the floor under the step after it.

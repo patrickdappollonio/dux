@@ -261,7 +261,7 @@ impl LogLine {
 }
 
 /// One labeled, bound listener row in the startup banner. A new kind of address
-/// (a MagicDNS name, say) is one more row: the banner renders every row the same
+/// (a `MagicDNS` name, say) is one more row: the banner renders every row the same
 /// way on every surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenerRow {
@@ -316,7 +316,7 @@ impl Banner {
 }
 
 /// Listener rows as the banner draws them, for addresses that become known after
-/// the banner was printed (this machine's MagicDNS name, a `tailscale serve`
+/// the banner was printed (this machine's `MagicDNS` name, a `tailscale serve`
 /// route), so they read exactly like the rows above them.
 pub fn listener_lines(rows: &[ListenerRow]) -> Vec<LogLine> {
     rows.iter()
@@ -333,7 +333,7 @@ pub fn listener_lines(rows: &[ListenerRow]) -> Vec<LogLine> {
         .collect()
 }
 
-/// QR codes for `urls` (the Tailscale IP URL, then the MagicDNS one), laid out
+/// QR codes for `urls` (the Tailscale IP URL, then the `MagicDNS` one), laid out
 /// by [`crate::qr::layout`] in `columns` columns, side by side when they fit and
 /// stacked when they do not, each with its URL under it, after a caption. A
 /// blank line sits between the caption and the codes and another after the URLs,
