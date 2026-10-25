@@ -2540,8 +2540,13 @@ impl AttachedPtySocket<'_> {
         let outcome = self.owners.claim_for_resize(
             pty_id,
             self.conn_id,
-            frame.takeover,
-            expected_owner,
+            if frame.takeover {
+                dux_core::pty_owners::ResizeIntent::TakeOver {
+                    expected_owner: expected_owner,
+                }
+            } else {
+                dux_core::pty_owners::ResizeIntent::Plain
+            },
             self.user_agent,
             |seq| {
                 self.engine
@@ -4172,8 +4177,12 @@ impl AttachmentGuard {
     }
 
     fn note_viewed(&self, viewed: bool) {
-        self.attachments
-            .note_viewed(self.token, viewed, std::time::Instant::now());
+        if viewed {
+            self.attachments
+                .note_viewed(self.token, std::time::Instant::now());
+        } else {
+            self.attachments.note_unviewed(self.token);
+        }
     }
 
     fn end_deliberately(&self) {
@@ -6120,8 +6129,7 @@ mod tests {
             .claim_for_resize(
                 "s1",
                 tui,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some(dux_core::background_serve::TUI_DEVICE_LABEL),
                 |_| {},
             )
@@ -6220,7 +6228,15 @@ mod tests {
         let owner = owners.next_conn_id();
         let stranger = owners.next_conn_id();
         owners.claim("p", owner);
-        let outcome = owners.claim_for_resize("p", stranger, true, parsed, None, |_| {});
+        let outcome = owners.claim_for_resize(
+            "p",
+            stranger,
+            dux_core::pty_owners::ResizeIntent::TakeOver {
+                expected_owner: parsed,
+            },
+            None,
+            |_| {},
+        );
         assert!(
             !outcome.apply && outcome.epoch.is_none(),
             "a take-over whose expected owner could not be parsed must be refused whole"

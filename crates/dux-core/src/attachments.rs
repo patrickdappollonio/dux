@@ -504,12 +504,22 @@ impl Attachments {
         })
     }
 
-    /// The last beat on attachment `token` said whether its page is being
+    /// The last beat on attachment `token`, at `now`, said its page is being
     /// looked at.
-    pub fn note_viewed(&self, token: u64, viewed: bool, now: Instant) {
+    pub fn note_viewed(&self, token: u64, now: Instant) {
         self.with(|state| {
             if let Some(attachment) = state.attachments.get_mut(&token) {
-                attachment.viewed_at = viewed.then_some(now);
+                attachment.viewed_at = Some(now);
+            }
+        });
+    }
+
+    /// The last beat on attachment `token` said its page is not being looked
+    /// at.
+    pub fn note_unviewed(&self, token: u64) {
+        self.with(|state| {
+            if let Some(attachment) = state.attachments.get_mut(&token) {
+                attachment.viewed_at = None;
             }
         });
     }
@@ -599,14 +609,14 @@ impl Attachments {
     /// presences included: every tab of one browser profile counted once (see
     /// [`BrowserId`]), a connection that named no browser counted on its own.
     pub fn remote_viewers(&self, scope: &Scope, now: Instant) -> usize {
-        self.with(|state| state.browsers(scope, now, true))
+        self.with(|state| state.browsers(scope, now, Counting::WithGraced))
     }
 
     /// How many browsers have a socket open on something in `scope` right now,
     /// counted like [`Self::remote_viewers`] but without the graced presences of
     /// sockets already lost: what the terminal UI's rows and caption show.
     pub fn browsers_attached(&self, scope: &Scope, now: Instant) -> usize {
-        self.with(|state| state.browsers(scope, now, false))
+        self.with(|state| state.browsers(scope, now, Counting::OpenSocketsOnly))
     }
 
     /// In one locked step, reserve `scope` against new attachments for `life`,
@@ -737,12 +747,12 @@ impl State {
             .collect()
     }
 
-    fn browsers(&self, scope: &Scope, now: Instant, graced: bool) -> usize {
+    fn browsers(&self, scope: &Scope, now: Instant, counting: Counting) -> usize {
         let browsers: BTreeSet<String> = self
             .in_scope(scope, None, now)
             .into_iter()
             .filter(|found| found.blocker.surface == Surface::Browser)
-            .filter(|found| graced || !found.graced)
+            .filter(|found| counting == Counting::WithGraced || !found.graced)
             .map(|found| found.browser)
             .collect();
         browsers.len()
@@ -774,7 +784,10 @@ impl State {
             blockers.push(InScope {
                 browser: facts.browser_key(&attachment.connection),
                 graced: false,
-                blocker: blocker(facts, &attachment.target, self.drives(facts, attachment)),
+                blocker: Blocker {
+                    driving: self.drives(facts, attachment),
+                    ..blocker(facts, &attachment.target)
+                },
             });
         }
         for presence in &self.presences {
@@ -787,7 +800,7 @@ impl State {
             blockers.push(InScope {
                 browser: presence.facts.browser_key(&presence.connection),
                 graced: true,
-                blocker: blocker(&presence.facts, &presence.target, false),
+                blocker: blocker(&presence.facts, &presence.target),
             });
         }
         blockers
@@ -851,6 +864,16 @@ impl State {
     }
 }
 
+/// Which browsers a count counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Counting {
+    /// Those with a socket open now and those whose socket was lost within
+    /// the grace.
+    WithGraced,
+    /// Only those with a socket open now.
+    OpenSocketsOnly,
+}
+
 /// One attachment or kept presence a scope covers.
 struct InScope {
     /// What a browser count counts it under ([`ConnectionFacts::browser_key`]).
@@ -860,13 +883,14 @@ struct InScope {
     blocker: Blocker,
 }
 
-fn blocker(facts: &ConnectionFacts, target: &Target, driving: bool) -> Blocker {
+/// The blocker `facts` make of `target`, as one that is not driving it.
+fn blocker(facts: &ConnectionFacts, target: &Target) -> Blocker {
     Blocker {
         surface: facts.surface,
         device: facts.device.clone(),
         address: facts.address.map(|address| address.to_string()),
         verified: facts.verified,
-        driving,
+        driving: false,
         target: target.clone(),
     }
 }
@@ -1128,7 +1152,7 @@ mod tests {
             (
                 "its last beat not looked at",
                 |a, t, at| {
-                    a.note_viewed(t, false, at);
+                    a.note_unviewed(t);
                     lose(a, t, at);
                 },
                 false,
@@ -1196,7 +1220,7 @@ mod tests {
             let token = attachments
                 .attach("phone", tab("s1-slot", "s1"), None, None)
                 .unwrap();
-            attachments.note_viewed(token, true, beat);
+            attachments.note_viewed(token, beat);
             end(&attachments, token, beat + Duration::from_secs(10));
             let blockers =
                 attachments.blockers(&agent_scope("s1"), None, beat + Duration::from_secs(60));
@@ -1311,7 +1335,7 @@ mod tests {
         assert_eq!(attachments.browsers_attached(&agent_scope("s1"), now), 2);
 
         // The phone's socket is lost while its page was looked at.
-        attachments.note_viewed(phone, true, now);
+        attachments.note_viewed(phone, now);
         attachments.detach(phone, Ending::Lost, now, Duration::from_secs(60));
         assert_eq!(
             attachments.remote_viewers(&agent_scope("s1"), now),
@@ -1402,7 +1426,7 @@ mod tests {
         let token = attachments
             .attach("phone", tab("s1-slot", "s1"), None, None)
             .unwrap();
-        attachments.note_viewed(token, true, beat);
+        attachments.note_viewed(token, beat);
         lose(&attachments, token, beat + Duration::from_secs(100));
         let at = |offset: u64| beat + Duration::from_secs(offset);
         assert_eq!(

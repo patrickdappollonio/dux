@@ -113,6 +113,20 @@ pub struct ResizeClaim {
     pub seq: Option<u64>,
 }
 
+/// What a resize asks of the pty's ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeIntent {
+    /// A plain resize: it claims only an unowned pty, and is refused against
+    /// one somebody else drives.
+    Plain,
+    /// A take-over: ownership transfers to the resizing connection.
+    TakeOver {
+        /// A compare-and-swap on the claim: `Some(id)` takes over only from
+        /// that predecessor, `None` from whoever holds it.
+        expected_owner: Option<u64>,
+    },
+}
+
 impl PtySizeOwners {
     /// Allocate a process-unique id for a freshly attached PTY socket. Drawn
     /// from [`NEXT_CONN_ID`], so ids stay unique across serve cycles.
@@ -142,14 +156,15 @@ impl PtySizeOwners {
     ///
     ///   - unowned              -> claims it, resize applies
     ///   - owned by `conn_id`   -> resize applies, no handover
-    ///   - owned by another AND `takeover` -> ownership transfers, resize applies
+    ///   - owned by another AND a take-over -> ownership transfers, resize applies
     ///   - owned by another, plain resize  -> REFUSED: nothing applied, nothing
     ///     broadcast
-    ///   - `takeover` AND `expected_owner` names anyone but the current owner
-    ///     (an unowned pty included) -> REFUSED exactly as a plain resize is
+    ///   - a take-over whose `expected_owner` names anyone but the current
+    ///     owner (an unowned pty included) -> REFUSED exactly as a plain
+    ///     resize is
     ///
-    /// `expected_owner` is a compare-and-swap on a flagged claim, ignored
-    /// entirely when `takeover` is false. `None` takes from whoever holds it,
+    /// `expected_owner` is a compare-and-swap on a flagged claim, which only a
+    /// take-over carries. `None` takes from whoever holds it,
     /// which is what a pressed Take over sends; `Some(id)` narrows the claim to
     /// one predecessor, for the press-less re-claim of a returning owner
     /// succeeding its own ghost. The comparison runs in the same critical
@@ -167,8 +182,7 @@ impl PtySizeOwners {
         &self,
         pty_id: &str,
         conn_id: u64,
-        takeover: bool,
-        expected_owner: Option<u64>,
+        intent: ResizeIntent,
         device: Option<&str>,
         apply_resize: impl FnOnce(u64),
     ) -> ResizeClaim {
@@ -184,14 +198,17 @@ impl PtySizeOwners {
                 epoch: None,
                 seq: None,
             },
-            Some(_) if !takeover => refused,
+            Some(_) if intent == ResizeIntent::Plain => refused,
             // A flagged claim naming a predecessor must find exactly that
             // predecessor recorded; anything else, an unowned pty included,
             // means the client's premise was already overtaken.
             current
-                if takeover
-                    && expected_owner
-                        .is_some_and(|expected| current.map(|r| r.conn_id) != Some(expected)) =>
+                if matches!(
+                    intent,
+                    ResizeIntent::TakeOver {
+                        expected_owner: Some(expected)
+                    } if current.map(|r| r.conn_id) != Some(expected)
+                ) =>
             {
                 refused
             }
@@ -226,12 +243,20 @@ impl PtySizeOwners {
 
     /// Hand `pty_id` to `conn_id` unconditionally and report the handover epoch
     /// (`None` when it already owned it). A thin spelling of
-    /// [`Self::claim_for_resize`] with `takeover: true` and nothing to resize, so
+    /// [`Self::claim_for_resize`] with a take-over and nothing to resize, so
     /// there is one implementation of "record a new owner". Deliberately not
     /// `#[cfg(test)]`: its callers live in more than one crate.
     pub fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        self.claim_for_resize(pty_id, conn_id, true, None, None, |_| {})
-            .epoch
+        self.claim_for_resize(
+            pty_id,
+            conn_id,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            None,
+            |_| {},
+        )
+        .epoch
     }
 
     /// Whether `conn_id` is the current owner of `pty_id`; an unowned PTY is
@@ -510,6 +535,11 @@ impl PtySizeOwners {
 mod tests {
     use super::*;
 
+    /// A take-over that takes from whoever holds the pty.
+    const TAKE_OVER: ResizeIntent = ResizeIntent::TakeOver {
+        expected_owner: None,
+    };
+
     /// Run `claim_for_resize` and report both the verdict and whether the resize
     /// effect actually ran, so the table below can assert that "apply" is not
     /// merely reported but obeyed.
@@ -517,21 +547,10 @@ mod tests {
         owners: &PtySizeOwners,
         pty: &str,
         conn: u64,
-        takeover: bool,
-    ) -> (ResizeClaim, bool) {
-        claim_resize_expecting(owners, pty, conn, takeover, None)
-    }
-
-    /// The same, with an `expected_owner` compare-and-swap in play.
-    fn claim_resize_expecting(
-        owners: &PtySizeOwners,
-        pty: &str,
-        conn: u64,
-        takeover: bool,
-        expected_owner: Option<u64>,
+        intent: ResizeIntent,
     ) -> (ResizeClaim, bool) {
         let applied = std::cell::Cell::new(false);
-        let outcome = owners.claim_for_resize(pty, conn, takeover, expected_owner, None, |_| {
+        let outcome = owners.claim_for_resize(pty, conn, intent, None, |_| {
             applied.set(true);
         });
         (outcome, applied.get())
@@ -572,7 +591,7 @@ mod tests {
     fn the_owner_snapshot_reports_exactly_the_id_that_claimed_it() {
         let owners = PtySizeOwners::default();
         let pane = owners.next_conn_id();
-        let (out, _) = claim_resize(&owners, "p", pane, false);
+        let (out, _) = claim_resize(&owners, "p", pane, ResizeIntent::Plain);
         assert!(out.apply);
         let (owner, _epoch, _device) = owners.current_owner("p");
         assert_eq!(
@@ -584,9 +603,25 @@ mod tests {
         // And that is the value `expected_owner` is matched against: nothing else.
         let successor = owners.next_conn_id();
         let stranger = owners.next_conn_id();
-        let refused = owners.claim_for_resize("p", successor, true, Some(stranger), None, |_| {});
+        let refused = owners.claim_for_resize(
+            "p",
+            successor,
+            ResizeIntent::TakeOver {
+                expected_owner: Some(stranger),
+            },
+            None,
+            |_| {},
+        );
         assert!(!refused.apply, "a succession naming anyone else is refused");
-        let granted = owners.claim_for_resize("p", successor, true, Some(pane), None, |_| {});
+        let granted = owners.claim_for_resize(
+            "p",
+            successor,
+            ResizeIntent::TakeOver {
+                expected_owner: Some(pane),
+            },
+            None,
+            |_| {},
+        );
         assert!(
             granted.apply,
             "a succession naming the recorded owner is granted"
@@ -621,7 +656,7 @@ mod tests {
         let owners = PtySizeOwners::default();
         let a = owners.next_conn_id();
         let b = owners.next_conn_id();
-        let (out, applied) = claim_resize(&owners, "p", a, false);
+        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
         assert!(out.apply);
         assert!(out.epoch.is_some(), "an unowned pty is claimed by a resize");
         assert_eq!(out.seq, Some(1), "the first applied resize starts the seq");
@@ -630,7 +665,7 @@ mod tests {
 
         // OWNED-BY-SELF x plain: the steady-state resize. Applies, hands over
         // nothing, so no `pty.owner` is broadcast for every divider drag.
-        let (out, applied) = claim_resize(&owners, "p", a, false);
+        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
         assert_eq!(
             out,
             ResizeClaim {
@@ -643,7 +678,7 @@ mod tests {
 
         // OWNED-BY-SELF x takeover: idempotent. The owner re-asserting itself is
         // still not a handover, so it raises no card on anybody else's screen.
-        let (out, _) = claim_resize(&owners, "p", a, true);
+        let (out, _) = claim_resize(&owners, "p", a, TAKE_OVER);
         assert_eq!(
             out,
             ResizeClaim {
@@ -657,7 +692,7 @@ mod tests {
         // transferred": the resize itself must not land, or a backgrounded
         // viewer's alt-tab would still SIGWINCH the owner's child to the
         // viewer's geometry, which is the visible half of the steal.
-        let (out, applied) = claim_resize(&owners, "p", b, false);
+        let (out, applied) = claim_resize(&owners, "p", b, ResizeIntent::Plain);
         assert_eq!(
             out,
             ResizeClaim {
@@ -673,7 +708,7 @@ mod tests {
         );
 
         // OWNED-BY-OTHER x takeover: the one transferring cell.
-        let (out, applied) = claim_resize(&owners, "p", b, true);
+        let (out, applied) = claim_resize(&owners, "p", b, TAKE_OVER);
         assert!(out.apply);
         assert!(out.epoch.is_some(), "an explicit take-over hands over");
         assert!(applied);
@@ -683,7 +718,7 @@ mod tests {
         // the gap (the owner's tab closed while the card was on screen) must not
         // be refused for having nobody to take from.
         assert!(owners.release("p", b).is_some());
-        let (out, applied) = claim_resize(&owners, "p", a, true);
+        let (out, applied) = claim_resize(&owners, "p", a, TAKE_OVER);
         assert!(out.apply && out.epoch.is_some());
         assert!(applied);
     }
@@ -706,12 +741,20 @@ mod tests {
         let applied: std::cell::RefCell<Vec<(u64, u64)>> = std::cell::RefCell::new(Vec::new());
 
         // A claims at 24x80, B takes over at 30x100.
-        let first = owners.claim_for_resize("p", a, false, None, None, |_| {
+        let first = owners.claim_for_resize("p", a, ResizeIntent::Plain, None, |_| {
             applied.borrow_mut().push((a, 80));
         });
-        let second = owners.claim_for_resize("p", b, true, None, None, |_| {
-            applied.borrow_mut().push((b, 100));
-        });
+        let second = owners.claim_for_resize(
+            "p",
+            b,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            None,
+            |_| {
+                applied.borrow_mut().push((b, 100));
+            },
+        );
 
         let epoch_a = first.epoch.expect("A claimed the unowned pty");
         let epoch_b = second.epoch.expect("B took it over");
@@ -745,14 +788,14 @@ mod tests {
 
         // Interleaved: A claims, B takes over, A takes back, each apply gets
         // the next seq in the order the lock granted them.
-        let s1 = claim_resize(&owners, "p", a, false).0.seq;
-        let s2 = claim_resize(&owners, "p", b, true).0.seq;
-        let s3 = claim_resize(&owners, "p", a, true).0.seq;
+        let s1 = claim_resize(&owners, "p", a, ResizeIntent::Plain).0.seq;
+        let s2 = claim_resize(&owners, "p", b, TAKE_OVER).0.seq;
+        let s3 = claim_resize(&owners, "p", a, TAKE_OVER).0.seq;
         assert_eq!((s1, s2, s3), (Some(1), Some(2), Some(3)));
 
         // A refusal advances nothing: the resize did not land, so announcing a
         // seq for it would let a stale geometry outrank a real one.
-        let (refused, _) = claim_resize(&owners, "p", b, false);
+        let (refused, _) = claim_resize(&owners, "p", b, ResizeIntent::Plain);
         assert_eq!(refused.seq, None);
         assert_eq!(
             owners.grid_seq("p"),
@@ -762,7 +805,7 @@ mod tests {
 
         // Another pty counts on its own: the broadcasts are filtered per pty,
         // so the order only has to hold within one.
-        let (other, _) = claim_resize(&owners, "q", b, false);
+        let (other, _) = claim_resize(&owners, "q", b, ResizeIntent::Plain);
         assert_eq!(other.seq, Some(1));
         assert_eq!(owners.grid_seq("p"), 3);
     }
@@ -789,11 +832,19 @@ mod tests {
 
         // The browser claims the unowned pty at 80 columns and ENQUEUES its
         // resize: nothing has reached the child yet.
-        let queued = owners.claim_for_resize("p", browser, false, None, None, |_| {});
+        let queued = owners.claim_for_resize("p", browser, ResizeIntent::Plain, None, |_| {});
         let queued_seq = queued.seq.expect("the claim applied, so it stamped a seq");
 
         // The terminal UI takes over at 100 columns and applies immediately.
-        let direct = owners.claim_for_resize("p", tui, true, None, None, |_| {});
+        let direct = owners.claim_for_resize(
+            "p",
+            tui,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            None,
+            |_| {},
+        );
         let direct_seq = direct.seq.expect("the take-over applied");
         assert!(
             owners.accept_grid_apply("p", direct_seq, 30, 100),
@@ -816,7 +867,15 @@ mod tests {
         // A fresh claim by the demoted browser is newer, so it passes again: the
         // gate drops stale applies, it does not wedge the pty.
         let again = owners
-            .claim_for_resize("p", browser, true, None, None, |_| {})
+            .claim_for_resize(
+                "p",
+                browser,
+                ResizeIntent::TakeOver {
+                    expected_owner: None,
+                },
+                None,
+                |_| {},
+            )
             .seq
             .expect("the take-over applied");
         assert!(owners.accept_grid_apply("p", again, 24, 80));
@@ -828,7 +887,10 @@ mod tests {
         let owners = PtySizeOwners::default();
         let conn = owners.next_conn_id();
 
-        let first = claim_resize(&owners, "p", conn, false).0.seq.unwrap();
+        let first = claim_resize(&owners, "p", conn, ResizeIntent::Plain)
+            .0
+            .seq
+            .unwrap();
         assert!(
             owners.accept_grid_apply("p", first, 24, 80),
             "nothing applied yet"
@@ -840,7 +902,10 @@ mod tests {
 
         // Another pty is stamped and gated on its own counter, exactly as the
         // broadcasts are filtered per pty.
-        let other = claim_resize(&owners, "q", conn, false).0.seq.unwrap();
+        let other = claim_resize(&owners, "q", conn, ResizeIntent::Plain)
+            .0
+            .seq
+            .unwrap();
         assert!(owners.accept_grid_apply("q", other, 24, 80));
     }
 
@@ -849,8 +914,11 @@ mod tests {
         let owners = PtySizeOwners::default();
         let browser = owners.next_conn_id();
         let tui = owners.next_conn_id();
-        let stale = claim_resize(&owners, "p", browser, false).0.seq.unwrap();
-        let newest = claim_resize(&owners, "p", tui, true).0.seq.unwrap();
+        let stale = claim_resize(&owners, "p", browser, ResizeIntent::Plain)
+            .0
+            .seq
+            .unwrap();
+        let newest = claim_resize(&owners, "p", tui, TAKE_OVER).0.seq.unwrap();
 
         assert!(owners.accept_grid_apply("p", newest, 30, 100));
         let calls = std::cell::Cell::new(0);
@@ -872,8 +940,11 @@ mod tests {
         let owners = PtySizeOwners::default();
         let browser = owners.next_conn_id();
         let tui = owners.next_conn_id();
-        let older = claim_resize(&owners, "p", browser, false).0.seq.unwrap();
-        let newer = claim_resize(&owners, "p", tui, true).0.seq.unwrap();
+        let older = claim_resize(&owners, "p", browser, ResizeIntent::Plain)
+            .0
+            .seq
+            .unwrap();
+        let newer = claim_resize(&owners, "p", tui, TAKE_OVER).0.seq.unwrap();
         let child = std::cell::Cell::new((0, 0));
         let calls = std::cell::Cell::new(0);
 
@@ -929,7 +1000,7 @@ mod tests {
 
         // A claim is granted and the resize is STAMPED, but nothing has applied
         // it yet: this is the window a handshake can land in.
-        let stamped = claim_resize(&owners, "p", conn, false)
+        let stamped = claim_resize(&owners, "p", conn, ResizeIntent::Plain)
             .0
             .seq
             .expect("the claim was granted");
@@ -967,14 +1038,22 @@ mod tests {
         // The browser's resize is accepted first, but the interleaving parks it
         // before it reaches the child.
         let queued = owners
-            .claim_for_resize("p", browser, false, None, None, |_| {})
+            .claim_for_resize("p", browser, ResizeIntent::Plain, None, |_| {})
             .seq
             .expect("granted");
         assert!(owners.accept_grid_apply("p", queued, 24, 80));
 
         // The terminal UI takes over, accepts, and reaches the child first.
         let direct = owners
-            .claim_for_resize("p", tui, true, None, None, |_| {})
+            .claim_for_resize(
+                "p",
+                tui,
+                ResizeIntent::TakeOver {
+                    expected_owner: None,
+                },
+                None,
+                |_| {},
+            )
             .seq
             .expect("granted");
         assert!(owners.accept_grid_apply("p", direct, 50, 150));
@@ -1100,7 +1179,8 @@ mod tests {
         let b = owners.next_conn_id();
 
         // A resize claim records the claimer's device.
-        let claim = owners.claim_for_resize("p", a, false, None, Some("Desktop UA"), |_| {});
+        let claim =
+            owners.claim_for_resize("p", a, ResizeIntent::Plain, Some("Desktop UA"), |_| {});
         assert!(claim.epoch.is_some(), "the unowned pty was claimed");
         let (owner, _, device) = owners.current_owner("p");
         assert_eq!(owner, Some(a));
@@ -1112,7 +1192,15 @@ mod tests {
 
         // A take-over replaces both halves together; a claimer that sent no
         // User-Agent leaves the device empty rather than inheriting the old one.
-        let takeover = owners.claim_for_resize("p", b, true, None, None, |_| {});
+        let takeover = owners.claim_for_resize(
+            "p",
+            b,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            None,
+            |_| {},
+        );
         assert!(takeover.epoch.is_some());
         assert_eq!(
             owners.current_owner("p"),
@@ -1234,11 +1322,11 @@ mod tests {
         let a_new = owners.next_conn_id();
 
         // A drives the pty, then its socket dies and B claims it.
-        let (out, _) = claim_resize(&owners, "p", a_old, false);
+        let (out, _) = claim_resize(&owners, "p", a_old, ResizeIntent::Plain);
         assert!(out.apply);
         assert!(owners.release("p", a_old).is_some());
         let applied: std::cell::RefCell<Vec<(u64, u16)>> = std::cell::RefCell::new(Vec::new());
-        owners.claim_for_resize("p", b, false, None, None, |_| {
+        owners.claim_for_resize("p", b, ResizeIntent::Plain, None, |_| {
             applied.borrow_mut().push((b, 100));
         });
         assert!(owners.is_owner("p", b));
@@ -1247,9 +1335,17 @@ mod tests {
         // dead connection it believes still owns the pty. B owns it now, so the
         // whole frame is refused: no apply, no epoch, no seq, nothing to
         // broadcast.
-        let out = owners.claim_for_resize("p", a_new, true, Some(a_old), None, |_| {
-            applied.borrow_mut().push((a_new, 80));
-        });
+        let out = owners.claim_for_resize(
+            "p",
+            a_new,
+            ResizeIntent::TakeOver {
+                expected_owner: Some(a_old),
+            },
+            None,
+            |_| {
+                applied.borrow_mut().push((a_new, 80));
+            },
+        );
         assert_eq!(
             out,
             ResizeClaim {
@@ -1277,8 +1373,19 @@ mod tests {
         let ghost = owners.next_conn_id();
         let returning = owners.next_conn_id();
 
-        assert!(claim_resize(&owners, "p", ghost, false).0.apply);
-        let (out, applied) = claim_resize_expecting(&owners, "p", returning, true, Some(ghost));
+        assert!(
+            claim_resize(&owners, "p", ghost, ResizeIntent::Plain)
+                .0
+                .apply
+        );
+        let (out, applied) = claim_resize(
+            &owners,
+            "p",
+            returning,
+            ResizeIntent::TakeOver {
+                expected_owner: Some(ghost),
+            },
+        );
         assert!(
             out.apply,
             "the expectation held, so the transfer is granted"
@@ -1297,8 +1404,8 @@ mod tests {
         let a = owners.next_conn_id();
         let b = owners.next_conn_id();
 
-        assert!(claim_resize(&owners, "p", b, false).0.apply);
-        let (out, applied) = claim_resize_expecting(&owners, "p", a, true, None);
+        assert!(claim_resize(&owners, "p", b, ResizeIntent::Plain).0.apply);
+        let (out, applied) = claim_resize(&owners, "p", a, TAKE_OVER);
         assert!(out.apply && out.epoch.is_some());
         assert!(applied);
         assert!(owners.is_owner("p", a));
@@ -1315,7 +1422,14 @@ mod tests {
         let ghost = owners.next_conn_id();
         let returning = owners.next_conn_id();
 
-        let (out, applied) = claim_resize_expecting(&owners, "p", returning, true, Some(ghost));
+        let (out, applied) = claim_resize(
+            &owners,
+            "p",
+            returning,
+            ResizeIntent::TakeOver {
+                expected_owner: Some(ghost),
+            },
+        );
         assert_eq!(
             out,
             ResizeClaim {
@@ -1328,35 +1442,34 @@ mod tests {
         assert!(owners.current_owner("p").0.is_none());
 
         // And the plain attach that follows claims it, unflagged.
-        let (out, applied) = claim_resize(&owners, "p", returning, false);
+        let (out, applied) = claim_resize(&owners, "p", returning, ResizeIntent::Plain);
         assert!(out.apply && out.epoch.is_some());
         assert!(applied);
     }
 
-    /// `expected_owner` is a qualifier on the take-over flag and nothing else: a
-    /// plain resize is decided exactly as it always was, so a client that sends
-    /// the field on every frame cannot accidentally change its own steady-state
-    /// resizes or its first attach.
+    /// `expected_owner` is a qualifier on a take-over and nothing else: a
+    /// plain resize, which carries none, is decided exactly as it always was,
+    /// so a client that sends the field on every frame cannot accidentally
+    /// change its own steady-state resizes or its first attach.
     #[test]
     fn expected_owner_is_ignored_when_the_frame_is_not_a_takeover() {
         let owners = PtySizeOwners::default();
         let a = owners.next_conn_id();
         let b = owners.next_conn_id();
-        let stranger = owners.next_conn_id();
 
         // UNOWNED x plain, with a bogus expectation: still claims.
-        let (out, applied) = claim_resize_expecting(&owners, "p", a, false, Some(stranger));
+        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
         assert!(out.apply && out.epoch.is_some());
         assert!(applied);
 
         // OWNED-BY-SELF x plain, with a bogus expectation: still applies.
-        let (out, applied) = claim_resize_expecting(&owners, "p", a, false, Some(stranger));
+        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
         assert!(out.apply && out.epoch.is_none());
         assert!(applied);
 
         // OWNED-BY-OTHER x plain, with an expectation that actually MATCHES:
         // still refused, because only a take-over ever transfers.
-        let (out, applied) = claim_resize_expecting(&owners, "p", b, false, Some(a));
+        let (out, applied) = claim_resize(&owners, "p", b, ResizeIntent::Plain);
         assert_eq!(
             out,
             ResizeClaim {
@@ -1387,7 +1500,15 @@ mod tests {
             let gate = gate.clone();
             std::thread::spawn(move || {
                 gate.wait();
-                owners.claim_for_resize("p", taker, true, None, None, |_| {});
+                owners.claim_for_resize(
+                    "p",
+                    taker,
+                    ResizeIntent::TakeOver {
+                        expected_owner: None,
+                    },
+                    None,
+                    |_| {},
+                );
                 order.lock().unwrap().push("takeover");
             })
         };
@@ -1428,7 +1549,15 @@ mod tests {
             let gate = gate.clone();
             std::thread::spawn(move || {
                 gate.wait();
-                owners.claim_for_resize("p", taker, true, None, None, |_| {});
+                owners.claim_for_resize(
+                    "p",
+                    taker,
+                    ResizeIntent::TakeOver {
+                        expected_owner: None,
+                    },
+                    None,
+                    |_| {},
+                );
                 order.lock().unwrap().push("takeover");
             })
         };

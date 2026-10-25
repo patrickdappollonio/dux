@@ -395,8 +395,13 @@ impl App {
         let outcome = seat.owners.claim_for_resize(
             pty_id,
             seat.conn_id,
-            takeover,
-            None,
+            if takeover {
+                dux_core::pty_owners::ResizeIntent::TakeOver {
+                    expected_owner: None,
+                }
+            } else {
+                dux_core::pty_owners::ResizeIntent::Plain
+            },
             Some(TUI_DEVICE_LABEL),
             |_| {},
         );
@@ -891,7 +896,13 @@ mod tests {
         // The browser claims and ENQUEUES: its apply is still in the actor queue.
         let queued = seat
             .owners
-            .claim_for_resize("s1", browser, false, None, Some("Chrome"), |_| {})
+            .claim_for_resize(
+                "s1",
+                browser,
+                dux_core::pty_owners::ResizeIntent::Plain,
+                Some("Chrome"),
+                |_| {},
+            )
             .seq
             .expect("the browser's claim applied");
 
@@ -1071,7 +1082,13 @@ mod tests {
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         let browser = seat.owners.next_conn_id();
         seat.owners
-            .claim_for_resize("session-1-slot", browser, false, None, device, |_| {})
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                dux_core::pty_owners::ResizeIntent::Plain,
+                device,
+                |_| {},
+            )
             .epoch
             .expect("the browser claimed the pty");
         wait_for_child_output(&app);
@@ -1580,8 +1597,9 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                true,
-                None,
+                dux_core::pty_owners::ResizeIntent::TakeOver {
+                    expected_owner: None,
+                },
                 Some("Chrome"),
                 |_| {},
             )
@@ -1676,8 +1694,7 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some("Chrome"),
                 |_| {},
             )
@@ -2308,8 +2325,7 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some(REAL_CHROME_UA),
                 |_| {},
             )
@@ -2383,8 +2399,7 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some(REAL_CHROME_UA),
                 |_| {},
             )
@@ -2643,8 +2658,7 @@ mod tests {
         let claim = seat.owners.claim_for_resize(
             "session-1-slot",
             browser,
-            false,
-            None,
+            dux_core::pty_owners::ResizeIntent::Plain,
             Some(REAL_CHROME_UA),
             |_| {},
         );
@@ -2669,8 +2683,7 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some(REAL_CHROME_UA),
                 |_| {},
             )
@@ -3576,8 +3589,7 @@ mod tests {
         let attach = seat.owners.claim_for_resize(
             "session-1-slot",
             browser,
-            false,
-            None,
+            dux_core::pty_owners::ResizeIntent::Plain,
             Some(REAL_CHROME_UA),
             |_| {},
         );
@@ -3594,8 +3606,9 @@ mod tests {
         let takeover = seat.owners.claim_for_resize(
             "session-1-slot",
             browser,
-            true,
-            None,
+            dux_core::pty_owners::ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
             Some(REAL_CHROME_UA),
             |_| {},
         );
@@ -3643,8 +3656,7 @@ mod tests {
             .claim_for_resize(
                 "session-1-slot",
                 browser,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
                 Some(REAL_CHROME_UA),
                 |_| {},
             )
