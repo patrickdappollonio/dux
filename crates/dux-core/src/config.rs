@@ -2619,7 +2619,7 @@ pub fn expand_env_vars(raw: &str) -> Option<String> {
                 return None;
             }
             if let Ok(value) = std::env::var(&var_name) {
-                result.push_str(&value)
+                result.push_str(&value);
             } else {
                 result.push('$');
                 if braced {

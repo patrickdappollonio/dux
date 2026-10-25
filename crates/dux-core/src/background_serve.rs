@@ -86,7 +86,7 @@ impl TuiOwnership {
         let mut skipped = Vec::new();
         for pty_id in &running {
             if let Some(event) = self.claim_if_free(pty_id) {
-                claimed.push(event)
+                claimed.push(event);
             } else {
                 let (holder, _, _) = self.owners.current_owner(pty_id);
                 skipped.push((pty_id.clone(), holder));
