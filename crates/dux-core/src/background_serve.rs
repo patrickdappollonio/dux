@@ -209,6 +209,16 @@ pub struct ServiceOutcome {
     pub statuses: Vec<crate::wire::WireStatus>,
 }
 
+/// What a background serve claims for the terminal UI as it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServeClaims {
+    /// Every running pty nobody drives, before any listener accepts a
+    /// connection.
+    UndrivenPtys,
+    /// Nothing: every pty stays as it is.
+    Nothing,
+}
+
 /// A web server the terminal UI services once per loop iteration, lending it the
 /// engine for each call. [`Self::has_core`] decides whether the engine is lent;
 /// [`Self::is_serving`] decides everything a person sees or a browser drives.
@@ -281,14 +291,15 @@ pub trait BackgroundServeCompanion {
 
     /// Start serving on `listeners`, which the caller already bound so a bind
     /// failure tears nothing down. Returns the URLs, or a status-line message.
-    /// `claim_before_serving` claims every undriven running pty for the terminal
-    /// UI before any listener accepts a connection; `startup` opens the log's banner.
+    /// `claims` says whether every undriven running pty is claimed for the
+    /// terminal UI before any listener accepts a connection; `startup` opens
+    /// the log's banner.
     fn start(
         &mut self,
         engine: &mut Engine,
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
-        claim_before_serving: bool,
+        claims: ServeClaims,
         startup: crate::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String>;
 

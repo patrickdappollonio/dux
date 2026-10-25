@@ -208,9 +208,10 @@ impl BackgroundServeCompanion for WebCompanion {
         engine: &mut Engine,
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
-        claim_before_serving: bool,
+        claims: dux_core::background_serve::ServeClaims,
         startup: dux_core::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String> {
+        let claim_before_serving = claims == dux_core::background_serve::ServeClaims::UndrivenPtys;
         if self.is_serving() {
             return Err("The web UI is already serving in the background.".to_string());
         }

@@ -498,7 +498,11 @@ impl App {
                         &mut self.engine,
                         listeners,
                         urls.clone(),
-                        claim_before_serving,
+                        if claim_before_serving {
+                            dux_core::background_serve::ServeClaims::UndrivenPtys
+                        } else {
+                            dux_core::background_serve::ServeClaims::Nothing
+                        },
                         startup,
                     ) {
                         Ok(urls) => {
@@ -1300,7 +1304,7 @@ pub(crate) mod tests {
             engine: &mut Engine,
             _listeners: Vec<std::net::TcpListener>,
             _urls: Vec<String>,
-            claim_before_serving: bool,
+            claims: dux_core::background_serve::ServeClaims,
             startup: dux_core::serve_log::StartupNotes,
         ) -> Result<Vec<String>, String> {
             self.recorded
@@ -1310,7 +1314,7 @@ pub(crate) mod tests {
                 .push(startup);
             // What the real serve does: seed the claims before it is serving,
             // then announce them once it is.
-            let seeded = if claim_before_serving {
+            let seeded = if claims == dux_core::background_serve::ServeClaims::UndrivenPtys {
                 self.ownership.claim_every_running_pty(engine)
             } else {
                 Vec::new()
