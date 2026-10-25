@@ -568,7 +568,7 @@ fn clear_positions(table: &mut Table) {
 
 /// `root` when `seen` is the file itself (see [`merges_entries`]).
 fn union_tables(seen: &mut Table, written: &Table, root: bool) {
-    for (key, item) in written.iter() {
+    for (key, item) in written {
         match seen.get_mut(key) {
             None => {
                 seen.insert(key, item.clone());
@@ -792,7 +792,7 @@ fn merge_changed_at(
     ours: &Table,
     root: bool,
 ) {
-    for (key, ours_item) in ours.iter() {
+    for (key, ours_item) in ours {
         let Some(base_side) = base else {
             // No base: the full patch, through the same in-place writes.
             match (ours_item, disk.get(key), target.get_mut(key)) {
@@ -2579,7 +2579,7 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
     let mut carried: Vec<Option<CarriedProject>> = Vec::new();
     match doc.get("projects") {
         Some(Item::ArrayOfTables(existing)) => {
-            for table in existing.iter() {
+            for table in existing {
                 let keys: Vec<(Key, Item)> = table
                     .iter()
                     .map(|(name, _)| name.to_string())
@@ -2611,7 +2611,7 @@ fn unmanaged_project_keys(doc: &DocumentMut) -> Vec<Option<CarriedProject>> {
             }
         }
         Some(Item::Value(Value::Array(existing))) => {
-            for value in existing.iter() {
+            for value in existing {
                 let Some(inline) = value.as_inline_table() else {
                     continue;
                 };
@@ -2999,7 +2999,7 @@ fn collect_unmanaged(
     carry: &mut Vec<CarriedLeaf>,
     dropped: &mut Vec<String>,
 ) {
-    for (key, item) in orig.iter() {
+    for (key, item) in orig {
         path.push(PathSeg::Key(key.to_string()));
 
         // An orphaned section holding a password hash is never cleaned up:

@@ -3118,7 +3118,7 @@ impl Engine {
     /// their override; projects without one pick up the new global default.
     pub fn refresh_project_defaults(&mut self) {
         let fallback = self.config.default_provider();
-        for project in self.projects.iter_mut() {
+        for project in &mut self.projects {
             project.default_provider = project
                 .explicit_default_provider
                 .clone()

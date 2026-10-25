@@ -3373,7 +3373,7 @@ mod recreate_tests {
     ) -> (Engine, crate::test_scratch::ScratchDir, tempfile::TempDir) {
         let (mut engine, tmp) = engine_with_a_missing_working_copy();
         let cwd = tempfile::tempdir().expect("a directory for the stand-in processes");
-        for (name, provider) in engine.config.providers.commands.iter_mut() {
+        for (name, provider) in &mut engine.config.providers.commands {
             if name == "claude" {
                 provider.command = cwd.path().join("claude").to_string_lossy().into_owned();
             } else {

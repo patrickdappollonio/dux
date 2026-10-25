@@ -399,7 +399,7 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
     // lookup. The original form is also tried as a fallback to forgive any
     // legacy hyphenated id that may already live in someone's config.
     let candidates: [String; 2] = [name.replace('_', "-"), name.to_string()];
-    for candidate in candidates.iter() {
+    for candidate in &candidates {
         if let Some(mut theme) = opaline::load_by_name(candidate) {
             register_dux_defaults(&mut theme);
             return Ok(Theme::from_opaline(&theme));

@@ -5221,7 +5221,7 @@ fn recovery_plan(doc: &toml::Table) -> Vec<Recovery> {
     // ok). For a bad section, drop only the offending FIELDS where each can be
     // isolated; otherwise reset the whole section.
     let mut plan = Vec::new();
-    for (section, value) in doc.iter() {
+    for (section, value) in doc {
         if section_solo_ok(section, value.clone()) {
             continue;
         }

@@ -1262,7 +1262,7 @@ pub fn append_blocked_entry(
                     .unwrap_or_default()
                     .to_string()
             };
-            for value in array.iter() {
+            for value in &array {
                 if folds(value) {
                     let dropped = prefix_of(value);
                     carry = Some(match carry.take() {
@@ -1635,7 +1635,7 @@ pub fn shown_file_text(
         out: &mut Vec<Entry>,
         line_of: &dyn Fn(usize) -> usize,
     ) {
-        for (key, item) in table.iter() {
+        for (key, item) in table {
             path.push(Step::Key(key.to_string()));
             match item {
                 toml_edit::Item::Value(value) => {
@@ -1728,7 +1728,7 @@ pub fn shown_file_text(
         }
         match value {
             toml_edit::Value::InlineTable(table) => {
-                for (key, child) in table.iter() {
+                for (key, child) in table {
                     let mut at = path.to_vec();
                     at.push(Step::Key(key.to_string()));
                     mask = mask.max(mask_of(&at, child, show, held_back, binding_understood));

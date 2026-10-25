@@ -2845,7 +2845,7 @@ mod tests {
         // stronger check than a handful of spot assertions.
         let mut normalized = after.clone();
         normalized.keys.bindings = before.keys.bindings.clone();
-        for (name, provider) in normalized.providers.commands.iter_mut() {
+        for (name, provider) in &mut normalized.providers.commands {
             if before.providers.commands[name]
                 .resume_wait_timeout_ms
                 .is_none()

@@ -1569,7 +1569,7 @@ mod tests {
         let notes = sample_notes();
         let notes_lines = whats_new_lines(&notes, prose_cols, &colors);
         for group in [&lines, &notes_lines] {
-            for line in group.iter() {
+            for line in group {
                 let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
                 assert!(
                     width <= prose_cols as usize,

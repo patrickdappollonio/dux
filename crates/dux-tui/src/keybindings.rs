@@ -2273,8 +2273,8 @@ pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
             // Find the scopes a keystroke could reach both bindings through,
             // each named the way it will be reported.
             let mut shared_scopes: Vec<BindingScope> = Vec::new();
-            for sa in scopes_a.iter() {
-                for sb in scopes_b.iter() {
+            for sa in *scopes_a {
+                for sb in *scopes_b {
                     if let Some(scope) = conflict_scope(*sa, *sb)
                         && !shared_scopes.contains(&scope)
                     {

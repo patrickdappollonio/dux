@@ -7981,7 +7981,7 @@ mod tests {
         let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
 
         // Mutate the sessions spine WITHOUT touching the version counters.
-        for s in engine.sessions.iter_mut() {
+        for s in &mut engine.sessions {
             if s.id == "s1" {
                 s.title = Some("renamed-out-of-band".to_string());
             }

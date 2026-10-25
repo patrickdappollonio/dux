@@ -646,7 +646,7 @@ impl Operations {
     /// that made a thing holds it from then on.
     pub fn hold(&self, key: &str, hold: Hold) {
         self.with(|registry| {
-            for (id, record) in registry.records.iter_mut() {
+            for (id, record) in &mut registry.records {
                 if record.end.is_none()
                     && (id.as_str() == key || record.awaiting.as_deref() == Some(key))
                     && !record.holds.contains(&hold)
