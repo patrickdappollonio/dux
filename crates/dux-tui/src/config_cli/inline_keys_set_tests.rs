@@ -43,8 +43,7 @@ fn set_says_the_terminal_ui_will_not_start_with_a_file_it_refuses() {
     assert!(
         crate::config::ensure_config(&paths).is_err()
             || crate::config::ensure_config(&paths)
-                .ok()
-                .is_some_and(|c| crate::config::validate_keys(&c.keys).is_err()),
+                .is_ok_and(|c| crate::config::validate_keys(&c.keys).is_err()),
         "precondition: the terminal UI refuses the file"
     );
     assert!(

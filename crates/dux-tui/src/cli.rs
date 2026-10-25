@@ -600,9 +600,7 @@ fn run_regenerate(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
 /// Looks at the text itself too, so a password inside a section dux cannot
 /// load (or a file that is not TOML) is still warned about.
 fn regenerate_password_note(current: &str) -> Option<&'static str> {
-    let loaded = dux_core::config::auth_section_of(current)
-        .ok()
-        .is_some_and(|auth| auth.has_password());
+    let loaded = dux_core::config::auth_section_of(current).is_ok_and(|auth| auth.has_password());
     let written = current.lines().any(|line| {
         let Some(at) = line.find("password_hash") else {
             return false;

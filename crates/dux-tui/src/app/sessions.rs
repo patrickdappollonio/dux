@@ -5962,8 +5962,7 @@ mod tests {
         if std::process::Command::new("id")
             .arg("-u")
             .output()
-            .ok()
-            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         {
             return; // root bypasses the read-only trick
         }

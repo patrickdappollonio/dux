@@ -1363,8 +1363,7 @@ pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
             &remote_ref,
         ])
         .output()
-        .ok()
-        .is_some_and(|o| o.status.success());
+        .is_ok_and(|o| o.status.success());
     if remote {
         return Some(BranchLocation::Remote);
     }
@@ -2328,8 +2327,7 @@ fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
             ref_name,
         ])
         .output()
-        .ok()
-        .is_some_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Where [`create_worktree_existing_branch`] puts the worktree for `branch_name`
@@ -14287,8 +14285,7 @@ mod tests {
         Command::new("id")
             .arg("-u")
             .output()
-            .ok()
-            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
     }
 
     #[test]
