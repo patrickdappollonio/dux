@@ -35,15 +35,22 @@ pub enum Shape {
     Ids,
 }
 
+/// Whether `-q` asked for the ids alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdsOnly {
+    /// No `-q`: the format decides.
+    No,
+    /// `-q`: the ids, one per line.
+    Yes,
+}
+
 impl Shape {
-    /// `-q` asks for the ids whatever the format says.
-    pub fn of(json: bool, quiet: bool) -> Self {
-        if quiet {
-            Shape::Ids
-        } else if json {
-            Shape::Json
-        } else {
-            Shape::Table
+    /// The shape a list prints in: `format` (a table or JSON), unless `-q`
+    /// asks for the ids whatever the format says.
+    pub fn of(format: Shape, ids_only: IdsOnly) -> Self {
+        match ids_only {
+            IdsOnly::Yes => Shape::Ids,
+            IdsOnly::No => format,
         }
     }
 }
@@ -168,8 +175,17 @@ pub fn select_shown<'a, T>(
     }
 }
 
+/// Whether a change still needs the user's yes, or `--yes` already gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consent {
+    /// Ask on the terminal.
+    Ask,
+    /// `--yes` answered for the user.
+    Given,
+}
+
 /// Ask `question` about `target` before a change, on `terminal` (the prompt to stderr, the
-/// answer from stdin); `yes` answers for the user.
+/// answer from stdin), unless `consent` was already given.
 ///
 /// # Errors
 ///
@@ -177,10 +193,10 @@ pub fn select_shown<'a, T>(
 pub fn confirm(
     question: &str,
     target: &str,
-    yes: bool,
+    consent: Consent,
     terminal: Option<(&mut dyn BufRead, &mut dyn Write)>,
 ) -> Result<(), CliError> {
-    if yes {
+    if consent == Consent::Given {
         return Ok(());
     }
     let Some((input, prompt)) = terminal else {
@@ -291,10 +307,10 @@ mod tests {
 
     #[test]
     fn quiet_asks_for_ids_whatever_the_format() {
-        assert_eq!(Shape::of(true, true), Shape::Ids);
-        assert_eq!(Shape::of(false, true), Shape::Ids);
-        assert_eq!(Shape::of(true, false), Shape::Json);
-        assert_eq!(Shape::of(false, false), Shape::Table);
+        assert_eq!(Shape::of(Shape::Json, IdsOnly::Yes), Shape::Ids);
+        assert_eq!(Shape::of(Shape::Table, IdsOnly::Yes), Shape::Ids);
+        assert_eq!(Shape::of(Shape::Json, IdsOnly::No), Shape::Json);
+        assert_eq!(Shape::of(Shape::Table, IdsOnly::No), Shape::Table);
     }
 
     #[test]
@@ -327,12 +343,16 @@ mod tests {
 
     #[test]
     fn a_change_without_a_terminal_or_yes_is_refused() {
-        let refused = confirm("Delete agent web", "this machine's dux", false, None).unwrap_err();
+        let refused =
+            confirm("Delete agent web", "this machine's dux", Consent::Ask, None).unwrap_err();
         assert_eq!(refused.exit, Exit::Refused);
         assert!(refused.message.contains("--yes"), "{}", refused.message);
         assert!(refused.message.contains("Delete agent web"));
 
-        assert_eq!(confirm("Delete agent web", "x", true, None), Ok(()));
+        assert_eq!(
+            confirm("Delete agent web", "x", Consent::Given, None),
+            Ok(())
+        );
 
         let mut prompt = Vec::new();
         let mut yes = std::io::Cursor::new(b"y\n".to_vec());
@@ -340,7 +360,7 @@ mod tests {
             confirm(
                 "Delete agent web",
                 "remote work",
-                false,
+                Consent::Ask,
                 Some((&mut yes, &mut prompt))
             ),
             Ok(())
@@ -354,8 +374,13 @@ mod tests {
 
         let mut prompt = Vec::new();
         let mut no = std::io::Cursor::new(b"\n".to_vec());
-        let declined =
-            confirm("Delete agent web", "x", false, Some((&mut no, &mut prompt))).unwrap_err();
+        let declined = confirm(
+            "Delete agent web",
+            "x",
+            Consent::Ask,
+            Some((&mut no, &mut prompt)),
+        )
+        .unwrap_err();
         assert_eq!(declined.exit, Exit::Refused);
     }
 

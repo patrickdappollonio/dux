@@ -20,7 +20,7 @@ use super::output::{self, Listing, Row, Shape};
 use super::transport::Method;
 use super::{CliError, Exit};
 use crate::config::DuxPaths;
-use crate::config_keys::NOT_SHOWN;
+use crate::config_keys::{HeldBack, NOT_SHOWN};
 use crate::config_resources::{
     self as resources, EnvItem, KeyItem, MacroItem, ProviderItem, ThemeItem,
 };
@@ -67,15 +67,15 @@ fn macro_items(source: &Source<'_>) -> Result<Vec<MacroItem>, CliError> {
     }
 }
 
-fn env_items(source: &Source<'_>, show: bool) -> Result<Vec<EnvItem>, CliError> {
+fn env_items(source: &Source<'_>, values: HeldBack) -> Result<Vec<EnvItem>, CliError> {
     match source {
         Source::File(paths) => {
             let file = file(paths)?;
-            Ok(resources::env(&file.raw, &file.config.env, show))
+            Ok(resources::env(&file.raw, &file.config.env, values))
         }
         Source::Dux(client) => {
             let boot: Bootstrap = client.get_json("/api/v1/bootstrap")?;
-            Ok(resources::env("", &boot.global_env, show))
+            Ok(resources::env("", &boot.global_env, values))
         }
     }
 }
@@ -189,9 +189,9 @@ pub fn macros_show(source: &Source<'_>, name: &str) -> Result<String, CliError> 
     Ok(output::details(&to_json(item)))
 }
 
-/// `dux env ls`: names only, unless `show`.
-pub fn env_ls(source: &Source<'_>, show: bool, shape: Shape) -> Result<String, CliError> {
-    let rows = env_items(source, show)?
+/// `dux env ls`: names only, unless [`HeldBack::Shown`].
+pub fn env_ls(source: &Source<'_>, values: HeldBack, shape: Shape) -> Result<String, CliError> {
+    let rows = env_items(source, values)?
         .into_iter()
         .map(|item| {
             let mut cells = vec![item.name.clone()];
@@ -203,7 +203,7 @@ pub fn env_ls(source: &Source<'_>, show: bool, shape: Shape) -> Result<String, C
             }
         })
         .collect();
-    let headers = if show {
+    let headers = if values == HeldBack::Shown {
         vec!["NAME", "VALUE"]
     } else {
         vec!["NAME"]

@@ -340,14 +340,22 @@ mod tests {
         (fake, lock, client)
     }
 
-    /// A followed log's reply: these lines, `gap` apart, then its last chunk
-    /// when `ends`, else the connection just closes.
-    fn chunked(lines: &[&str], gap: std::time::Duration, ends: bool) -> Reply {
+    /// How a followed log's reply ends.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Ending {
+        /// With its last chunk.
+        LastChunk,
+        /// The connection just closes.
+        Cut,
+    }
+
+    /// A followed log's reply: these lines, `gap` apart, then `ending`.
+    fn chunked(lines: &[&str], gap: std::time::Duration, ending: Ending) -> Reply {
         let mut pieces = vec!["HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_string()];
         for line in lines {
             pieces.push(format!("{:x}\r\n{line}\n\r\n", line.len() + 1));
         }
-        if ends {
+        if ending == Ending::LastChunk {
             pieces.push("0\r\n\r\n".to_string());
         }
         Reply::Slow(pieces, gap)
@@ -391,7 +399,7 @@ mod tests {
                 chunked(
                     &["one", "two", "three", "four"],
                     std::time::Duration::from_millis(300),
-                    false,
+                    Ending::Cut,
                 )
             } else {
                 Reply::json(404, "{}")
@@ -432,7 +440,7 @@ mod tests {
         let dir = private_dir();
         let (_fake, _lock, client) = local_dux(dir.path(), |path| match path {
             "/api/v1/server/log?follow=true&lines=1" => {
-                chunked(&["only"], std::time::Duration::ZERO, true)
+                chunked(&["only"], std::time::Duration::ZERO, Ending::LastChunk)
             }
             "/api/v1/server/log?follow=true&lines=4" => Reply::Raw(format!(
                 "HTTP/1.1 500 X\r\ncontent-length: 70000\r\n\r\n{}",
@@ -449,7 +457,7 @@ mod tests {
                 Reply::Raw("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".to_string())
             }
             "/api/v1/server/log?follow=true&lines=3" => {
-                chunked(&["cut"], std::time::Duration::ZERO, false)
+                chunked(&["cut"], std::time::Duration::ZERO, Ending::Cut)
             }
             "/api/v1/server/log?follow=true&lines=2" => Reply::json(409, r#"{"error":"no log"}"#),
             _ => Reply::json(404, "{}"),

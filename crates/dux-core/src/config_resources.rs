@@ -17,7 +17,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, DuxPaths, ProviderCommandConfig};
-use crate::config_keys::{NOT_SHOWN, ValueForm};
+use crate::config_keys::{HeldBack, NOT_SHOWN, ValueForm};
 
 /// A config file as read for a listing: its text (empty when there is no
 /// file yet) and what dux loads from it.
@@ -167,9 +167,10 @@ pub struct EnvItem {
     pub value: Option<String>,
 }
 
-/// The global environment, by name; with `show`, each value through the one
-/// value printer.
-pub fn env(raw: &str, env: &BTreeMap<String, String>, show: bool) -> Vec<EnvItem> {
+/// The global environment, by name; with [`HeldBack::Shown`], each value
+/// through the one value printer.
+pub fn env(raw: &str, env: &BTreeMap<String, String>, values: HeldBack) -> Vec<EnvItem> {
+    let show = values == HeldBack::Shown;
     env.iter()
         .map(|(name, value)| {
             let (shown, _) = shown_name(raw, "env", name);

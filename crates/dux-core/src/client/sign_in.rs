@@ -11,7 +11,7 @@ use super::{CliError, Exit};
 const LABEL: &str = "dux CLI";
 
 fn send(name: &str, remote: &Remote, request: &Request) -> Result<Response, CliError> {
-    HttpTransport::new(&remote.url, remote.insecure)
+    HttpTransport::new(&remote.url, remote.plain_http())
         .send(request)
         .map_err(|error| match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why),

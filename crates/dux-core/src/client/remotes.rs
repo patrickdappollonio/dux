@@ -21,6 +21,16 @@ pub struct Remotes {
     pub remotes: BTreeMap<String, Remote>,
 }
 
+/// Where plain HTTP may go: only to this machine and the tailnet, or, for a
+/// remote added with `--insecure`, anywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlainHttp {
+    /// Only to this machine and the tailnet.
+    SafeNetworksOnly,
+    /// Anywhere: the remote was added with `--insecure`.
+    Anywhere,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
     pub url: String,
@@ -37,6 +47,17 @@ pub struct Remote {
     /// check only, never an auth or trust input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+}
+
+impl Remote {
+    /// Where plain HTTP to this remote may go, as it was added.
+    pub fn plain_http(&self) -> PlainHttp {
+        if self.insecure {
+            PlainHttp::Anywhere
+        } else {
+            PlainHttp::SafeNetworksOnly
+        }
+    }
 }
 
 /// The file every change to [`REMOTES_FILE`] holds an exclusive lock on.
@@ -178,8 +199,8 @@ impl Remotes {
     }
 
     /// Save `url` as `name`. Plain HTTP is allowed to this machine and the
-    /// tailnet; anywhere else only with `insecure`.
-    pub fn add(&mut self, name: &str, url: &str, insecure: bool) -> Result<(), CliError> {
+    /// tailnet; anywhere else only with [`PlainHttp::Anywhere`].
+    pub fn add(&mut self, name: &str, url: &str, plain_http: PlainHttp) -> Result<(), CliError> {
         if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(CliError::new(
                 Exit::Usage,
@@ -194,12 +215,12 @@ impl Remotes {
                 ),
             ));
         }
-        let url = checked_url(url, insecure)?;
+        let url = checked_url(url, plain_http)?;
         self.remotes.insert(
             name.to_string(),
             Remote {
                 url,
-                insecure,
+                insecure: plain_http == PlainHttp::Anywhere,
                 token: None,
                 instance: None,
             },
@@ -267,7 +288,7 @@ fn unknown(name: &str) -> CliError {
 }
 
 /// `url` as saved: http or https, with a host, without a trailing slash.
-fn checked_url(url: &str, insecure: bool) -> Result<String, CliError> {
+fn checked_url(url: &str, plain_http: PlainHttp) -> Result<String, CliError> {
     let parsed = url::Url::parse(url).map_err(|error| {
         CliError::new(
             Exit::Usage,
@@ -281,7 +302,7 @@ fn checked_url(url: &str, insecure: bool) -> Result<String, CliError> {
     };
     match parsed.scheme() {
         "https" => {}
-        "http" if insecure || plain_http_allowed(&host) => {}
+        "http" if plain_http == PlainHttp::Anywhere || plain_http_allowed(&host) => {}
         "http" => {
             return Err(CliError::new(
                 Exit::Usage,
@@ -334,7 +355,11 @@ mod tests {
     fn plain_http_is_refused_off_this_machine_and_the_tailnet_unless_insecure() {
         let mut remotes = Remotes::default();
         let refused = remotes
-            .add("lan", "http://192.168.1.20:3890", false)
+            .add(
+                "lan",
+                "http://192.168.1.20:3890",
+                PlainHttp::SafeNetworksOnly,
+            )
             .unwrap_err();
         assert_eq!(refused.exit, Exit::Usage);
         assert!(
@@ -355,7 +380,15 @@ mod tests {
             ("lan", "http://192.168.1.20:3890"),
         ] {
             remotes
-                .add(name, url, name == "lan")
+                .add(
+                    name,
+                    url,
+                    if name == "lan" {
+                        PlainHttp::Anywhere
+                    } else {
+                        PlainHttp::SafeNetworksOnly
+                    },
+                )
                 .unwrap_or_else(|e| panic!("{url}: {e}"));
         }
         assert_eq!(remotes.get("named").unwrap().url, "http://localhost:3890");
@@ -365,10 +398,18 @@ mod tests {
             "every login to it warns"
         );
         assert!(insecure_login_warning("tls", remotes.get("tls").unwrap()).is_none());
-        assert!(remotes.add("ftp", "ftp://example.com", true).is_err());
         assert!(
             remotes
-                .add("cgnat-edge", "http://100.128.0.1", false)
+                .add("ftp", "ftp://example.com", PlainHttp::Anywhere)
+                .is_err()
+        );
+        assert!(
+            remotes
+                .add(
+                    "cgnat-edge",
+                    "http://100.128.0.1",
+                    PlainHttp::SafeNetworksOnly
+                )
                 .is_err(),
             "100.128/10 is past Tailscale's range"
         );
@@ -384,9 +425,15 @@ mod tests {
 
         let mut remotes = Remotes::default();
         remotes
-            .add("work", "https://work.example.com/", false)
+            .add(
+                "work",
+                "https://work.example.com/",
+                PlainHttp::SafeNetworksOnly,
+            )
             .unwrap();
-        remotes.add("home", "http://127.0.0.1:3890", false).unwrap();
+        remotes
+            .add("home", "http://127.0.0.1:3890", PlainHttp::SafeNetworksOnly)
+            .unwrap();
         remotes.set_default(Some("work")).unwrap();
         remotes.remotes.get_mut("work").unwrap().token = Some("t0k".into());
         remotes.save(&root).unwrap();
@@ -421,7 +468,11 @@ mod tests {
         // issued by.
         Remotes::update(&root, |saved| {
             saved.remove("work")?;
-            saved.add("work", "https://other.example.com", false)
+            saved.add(
+                "work",
+                "https://other.example.com",
+                PlainHttp::SafeNetworksOnly,
+            )
         })
         .unwrap();
         let refused = Remotes::keep_token(&root, "work", "https://work.example.com", "new", None)
@@ -471,14 +522,14 @@ mod tests {
             Remotes::update(&first_root, |saved| {
                 loaded.send(()).unwrap();
                 let _ = may_go.recv_timeout(Duration::from_millis(500));
-                saved.add("a", "https://a.example.com", false)
+                saved.add("a", "https://a.example.com", PlainHttp::SafeNetworksOnly)
             })
         });
         has_loaded.recv().unwrap();
         let second_root = root.clone();
         let second = std::thread::spawn(move || {
             Remotes::update(&second_root, |saved| {
-                saved.add("b", "https://b.example.com", false)
+                saved.add("b", "https://b.example.com", PlainHttp::SafeNetworksOnly)
             })
         });
         std::thread::sleep(Duration::from_millis(200));

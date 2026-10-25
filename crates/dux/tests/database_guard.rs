@@ -155,6 +155,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the placeholder printed for a hidden value",
     ),
     (
+        "dux_core::config_keys::HeldBack",
+        Vetted::Data,
+        "whether a printer shows what it holds back by default, as --show asks",
+    ),
+    (
         "dux_core::config_resources",
         Vetted::Module("crates/dux-core/src/config_resources.rs"),
         "macros, providers, keys, themes and env as config.toml holds them",

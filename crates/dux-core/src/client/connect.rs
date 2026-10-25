@@ -32,15 +32,25 @@ pub enum Target {
     Remote { name: String, remote: Remote },
 }
 
+/// Whether `--local` was given, which talks to this machine's dux whatever
+/// else names a remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalFlag {
+    /// No `--local`: a remote may be named.
+    Absent,
+    /// `--local`: this machine's dux.
+    Given,
+}
+
 /// The remote named by `flag`, `env` ([`REMOTE_VARIABLE`], empty naming nothing) or the
 /// saved default, in that order; `None` with `--local` or when nothing names one.
 pub fn selected_remote(
     flag: Option<&str>,
-    local: bool,
+    local: LocalFlag,
     env: Option<&str>,
     default: Option<&str>,
 ) -> Option<String> {
-    if local {
+    if local == LocalFlag::Given {
         return None;
     }
     flag.or(env.filter(|name| !name.is_empty()))
@@ -52,7 +62,7 @@ pub fn selected_remote(
 /// stops the command.
 pub fn choose_target(
     flag: Option<&str>,
-    local: bool,
+    local: LocalFlag,
     env: Option<&str>,
     remotes: &Remotes,
 ) -> Result<Target, CliError> {
@@ -88,7 +98,7 @@ pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
         Target::Local => local_client(find_local(lock_path)?),
         Target::Remote { name, remote } => {
             let client = Client {
-                transport: Box::new(HttpTransport::new(&remote.url, remote.insecure)),
+                transport: Box::new(HttpTransport::new(&remote.url, remote.plain_http())),
                 token: remote.token.clone(),
                 target: format!("{name} ({})", remote.url),
                 remote: Some(name.clone()),
@@ -492,21 +502,30 @@ mod tests {
     #[test]
     fn the_target_is_local_then_remote_then_variable_then_default() {
         assert_eq!(
-            selected_remote(Some("a"), false, Some("b"), Some("c")).as_deref(),
+            selected_remote(Some("a"), LocalFlag::Absent, Some("b"), Some("c")).as_deref(),
             Some("a")
         );
         assert_eq!(
-            selected_remote(None, false, Some("b"), Some("c")).as_deref(),
+            selected_remote(None, LocalFlag::Absent, Some("b"), Some("c")).as_deref(),
             Some("b")
         );
         assert_eq!(
-            selected_remote(None, false, Some(""), Some("c")).as_deref(),
+            selected_remote(None, LocalFlag::Absent, Some(""), Some("c")).as_deref(),
             Some("c")
         );
-        assert_eq!(selected_remote(None, false, None, None), None);
-        assert_eq!(selected_remote(None, true, Some("b"), Some("c")), None);
+        assert_eq!(selected_remote(None, LocalFlag::Absent, None, None), None);
+        assert_eq!(
+            selected_remote(None, LocalFlag::Given, Some("b"), Some("c")),
+            None
+        );
 
-        let unknown = choose_target(Some("nowhere"), false, None, &Remotes::default()).unwrap_err();
+        let unknown = choose_target(
+            Some("nowhere"),
+            LocalFlag::Absent,
+            None,
+            &Remotes::default(),
+        )
+        .unwrap_err();
         assert_eq!(unknown.exit, Exit::Usage);
         assert!(unknown.message.contains("nowhere"));
     }
@@ -613,17 +632,21 @@ mod tests {
             .unwrap();
         let mut remotes = Remotes::default();
         remotes
-            .add("far", &format!("http://{closed}"), false)
+            .add(
+                "far",
+                &format!("http://{closed}"),
+                crate::client::remotes::PlainHttp::SafeNetworksOnly,
+            )
             .unwrap();
         remotes.set_default(Some("far")).unwrap();
         let lock_path = dir.path().join("dux.lock");
 
-        let by_default = choose_target(None, false, None, &remotes).unwrap();
+        let by_default = choose_target(None, LocalFlag::Absent, None, &remotes).unwrap();
         let error = connect(&by_default, &lock_path).unwrap_err();
         assert_eq!(error.exit, Exit::NotRunning);
         assert!(error.message.contains("far"), "{}", error.message);
         let error = connect(
-            &choose_target(Some("far"), false, None, &remotes).unwrap(),
+            &choose_target(Some("far"), LocalFlag::Absent, None, &remotes).unwrap(),
             &lock_path,
         )
         .unwrap_err();
@@ -634,7 +657,7 @@ mod tests {
         );
 
         let client = connect(
-            &choose_target(None, true, None, &remotes).unwrap(),
+            &choose_target(None, LocalFlag::Given, None, &remotes).unwrap(),
             &lock_path,
         )
         .expect("--local reaches the local dux whatever the default says");
@@ -775,7 +798,11 @@ mod tests {
         let (same, same_addr) = serve(200, "application/json", dux_status("a"));
         let url = format!("http://{same_addr}");
         Remotes::update(dir.path(), |saved| {
-            saved.add("work", &url, false)?;
+            saved.add(
+                "work",
+                &url,
+                crate::client::remotes::PlainHttp::SafeNetworksOnly,
+            )?;
             Ok(())
         })
         .unwrap();

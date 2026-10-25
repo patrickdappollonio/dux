@@ -93,6 +93,15 @@ impl From<CliError> for Refused {
     }
 }
 
+/// Whose operation a wait follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Whose {
+    /// This command's own, whose record must stay known until it ends.
+    Own,
+    /// Somebody else's, which may finish and be forgotten while it is waited for.
+    Other,
+}
+
 impl Client {
     /// Send a change as an operation and return its record as the change
     /// answered it: already final when the change finished inside the call.
@@ -163,7 +172,7 @@ impl Client {
         record: OperationRecord,
         timeout: Duration,
     ) -> Result<OperationRecord, CliError> {
-        self.wait_loop(record, Instant::now(), deadline_after(timeout), false)
+        self.wait_loop(record, Instant::now(), deadline_after(timeout), Whose::Own)
     }
 
     /// Wait for somebody else's operation `id`, until `deadline`, as [`Self::wait`] does, except
@@ -179,7 +188,7 @@ impl Client {
             removed: Vec::new(),
             parts: Vec::new(),
         };
-        self.wait_loop(stand_in, Instant::now(), deadline, true)
+        self.wait_loop(stand_in, Instant::now(), deadline, Whose::Other)
             .map(|_| ())
     }
 
@@ -188,8 +197,9 @@ impl Client {
         record: OperationRecord,
         started: Instant,
         deadline: Instant,
-        other: bool,
+        whose: Whose,
     ) -> Result<OperationRecord, CliError> {
+        let other = whose == Whose::Other;
         let mut record = record;
         loop {
             if record.state.is_final() {

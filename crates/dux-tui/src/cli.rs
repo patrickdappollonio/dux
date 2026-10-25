@@ -792,7 +792,12 @@ fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
 /// plaintext password is never shown and, without `show`, nothing below a
 /// hidden key or in `[env]` or `[projects]` either.
 fn shown_for_preview(raw: &str, show: bool) -> Result<String> {
-    dux_core::config_keys::shown_file_text(raw, show, &crate::config::binding_is_understood)
+    let held_back = if show {
+        dux_core::config_keys::HeldBack::Shown
+    } else {
+        dux_core::config_keys::HeldBack::Masked
+    };
+    dux_core::config_keys::shown_file_text(raw, held_back, &crate::config::binding_is_understood)
 }
 
 /// The diff of `a` against `b`, each shown as a printer may show it; when

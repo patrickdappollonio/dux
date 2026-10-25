@@ -13,6 +13,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::remotes::PlainHttp;
+
 /// The longest any reply may take: room for a waiting operation read's
 /// [`super::wait::READ_WAIT`] and a slow network.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -592,14 +594,14 @@ fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, TransportError
 pub struct HttpTransport {
     base: String,
     url: Option<url::Url>,
-    insecure: bool,
+    plain_http: PlainHttp,
     agent: ureq::Agent,
 }
 
 impl HttpTransport {
-    /// `base` is the remote's URL, to which request paths are appended; `insecure` says the
-    /// remote was added with `--insecure`.
-    pub fn new(base: &str, insecure: bool) -> Self {
+    /// `base` is the remote's URL, to which request paths are appended; `plain_http` says
+    /// whether the remote was added with `--insecure`.
+    pub fn new(base: &str, plain_http: PlainHttp) -> Self {
         let url = url::Url::parse(base).ok();
         let mut builder = ureq::Agent::config_builder()
             .timeout_connect(Some(CONNECT_TIMEOUT))
@@ -608,14 +610,14 @@ impl HttpTransport {
             .user_agent(USER_AGENT);
         if !url
             .as_ref()
-            .is_some_and(|url| uses_environment_proxy(url, insecure))
+            .is_some_and(|url| uses_environment_proxy(url, plain_http))
         {
             builder = builder.proxy(None);
         }
         Self {
             base: base.trim_end_matches('/').to_string(),
             url,
-            insecure,
+            plain_http,
             agent: builder.build().into(),
         }
     }
@@ -717,7 +719,7 @@ impl HttpTransport {
         let resolve = |host: &str, port: u16| {
             std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(Iterator::collect)
         };
-        let Some(addrs) = destinations(url, self.insecure, resolve)? else {
+        let Some(addrs) = destinations(url, self.plain_http, resolve)? else {
             return attempt(&self.base, None);
         };
         let host = match url.port() {
@@ -737,25 +739,25 @@ impl HttpTransport {
 
 /// Whether a request to `url` may go through an environment proxy. Plain HTTP without
 /// `--insecure` never may: it is allowed only because it stays on this machine or the tailnet.
-pub(crate) fn uses_environment_proxy(url: &url::Url, insecure: bool) -> bool {
+pub(crate) fn uses_environment_proxy(url: &url::Url, plain_http: PlainHttp) -> bool {
     let loopback = match url.host() {
         Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
     };
-    !loopback && (url.scheme() == "https" || insecure)
+    !loopback && (url.scheme() == "https" || plain_http == PlainHttp::Anywhere)
 }
 
 /// Where a plain-HTTP request to `url` must connect, or `None` to reach it as written. A
 /// Tailscale name must resolve to Tailscale addresses only: that is why plain HTTP is allowed.
 pub(crate) fn destinations(
     url: &url::Url,
-    insecure: bool,
+    plain_http: PlainHttp,
     resolve: impl Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
 ) -> Result<Option<Vec<std::net::SocketAddr>>, TransportError> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-    if url.scheme() != "http" || insecure {
+    if url.scheme() != "http" || plain_http == PlainHttp::Anywhere {
         return Ok(None);
     }
     let port = url.port_or_known_default().unwrap_or(80);
@@ -1023,17 +1025,18 @@ mod tests {
 
     #[test]
     fn only_https_and_insecure_remotes_may_go_through_an_environment_proxy() {
-        for (url, insecure, proxied) in [
-            ("https://dux.example.com", false, true),
-            ("http://192.168.1.20:3890", true, true),
-            ("http://100.101.2.3:3890", false, false),
-            ("http://box.tail1234.ts.net:3890", false, false),
-            ("http://localhost:3890", false, false),
-            ("http://127.0.0.1:3890", false, false),
-            ("https://127.0.0.1:3890", false, false),
+        let safe = PlainHttp::SafeNetworksOnly;
+        for (url, plain_http, proxied) in [
+            ("https://dux.example.com", safe, true),
+            ("http://192.168.1.20:3890", PlainHttp::Anywhere, true),
+            ("http://100.101.2.3:3890", safe, false),
+            ("http://box.tail1234.ts.net:3890", safe, false),
+            ("http://localhost:3890", safe, false),
+            ("http://127.0.0.1:3890", safe, false),
+            ("https://127.0.0.1:3890", safe, false),
         ] {
             let url = url::Url::parse(url).unwrap();
-            assert_eq!(uses_environment_proxy(&url, insecure), proxied, "{url}");
+            assert_eq!(uses_environment_proxy(&url, plain_http), proxied, "{url}");
         }
     }
 
@@ -1053,7 +1056,12 @@ mod tests {
         let url = |text: &str| url::Url::parse(text).unwrap();
 
         assert_eq!(
-            destinations(&url("http://localhost:3890"), false, never).unwrap(),
+            destinations(
+                &url("http://localhost:3890"),
+                PlainHttp::SafeNetworksOnly,
+                never
+            )
+            .unwrap(),
             Some(vec![
                 "127.0.0.1:3890".parse().unwrap(),
                 "[::1]:3890".parse().unwrap()
@@ -1062,7 +1070,7 @@ mod tests {
         assert_eq!(
             destinations(
                 &url("http://box.tail1234.ts.net:3890"),
-                false,
+                PlainHttp::SafeNetworksOnly,
                 resolves_to(&["100.101.2.3", "fd7a:115c:a1e0::5"])
             )
             .unwrap(),
@@ -1073,7 +1081,7 @@ mod tests {
         );
         let refused = destinations(
             &url("http://box.tail1234.ts.net:3890"),
-            false,
+            PlainHttp::SafeNetworksOnly,
             resolves_to(&["100.101.2.3", "203.0.113.9"]),
         )
         .unwrap_err();
@@ -1083,16 +1091,31 @@ mod tests {
         assert!(why.contains("--insecure"), "{why}");
         assert!(why.contains("203.0.113.9"), "{why}");
         assert_eq!(
-            destinations(&url("http://box.tail1234.ts.net:3890"), true, never).unwrap(),
+            destinations(
+                &url("http://box.tail1234.ts.net:3890"),
+                PlainHttp::Anywhere,
+                never
+            )
+            .unwrap(),
             None,
             "a remote added with --insecure is reached as written"
         );
         assert_eq!(
-            destinations(&url("https://dux.example.com"), false, never).unwrap(),
+            destinations(
+                &url("https://dux.example.com"),
+                PlainHttp::SafeNetworksOnly,
+                never
+            )
+            .unwrap(),
             None
         );
         assert_eq!(
-            destinations(&url("http://100.101.2.3:3890"), false, never).unwrap(),
+            destinations(
+                &url("http://100.101.2.3:3890"),
+                PlainHttp::SafeNetworksOnly,
+                never
+            )
+            .unwrap(),
             None
         );
     }
@@ -1131,7 +1154,7 @@ mod tests {
             }
             _ => Reply::json(200, r#"{"ok":true}"#),
         });
-        let reply = HttpTransport::new(&format!("http://{addr}/"), false)
+        let reply = HttpTransport::new(&format!("http://{addr}/"), PlainHttp::SafeNetworksOnly)
             .send(&Request {
                 method: Method::Delete,
                 path: "/api/v1/sessions/a1?operation=1".to_string(),
@@ -1148,7 +1171,7 @@ mod tests {
         assert_eq!(seen[0].header("authorization"), Some("Bearer t0k"));
 
         let by_name = format!("http://localhost:{}", addr.port());
-        let reply = HttpTransport::new(&by_name, false)
+        let reply = HttpTransport::new(&by_name, PlainHttp::SafeNetworksOnly)
             .send(&Request::get("/api/v1/build"))
             .expect("localhost reaches this machine's loopback");
         assert_eq!(reply.status, 200);
@@ -1159,31 +1182,30 @@ mod tests {
         );
 
         let mut statuses = Vec::new();
-        let ended = HttpTransport::new(&format!("http://{addr}"), false).stream(
-            &Request::get("/no-body"),
-            &mut |status, _| {
+        let ended = HttpTransport::new(&format!("http://{addr}"), PlainHttp::SafeNetworksOnly)
+            .stream(&Request::get("/no-body"), &mut |status, _| {
                 statuses.push(status);
                 std::ops::ControlFlow::Continue(())
-            },
-        );
+            });
         assert_eq!((ended, statuses), (Ok(()), vec![401]));
 
         // Its body is handed over as it arrives too, past the request's own time.
         let started = std::time::Instant::now();
         let mut first = None;
-        let stopped = HttpTransport::new(&format!("http://{addr}"), false).stream(
-            &Request {
-                timeout: Some(Duration::from_millis(300)),
-                ..Request::get("/endless")
-            },
-            &mut |status, piece| {
-                if piece.is_empty() {
-                    return std::ops::ControlFlow::Continue(());
-                }
-                first = Some((status, started.elapsed(), piece.to_vec()));
-                std::ops::ControlFlow::Break(())
-            },
-        );
+        let stopped = HttpTransport::new(&format!("http://{addr}"), PlainHttp::SafeNetworksOnly)
+            .stream(
+                &Request {
+                    timeout: Some(Duration::from_millis(300)),
+                    ..Request::get("/endless")
+                },
+                &mut |status, piece| {
+                    if piece.is_empty() {
+                        return std::ops::ControlFlow::Continue(());
+                    }
+                    first = Some((status, started.elapsed(), piece.to_vec()));
+                    std::ops::ControlFlow::Break(())
+                },
+            );
         assert_eq!(stopped, Ok(()));
         let (status, at, piece) = first.expect("a piece arrived");
         assert_eq!((status, piece.as_slice()), (200, &b"line\r\n"[..]));

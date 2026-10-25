@@ -213,7 +213,9 @@ fn find_tab<'a>(agent: &'a Agent, query: &str) -> Result<(&'a Tab, String), CliE
     Ok((found.0, found.1.clone()))
 }
 
-fn yes_or_blank(flag: bool) -> String {
+/// `yes` for a JSON `true`, blank for anything else.
+fn yes_or_blank(value: Option<&Value>) -> String {
+    let flag = value.and_then(Value::as_bool).unwrap_or(false);
     if flag { "yes" } else { "" }.to_string()
 }
 
@@ -309,9 +311,7 @@ pub fn worktrees_ls(client: &Client, query: &str, shape: Shape) -> Result<String
             .unwrap_or_default()
             .to_string()
     };
-    let flag = |entry: &Value, field: &str| {
-        yes_or_blank(entry.get(field).and_then(Value::as_bool).unwrap_or(false))
-    };
+    let flag = |entry: &Value, field: &str| yes_or_blank(entry.get(field));
     let rows = entries
         .entries
         .into_iter()
@@ -344,12 +344,20 @@ pub fn worktrees_ls(client: &Client, query: &str, shape: Shape) -> Result<String
     ))
 }
 
-/// `dux agents ls`, of one project when `project` names one. `worktrees`
-/// prints only each agent's id and the folder it works in.
+/// What `dux agents ls` lists of each agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentColumns {
+    /// Every column.
+    All,
+    /// Only its id and the folder it works in (`--worktrees`).
+    Worktree,
+}
+
+/// `dux agents ls`, of one project when `project` names one, with `columns`.
 pub fn agents_ls(
     client: &Client,
     project: Option<&str>,
-    worktrees: bool,
+    columns: AgentColumns,
     shape: Shape,
 ) -> Result<String, CliError> {
     let projects = projects(client)?;
@@ -363,7 +371,7 @@ pub fn agents_ls(
     let listed = agents(client)?
         .into_iter()
         .filter(|a| only.is_none() || a.project_id() == only.as_deref());
-    if worktrees {
+    if columns == AgentColumns::Worktree {
         let rows = listed
             .map(|agent| Row {
                 id: agent.id.clone(),
@@ -595,6 +603,55 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
 // Changes
 // ---------------------------------------------------------------------------
 
+/// What a change does when somebody else is attached to what it would end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IfAttached {
+    /// Refuse, naming who.
+    Refuse,
+    /// Go ahead anyway (`--dangerously-ignore-connected`).
+    GoAhead,
+}
+
+/// Whether a removal deletes the worktrees too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Worktrees {
+    /// They stay on disk.
+    Keep,
+    /// They are deleted.
+    Delete,
+}
+
+impl Worktrees {
+    fn deleted(self) -> bool {
+        self == Worktrees::Delete
+    }
+}
+
+/// Whether a create agrees to a review copy of a pull request whose own
+/// branch cannot be used as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewCopy {
+    /// Not agreed: a create that needs one is refused.
+    NotAgreed,
+    /// Agreed (`--review-copy`).
+    Agreed,
+}
+
+impl ReviewCopy {
+    fn agreed(self) -> bool {
+        self == ReviewCopy::Agreed
+    }
+}
+
+/// The choices `dux projects add` passes along.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProjectAddChoices {
+    /// Check out the default branch in the folder first.
+    pub checkout_default: bool,
+    /// Make the folder a git repository when it is not one.
+    pub init_repo: bool,
+}
+
 /// A change worked out and not sent yet: what to ask before it, and the
 /// request that makes it.
 pub struct Planned {
@@ -619,9 +676,10 @@ impl Planned {
         }
     }
 
-    /// Go ahead even though somebody else is attached to what this ends.
-    fn forced(mut self, force: bool) -> Self {
-        if force {
+    /// Go ahead even though somebody else is attached to what this ends,
+    /// when `if_attached` says so.
+    fn forced(mut self, if_attached: IfAttached) -> Self {
+        if if_attached == IfAttached::GoAhead {
             let separator = if self.path.contains('?') { '&' } else { '?' };
             self.path.push(separator);
             self.path.push_str("force_connected=true");
@@ -729,8 +787,7 @@ pub fn projects_add(
     client: &Client,
     path: &str,
     name: Option<&str>,
-    checkout_default: bool,
-    init: bool,
+    choices: ProjectAddChoices,
     cwd: &Path,
 ) -> Result<Planned, CliError> {
     let path = output::path_for_target(path, client.remote_name(), cwd)?;
@@ -741,8 +798,8 @@ pub fn projects_add(
         Some(json!({
             "path": path,
             "name": name.unwrap_or_default(),
-            "checkout_default": checkout_default,
-            "init_repo": init,
+            "checkout_default": choices.checkout_default,
+            "init_repo": choices.init_repo,
         })),
     ))
 }
@@ -751,11 +808,12 @@ pub fn projects_add(
 pub fn projects_rm(
     client: &Client,
     query: &str,
-    delete_worktrees: bool,
-    force: bool,
+    worktrees: Worktrees,
+    if_attached: IfAttached,
 ) -> Result<Planned, CliError> {
     let projects = projects(client)?;
     let project = find_project(&projects, query)?;
+    let delete_worktrees = worktrees.deleted();
     let question = if delete_worktrees {
         format!(
             "Remove project {} and delete its agents and their worktrees",
@@ -776,7 +834,7 @@ pub fn projects_rm(
         ),
         None,
     )
-    .forced(force))
+    .forced(if_attached))
 }
 
 /// How `dux agents add` makes its agent.
@@ -792,7 +850,7 @@ pub enum NewAgent {
     PullRequest {
         project: String,
         reference: String,
-        review_copy: bool,
+        review_copy: ReviewCopy,
     },
     /// From a pull request named by its address or `owner/repo#123`, in
     /// whichever project has its repository, or in a new one cloned (or added
@@ -800,7 +858,7 @@ pub enum NewAgent {
     PullRequestAnywhere {
         reference: String,
         path: Option<String>,
-        review_copy: bool,
+        review_copy: ReviewCopy,
     },
     /// From a worktree a project already has.
     Worktree { project: String, path: String },
@@ -921,7 +979,7 @@ fn pull_request_in_project(
     called: &str,
     reference: &str,
     name: &str,
-    review_copy: bool,
+    review_copy: ReviewCopy,
 ) -> (String, Value) {
     (
         format!("Create {called} from pull request {reference} in project {project}"),
@@ -930,7 +988,7 @@ fn pull_request_in_project(
             "project_id": id,
             "pr": reference,
             "name": name,
-            "review_copy": review_copy,
+            "review_copy": review_copy.agreed(),
             // This client agrees with a flag, so a refusal names it.
             "review_copy_by_flag": true,
         }),
@@ -1013,7 +1071,7 @@ fn pull_request_anywhere(
     client: &Client,
     reference: &str,
     path: Option<&str>,
-    review_copy: bool,
+    review_copy: ReviewCopy,
     name: &str,
     called: &str,
     cwd: &Path,
@@ -1185,7 +1243,7 @@ fn pull_request_anywhere(
         }
         ReviewCopyOutlook::Needed { warning, .. } => {
             let warning = Prose::from_segments(warning).plain();
-            if !review_copy {
+            if !review_copy.agreed() {
                 return Err(CliError::new(
                     Exit::Refused,
                     format!(
@@ -1219,9 +1277,9 @@ fn pull_request_anywhere(
             "number": offer.number,
         },
         "add_existing": adding,
-        "review_copy": review_copy,
+        "review_copy": review_copy.agreed(),
         // This client agrees with a flag, so a refusal names it.
-        "review_copy_by_flag": !review_copy,
+        "review_copy_by_flag": !review_copy.agreed(),
     });
     if !typed.is_empty() {
         body["agent_name"] = json!(typed);
@@ -1266,10 +1324,11 @@ pub fn existing_branch_refusal(error: CliError) -> CliError {
 pub fn agents_rm(
     client: &Client,
     query: &str,
-    delete_worktree: bool,
+    worktree: Worktrees,
     delete_branch: Option<bool>,
-    force: bool,
+    if_attached: IfAttached,
 ) -> Result<Planned, CliError> {
+    let delete_worktree = worktree.deleted();
     let agent = find_agent(client, query)?;
     let mut question = format!("Delete agent {}", agent.name());
     let mut path = format!(
@@ -1287,11 +1346,15 @@ pub fn agents_rm(
     if let Some(delete) = delete_branch {
         path.push_str(&format!("&delete_branch={delete}"));
     }
-    Ok(Planned::new(question, Method::Delete, path, None).forced(force))
+    Ok(Planned::new(question, Method::Delete, path, None).forced(if_attached))
 }
 
 /// `dux agents stop <a>`.
-pub fn agents_stop(client: &Client, query: &str, force: bool) -> Result<Planned, CliError> {
+pub fn agents_stop(
+    client: &Client,
+    query: &str,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let agent = find_agent(client, query)?;
     Ok(Planned::new(
         format!("Stop everything agent {} runs", agent.name()),
@@ -1299,7 +1362,7 @@ pub fn agents_stop(client: &Client, query: &str, force: bool) -> Result<Planned,
         format!("/api/v1/sessions/{}/kill", segment(&agent.id)),
         None,
     )
-    .forced(force))
+    .forced(if_attached))
 }
 
 /// `dux agents start <a>`.
@@ -1345,7 +1408,12 @@ fn tab_address(
 }
 
 /// `dux agents tabs rm <a> <tab>`.
-pub fn tabs_rm(client: &Client, agent: &str, tab: &str, force: bool) -> Result<Planned, CliError> {
+pub fn tabs_rm(
+    client: &Client,
+    agent: &str,
+    tab: &str,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let (agent, label, path) = tab_address(client, agent, tab)?;
     Ok(Planned::new(
         format!("Close the {label} tab of agent {agent}"),
@@ -1353,7 +1421,7 @@ pub fn tabs_rm(client: &Client, agent: &str, tab: &str, force: bool) -> Result<P
         path,
         None,
     )
-    .forced(force))
+    .forced(if_attached))
 }
 
 /// `dux agents tabs start <a> <tab>`.
@@ -1372,7 +1440,7 @@ pub fn tabs_stop(
     client: &Client,
     agent: &str,
     tab: &str,
-    force: bool,
+    if_attached: IfAttached,
 ) -> Result<Planned, CliError> {
     let (agent, label, path) = tab_address(client, agent, tab)?;
     Ok(Planned::new(
@@ -1381,7 +1449,7 @@ pub fn tabs_stop(
         format!("{path}/stop"),
         None,
     )
-    .forced(force))
+    .forced(if_attached))
 }
 
 /// Who a new terminal belongs to.
@@ -1418,7 +1486,11 @@ pub fn terminals_add(client: &Client, owner: TerminalFor) -> Result<Planned, Cli
 }
 
 /// `dux terminals rm <t>`.
-pub fn terminals_rm(client: &Client, query: &str, force: bool) -> Result<Planned, CliError> {
+pub fn terminals_rm(
+    client: &Client,
+    query: &str,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let document = WorkspaceDocument::read(client)?;
     let terminal = output::select(
         "terminal",
@@ -1447,7 +1519,7 @@ pub fn terminals_rm(client: &Client, query: &str, force: bool) -> Result<Planned
         path,
         None,
     )
-    .forced(force))
+    .forced(if_attached))
 }
 
 #[cfg(test)]
@@ -1596,9 +1668,9 @@ mod create_wait_tests {
             .body
             .unwrap()
         };
-        assert_eq!(body_for(true)["review_copy"], true);
-        assert_eq!(body_for(false)["review_copy_by_flag"], true);
-        assert_eq!(body_for(false)["review_copy"], false);
+        assert_eq!(body_for(ReviewCopy::Agreed)["review_copy"], true);
+        assert_eq!(body_for(ReviewCopy::NotAgreed)["review_copy_by_flag"], true);
+        assert_eq!(body_for(ReviewCopy::NotAgreed)["review_copy"], false);
     }
 
     #[test]
@@ -1799,7 +1871,7 @@ mod pull_request_anywhere_tests {
         fn plan(
             &self,
             path: Option<&str>,
-            review_copy: bool,
+            review_copy: ReviewCopy,
             name: Option<&str>,
         ) -> Result<Planned, CliError> {
             self.plan_for("octo/other#5", path, review_copy, name)
@@ -1809,7 +1881,7 @@ mod pull_request_anywhere_tests {
             &self,
             reference: &str,
             path: Option<&str>,
-            review_copy: bool,
+            review_copy: ReviewCopy,
             name: Option<&str>,
         ) -> Result<Planned, CliError> {
             agents_add(
@@ -1832,7 +1904,10 @@ mod pull_request_anywhere_tests {
     #[test]
     fn a_bare_number_is_refused_before_anything_is_sent() {
         let dux = dux(free(NOT_NEEDED), FREE_FOLDER);
-        let error = dux.plan_for(" #42 ", None, false, None).err().unwrap();
+        let error = dux
+            .plan_for(" #42 ", None, ReviewCopy::NotAgreed, None)
+            .err()
+            .unwrap();
         assert_eq!(error.exit, Exit::Refused);
         assert_eq!(
             error.message,
@@ -1849,7 +1924,7 @@ mod pull_request_anywhere_tests {
     #[test]
     fn a_free_folder_is_cloned_into_the_start_folder_and_the_flag_is_not_given() {
         let dux = dux(free(NOT_NEEDED), FREE_FOLDER);
-        let planned = dux.plan(None, false, Some("mine")).unwrap();
+        let planned = dux.plan(None, ReviewCopy::NotAgreed, Some("mine")).unwrap();
         assert_eq!(
             planned.question,
             "Clone git@github.com:octo/other.git into /srv/src/other and create agent mine from pull request octo/other#5"
@@ -1881,7 +1956,9 @@ mod pull_request_anywhere_tests {
     #[test]
     fn an_unnamed_agent_omits_its_name_and_a_checkout_is_added() {
         let dux = dux(free(NOT_NEEDED), CHECKOUT_PLAIN);
-        let planned = dux.plan(Some("/work/other"), false, None).unwrap();
+        let planned = dux
+            .plan(Some("/work/other"), ReviewCopy::NotAgreed, None)
+            .unwrap();
         assert_eq!(
             planned.question,
             "Add the folder /work/other as a project and create an agent from pull request octo/other#5"
@@ -1894,13 +1971,13 @@ mod pull_request_anywhere_tests {
     #[test]
     fn a_needed_review_copy_is_refused_without_the_flag_and_said_with_it() {
         let dux = dux(free(NEEDED), FREE_FOLDER);
-        let refused = dux.plan(None, false, None).err().unwrap();
+        let refused = dux.plan(None, ReviewCopy::NotAgreed, None).err().unwrap();
         assert_eq!(refused.exit, Exit::Refused);
         assert_eq!(
             refused.message,
             "Branch \"fix\" is busy, so the agent would work on a review copy. To go ahead anyway, run the command again with --review-copy. Nothing was cloned."
         );
-        let agreed = dux.plan(None, true, Some("fix")).unwrap();
+        let agreed = dux.plan(None, ReviewCopy::Agreed, Some("fix")).unwrap();
         assert_eq!(
             agreed.notice.as_deref(),
             Some("Branch \"fix\" is busy, so the agent would work on a review copy.")
@@ -1913,9 +1990,16 @@ mod pull_request_anywhere_tests {
         // The checkout says nothing about a copy, so the offer's warning no
         // longer applies.
         let plain = dux(free(NEEDED), CHECKOUT_PLAIN);
-        assert!(plain.plan(Some("/work/other"), false, None).is_ok());
+        assert!(
+            plain
+                .plan(Some("/work/other"), ReviewCopy::NotAgreed, None)
+                .is_ok()
+        );
         let needed = dux(free(NOT_NEEDED), CHECKOUT_NEEDED);
-        let refused = needed.plan(Some("/work/other"), false, None).err().unwrap();
+        let refused = needed
+            .plan(Some("/work/other"), ReviewCopy::NotAgreed, None)
+            .err()
+            .unwrap();
         assert_eq!(
             refused.message,
             "Folder copy needed. To go ahead anyway, run the command again with --review-copy. Nothing was added."
@@ -1925,20 +2009,30 @@ mod pull_request_anywhere_tests {
     #[test]
     fn a_typed_name_skips_the_review_copy_rules_and_no_free_name_refuses() {
         let needed = dux(free(NEEDED), FREE_FOLDER);
-        assert!(needed.plan(None, false, Some("other-name")).is_ok());
+        assert!(
+            needed
+                .plan(None, ReviewCopy::NotAgreed, Some("other-name"))
+                .is_ok()
+        );
         let none = dux(free(NO_NAME), FREE_FOLDER);
-        let refused = none.plan(None, true, None).err().unwrap();
+        let refused = none.plan(None, ReviewCopy::Agreed, None).err().unwrap();
         assert_eq!(
             refused.message,
             "Every review name is taken. Type another name for the agent from PR #5. Nothing was cloned."
         );
-        assert!(none.plan(None, false, Some("elsewhere")).is_ok());
+        assert!(
+            none.plan(None, ReviewCopy::NotAgreed, Some("elsewhere"))
+                .is_ok()
+        );
     }
 
     #[test]
     fn a_typed_name_spelled_like_a_copy_is_asked_about_and_names_are_trimmed() {
         let clone = dux(free(NOT_NEEDED), FREE_FOLDER);
-        let refused = clone.plan(None, false, Some(" fix-review ")).err().unwrap();
+        let refused = clone
+            .plan(None, ReviewCopy::NotAgreed, Some(" fix-review "))
+            .err()
+            .unwrap();
         assert_eq!(refused.exit, Exit::Refused);
         assert!(
             refused.message.ends_with(
@@ -1947,17 +2041,27 @@ mod pull_request_anywhere_tests {
             "{}",
             refused.message
         );
-        let agreed = clone.plan(None, true, Some("fix-review")).unwrap();
+        let agreed = clone
+            .plan(None, ReviewCopy::Agreed, Some("fix-review"))
+            .unwrap();
         assert!(agreed.notice.is_some());
         // Spaces around the branch's own name do not make it another name.
         let offered = dux(free(NEEDED), FREE_FOLDER);
-        assert!(offered.plan(None, false, Some(" fix ")).is_err());
+        assert!(
+            offered
+                .plan(None, ReviewCopy::NotAgreed, Some(" fix "))
+                .is_err()
+        );
         // An add cannot tell whether a branch of that name exists, so the
         // server asks.
         let add = dux(free(NOT_NEEDED), CHECKOUT_PLAIN);
         assert!(
-            add.plan(Some("/work/other"), false, Some("fix-review"))
-                .is_ok()
+            add.plan(
+                Some("/work/other"),
+                ReviewCopy::NotAgreed,
+                Some("fix-review")
+            )
+            .is_ok()
         );
     }
 
@@ -1968,7 +2072,7 @@ mod pull_request_anywhere_tests {
             r#""uninspected_summary":"1 has an address dux could not read""#,
         );
         let dux = dux(reply, FREE_FOLDER);
-        let planned = dux.plan(None, false, None).unwrap();
+        let planned = dux.plan(None, ReviewCopy::NotAgreed, None).unwrap();
         assert_eq!(
             planned.notice.as_deref(),
             Some(
@@ -1983,15 +2087,21 @@ mod pull_request_anywhere_tests {
             resolve_reply(r#"[{"id":"p1","name":"app"}]"#, None, None),
             FREE_FOLDER,
         );
-        let planned = one.plan(None, false, None).unwrap();
+        let planned = one.plan(None, ReviewCopy::NotAgreed, None).unwrap();
         assert_eq!(
             planned.question,
             "Create an agent from pull request octo/other#5 in project app"
         );
         assert_eq!(planned.body.unwrap()["project_id"], "p1");
         // The folder of the project itself is not a different folder.
-        assert!(one.plan(Some("/src/app"), false, None).is_ok());
-        let refused = one.plan(Some("/x"), false, None).err().unwrap();
+        assert!(
+            one.plan(Some("/src/app"), ReviewCopy::NotAgreed, None)
+                .is_ok()
+        );
+        let refused = one
+            .plan(Some("/x"), ReviewCopy::NotAgreed, None)
+            .err()
+            .unwrap();
         assert_eq!(
             refused.message,
             "github.com/octo/other is already a checkout in project app, so there is nothing to clone or add at /x. Drop --path to create the agent in that project."
@@ -2005,7 +2115,7 @@ mod pull_request_anywhere_tests {
             ),
             FREE_FOLDER,
         );
-        let refused = two.plan(None, false, None).err().unwrap();
+        let refused = two.plan(None, ReviewCopy::NotAgreed, None).err().unwrap();
         assert_eq!(
             refused.message,
             "github.com/octo/other is checked out in more than one project (app, app2); add --project to choose one."
@@ -2015,7 +2125,7 @@ mod pull_request_anywhere_tests {
             resolve_reply("[]", None, Some("Failed to resolve PR #5.")),
             FREE_FOLDER,
         );
-        let refused = none.plan(None, false, None).err().unwrap();
+        let refused = none.plan(None, ReviewCopy::NotAgreed, None).err().unwrap();
         assert_eq!(
             refused.message,
             "No project in dux is a checkout of github.com/octo/other. dux could not look the pull request up to offer a clone: Failed to resolve PR #5. Add --project to choose one."
@@ -2024,7 +2134,10 @@ mod pull_request_anywhere_tests {
             resolve_reply("[]", None, Some("gh did not answer")),
             FREE_FOLDER,
         );
-        let refused = unpunctuated.plan(None, false, None).err().unwrap();
+        let refused = unpunctuated
+            .plan(None, ReviewCopy::NotAgreed, None)
+            .err()
+            .unwrap();
         assert!(
             refused
                 .message

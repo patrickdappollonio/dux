@@ -22,6 +22,15 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// What `--local` said, for the client.
+    fn local_flag(&self) -> connect::LocalFlag {
+        if self.local {
+            connect::LocalFlag::Given
+        } else {
+            connect::LocalFlag::Absent
+        }
+    }
+
     fn variable() -> Option<String> {
         std::env::var(REMOTE_VARIABLE).ok()
     }
@@ -34,7 +43,7 @@ impl Selection {
         {
             return Ok(connect::selected_remote(
                 self.remote.as_deref(),
-                self.local,
+                self.local_flag(),
                 variable.as_deref(),
                 None,
             ));
@@ -53,7 +62,7 @@ impl Selection {
         if args.first().is_some_and(|word| word == "reset") {
             return Ok(connect::selected_remote(
                 self.remote.as_deref(),
-                self.local,
+                self.local_flag(),
                 Self::variable().as_deref(),
                 None,
             ));
@@ -75,7 +84,7 @@ impl Selection {
         let remotes = Remotes::load(&paths.root)?;
         connect::choose_target(
             self.remote.as_deref(),
-            self.local,
+            self.local_flag(),
             Self::variable().as_deref(),
             &remotes,
         )
@@ -106,7 +115,17 @@ fn discover() -> Result<DuxPaths, CliError> {
 }
 
 fn shape(list: &ListFlags) -> Shape {
-    Shape::of(matches!(list.format, Format::Json), list.quiet)
+    let format = if matches!(list.format, Format::Json) {
+        Shape::Json
+    } else {
+        Shape::Table
+    };
+    let ids_only = if list.quiet {
+        output::IdsOnly::Yes
+    } else {
+        output::IdsOnly::No
+    };
+    Shape::of(format, ids_only)
 }
 
 fn line(text: String) -> String {
@@ -140,7 +159,12 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
             insecure,
         } => {
             let url = Remotes::update(root, |saved| {
-                saved.add(&name, &url, insecure)?;
+                let plain_http = if insecure {
+                    remotes::PlainHttp::Anywhere
+                } else {
+                    remotes::PlainHttp::SafeNetworksOnly
+                };
+                saved.add(&name, &url, plain_http)?;
                 Ok(saved.get(&name)?.url.clone())
             })?;
             Ok(line(format!(
@@ -280,7 +304,7 @@ fn named_or_selected(
     }
     connect::selected_remote(
         selection.remote.as_deref(),
-        selection.local,
+        selection.local_flag(),
         Selection::variable().as_deref(),
         saved.default.as_deref(),
     )
@@ -359,14 +383,19 @@ fn client_if_running(
 /// Confirm a change on the terminal, or take `--yes` for it.
 fn ask(question: &str, target: &str, yes: bool, stdin_taken: bool) -> Result<(), CliError> {
     use std::io::IsTerminal;
+    let consent = if yes {
+        output::Consent::Given
+    } else {
+        output::Consent::Ask
+    };
     let terminal =
         !stdin_taken && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     if !terminal {
-        return output::confirm(question, target, yes, None);
+        return output::confirm(question, target, consent, None);
     }
     let mut input = std::io::stdin().lock();
     let mut prompt = std::io::stderr();
-    output::confirm(question, target, yes, Some((&mut input, &mut prompt)))
+    output::confirm(question, target, consent, Some((&mut input, &mut prompt)))
 }
 
 pub fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliError> {
@@ -425,7 +454,12 @@ pub fn themes(command: ListOnlySub, selection: &Selection) -> Result<String, Cli
 pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         EnvSub::Ls { show, list } => read_with(selection, |source| {
-            resources::env_ls(source, show, shape(&list))
+            let values = if show {
+                dux_core::config_keys::HeldBack::Shown
+            } else {
+                dux_core::config_keys::HeldBack::Masked
+            };
+            resources::env_ls(source, values, shape(&list))
         }),
         EnvSub::Set {
             name,
@@ -509,9 +543,13 @@ fn change_on_dux(
 fn guarded_on_dux(
     selection: &Selection,
     flags: &GuardedChangeFlags,
-    plan: impl FnOnce(&connect::Client, bool) -> Result<workspace::Planned, CliError>,
+    plan: impl FnOnce(&connect::Client, workspace::IfAttached) -> Result<workspace::Planned, CliError>,
 ) -> Result<String, CliError> {
-    let force = flags.dangerously_ignore_connected;
+    let force = if flags.dangerously_ignore_connected {
+        workspace::IfAttached::GoAhead
+    } else {
+        workspace::IfAttached::Refuse
+    };
     change_on_dux(selection, &flags.change, |client, _| plan(client, force))
 }
 
@@ -530,14 +568,23 @@ pub fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, C
             init,
             change,
         } => change_on_dux(selection, &change, |client, cwd| {
-            workspace::projects_add(client, &path, name.as_deref(), checkout_default, init, cwd)
+            let choices = workspace::ProjectAddChoices {
+                checkout_default,
+                init_repo: init,
+            };
+            workspace::projects_add(client, &path, name.as_deref(), choices, cwd)
         }),
         ProjectsSub::Rm {
             project,
             delete_worktrees,
             guarded,
         } => guarded_on_dux(selection, &guarded, |client, force| {
-            workspace::projects_rm(client, &project, delete_worktrees, force)
+            let worktrees = if delete_worktrees {
+                workspace::Worktrees::Delete
+            } else {
+                workspace::Worktrees::Keep
+            };
+            workspace::projects_rm(client, &project, worktrees, force)
         }),
         ProjectsSub::Worktrees {
             command: WorktreesSub::Ls { project, list },
@@ -554,7 +601,12 @@ pub fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliEr
             worktrees,
             list,
         } => read_on_dux(selection, |client| {
-            workspace::agents_ls(client, project.as_deref(), worktrees, shape(&list))
+            let columns = if worktrees {
+                workspace::AgentColumns::Worktree
+            } else {
+                workspace::AgentColumns::All
+            };
+            workspace::agents_ls(client, project.as_deref(), columns, shape(&list))
         }),
         AgentsSub::Show { agent } => {
             read_on_dux(selection, |client| workspace::agents_show(client, &agent))
@@ -580,8 +632,13 @@ pub fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliEr
                 (_, true) => Some(false),
                 _ => None,
             };
+            let worktree = if delete_worktree {
+                workspace::Worktrees::Delete
+            } else {
+                workspace::Worktrees::Keep
+            };
             guarded_on_dux(selection, &guarded, |client, force| {
-                workspace::agents_rm(client, &agent, delete_worktree, branch, force)
+                workspace::agents_rm(client, &agent, worktree, branch, force)
             })
         }
         AgentsSub::Stop { agent, guarded } => {
@@ -599,6 +656,11 @@ pub fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliEr
 /// Which kind of create `dux agents add` was asked for. The command tree
 /// guarantees exactly one source.
 fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
+    let review_copy = if args.review_copy {
+        workspace::ReviewCopy::Agreed
+    } else {
+        workspace::ReviewCopy::NotAgreed
+    };
     if let Some(agent) = &args.fork {
         return workspace::NewAgent::Fork {
             agent: agent.clone(),
@@ -616,13 +678,13 @@ fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
             return workspace::NewAgent::PullRequestAnywhere {
                 reference: reference.clone(),
                 path: args.path.clone(),
-                review_copy: args.review_copy,
+                review_copy,
             };
         }
         return workspace::NewAgent::PullRequest {
             project,
             reference: reference.clone(),
-            review_copy: args.review_copy,
+            review_copy,
         };
     }
     if let Some(path) = &args.from_worktree {

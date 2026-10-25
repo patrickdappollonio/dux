@@ -135,7 +135,15 @@ fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
         for (printer, result) in [
             (
                 format!("env ls (show {show})"),
-                env_ls(&source, show, shape),
+                env_ls(
+                    &source,
+                    if show {
+                        dux_core::config_keys::HeldBack::Shown
+                    } else {
+                        dux_core::config_keys::HeldBack::Masked
+                    },
+                    shape,
+                ),
             ),
             ("macros ls".to_string(), macros_ls(&source, shape)),
             ("providers ls".to_string(), providers_ls(&source, shape)),

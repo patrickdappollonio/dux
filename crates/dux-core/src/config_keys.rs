@@ -1549,12 +1549,23 @@ pub fn sensitive_auth_setting(path: &[String]) -> Option<SensitiveAuthSetting> {
     }
 }
 
+/// Whether a printer shows what dux holds back by default (hidden and
+/// sensitive values, and names that break their map's rule), as `--show` asks.
+/// A plaintext password is never shown either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldBack {
+    /// Held back, as every printer does by default.
+    Masked,
+    /// Shown, as `--show` asks.
+    Shown,
+}
+
 /// The user's config file `raw` as a printer may show it line by line (the
 /// previews of `dux config regenerate` and `restore-docs` diff it): every
 /// line dux can map to a key path goes through the same rules as the one
 /// value printer. A plaintext password (each one [`crate::config::plaintext_passwords`]
-/// finds, by its path and by its lines) is never shown, `show` or not;
-/// without `show`, a value whose path is hidden or sensitive (anything under
+/// finds, by its path and by its lines) is never shown, whatever `values` says;
+/// with [`HeldBack::Masked`], a value whose path is hidden or sensitive (anything under
 /// an unknown key or a name that breaks its map's rule, an `[env]` value, a
 /// project's values, a binding `binding_understood` refuses, a
 /// [`SensitiveAuthSetting`]) is its key, as
@@ -1565,10 +1576,10 @@ pub fn sensitive_auth_setting(path: &[String]) -> Option<SensitiveAuthSetting> {
 ///
 /// An error, naming the parse problem by line and kind only, when `raw` is
 /// not TOML: dux cannot tell where anything sits in such a file, a secret
-/// included, so none of its text is shown, `show` or not.
+/// included, so none of its text is shown, whatever `values` says.
 pub fn shown_file_text(
     raw: &str,
-    show: bool,
+    values: HeldBack,
     binding_understood: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
     use crate::config::PathStep as Step;
@@ -1704,10 +1715,11 @@ pub fn shown_file_text(
     fn mask_of(
         path: &[Step],
         value: &toml_edit::Value,
-        show: bool,
+        shown: HeldBack,
         held_back: &dyn Fn(&[Step]) -> bool,
         binding_understood: &dyn Fn(&str) -> bool,
     ) -> Mask {
+        let show = shown == HeldBack::Shown;
         let mut mask = Mask::Shown;
         if !show && held_back(path) {
             mask = Mask::Hidden;
@@ -1731,14 +1743,14 @@ pub fn shown_file_text(
                 for (key, child) in table {
                     let mut at = path.to_vec();
                     at.push(Step::Key(key.to_string()));
-                    mask = mask.max(mask_of(&at, child, show, held_back, binding_understood));
+                    mask = mask.max(mask_of(&at, child, shown, held_back, binding_understood));
                 }
             }
             toml_edit::Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     let mut at = path.to_vec();
                     at.push(Step::Index(index));
-                    mask = mask.max(mask_of(&at, item, show, held_back, binding_understood));
+                    mask = mask.max(mask_of(&at, item, shown, held_back, binding_understood));
                 }
             }
             _ => {}
@@ -1765,7 +1777,7 @@ pub fn shown_file_text(
                     continue;
                 };
                 is_header[*line] = true;
-                if show || !held_back(path) {
+                if values == HeldBack::Shown || !held_back(path) {
                     continue;
                 }
                 // Held back: the header as dux names it, and never the
@@ -1812,7 +1824,7 @@ pub fn shown_file_text(
                 let mask = if plaintext(path) {
                     Mask::Plaintext
                 } else {
-                    mask_of(path, value, show, &held_back, binding_understood)
+                    mask_of(path, value, values, &held_back, binding_understood)
                 };
                 if mask == Mask::Shown {
                     continue;
@@ -1883,7 +1895,7 @@ pub fn shown_file_text(
         }
     }
     // A comment belongs to the table whose header comes last before it.
-    if !show {
+    if values == HeldBack::Masked {
         headers.sort_by_key(|(line, _)| *line);
         for (index, text) in lines.iter().enumerate() {
             if in_value[index] || !text.trim_start().starts_with('#') {
@@ -2100,7 +2112,7 @@ fn names_hidden(
 
 /// The table `in_use` (what dux uses at `path`) as `get` prints it: every
 /// entry, each one the file `file` leaves out marked with where it came
-/// from, and, with `hide_names`, every name that breaks its map's rule a
+/// from, and, with `names` [`HeldBack::Masked`], every name that breaks its map's rule a
 /// marker naming its line (see [`printed_value`]). The mark comes from the
 /// same corrections the lines on stderr say (`corrections`), so the two
 /// never disagree: an entry a correction wrote from another setting is
@@ -2112,7 +2124,7 @@ fn render_in_use(
     in_use: &toml::Value,
     file: &toml::Value,
     corrections: &[Correction],
-    hide_names: bool,
+    names: HeldBack,
 ) -> String {
     let mut leaves = Vec::new();
     leaves_of(in_use, &mut path.to_vec(), &mut leaves);
@@ -2131,7 +2143,7 @@ fn render_in_use(
             (at, mark)
         })
         .collect();
-    let text = if hide_names {
+    let text = if names == HeldBack::Masked {
         printed_value(raw, path, in_use, ValueForm::Get).unwrap_or_else(|| NOT_SHOWN.to_string())
     } else {
         // `--show` prints names as the file writes them, but never a
@@ -2424,8 +2436,8 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
             }
         }
         let in_use = effective_at(&path).unwrap_or_else(|| table.clone());
-        let shown = render_in_use(raw, &path, &in_use, &file, &corrections, true);
-        let named = render_in_use(raw, &path, &in_use, &file, &corrections, false);
+        let shown = render_in_use(raw, &path, &in_use, &file, &corrections, HeldBack::Masked);
+        let named = render_in_use(raw, &path, &in_use, &file, &corrections, HeldBack::Shown);
         return Ok(GetReport {
             with_names: (named != shown).then_some(named),
             value: GetValue::Set(shown),
@@ -2891,7 +2903,7 @@ port = 3890
     fn a_file_shown_line_by_line_holds_back_what_a_printer_does() {
         let raw = "[ui]\nleft_width_pct = 25\n\n[env]\n# ghp_COMMENT_SECRET\nTOKEN = \"ghp_VALUE_SECRET\"\nLIST = [\n  \"ghp_MULTI_SECRET\",\n]\n\n[keys]\nquit = [\"ghp_BINDING_SECRET\"]\nnew_agent = [\"n\"]\n\n[server.auth]\npassword = \"ghp_PLAIN_SECRET\"\n";
         let understood = |binding: &str| binding.len() == 1;
-        let shown = shown_file_text(raw, false, &understood).expect("parses");
+        let shown = shown_file_text(raw, HeldBack::Masked, &understood).expect("parses");
         for secret in [
             "ghp_COMMENT_SECRET",
             "ghp_VALUE_SECRET",
@@ -2912,7 +2924,7 @@ port = 3890
         ] {
             assert!(shown.contains(line), "{line:?}:\n{shown}");
         }
-        let with_show = shown_file_text(raw, true, &understood).expect("parses");
+        let with_show = shown_file_text(raw, HeldBack::Shown, &understood).expect("parses");
         assert!(with_show.contains("ghp_VALUE_SECRET"), "{with_show}");
         assert!(with_show.contains("ghp_COMMENT_SECRET"), "{with_show}");
         assert!(!with_show.contains("ghp_PLAIN_SECRET"), "{with_show}");
@@ -2923,7 +2935,7 @@ port = 3890
     #[test]
     fn a_held_back_header_and_value_lose_their_trailing_comments() {
         let raw = "[env] # ghp_HEADER_SECRET\nA = \"v\" # ghp_VALUE_COMMENT\n\n[[projects]] # ghp_LIST_SECRET\npath = \"/tmp/x\"\n";
-        let shown = shown_file_text(raw, false, &|_| true).expect("parses");
+        let shown = shown_file_text(raw, HeldBack::Masked, &|_| true).expect("parses");
         for secret in ["ghp_HEADER_SECRET", "ghp_VALUE_COMMENT", "ghp_LIST_SECRET"] {
             assert!(!shown.contains(secret), "{secret}:\n{shown}");
         }
@@ -2942,7 +2954,7 @@ port = 3890
     #[test]
     fn a_file_that_is_not_toml_shows_nothing_of_itself() {
         let raw = "[server.auth]\npassword = \"ghp_BROKEN_SECRET\"\nbroken =\n";
-        for show in [false, true] {
+        for show in [HeldBack::Masked, HeldBack::Shown] {
             let error = format!(
                 "{:#}",
                 shown_file_text(raw, show, &|_| true).expect_err("not TOML")
