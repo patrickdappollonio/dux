@@ -1319,7 +1319,7 @@ mod tests {
         ts_names.sort();
         let mut rust_names: Vec<String> = CURATED_FAVICON_COLORS
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         rust_names.sort();
         assert_eq!(

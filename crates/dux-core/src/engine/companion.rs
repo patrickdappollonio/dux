@@ -205,7 +205,7 @@ impl Engine {
                 crate::model::TerminalOwnerRef::Session(session_id) => format!(
                     "terminal \"{name}\" of agent \"{}\"",
                     self.session_by_id(session_id)
-                        .map(|session| session.display_label())
+                        .map(super::super::model::AgentSession::display_label)
                         .unwrap_or_else(|| session_id.to_string())
                 ),
                 crate::model::TerminalOwnerRef::Project(project_id) => format!(

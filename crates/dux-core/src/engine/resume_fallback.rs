@@ -609,7 +609,7 @@ mod tests {
         while !engine
             .providers
             .get(TabIdRef::new("s1-slot"))
-            .is_some_and(|c| c.is_exited())
+            .is_some_and(crate::pty::PtyClient::is_exited)
         {
             assert!(Instant::now() < deadline, "child never exited");
             std::thread::sleep(Duration::from_millis(20));

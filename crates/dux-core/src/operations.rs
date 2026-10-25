@@ -563,7 +563,10 @@ impl std::fmt::Debug for Operations {
 
 impl Operations {
     fn with<T>(&self, f: impl FnOnce(&mut Registry) -> T) -> T {
-        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
     }
 

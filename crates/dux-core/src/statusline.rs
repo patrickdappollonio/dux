@@ -159,7 +159,10 @@ impl LiveStatusKeys {
     /// optimisation over guessing, and a panic in an unrelated thread must not
     /// take the status line down with it.
     fn with<T>(&self, f: impl FnOnce(&mut HashSet<String>) -> T) -> T {
-        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
     }
 }

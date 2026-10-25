@@ -1449,7 +1449,7 @@ pub(super) mod tests {
             .map(|cell| cell.symbol().to_string())
             .collect::<Vec<_>>()
             .chunks(width)
-            .map(|row| row.concat())
+            .map(<[std::string::String]>::concat)
             .collect::<Vec<_>>()
             .join("\n")
     }

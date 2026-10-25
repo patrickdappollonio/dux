@@ -1136,7 +1136,7 @@ mod tests {
         let mut config = crate::config::KeysConfig::default();
         config.bindings.insert(
             action.to_string(),
-            keys.iter().map(|key| key.to_string()).collect(),
+            keys.iter().map(std::string::ToString::to_string).collect(),
         );
         crate::keybindings::RuntimeBindings::from_keys_config(&config)
     }

@@ -194,7 +194,7 @@ impl ConfigWriteQueue {
                 if self
                     .writer
                     .as_ref()
-                    .map(|w| w.is_finished())
+                    .map(std::thread::JoinHandle::is_finished)
                     .unwrap_or(true)
                 {
                     Err("config writer thread died; config was not saved".into())

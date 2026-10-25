@@ -127,7 +127,7 @@ fn deleting_an_agent_keeps_a_worktree_a_standalone_agent_runs_inside() {
     let still_running = engine
         .providers
         .get(crate::ids::TabIdRef::new("s-alone-slot"))
-        .is_some_and(|client| client.is_live());
+        .is_some_and(super::super::pty::PtyClient::is_live);
     assert!(still_running, "the standalone agent is still running");
     assert!(
         inside.join("notes.txt").exists(),

@@ -193,7 +193,7 @@ pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
     // e.g. "refs/remotes/origin/main" → "main"
     full_ref
         .strip_prefix("refs/remotes/origin/")
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Classifies a checked-out branch against the repo's known default branch.
@@ -2661,7 +2661,7 @@ pub fn create_worktree_from_start_point_claimed(
     claim: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<(String, PathBuf)> {
     let branch_name = custom_name
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .unwrap_or_else(docker_style_name);
     let worktree_path = managed_worktree_path(worktrees_root, project_name, &branch_name);
     claim(&worktree_path)?;
@@ -5171,7 +5171,7 @@ fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
                 .next()
                 .and_then(|old| std::str::from_utf8(old).ok())
                 .filter(|old| !old.is_empty())
-                .map(|old| old.to_string())
+                .map(std::string::ToString::to_string)
         } else {
             None
         };
@@ -8743,7 +8743,7 @@ mod tests {
         let repo = init_test_repo();
         let wt = repo.path();
         let odd = write_option_looking_files(wt);
-        let paths: Vec<String> = odd.iter().map(|s| s.to_string()).collect();
+        let paths: Vec<String> = odd.iter().map(std::string::ToString::to_string).collect();
 
         stage_files(wt, &paths).unwrap();
         let mut want = paths.clone();
@@ -14424,7 +14424,7 @@ mod tests {
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         assert!(
-            results.iter().all(|r| r.is_ok()),
+            results.iter().all(std::result::Result::is_ok),
             "neither racer should hard-error, got: {results:?}"
         );
         // Exactly one commit exists (the CAS prevented a second).

@@ -1282,7 +1282,7 @@ impl Engine {
                 .map(|s| {
                     let extras = extras_by_session
                         .get(s.id.as_str())
-                        .map(|v| v.as_slice())
+                        .map(std::vec::Vec::as_slice)
                         .unwrap_or(&[]);
                     self.project_session(s, extras)
                 })
@@ -1406,7 +1406,11 @@ impl Engine {
         // map and would cost O(sessions * tabs) per spine build.
         let has_output = std::iter::once(s.slot_tab_id())
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
-            .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
+            .any(|id| {
+                self.providers
+                    .get(id)
+                    .is_some_and(super::pty::PtyClient::has_output)
+            });
         let working = std::iter::once(s.slot_tab_id())
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.is_agent_streaming(id.as_str()));
@@ -1467,7 +1471,7 @@ impl Engine {
             has_output: self
                 .providers
                 .get(id)
-                .map(|p| p.has_output())
+                .map(super::pty::PtyClient::has_output)
                 .unwrap_or(false),
             has_live_process: self.providers.contains_key(id),
             last_run_failed: self.tab_last_run_failed(id.as_str()),

@@ -680,7 +680,7 @@ impl App {
         let Some(worktree) = self
             .engine
             .session_git_access(&session_id)
-            .filter(|access| access.changes_panel_works())
+            .filter(dux_core::engine::SessionGitAccess::changes_panel_works)
             .map(|access| access.directory().to_path_buf())
         else {
             return;

@@ -350,7 +350,7 @@ fn branches(repo: &Path) -> Vec<String> {
         .unwrap();
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|line| line.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

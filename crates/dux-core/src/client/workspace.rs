@@ -382,7 +382,7 @@ pub fn agents_ls(
             let project_cell = match &agent.workspace {
                 Workspace::Managed { project_id, .. } => project_names
                     .get(project_id.as_str())
-                    .map_or(project_id.clone(), |name| name.to_string()),
+                    .map_or(project_id.clone(), std::string::ToString::to_string),
                 Workspace::Folder { folder_label, .. } => format!("folder {folder_label}"),
             };
             let running = agent.tabs.iter().filter(|t| t.has_live_process).count();

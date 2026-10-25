@@ -112,7 +112,7 @@ pub fn leading_branch_for_project(path: &Path, current_branch: Option<&str>) -> 
         // No remote default: use the current branch when available, else
         // fall back to "main" (the same heuristic used in load_projects).
         None => current_branch
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_else(|| "main".to_string()),
     }
 }

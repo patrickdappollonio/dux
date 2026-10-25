@@ -81,7 +81,10 @@ fn review15_restoring_a_file_under_a_path_now_held_by_a_file_keeps_that_file() {
         still_a_file,
         "the untracked file `dir` was deleted by a discard confirmed as restoring `dir/a.txt` \
          (outcome: {:?})",
-        outcome.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::string::ToString::to_string)
     );
 }
 
@@ -123,7 +126,10 @@ fn review15_restoring_a_tracked_file_over_a_link_that_is_a_standalone_agents_fol
         std::fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_symlink()),
         "the link that IS the standalone agent's folder was removed by a restore, with no \
          occupancy question (outcome: {:?})",
-        outcome.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::string::ToString::to_string)
     );
 }
 
@@ -167,6 +173,9 @@ fn review15_restoring_a_file_beneath_a_link_that_is_a_standalone_agents_folder_k
         std::fs::symlink_metadata(&folder).is_ok_and(|m| m.file_type().is_symlink()),
         "the link that IS the standalone agent's folder was replaced by a restore \
          (outcome: {:?})",
-        outcome.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::string::ToString::to_string)
     );
 }

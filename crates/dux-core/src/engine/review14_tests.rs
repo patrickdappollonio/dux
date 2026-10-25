@@ -85,7 +85,10 @@ fn review14_discarding_a_deleted_tracked_file_keeps_a_standalone_agents_folder_i
         folder.join("precious.txt").exists(),
         "the standalone agent's folder inside `notes/` was deleted by a discard confirmed as \
          restoring one file (outcome: {:?})",
-        outcome.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::string::ToString::to_string)
     );
 }
 
@@ -125,6 +128,9 @@ fn review14_discarding_a_deleted_tracked_file_keeps_a_projects_repository_in_its
         nested.join(".git").exists(),
         "project p2's repository (with its history) was deleted by a discard confirmed as \
          restoring one file (outcome: {:?})",
-        outcome.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(std::string::ToString::to_string)
     );
 }

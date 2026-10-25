@@ -506,7 +506,7 @@ fn named(code: &str, tokens: &[&str]) -> Vec<String> {
     tokens
         .iter()
         .filter(|token| code.contains(**token))
-        .map(|token| token.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

@@ -416,7 +416,7 @@ mod tests {
         response
             .lines()
             .next()
-            .map(|line| line.to_string())
+            .map(std::string::ToString::to_string)
             .ok_or_else(|| "the server closed without answering".to_string())
     }
 

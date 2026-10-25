@@ -17,7 +17,7 @@ fn get_all(body: &str, args: &[&str]) -> String {
     let paths = paths_in(tmp.path());
     std::fs::write(&paths.config_path, body).unwrap();
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     let r = run_get(&args, &paths, &mut out, &mut err);
     format!(
         "{r:?}\nOUT:{}\nERR:{}",

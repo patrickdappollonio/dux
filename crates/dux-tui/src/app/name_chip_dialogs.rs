@@ -52,7 +52,7 @@ fn screen(buf: &Buffer) -> String {
         .map(|c| c.symbol().to_string())
         .collect::<Vec<_>>()
         .chunks(width)
-        .map(|row| row.concat())
+        .map(<[std::string::String]>::concat)
         .collect::<Vec<_>>()
         .join("\n")
 }

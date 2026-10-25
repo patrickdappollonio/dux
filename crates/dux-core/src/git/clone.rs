@@ -37,7 +37,7 @@ impl CloneProcesses {
     fn lock(&self) -> std::sync::MutexGuard<'_, CloneProcessState> {
         self.0
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Start a clone with `start` and record its process group, under the

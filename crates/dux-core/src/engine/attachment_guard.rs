@@ -331,7 +331,7 @@ impl Engine {
                     driving: blocker.driving,
                     target_kind: target.kind,
                     target_label: label.unwrap_or_else(|| target.id.clone()),
-                    agent_label: agent.map(|session| session.display_label()),
+                    agent_label: agent.map(super::super::model::AgentSession::display_label),
                 }
             })
             .collect()

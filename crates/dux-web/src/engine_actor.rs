@@ -2034,7 +2034,7 @@ impl EngineHandle {
         #[cfg(test)]
         self.refresh_requests
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(worktree.clone());
         // `try_send`: a dropped refresh under overload self-heals, because the periodic
         // changed-files poller recomputes the lists on its next pass regardless.
@@ -2049,7 +2049,7 @@ impl EngineHandle {
     pub(crate) fn refresh_requests(&self) -> Vec<String> {
         self.refresh_requests
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -4525,7 +4525,7 @@ fn handle_request(
             handle_pty_resize(engine, input_owners, id, rows, cols, seq);
         }
         EngineRequest::PtyGridSize(id, reply) => {
-            let _ = reply.send(pty_for(engine, &id).and_then(|client| client.grid_size()));
+            let _ = reply.send(pty_for(engine, &id).and_then(dux_core::pty::PtyClient::grid_size));
         }
         EngineRequest::NoteViewed(id) => {
             // The engine gates on the id resolving to a real agent tab, so a

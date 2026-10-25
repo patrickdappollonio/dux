@@ -4358,7 +4358,11 @@ oneshot_output = "stdout"
 "Middle" = { text = "m cmd", surface = "both" }
 "#;
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
-        let names: Vec<&str> = config.entries.keys().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = config
+            .entries
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         assert_eq!(names, vec!["Zebra", "Alpha", "Middle"]);
     }
 
@@ -4372,7 +4376,11 @@ oneshot_output = "stdout"
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
         let serialized = toml::to_string(&config).unwrap();
         let round_tripped: MacrosConfig = toml::from_str(&serialized).unwrap();
-        let names: Vec<&str> = round_tripped.entries.keys().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = round_tripped
+            .entries
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         assert_eq!(names, vec!["Zebra", "Alpha", "Middle"]);
     }
 
@@ -4400,7 +4408,11 @@ oneshot_output = "stdout"
                 surface: MacroSurface::Agent,
             },
         );
-        let names: Vec<&str> = config.entries.keys().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = config
+            .entries
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         assert_eq!(names, vec!["Zulu", "Alpha", "Mike"]);
     }
 

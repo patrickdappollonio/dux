@@ -233,7 +233,7 @@ mod tests {
     fn row(id: &str, cells: &[&str]) -> Row {
         Row {
             id: id.to_string(),
-            cells: cells.iter().map(|c| c.to_string()).collect(),
+            cells: cells.iter().map(std::string::ToString::to_string).collect(),
             json: serde_json::json!({ "id": id, "name": cells[1] }),
         }
     }

@@ -142,7 +142,7 @@ pub(crate) fn read_auth_status(target: &str, reply: &Response) -> Result<AuthSta
     if reply.status != 200 {
         let dux_refusal = serde_json::from_slice::<serde_json::Value>(&reply.body)
             .ok()
-            .is_some_and(|json| json.get("error").is_some_and(|e| e.is_string()));
+            .is_some_and(|json| json.get("error").is_some_and(serde_json::Value::is_string));
         if dux_refusal {
             return Err(CliError::new(Exit::Failed, reply_sentence(reply)));
         }

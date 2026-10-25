@@ -255,7 +255,10 @@ fn resolve_mirror(host_env: &HostEnvProbe) -> TerminalIdentity {
 }
 
 fn scrub_list() -> Vec<String> {
-    IDENTITY_SCRUB_VARS.iter().map(|s| s.to_string()).collect()
+    IDENTITY_SCRUB_VARS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect()
 }
 
 fn forced_ghostty(host_env: &HostEnvProbe) -> TerminalIdentity {

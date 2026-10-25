@@ -1174,7 +1174,7 @@ pub(crate) fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(crate::auth::provenance::header_text)
-        .map(|h| h.to_string());
+        .map(std::string::ToString::to_string);
 
     matches!((origin, host), (Some(o), Some(h)) if o == h)
 }
@@ -1815,7 +1815,9 @@ impl TabWsGuard {
         max_per_agent: u32,
     ) -> Option<Self> {
         {
-            let mut map = counts.lock().unwrap_or_else(|e| e.into_inner());
+            let mut map = counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let n = map.entry(session_id.clone()).or_insert(0);
             if *n as u32 >= max_per_agent {
                 // At/over the cap (or `max_per_agent == 0` blocks all). Don't leave
@@ -1833,7 +1835,10 @@ impl TabWsGuard {
 
 impl Drop for TabWsGuard {
     fn drop(&mut self) {
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(n) = map.get_mut(&self.session_id) {
             *n = n.saturating_sub(1);
             if *n == 0 {

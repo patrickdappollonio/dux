@@ -444,7 +444,7 @@ impl App {
             restarts
                 .finals
                 .into_iter()
-                .map(|outcome| outcome.into_reaction()),
+                .map(dux_core::engine::ResolvedFinal::into_reaction),
         ) {
             self.mark_frame_dirty();
             let routing = self.companion_routing();

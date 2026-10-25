@@ -45,7 +45,7 @@ const CACHE_TTL: Duration = Duration::from_secs(1);
 /// re-established by the next sample, so recovering the guard beats propagating
 /// a panic into every later request.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The 200 body: `{ "rows": [...] }`.
@@ -161,7 +161,10 @@ impl ResourceService {
         }
         impl Drop for InflightGuard<'_> {
             fn drop(&mut self) {
-                *self.inflight.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self
+                    .inflight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 let _ = self.tx.send(true);
             }
         }

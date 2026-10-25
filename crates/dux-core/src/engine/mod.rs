@@ -300,7 +300,7 @@ fn lock_changed_files_queue(
 ) -> std::sync::MutexGuard<'_, ChangedFilesRefreshQueue> {
     queue
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// See [`Engine::serve_memory`].
@@ -2773,7 +2773,7 @@ impl Engine {
                         } => {
                             store.update_project_default_provider(
                                 project_id,
-                                provider.as_ref().map(|provider| provider.as_str()),
+                                provider.as_ref().map(super::model::ProviderKind::as_str),
                             )?;
                         }
                         ProjectPersistenceAction::UpdateAutoReopen {
@@ -4104,8 +4104,14 @@ impl Engine {
                 // Backed-off hosts are skipped inside run_pr_sync via this
                 // snapshot (their sessions keep last-known PRs), so no global
                 // pause is needed here.
-                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let policy = policy.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let snapshot = backoff
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let policy = policy
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 // An agent in the Inactive tail is on its own, much slower
                 // clock: nobody is working in it, nothing on screen is waiting
                 // on the answer, and its pull request moves rarely. Most cycles
@@ -4113,7 +4119,7 @@ impl Engine {
                 let scope = {
                     let mut swept_at = last_inactive_sweep
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let since = match *swept_at {
                         Some(at) => at.elapsed(),
                         // Never swept: start the clock, sweep nothing.
@@ -4176,7 +4182,9 @@ impl Engine {
                 Some(notice) => {
                     let until = Instant::now() + notice.pause;
                     let already_active = {
-                        let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut map = shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let already = map.get(&sig.host).is_some_and(|u| Instant::now() < *u);
                         map.insert(sig.host.clone(), until);
                         already
@@ -4197,7 +4205,9 @@ impl Engine {
                     // Host is healthy again: clear its backoff so it is queried
                     // normally. No "resumed" message: the pause notice already
                     // auto-cleared, so a fresh toast now would be stale.
-                    let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut map = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     map.remove(&sig.host);
                 }
             }
@@ -4215,7 +4225,7 @@ impl Engine {
         self.gh_probe
             .policy
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -4225,7 +4235,7 @@ impl Engine {
             .gh_probe
             .policy
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = policy;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
     }
 
     /// A snapshot of each signed-in host's git protocol, as `gh` reports it.
@@ -4236,7 +4246,7 @@ impl Engine {
         self.gh_probe
             .protocols
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -4249,7 +4259,7 @@ impl Engine {
             .gh_probe
             .protocols
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = protocols;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = protocols;
     }
 
     /// Stop pull-request background work: clear the arm flag so the live poller
@@ -4276,7 +4286,10 @@ impl Engine {
                 panic_event: None,
             },
             move |tx| {
-                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let snapshot = backoff
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 // Boot is a one-shot: a pull request closed before the last
                 // shutdown may have been reopened since, and this is the pass
                 // that notices.
@@ -4327,7 +4340,7 @@ impl Engine {
                     .sessions
                     .iter()
                     .find(|s| s.id == tab.session_id)
-                    .map(|s| s.display_label())
+                    .map(super::model::AgentSession::display_label)
                     .unwrap_or_else(|| tab.session_id.clone());
                 let provider = self
                     .running_provider_pins
@@ -4389,7 +4402,9 @@ impl Engine {
                 // state is sysinfo's process snapshot, re-established by the very
                 // next refresh, so recovering the guard beats propagating a panic
                 // into every later sample.
-                let mut collector = collector.lock().unwrap_or_else(|e| e.into_inner());
+                let mut collector = collector
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let (rows, was_baseline) = collector.sample(targets);
                 let _ = tx.send(WorkerEvent::ResourceStatsReady(rows, was_baseline));
             },
@@ -4670,7 +4685,10 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let snapshot = backoff
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let (result, signals) =
                     crate::gh::check_pr_for_entry(&entry, &snapshot, &policy, trigger);
                 // Event-driven checks feed the shared backoff too, so a sustained
@@ -4824,7 +4842,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| s.supports_branch_git())
+            .map(super::model::AgentSession::supports_branch_git)
             .unwrap_or(true);
         if name.is_empty() {
             // An empty name resets the label to the branch (or, for a
@@ -6323,7 +6341,10 @@ impl Engine {
             })
             .collect();
         let labels = crate::agent_tabs::tab_labels(
-            &providers.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &providers
+                .iter()
+                .map(std::string::String::as_str)
+                .collect::<Vec<_>>(),
         );
         ids.into_iter().zip(labels).collect()
     }
@@ -6480,7 +6501,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| s.display_label())
+            .map(super::model::AgentSession::display_label)
             .unwrap_or_else(|| tab_id.to_string());
         self.begin_close_provider(TabIdRef::new(tab_id), label, Some(owner));
         self.clear_tab_runtime(TabIdRef::new(tab_id));
@@ -8472,7 +8493,7 @@ mod tests {
             if engine
                 .providers
                 .get(TabIdRef::new(tab))
-                .and_then(|p| p.progress_report())
+                .and_then(super::super::pty::PtyClient::progress_report)
                 .is_some()
             {
                 return tmp;
@@ -8579,7 +8600,7 @@ mod tests {
             if engine
                 .providers
                 .get(TabIdRef::new(tab))
-                .map(|p| p.passthrough_pending())
+                .map(super::super::pty::PtyClient::passthrough_pending)
                 .unwrap_or(0)
                 > 0
             {
@@ -8872,7 +8893,7 @@ mod tests {
     }
 
     fn hosts(names: &[&str]) -> GithubHostPolicy {
-        GithubHostPolicy::Hosts(names.iter().map(|n| n.to_string()).collect())
+        GithubHostPolicy::Hosts(names.iter().map(std::string::ToString::to_string).collect())
     }
 
     fn protocols(
@@ -11404,7 +11425,7 @@ mod tests {
             engine
                 .running_provider_pins
                 .get(TabIdRef::new(&slot))
-                .map(|p| p.as_str()),
+                .map(super::super::model::ProviderKind::as_str),
             Some("claude")
         );
         assert_eq!(
@@ -11422,7 +11443,7 @@ mod tests {
             engine
                 .running_provider_pins
                 .get(TabIdRef::new(&slot))
-                .map(|p| p.as_str()),
+                .map(super::super::model::ProviderKind::as_str),
             Some("claude"),
             "the pin records what's actually spawned, not the latest selection"
         );

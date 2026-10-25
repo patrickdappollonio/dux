@@ -180,7 +180,9 @@ impl Heard {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Instant> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -411,7 +413,10 @@ impl std::fmt::Debug for Attachments {
 
 impl Attachments {
     fn with<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
-        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
     }
 

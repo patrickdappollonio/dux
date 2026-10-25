@@ -769,7 +769,9 @@ static LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// assertion window.
 #[cfg(test)]
 pub(crate) fn level_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    LEVEL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Whether the level guard is held right now, for a test that needs to see the

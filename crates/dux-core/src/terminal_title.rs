@@ -35,7 +35,7 @@ fn terminal_number(label: &str) -> Option<u64> {
     let digits: String = label
         .chars()
         .rev()
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()

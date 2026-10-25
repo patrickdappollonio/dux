@@ -1013,7 +1013,7 @@ port = 3890
     }
 
     fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+        list.iter().map(std::string::ToString::to_string).collect()
     }
 
     fn get(paths: &DuxPaths, path: &str) -> (String, String) {
@@ -1928,7 +1928,7 @@ mod names_fields_and_per_surface_get_tests {
             dux_core::config::start_refusal(before, dux_core::config::Surface::TerminalUi),
             None
         );
-        let args: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = list.iter().map(std::string::ToString::to_string).collect();
         let mut out = Vec::new();
         let result = run_set(&args, &paths, secrets, &mut out);
         let after = std::fs::read_to_string(&paths.config_path).unwrap();
@@ -2079,7 +2079,7 @@ mod overridable_problems_name_their_flag_tests {
         std::fs::write(&paths.config_path, "[server]\nhost = \"localhost\"\n").unwrap();
         let args: Vec<String> = ["ui.left_width_pct", "30"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let mut out = Vec::new();
         run_set(&args, &paths, &mut NoSecrets, &mut out).expect("set of an unrelated key");

@@ -63,7 +63,9 @@ impl WebCompanion {
     /// last said "serving on ...", and nobody reads `dux.log` to learn that stopped
     /// being true.
     fn retire_if_failed(&mut self, engine: &mut Engine) -> Option<String> {
-        let failed = self.serving().is_some_and(|s| s.is_failed());
+        let failed = self
+            .serving()
+            .is_some_and(dux_web::background::BackgroundServer::is_failed);
         if !failed {
             return None;
         }
@@ -188,13 +190,16 @@ impl BackgroundServeCompanion for WebCompanion {
     }
 
     fn urls(&self) -> Vec<String> {
-        self.serving().map(|s| s.urls()).unwrap_or_default()
+        self.serving()
+            .map(dux_web::background::BackgroundServer::urls)
+            .unwrap_or_default()
     }
 
     fn browsers(&self) -> usize {
         // No serve, no browsers: the count is structurally zero rather than
         // remembered from last time.
-        self.serving().map_or(0, |s| s.browsers())
+        self.serving()
+            .map_or(0, dux_web::background::BackgroundServer::browsers)
     }
 
     fn start(
@@ -228,11 +233,15 @@ impl BackgroundServeCompanion for WebCompanion {
     }
 
     fn server_log_path(&self) -> Option<std::path::PathBuf> {
-        self.server.as_ref().and_then(|s| s.server_log_path())
+        self.server
+            .as_ref()
+            .and_then(dux_web::background::BackgroundServer::server_log_path)
     }
 
     fn ownership(&self) -> Option<TuiOwnership> {
-        self.server.as_ref().and_then(|server| server.ownership())
+        self.server
+            .as_ref()
+            .and_then(dux_web::background::BackgroundServer::ownership)
     }
 
     fn publish_ownership_events(&mut self, events: &[PtyOwnershipEvent]) {

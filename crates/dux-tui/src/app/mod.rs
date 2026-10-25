@@ -7866,7 +7866,7 @@ impl App {
         // an unconfigured surface keeps the ordinary behaviour.
         let capacity = self
             .selected_terminal_surface_client()
-            .map(|client| client.scrollback_capacity())
+            .map(dux_core::pty::PtyClient::scrollback_capacity)
             .unwrap_or(0);
         SelectionOrigin {
             history_saturated: capacity > 0 && self.snapshot_buf.scrollback_total >= capacity,

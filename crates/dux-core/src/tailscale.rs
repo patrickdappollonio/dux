@@ -395,7 +395,7 @@ static KNOWN_TAILSCALE_IPS: std::sync::Mutex<Vec<IpAddr>> = std::sync::Mutex::ne
 pub fn local_evidence() -> LocalEvidence {
     let known = KNOWN_TAILSCALE_IPS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     evidence_from(
         owned_tailscale_address(&interfaces(), &known),
@@ -404,7 +404,7 @@ pub fn local_evidence() -> LocalEvidence {
         &|| {
             PROCESS_SCAN
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .running(std::time::Instant::now(), tailscaled_process_running)
         },
     )
@@ -584,7 +584,7 @@ pub fn detect_identity(dux_port: u16) -> Result<TailscaleIdentity, TailscaleUnav
     if let Ok(identity) = &look {
         *KNOWN_TAILSCALE_IPS
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
             identity.status.tailscale_ips.clone();
     }
     look
@@ -1074,7 +1074,7 @@ pub fn parse_status_json(text: &str) -> Option<SelfStatus> {
     let magic_dns_enabled = root
         .get("CurrentTailnet")
         .and_then(|t| t.get("MagicDNSEnabled"))
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(magic_dns_suffix.is_some());
     let cert_domains = root
         .get("CertDomains")
@@ -1175,11 +1175,11 @@ fn collect_serve_routes(
         let listener = config.get("TCP").and_then(|tcp| tcp.get(port.to_string()));
         let plain_http = listener
             .and_then(|l| l.get("HTTP"))
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
             && !listener
                 .and_then(|l| l.get("HTTPS"))
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
         let (scheme, default_port) = if plain_http {
             ("http", 80)
@@ -1194,7 +1194,7 @@ fn collect_serve_routes(
         let funnel = config
             .get("AllowFunnel")
             .and_then(|f| f.get(host_port.as_str()))
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         out.push(ServeRoute { url, funnel });
     }

@@ -1486,7 +1486,7 @@ fn stat_fields_after_comm(stat: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
     let after_comm = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
     Some(
         after_comm
-            .split(|b| b.is_ascii_whitespace())
+            .split(u8::is_ascii_whitespace)
             .filter(|field| !field.is_empty()),
     )
 }

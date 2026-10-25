@@ -765,7 +765,11 @@ async fn delete_agent_and_wait(f: &Fixture, query: &str) {
         .unwrap();
     assert!(resp.status().is_success(), "delete got {}", resp.status());
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while !sessions(f).await.as_array().is_some_and(|l| l.is_empty()) {
+    while !sessions(f)
+        .await
+        .as_array()
+        .is_some_and(std::vec::Vec::is_empty)
+    {
         assert!(std::time::Instant::now() < deadline, "agent never left");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

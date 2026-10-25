@@ -103,7 +103,7 @@ impl Sessions {
         self.0
             .map
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn now(&self) -> i64 {
@@ -128,12 +128,12 @@ impl Sessions {
             let mut slot = inner
                 .store
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let unstored: Vec<StoredSession> = {
                 let mut map = inner
                     .map
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for StoredSession {
                     digest,
                     generation,
@@ -213,12 +213,12 @@ impl Sessions {
             let mut slot = inner
                 .store
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let loaded = *inner.loaded.borrow();
             inner
                 .map
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(
                     row.digest,
                     Live {
@@ -385,7 +385,7 @@ impl Sessions {
             let mut slot = inner
                 .store
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match slot.as_mut() {
                 Some(store) => write(store),
                 None => Ok(()),

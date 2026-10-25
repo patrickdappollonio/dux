@@ -58,7 +58,7 @@ fn a_secret_setting_never_repeats_an_unexpected_argument() {
         vec!["server.auth.password", "--stdin", "--hunter2=x"],
         vec!["env.TOKEN", "--hunter2"],
     ] {
-        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         let mut out = Vec::new();
         let error = run_set(&args, &paths, &mut NoSecrets, &mut out).expect_err("refused");
         let message = format!("{error:#}");

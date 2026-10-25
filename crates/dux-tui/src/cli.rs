@@ -25,7 +25,7 @@ pub fn asks_for_help(args: &[String]) -> bool {
 }
 
 pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    let sub = args.first().map(std::string::String::as_str).unwrap_or("");
     match sub {
         "reset" => {
             let all = args[1..].iter().any(|a| a == "--all");
@@ -1412,7 +1412,11 @@ mod tests {
 
     #[test]
     fn a_help_flag_asks_for_help_until_a_literal_double_dash() {
-        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let args = |a: &[&str]| {
+            a.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        };
         assert!(asks_for_help(&args(&["get", "--help"])));
         assert!(asks_for_help(&args(&["set", "k", "v", "-h"])));
         assert!(!asks_for_help(&args(&["set", "k", "--", "--help"])));
@@ -2891,7 +2895,7 @@ mod tests {
     fn backups(harness: &ResetHarness) -> Vec<PathBuf> {
         let mut found: Vec<PathBuf> = fs::read_dir(&harness.paths.root)
             .expect("read dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.path())
             .filter(|p| {
                 p.file_name()

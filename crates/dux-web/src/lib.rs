@@ -628,7 +628,7 @@ fn run_plain_http(
             );
             *engine_thread_slot
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(join);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join);
 
             // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
             // failure flips its watch and every serve task awaits it. It carries the
@@ -810,7 +810,7 @@ fn run_plain_http(
         });
         let join = engine_thread
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(join) = join {
             match finish_engine_thread(join, &quit, &exit_console, FORCE_SETTLE_BOUND) {
@@ -1135,7 +1135,7 @@ impl TailscaleLoop {
                 let bound = control.bound_leg();
                 *bound
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = initial_leg;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = initial_leg;
                 bound
             },
             host_literals: control.host_literals(),
@@ -1222,7 +1222,7 @@ impl TailscaleLoop {
             let mut slot = self
                 .identity
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::mem::replace(&mut *slot, identity)
         };
         self.own_name.replace(&admitted);
@@ -1356,7 +1356,7 @@ impl TailscaleLoop {
         let hint = self
             .identity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .and_then(|identity| serve_hint(identity, port));
         if let Some(hint) = hint {
@@ -1439,7 +1439,7 @@ impl TailscaleLoop {
     fn held_identity(&self) -> Option<TailscaleIdentity> {
         self.identity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -1539,7 +1539,7 @@ impl TailscaleLoop {
                         }
                         identity
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone()
                     },
                     emit: &|event| tx.blocking_send((generation, event)).is_ok(),
@@ -5681,7 +5681,7 @@ mod live_tailscale_mode_tests {
         ring.snapshot()
             .lines
             .iter()
-            .map(|line| line.text())
+            .map(dux_core::serve_log::LogLine::text)
             .collect()
     }
 

@@ -3245,7 +3245,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         // on would let two writers lock two different files), and is private.
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name() != "config.toml" && e.file_name() != CONFIG_WRITE_LOCK_NAME)
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");

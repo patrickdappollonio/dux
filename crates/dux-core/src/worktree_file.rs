@@ -457,7 +457,10 @@ pub fn read_file_as(
     let endings = text
         .as_ref()
         .map(|t| crate::text_encoding::line_endings(&t.text));
-    let unwritable = text.as_ref().and_then(|t| t.unwritable).map(|u| u.as_str());
+    let unwritable = text
+        .as_ref()
+        .and_then(|t| t.unwritable)
+        .map(super::text_encoding::Unwritable::as_str);
     Ok(WorktreeFile {
         path: rel_path.to_string(),
         binary: text.is_none(),

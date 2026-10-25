@@ -1128,7 +1128,7 @@ impl Engine {
                         .sessions
                         .iter()
                         .find(|s| &s.id == sid)
-                        .map(|s| s.display_label())
+                        .map(super::super::model::AgentSession::display_label)
                         .unwrap_or_else(|| sid.clone());
                     let label = if is_session_slot {
                         branch
@@ -1632,7 +1632,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| s.display_label())
+            .map(super::super::model::AgentSession::display_label)
         else {
             return DetachSessionOutcome::UnknownSession;
         };
@@ -1705,7 +1705,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|s| s.display_label())
+            .map(super::super::model::AgentSession::display_label)
         else {
             return ForceDetachOutcome::UnknownSession;
         };
@@ -2450,11 +2450,9 @@ impl Engine {
                         );
                         // A tab that could not be started again is a session
                         // the user now has to start by hand.
-                        if outcome
-                            .restart
-                            .as_ref()
-                            .is_some_and(|report| report.needs_attention())
-                        {
+                        if outcome.restart.as_ref().is_some_and(
+                            super::super::working_copy::TabRestartReport::needs_attention,
+                        ) {
                             crate::engine::Final::warning(message)
                         } else {
                             crate::engine::Final::info(message)
@@ -2590,7 +2588,7 @@ impl Engine {
         }
         let label = self
             .session_by_id(session_id)
-            .map(|session| session.display_label())
+            .map(super::super::model::AgentSession::display_label)
             .unwrap_or_else(|| session_id.to_string());
         for (id, _) in &tabs {
             let owner = self.terminating_owner_for_tab(session_id, id.as_ref_id());
@@ -2887,7 +2885,7 @@ impl Engine {
         let (_, provider) = restart.tabs.iter().find(|(id, _)| id == tab_id)?;
         let label = self
             .session_by_id(&restart.session_id)
-            .map(|session| session.display_label())
+            .map(super::super::model::AgentSession::display_label)
             .unwrap_or_else(|| restart.session_id.clone());
         Some(crate::working_copy::restart_pending_launch_refusal(
             &label,

@@ -8840,7 +8840,7 @@ mod tests {
             CompanionTerminal {
                 owner: TerminalOwner::Session("s1".to_string()),
                 label: label.to_string(),
-                foreground_cmd: foreground_cmd.map(|s| s.to_string()),
+                foreground_cmd: foreground_cmd.map(std::string::ToString::to_string),
                 client,
                 sort_order,
                 created_at,

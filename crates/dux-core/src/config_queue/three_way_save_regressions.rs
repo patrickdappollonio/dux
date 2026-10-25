@@ -2294,7 +2294,9 @@ mod randomized_model {
     /// Disk value of a tracked key, as TOML literal text, or None when absent.
     fn disk_get(text: &str, section: &str, key: &str) -> Option<String> {
         let doc: toml::Table = toml::from_str(text).unwrap();
-        doc.get(section)?.get(key).map(|v| v.to_string())
+        doc.get(section)?
+            .get(key)
+            .map(std::string::ToString::to_string)
     }
     fn disk_env(text: &str, key: &str) -> Option<String> {
         let doc: toml::Table = toml::from_str(text).unwrap();

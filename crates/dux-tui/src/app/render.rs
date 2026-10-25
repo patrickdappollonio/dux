@@ -486,7 +486,7 @@ fn right_align_line(
         spans
             .iter()
             .map(|s| s.content.as_ref().cell_width())
-            .fold(0u16, |a, b| a.saturating_add(b))
+            .fold(0u16, u16::saturating_add)
     };
     let right_w = width(&right);
     // Not enough room to reserve the right group plus a gap: degrade to a single
@@ -3548,8 +3548,12 @@ impl App {
         // label (`│ 1 │ codex │`): the visible address for the tab switch
         // keys. See `tab_pill_ordinal_cell` for why every pill is numbered
         // and why ordinals renumber on close.
-        let labels: Vec<String> =
-            tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let labels: Vec<String> = tab_labels(
+            &providers
+                .iter()
+                .map(std::string::String::as_str)
+                .collect::<Vec<_>>(),
+        );
         let seg_ordinal: Vec<String> = (1..=labels.len()).map(tab_pill_ordinal_cell).collect();
         // Per-tab activity, snapshotted here so the `&mut buf` work below borrows
         // nothing from the engine. Both predicates are keyed by tab id, so each
@@ -5027,7 +5031,10 @@ impl App {
                         &self.theme,
                     ),
                 };
-                let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
+                let stats_width = stats
+                    .iter()
+                    .map(ratatui::prelude::Span::width)
+                    .sum::<usize>();
 
                 // Status prefix takes 3 chars ("M  "), then the row's place in
                 // the tree: two columns per expanded folder above it, and a
@@ -13960,7 +13967,7 @@ mod tests {
                 .map(|cell| cell.symbol().to_string())
                 .collect::<Vec<_>>()
                 .chunks(width)
-                .map(|row| row.concat())
+                .map(<[std::string::String]>::concat)
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -14192,7 +14199,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("folder:"),
@@ -14282,7 +14289,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         let mut painted: Vec<usize> = Vec::new();
@@ -14338,7 +14345,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         // Asserted as fragments that each fit on one wrapped line: the pane
         // wraps the sentence, and the flattened buffer has no newlines, so a
@@ -14865,7 +14872,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             !rendered.contains("Also rename the git branch"),
@@ -14890,7 +14897,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("Also rename the git branch"),
@@ -15139,7 +15146,11 @@ mod tests {
         );
         // No return arrow anywhere: the agent row dropped it and no terminal
         // row exists in this app to legitimately carry one.
-        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+        let rendered: String = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
         assert!(
             !rendered.contains('↳'),
             "the standalone agent row must not use the return arrow; got:\n{rendered}"
@@ -15264,7 +15275,7 @@ mod tests {
                 .buffer()
                 .content()
                 .iter()
-                .map(|c| c.symbol())
+                .map(ratatui::buffer::Cell::symbol)
                 .collect()
         };
         let plain = crate::theme::Glyphs::PLAIN.project;
@@ -15970,7 +15981,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("✷ ~ "),
@@ -16066,7 +16077,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -16531,7 +16542,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("⚠ demo"),
@@ -16558,7 +16569,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains('⚠'),
@@ -16710,7 +16721,7 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect::<Vec<_>>()
             .chunks(width)
-            .map(|row| row.concat())
+            .map(<[std::string::String]>::concat)
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -16779,7 +16790,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("orig:"),
@@ -20679,7 +20690,11 @@ mod tests {
                 .draw(|frame| app.render(frame))
                 .expect("render frame");
             let buffer = terminal.backend().buffer();
-            buffer.content.iter().map(|cell| cell.symbol()).collect()
+            buffer
+                .content
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect()
         }
 
         // An app is in the foreground: the kill warning is shown.
@@ -20831,7 +20846,7 @@ mod tests {
         spans
             .iter()
             .map(|s| s.content.as_ref().cell_width())
-            .fold(0u16, |a, b| a.saturating_add(b))
+            .fold(0u16, u16::saturating_add)
     }
 
     fn spans_text(spans: &[Span<'static>]) -> String {
@@ -21747,7 +21762,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -21816,7 +21831,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         // The Name column floor (16) plus the child's 6-character tree
@@ -21862,7 +21877,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -21911,7 +21926,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(rendered.contains("Agent (claude): some-branch-name"));
@@ -21939,7 +21954,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect()
     }
 
@@ -22199,7 +22214,7 @@ mod tests {
         let widest = app
             .help_content_lines(400)
             .iter()
-            .map(|l| l.width())
+            .map(ratatui::prelude::Line::width)
             .max()
             .unwrap_or(0);
         let wide = u16::try_from(widest.max(100)).unwrap_or(u16::MAX);

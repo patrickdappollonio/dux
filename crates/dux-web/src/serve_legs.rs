@@ -423,7 +423,7 @@ impl LegStatus {
     fn lock(&self) -> std::sync::MutexGuard<'_, LegCoalescer> {
         self.coalescer
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn post(&self, status: dux_core::engine::StatusUpdate) {
@@ -1362,7 +1362,7 @@ impl TailscaleModeControl {
         let identity = self
             .identity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         tailnet_urls(
             legs,

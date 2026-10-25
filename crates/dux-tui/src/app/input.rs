@@ -1727,7 +1727,7 @@ impl App {
         let fs = self.selected_surface_forward_scroll();
         let alt = self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.is_alt_screen());
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
         should_forward_page(fs, alt)
     }
 
@@ -2158,7 +2158,7 @@ impl App {
         }
         match self
             .selected_terminal_surface_client()
-            .map(|p| p.scrollback_offset())
+            .map(dux_core::pty::PtyClient::scrollback_offset)
         {
             // No client behind the selected surface: nothing to be in scroll
             // mode over.
@@ -3322,7 +3322,7 @@ impl App {
             self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
             self.raw_paste_normalize = !self
                 .selected_terminal_surface_client()
-                .is_some_and(|provider| provider.has_bracketed_paste());
+                .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste);
             self.raw_paste_prev_cr = false;
             return (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
         }
@@ -3404,7 +3404,7 @@ impl App {
         let forward_scroll = self.selected_surface_forward_scroll();
         let alt_screen = self
             .selected_terminal_surface_client()
-            .is_some_and(|provider| provider.is_alt_screen());
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
         if should_forward_page(forward_scroll, alt_screen) {
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
@@ -3531,7 +3531,7 @@ impl App {
 
         let child_wants_mouse = self
             .selected_terminal_surface_client()
-            .is_some_and(|provider| provider.has_mouse_mode());
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
         if self.handle_raw_terminal_press(&mouse, child_wants_mouse, dispatch.is_scrolled_back) {
             return RawInputFlow::Continue;
         }
@@ -8011,7 +8011,7 @@ impl App {
         };
         let prefix_lower = prefix.to_lowercase();
         let mut candidates: Vec<String> = read
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
@@ -8207,10 +8207,9 @@ impl App {
                 );
                 rows.get(visual_index).and_then(|row| match row {
                     ManageWorktreeVisualRow::Entry(index)
-                        if prompt
-                            .entries
-                            .get(*index)
-                            .is_some_and(|entry| entry.is_removable()) =>
+                        if prompt.entries.get(*index).is_some_and(
+                            dux_core::worktree_manager::ManagedWorktree::is_removable,
+                        ) =>
                     {
                         Some(*index)
                     }
@@ -10496,7 +10495,7 @@ impl App {
         // a double click on a mouse-mode child is just two forwarded clicks.)
         if self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.has_mouse_mode())
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
         {
             return;
         }
@@ -10848,7 +10847,7 @@ impl App {
             .map(str::to_string);
         let child_wants_mouse = self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.has_mouse_mode());
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
         match decide_terminal_press(
             mouse.kind,
             mouse.modifiers,
@@ -10956,7 +10955,7 @@ impl App {
         };
         if !self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.has_mouse_drag_mode())
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_drag_mode)
         {
             return;
         }
@@ -10976,7 +10975,7 @@ impl App {
         };
         if !self
             .selected_terminal_surface_client()
-            .is_some_and(|p| p.has_mouse_mode())
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
         {
             return;
         }
@@ -15028,7 +15027,11 @@ not_a_real_action = ["x"]
             .expect("render frame");
 
         let buffer = terminal.backend().buffer();
-        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        let rendered: String = buffer
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
         assert!(
             rendered.contains("Enter startup command..."),
             "expected placeholder in non-editing mode, got: {rendered}"
@@ -18954,7 +18957,7 @@ not_a_real_action = ["x"]
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("second-branch"),
@@ -19550,7 +19553,7 @@ not_a_real_action = ["x"]
         for _ in 0..200 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_mouse_mode())
+                .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
             {
                 mouse_mode = true;
                 break;
@@ -19612,7 +19615,7 @@ not_a_real_action = ["x"]
         for _ in 0..400 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_mouse_mode())
+                .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
             {
                 return;
             }
@@ -21270,7 +21273,7 @@ not_a_real_action = ["x"]
         for _ in 0..400 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_mouse_mode())
+                .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
             {
                 break;
             }
@@ -21278,7 +21281,7 @@ not_a_real_action = ["x"]
         }
         assert!(
             app.selected_terminal_surface_client()
-                .is_some_and(|p| p.has_mouse_mode()),
+                .is_some_and(dux_core::pty::PtyClient::has_mouse_mode),
             "the child never enabled mouse tracking"
         );
 
@@ -26134,7 +26137,9 @@ cyan = "#00ffff"
             .expect("tab row exists");
         assert_eq!(created.provider.as_str(), "opencode");
         assert_eq!(
-            app.focused_tabs.get(&session_id).map(|id| id.as_str()),
+            app.focused_tabs
+                .get(&session_id)
+                .map(std::string::String::as_str),
             Some(created.id.as_str()),
             "the new tab should be focused"
         );
@@ -30514,7 +30519,7 @@ cyan = "#00ffff"
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(screen.contains("Create a review copy"), "the box is shown");
         assert!(screen.contains("will be checked out in the project folder"));
@@ -31194,7 +31199,7 @@ cyan = "#00ffff"
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(shown.contains("Space act on focus"), "{shown}");
     }
@@ -32897,7 +32902,7 @@ cyan = "#00ffff"
         for _ in 0..200 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_app_cursor())
+                .is_some_and(dux_core::pty::PtyClient::has_app_cursor)
             {
                 app_cursor = true;
                 break;
@@ -34615,7 +34620,7 @@ cyan = "#00ffff"
         for _ in 0..400 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_bracketed_paste())
+                .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste)
             {
                 ready = true;
                 break;
@@ -36407,7 +36412,7 @@ cyan = "#00ffff"
         for _ in 0..400 {
             if app
                 .selected_terminal_surface_client()
-                .is_some_and(|p| p.has_bracketed_paste())
+                .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste)
             {
                 ready = true;
                 break;
@@ -36916,7 +36921,7 @@ cyan = "#00ffff"
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -36952,7 +36957,7 @@ cyan = "#00ffff"
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -36996,7 +37001,7 @@ cyan = "#00ffff"
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
 
         assert!(
@@ -37089,7 +37094,7 @@ cyan = "#00ffff"
             .buffer()
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             rendered.contains("Codex agent"),
@@ -39057,7 +39062,7 @@ cyan = "#00ffff"
                 .map(|cell| cell.symbol().to_string())
                 .collect::<Vec<_>>()
                 .chunks(160)
-                .map(|row| row.concat())
+                .map(<[std::string::String]>::concat)
                 .collect::<Vec<_>>()
                 .join("\n")
         };

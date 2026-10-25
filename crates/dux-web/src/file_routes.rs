@@ -898,7 +898,10 @@ async fn write_file<R: EditorRoot>(
     Json(WriteResult {
         modified: stamp.modified,
         size: stamp.size,
-        unwritable: verdict.map(|v| v.unwritable.map(|u| u.as_str())),
+        unwritable: verdict.map(|v| {
+            v.unwritable
+                .map(dux_core::text_encoding::Unwritable::as_str)
+        }),
         mixed_line_endings: verdict.map(|v| v.line_endings.mixed),
         eol: verdict.map(|v| v.line_endings.saves_as.label()),
     })
@@ -1119,7 +1122,10 @@ async fn destructive_editor_op(
     let guard = {
         let state = state.clone();
         let root = root.to_path_buf();
-        let relative: Vec<String> = targets.iter().map(|target| target.to_string()).collect();
+        let relative: Vec<String> = targets
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         tokio::task::spawn_blocking(move || {
             let relative: Vec<&str> = relative.iter().map(String::as_str).collect();
             crate::git_routes::guard_destructive_targets(

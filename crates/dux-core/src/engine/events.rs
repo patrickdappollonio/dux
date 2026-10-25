@@ -2463,7 +2463,7 @@ impl Engine {
             if let Some(process) = self
                 .providers
                 .get(id.as_ref_id())
-                .and_then(|client| client.process_session())
+                .and_then(super::super::pty::PtyClient::process_session)
             {
                 sessions.push(process);
             }
@@ -5092,7 +5092,7 @@ mod tests {
                 .unwrap();
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .map(|line| line.to_string())
+                .map(std::string::ToString::to_string)
                 .collect()
         }
 
@@ -5136,7 +5136,7 @@ mod tests {
             .expect("a managed agent with a project has branch inputs")
             .warned_branches()
             .into_iter()
-            .map(|branch| branch.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let before = branches(&repo);
 
@@ -9266,7 +9266,7 @@ mod tests {
             engine.projects[0]
                 .explicit_default_provider
                 .as_ref()
-                .map(|p| p.as_str()),
+                .map(crate::model::ProviderKind::as_str),
             Some("claude"),
         );
         assert!(matches!(

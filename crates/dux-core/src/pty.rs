@@ -2502,7 +2502,7 @@ fn process_name(pid: u32) -> Option<String> {
     std::path::Path::new(trimmed)
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 struct TerminalState {

@@ -151,7 +151,10 @@ impl Engine {
     pub fn finish_pending_worktree_removals(&mut self, abort: Option<&AtomicBool>) {
         let aborted = || abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if self.pending_group_removals.is_empty()
-            && self.removal_workers.iter().all(|w| w.is_finished())
+            && self
+                .removal_workers
+                .iter()
+                .all(std::thread::JoinHandle::is_finished)
         {
             return;
         }

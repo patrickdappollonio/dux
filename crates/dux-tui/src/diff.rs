@@ -870,7 +870,7 @@ mod tests {
         let rendered = output
             .lines
             .iter()
-            .map(|line| line.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>();
 
         assert!(
@@ -982,7 +982,11 @@ mod tests {
             4,
         )
         .unwrap();
-        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+        let rendered: Vec<String> = output
+            .lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         // Context line "aaa" should show both old and new line numbers.
         // Max line is 4, so ln_width is 1: numbers are right-aligned in 1 char.
@@ -1023,7 +1027,11 @@ mod tests {
             4,
         )
         .unwrap();
-        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+        let rendered: Vec<String> = output
+            .lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         // No gutter separator should be present in any content line.
         let has_gutter = rendered.iter().any(|l| l.contains('│'));
@@ -1060,7 +1068,11 @@ mod tests {
             4,
         )
         .unwrap();
-        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+        let rendered: Vec<String> = output
+            .lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         let insert_line = rendered
             .iter()
@@ -1307,7 +1319,10 @@ mod tests {
                 3,
                 "sixty columns of content in twenty is three rows (gutter \
                  {gutter_width}): {:?}",
-                wrapped.iter().map(|l| l.to_string()).collect::<Vec<_>>()
+                wrapped
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
             );
             for row in &wrapped {
                 assert!(
@@ -1320,7 +1335,7 @@ mod tests {
             }
             let rejoined: String = wrapped
                 .iter()
-                .map(|row| row.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("")
                 .replace("  1 │ ", "")
@@ -1351,7 +1366,7 @@ mod tests {
         let line = Line::from("    indented words here supercalifragilistic tail   ");
         let wrapped: Vec<String> = wrap_diff_lines(&[line], 16, 0)
             .iter()
-            .map(|row| row.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(
             wrapped,
@@ -1537,7 +1552,11 @@ mod tests {
         )
         .unwrap();
 
-        let rendered: Vec<String> = output.lines.iter().map(|line| line.to_string()).collect();
+        let rendered: Vec<String> = output
+            .lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             !rendered
                 .iter()
@@ -1631,7 +1650,11 @@ mod tests {
         )
         .unwrap();
 
-        let rendered: Vec<String> = output.lines.iter().map(|line| line.to_string()).collect();
+        let rendered: Vec<String> = output
+            .lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert!(
             rendered.iter().any(|line| line.starts_with("+y")),
             "got {rendered:?}"
@@ -1683,7 +1706,7 @@ mod tests {
         let rendered: Vec<String> = binary_diff_output("image.bin", 1, 2, &theme)
             .lines
             .iter()
-            .map(|line| line.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert!(rendered.iter().any(|line| line == "Old size: 1 byte"));
         assert!(rendered.iter().any(|line| line == "New size: 2 bytes"));
@@ -1691,7 +1714,7 @@ mod tests {
         let rendered: Vec<String> = too_large_diff_output("image.bin", 1, 2, &theme)
             .lines
             .iter()
-            .map(|line| line.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert!(rendered.iter().any(|line| line == "Old size: 1 byte"));
         assert!(rendered.iter().any(|line| line == "New size: 2 bytes"));

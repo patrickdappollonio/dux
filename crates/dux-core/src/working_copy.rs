@@ -768,7 +768,10 @@ mod tests {
     }
 
     fn strings(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
+        values
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect()
     }
 
     /// A branch name can come from a pull request somebody else opened; an

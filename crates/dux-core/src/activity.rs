@@ -98,7 +98,7 @@ impl ActivityRing {
         self.0
             .held
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Append a line, dropping the oldest unpinned one if the buffer is full,
@@ -153,7 +153,7 @@ impl ActivityRing {
             .0
             .serve_urls
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *slot != urls {
             *slot = urls;
             self.0.urls_version.fetch_add(1, Ordering::Relaxed);
@@ -165,7 +165,7 @@ impl ActivityRing {
         self.0
             .serve_urls
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 

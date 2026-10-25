@@ -158,7 +158,7 @@ fn get_on(text: &str, args: &[&str]) -> (Result<()>, String, String) {
     std::fs::write(&paths.config_path, text).expect("seed");
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     let r = run_get(&args, &paths, &mut out, &mut err);
     (
         r,
@@ -281,7 +281,7 @@ fn a_malformed_path_never_repeats_what_was_typed_after_the_known_part() {
         let paths = paths_in(tmp.path());
         std::fs::write(&paths.config_path, "").unwrap();
         let mut out = Vec::new();
-        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         let r = run_set(&owned, &paths, &mut NoSecrets, &mut out);
         let s = format!(
             "{}{:?}",

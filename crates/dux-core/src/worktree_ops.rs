@@ -332,7 +332,7 @@ impl State {
         self.paths
             .values()
             .filter(|entry| path.contains(&entry.spelled))
-            .flat_map(|entry| entry.kinds())
+            .flat_map(PathEntry::kinds)
             .collect()
     }
 
@@ -503,7 +503,7 @@ impl WorktreeOps {
         self.inner
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Register an operation on `path` for as long as the returned guard lives.
@@ -775,7 +775,7 @@ impl WorktreeOps {
                 .inner
                 .changed
                 .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
     }
@@ -935,7 +935,7 @@ impl RemovalLease {
                 .inner
                 .changed
                 .wait_timeout(state, deadline - now)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
     }
@@ -992,7 +992,7 @@ impl RemovalLease {
             .slot
             .outcome
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
         self.slot.ready.notify_all();
         self.ops.inner.changed.notify_all();
     }
@@ -1029,7 +1029,7 @@ impl RemovalJoin {
             .slot
             .outcome
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             if let Some(result) = outcome.as_ref() {
                 return Some(result.clone());
@@ -1042,7 +1042,7 @@ impl RemovalJoin {
                 .slot
                 .ready
                 .wait_timeout(outcome, deadline - now)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
     }

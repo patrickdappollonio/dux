@@ -28,7 +28,7 @@ fn paths(dir: &std::path::Path) -> DuxPaths {
 
 fn set(p: &DuxPaths, args: &[&str]) -> (Result<()>, String) {
     let mut out = Vec::new();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
     let r = run_set(&args, p, &mut NoSecrets, &mut out);
     (r, String::from_utf8(out).unwrap())
 }

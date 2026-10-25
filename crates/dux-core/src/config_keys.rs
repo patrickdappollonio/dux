@@ -1204,7 +1204,7 @@ pub fn append_blocked_entry(
     let (first, last) = entry_span(entry).unwrap_or((ip, ip));
     let blocked_path: Vec<String> = ["server", "auth", "blocked_addresses"]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let written = crate::config_write::mutate_config_file_repairing(
         config_path,
@@ -2687,7 +2687,7 @@ port = 3890
 
         let hosts = lookup("server.allowed_hosts").unwrap();
         let list = parse_value(&hosts, "[\"a.example\", \"b.example\"]").unwrap();
-        assert_eq!(list.as_array().map(|a| a.len()), Some(2));
+        assert_eq!(list.as_array().map(toml_edit::Array::len), Some(2));
         assert!(parse_value(&hosts, "a.example").is_err());
 
         let start = lookup("defaults.start_directory").unwrap();

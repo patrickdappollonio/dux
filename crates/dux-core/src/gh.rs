@@ -1357,7 +1357,7 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         let errors = data_json
             .as_ref()
             .and_then(|j| j.get("errors"))
-            .map(|e| e.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         // Distinguish rate-limiting (a 403 / secondary limit, or a RATE_LIMITED
         // GraphQL error) from a generic network/gh failure so the status message
@@ -1845,7 +1845,7 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
     Some(RateLimitInfo {
         remaining,
         reset_at,
-        cost: rl.get("cost").and_then(|v| v.as_i64()),
+        cost: rl.get("cost").and_then(serde_json::Value::as_i64),
     })
 }
 
@@ -2285,7 +2285,7 @@ fn parse_pull_request_metadata_json(json: &str) -> Result<PullRequestMetadata, S
         .map_err(|err| format!("gh returned invalid PR JSON: {err}"))?;
     let number = obj
         .get("number")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "gh PR response did not include a PR number.".to_string())?;
     let title =
         crate::bidi::strip_bidi_controls(obj.get("title").and_then(|v| v.as_str()).unwrap_or(""));

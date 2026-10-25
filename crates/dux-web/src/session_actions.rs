@@ -690,7 +690,7 @@ async fn delete_session(
         Err(refused) => return refused.into_response(),
     };
     if operation.asked() {
-        return delete_operation_response(result.and_then(|guarded| guarded.followed()));
+        return delete_operation_response(result.and_then(super::rest_common::Guarded::followed));
     }
     delete_wire_response(result.map(|guarded| guarded.outcome))
 }

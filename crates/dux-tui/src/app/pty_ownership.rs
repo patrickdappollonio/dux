@@ -998,7 +998,7 @@ mod tests {
                 .engine
                 .providers
                 .get(TabIdRef::new("session-1-slot"))
-                .is_some_and(|client| client.has_output())
+                .is_some_and(dux_core::pty::PtyClient::has_output)
             {
                 return;
             }
@@ -1124,7 +1124,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_eq!(
             grid,
             Some((10, 10)),
@@ -1217,7 +1217,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_ne!(
             grid,
             Some((10, 10)),
@@ -1464,7 +1464,7 @@ mod tests {
             app.engine
                 .providers
                 .get(TabIdRef::new("session-1-slot"))
-                .map(|client| client.scrollback_offset()),
+                .map(dux_core::pty::PtyClient::scrollback_offset),
             Some(0),
             "the OFFSET has to go home with the mode. Retiring the mode alone \
              leaves the pane frozen on old history with nothing saying so, and \
@@ -2335,7 +2335,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_eq!(
             demoted_grid,
             Some((40, 20)),
@@ -2361,7 +2361,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size())
+            .and_then(dux_core::pty::PtyClient::grid_size)
             .expect("the pty is live");
         assert_ne!(
             healed,
@@ -2704,7 +2704,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_ne!(
             grid,
             Some((10, 10)),
@@ -2741,7 +2741,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_ne!(
             grid,
             Some((10, 10)),
@@ -2859,7 +2859,7 @@ mod tests {
             .engine
             .providers
             .get(TabIdRef::new("session-1-slot"))
-            .and_then(|client| client.grid_size());
+            .and_then(dux_core::pty::PtyClient::grid_size);
         assert_ne!(
             grid,
             Some((10, 10)),
@@ -3503,7 +3503,7 @@ mod tests {
             app.engine
                 .providers
                 .get(TabIdRef::new("session-1-slot"))
-                .and_then(|client| client.grid_size())
+                .and_then(dux_core::pty::PtyClient::grid_size)
         };
         // Learn the geometry this pane has while serving.
         app.start_background_server(BackgroundServerStart::UserRequest);

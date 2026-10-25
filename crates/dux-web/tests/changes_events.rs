@@ -255,7 +255,7 @@ where
 
 /// Poll `/api/_interest` until it equals `want` (sorted) or the deadline elapses.
 async fn wait_for_interest(client: &reqwest::Client, addr: SocketAddr, want: &[&str]) -> bool {
-    let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+    let mut want: Vec<String> = want.iter().map(std::string::ToString::to_string).collect();
     want.sort();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {

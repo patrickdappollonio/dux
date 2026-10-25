@@ -60,7 +60,7 @@ const EVICT_GRACE: Duration = Duration::from_secs(30);
 /// the next compute re-establishes, so recovering the inner guard beats
 /// propagating one panic across every interested session.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// One cached changed-files result for a session.
@@ -515,7 +515,7 @@ impl ChangesService {
             fn drop(&mut self) {
                 self.inflight
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&self.id);
                 // Wake any waiters (they re-check the cache).
                 let _ = self.tx.send(true);
@@ -1487,7 +1487,7 @@ mod tests {
             "a stale-generation entry must trigger exactly one recompute"
         );
         assert_eq!(
-            lock(&svc.cache).get("s1").map(|c| c.generation()),
+            lock(&svc.cache).get("s1").map(super::Cached::generation),
             Some(1),
             "the recompute must stamp the entry at the required generation"
         );

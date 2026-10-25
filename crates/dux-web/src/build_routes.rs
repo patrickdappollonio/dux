@@ -126,7 +126,7 @@ mod tests {
             .as_object()
             .expect("a JSON object")
             .keys()
-            .map(|k| k.as_str())
+            .map(std::string::String::as_str)
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["api", "instance", "process", "version"]);

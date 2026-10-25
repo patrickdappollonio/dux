@@ -243,7 +243,7 @@ fn aggregate_tree(
         .iter()
         .map(|(pid, proc_info)| ProcNode {
             pid: pid.as_u32(),
-            parent: proc_info.parent().map(|pp| pp.as_u32()),
+            parent: proc_info.parent().map(sysinfo::Pid::as_u32),
             is_thread: proc_info.thread_kind().is_some(),
             cpu_percent: proc_info.cpu_usage(),
             rss_bytes: proc_info.memory(),
@@ -357,7 +357,7 @@ mod tests {
         // 100% for the process. Skip the assertion on a single-core machine
         // rather than fail it spuriously.
         let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(1);
         if cores < 4 {
             return;
@@ -423,7 +423,7 @@ mod tests {
     fn sysinfo_parents(sys: &sysinfo::System) -> std::collections::HashMap<u32, Option<u32>> {
         sys.processes()
             .iter()
-            .map(|(pid, p)| (pid.as_u32(), p.parent().map(|pp| pp.as_u32())))
+            .map(|(pid, p)| (pid.as_u32(), p.parent().map(sysinfo::Pid::as_u32)))
             .collect()
     }
 
@@ -552,7 +552,7 @@ mod tests {
     fn aggregate_tree_excludes_threads_from_children() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(4);
 
         let mut child = std::process::Command::new("sleep")
@@ -603,7 +603,7 @@ mod tests {
     fn aggregate_tree_does_not_multiply_count_thread_memory() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(5);
 
         let mut child = std::process::Command::new("sleep")
@@ -646,7 +646,7 @@ mod tests {
     fn aggregate_tree_over_a_threaded_process_excludes_threads() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Spin many threads: if the adapter ever stopped flagging thread rows,
         // the count would jump to ~THREADS, far outside the asserted band.
         const THREADS: usize = 16;
@@ -688,7 +688,7 @@ mod tests {
     fn aggregate_tree_finds_real_grandchild_process() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(2);
 
         // `sleep 3 &` backgrounds sleep as a real forked child of the `sh`
@@ -783,7 +783,7 @@ mod tests {
     fn per_process_rss_matches_proc_vmrss_exactly() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Guarantee the multi-threaded arm has threads to trip over instead of
         // depending on however many the test harness happens to be running.
         let (stop, handles) = spin_threads(4);
@@ -878,7 +878,7 @@ mod tests {
     fn tree_rss_matches_the_kernel_sum_over_real_processes() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(4);
 
         let mut child = std::process::Command::new("sleep")
@@ -966,7 +966,7 @@ mod tests {
     fn children_breakdown_sums_to_the_parent_total() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Threads under the root, so the sum is checked against a tree that
         // has thread entries available to wrongly inflate it.
         let (stop, handles) = spin_threads(4);
@@ -1017,12 +1017,12 @@ mod tests {
     fn cpu_reads_high_for_a_burning_tree_and_near_zero_for_an_idle_one() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         use std::os::unix::process::CommandExt;
 
         let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(std::num::NonZero::get)
             .unwrap_or(1);
         // Four spinning subshells under one `sh`: a real multi-process tree
         // whose aggregate must exceed 100% on a box with cores to spare.
@@ -1091,7 +1091,7 @@ mod tests {
     fn has_breakdown_is_false_for_a_leaf_whose_only_child_is_itself() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut child = std::process::Command::new("sleep")
             .arg("5")
@@ -1137,7 +1137,7 @@ mod tests {
     fn has_breakdown_is_true_and_root_is_marked_once_for_a_real_tree() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut child = std::process::Command::new("sh")
             .arg("-c")

@@ -360,7 +360,7 @@ impl TerminalGate {
     fn lock(&self) -> std::sync::MutexGuard<'_, bool> {
         self.released
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The screen took the terminal: frames may be drawn.

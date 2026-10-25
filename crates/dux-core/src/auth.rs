@@ -289,7 +289,7 @@ pub fn strength(password: &Password, user_inputs: &[&str]) -> Strength {
     let score = u8::from(entropy.score());
     let warning = entropy
         .feedback()
-        .and_then(|feedback| feedback.warning())
+        .and_then(zxcvbn::feedback::Feedback::warning)
         .map(|warning| warning.to_string());
     let suggestions: Vec<String> = entropy
         .feedback()

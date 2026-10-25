@@ -607,7 +607,7 @@ pub fn idempotency_key(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|k| !k.is_empty())
-        .map(|k| k.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 /// Whether a `:id` path segment is within the length bound. Counts characters, not

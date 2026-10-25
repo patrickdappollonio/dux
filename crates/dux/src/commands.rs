@@ -1010,7 +1010,7 @@ mod tests {
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
-        args.iter().map(|a| a.to_string()).collect()
+        args.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

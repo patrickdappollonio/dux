@@ -333,7 +333,7 @@ impl Drop for Reservation {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for key in &self.keys {
             if let Some(n) = inner.pending.get_mut(key) {
                 *n = n.saturating_sub(1);
@@ -366,7 +366,7 @@ impl Admission {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether this client is refused outright: any address it names is inside

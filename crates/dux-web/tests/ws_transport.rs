@@ -4029,7 +4029,7 @@ async fn thin_reads_still_nest_terminals_for_both_owner_kinds() {
         .await
         .unwrap();
     assert_eq!(
-        empty["terminals"].as_array().map(|a| a.len()),
+        empty["terminals"].as_array().map(std::vec::Vec::len),
         Some(0),
         "an owner with no terminals must carry an empty array"
     );
@@ -4100,7 +4100,7 @@ async fn thin_reads_still_nest_terminals_for_both_owner_kinds() {
     // The project's terminals are ITS OWN: the session terminal above belongs to
     // s1, not to p1, so it must not be folded in here.
     assert_eq!(
-        p1["terminals"].as_array().map(|a| a.len()),
+        p1["terminals"].as_array().map(std::vec::Vec::len),
         Some(1),
         "a project must not absorb its sessions' terminals"
     );
@@ -4175,7 +4175,7 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         .as_object()
         .expect("a JSON object")
         .keys()
-        .map(|k| k.as_str())
+        .map(std::string::String::as_str)
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["api", "instance", "process", "version"]);
@@ -4353,7 +4353,7 @@ async fn session_create_and_its_replay_pin_the_same_terminal_key_set() {
         "the 201 must carry a terminals array: {created_keys:?}"
     );
     assert_eq!(
-        created_body["terminals"].as_array().map(|a| a.len()),
+        created_body["terminals"].as_array().map(std::vec::Vec::len),
         Some(0),
         "a brand new session carries an empty terminals array, never a missing field"
     );

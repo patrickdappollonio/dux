@@ -35,7 +35,7 @@ fn setup(body: Option<&str>) -> (tempfile::TempDir, DuxPaths) {
 }
 
 fn args(list: &[&str]) -> Vec<String> {
-    list.iter().map(|s| s.to_string()).collect()
+    list.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn get(paths: &DuxPaths, list: &[&str]) -> (String, String) {

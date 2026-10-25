@@ -157,7 +157,7 @@ impl LiveAuth {
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Live> {
         self.inner
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The section as it is now.
@@ -166,7 +166,7 @@ impl LiveAuth {
             &self
                 .inner
                 .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .current,
         )
     }
@@ -233,7 +233,7 @@ impl LiveAuth {
             if let Some(hook) = self
                 .update_hook
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
             {
                 hook();
@@ -296,11 +296,11 @@ impl Reach {
                 ip => ip.to_string(),
             })
             .collect();
-        if let Some(leg) = self
-            .tailscale_leg
-            .as_ref()
-            .and_then(|cell| *cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
-            && !out.contains(&leg.ip().to_string())
+        if let Some(leg) = self.tailscale_leg.as_ref().and_then(|cell| {
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }) && !out.contains(&leg.ip().to_string())
         {
             out.push(leg.ip().to_string());
         }
@@ -487,7 +487,7 @@ impl AuthState {
             &self
                 .interfaces
                 .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
     }
 
@@ -500,7 +500,7 @@ impl AuthState {
             let mut slot = self
                 .interfaces
                 .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let changed = **slot != fresh;
             if changed {
                 *slot = Arc::new(fresh);
@@ -674,7 +674,7 @@ impl AuthState {
                 && self
                     .weak
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_deref()
                     == Some(a.snapshot.generation.as_str()),
             can_set_first_password: !password_set && trusted_reader,
@@ -829,7 +829,7 @@ impl AuthState {
         let mut slot = self
             .weak
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let was = slot.as_deref() == Some(generation);
         if weak {
             *slot = Some(generation.to_string());

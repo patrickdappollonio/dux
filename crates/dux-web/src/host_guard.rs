@@ -280,7 +280,7 @@ impl HostAllowlist {
     /// one allowlist; a serve that can change the mode while running follows this
     /// with [`Self::with_live_tailscale_literals`].
     pub fn new(bound_ips: &[IpAddr], configured: &[String], tailscale_literals: bool) -> Self {
-        let has_unspecified = bound_ips.iter().any(|ip| ip.is_unspecified());
+        let has_unspecified = bound_ips.iter().any(std::net::IpAddr::is_unspecified);
         Self {
             bound_ips: bound_ips.to_vec(),
             has_unspecified,

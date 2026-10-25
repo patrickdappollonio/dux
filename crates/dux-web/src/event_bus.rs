@@ -136,7 +136,7 @@ impl EventBus {
         let map = self.interest.lock().unwrap();
         map.keys()
             .filter_map(|topic| session_id_from_changes_topic(topic))
-            .map(|id| id.to_string())
+            .map(std::string::ToString::to_string)
             .collect()
     }
 

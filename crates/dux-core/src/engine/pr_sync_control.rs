@@ -36,7 +36,9 @@ struct PrSyncState {
 
 impl PrSyncControl {
     fn lock(&self) -> MutexGuard<'_, PrSyncState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Arm pull-request work, and claim the poller slot if it is free.

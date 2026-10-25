@@ -531,6 +531,6 @@ fn run(dir: &Path, cmd: &str, args: &[&str]) -> Option<()> {
         .current_dir(dir)
         .status()
         .ok()
-        .filter(|s| s.success())
+        .filter(std::process::ExitStatus::success)
         .map(|_| ())
 }

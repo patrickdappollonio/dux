@@ -1530,7 +1530,10 @@ mod tests {
         ChangedFileKind::Directory(crate::model::FolderContents {
             file_count: files,
             nested_repositories: nested.len(),
-            repositories_inside: nested.iter().map(|path| path.to_string()).collect(),
+            repositories_inside: nested
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             ..Default::default()
         })
     }
@@ -3382,7 +3385,7 @@ mod tests {
             "build/lib/own.txt",
         ]
         .iter()
-        .map(|p| p.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
         let answered = rows_answering(root, &unstaged, ChangesSide::Unstaged, &asked).unwrap();
         let mut answered: Vec<_> = answered.into_iter().collect();
@@ -3396,7 +3399,7 @@ mod tests {
         let (staged, _) = changed_files_for_display(root).unwrap();
         let asked: Vec<String> = ["build/app.js", "build/sub/b.js", "build/sub/none.js"]
             .iter()
-            .map(|p| p.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let answered = rows_answering(root, &staged, ChangesSide::Staged, &asked).unwrap();
         let mut answered: Vec<_> = answered.into_iter().collect();

@@ -1519,7 +1519,7 @@ mod tests {
             status: SessionStatus::Active,
             created_at: now,
             updated_at: now,
-            last_focused_tab: last_focused_tab.map(|s| s.to_string()),
+            last_focused_tab: last_focused_tab.map(std::string::ToString::to_string),
         }
     }
 

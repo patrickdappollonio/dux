@@ -45,7 +45,7 @@ impl CheckGate {
     fn lock(&self) -> std::sync::MutexGuard<'_, Counts> {
         self.counts
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Take a check slot, waiting in the queue when they are all busy, or

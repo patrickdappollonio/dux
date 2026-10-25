@@ -473,10 +473,7 @@ fn a_project_value_reaches_no_printer() {
     for token in tokens() {
         let fragment = &token[..12];
         // A path and an id can hold the token's characters but a quote.
-        let plain: String = token
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
+        let plain: String = token.chars().filter(char::is_ascii_alphanumeric).collect();
         for position in PROJECT_VALUE_POSITIONS {
             let body = position.replace("{V}", &plain);
             assert!(toml::from_str::<toml::Table>(&body).is_ok(), "{body}");

@@ -665,7 +665,7 @@ fn raw_url_authority(input: &str) -> Option<&str> {
 fn decode_component(raw: &str) -> Result<String, String> {
     percent_encoding::percent_decode_str(raw)
         .decode_utf8()
-        .map(|decoded| decoded.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .map_err(|_| UNPARSEABLE.to_string())
 }
 
@@ -798,7 +798,7 @@ fn host_from_authority(authority: &str, ssh_like: bool) -> Result<String, String
         host
     };
     let host = host.to_ascii_lowercase();
-    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
         return Err(UNPARSEABLE.to_string());
     }
     // `gh` has never heard of `ssh.github.com`, GitHub's port-443 ssh endpoint,
@@ -1776,7 +1776,7 @@ mod resolution_tests {
     }
 
     fn allowed(hosts: &[&str]) -> GithubHostPolicy {
-        GithubHostPolicy::Hosts(hosts.iter().map(|h| h.to_string()).collect())
+        GithubHostPolicy::Hosts(hosts.iter().map(std::string::ToString::to_string).collect())
     }
 
     #[test]

@@ -561,7 +561,7 @@ pub fn tmux_wrap(bytes: &[u8]) -> Vec<u8> {
 /// token. This is the structural check that keeps a notification whose free text
 /// begins `4;` from being swallowed as progress.
 fn is_progress_state(s: &[u8]) -> bool {
-    (1..=2).contains(&s.len()) && s.iter().all(|b| b.is_ascii_digit())
+    (1..=2).contains(&s.len()) && s.iter().all(u8::is_ascii_digit)
 }
 
 /// Split `s` at the first occurrence of `sep`. Returns the head and, if `sep`

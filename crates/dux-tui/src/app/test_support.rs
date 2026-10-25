@@ -460,7 +460,7 @@ pub(crate) fn stop_watching(app: &App, token: u64) {
 /// reader to have raised it in the same step it parsed that output.
 pub(crate) fn surface_has_output(app: &App) -> bool {
     app.selected_terminal_surface_client()
-        .is_some_and(|provider| provider.has_output())
+        .is_some_and(dux_core::pty::PtyClient::has_output)
 }
 
 /// Block until the selected terminal surface has parsed `marker` into its

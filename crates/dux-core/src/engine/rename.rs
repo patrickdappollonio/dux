@@ -126,7 +126,7 @@ impl Engine {
                     .sessions
                     .iter()
                     .find(|s| s.id == session_id)
-                    .map(|s| s.display_label())
+                    .map(super::super::model::AgentSession::display_label)
                     .unwrap_or_default();
                 crate::status_text![
                     "Agent ",
@@ -176,7 +176,7 @@ impl Engine {
                         .sessions
                         .iter()
                         .find(|s| s.id == session_id)
-                        .map(|s| s.display_label())
+                        .map(super::super::model::AgentSession::display_label)
                         .unwrap_or_default();
                     crate::status_text![
                         "Cleared the custom name. Agent shows its folder's name ",

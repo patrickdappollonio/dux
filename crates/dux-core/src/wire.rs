@@ -6131,7 +6131,10 @@ mod tests {
             "a status quiet on the web still reaches the status line"
         );
         let json = serde_json::to_value(&web_only).expect("serialize");
-        assert_eq!(json.get("quiet").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            json.get("quiet").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
 
         let round_tripped: WireStatus = serde_json::from_value(json).expect("deserialize");
         assert_eq!(round_tripped, web_only);
@@ -14363,7 +14366,7 @@ mod tests {
             engine
                 .running_provider_pins
                 .get(TabIdRef::new("s1-slot"))
-                .map(|p| p.as_str()),
+                .map(super::super::model::ProviderKind::as_str),
             Some("claude")
         );
 
