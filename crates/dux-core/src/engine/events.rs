@@ -3896,7 +3896,7 @@ impl Engine {
             .find(|session| session.id == session_id)
             .map_or_else(
                 || session_id.to_string(),
-                |session| session.display_label().to_string(),
+                |session| session.display_label().clone(),
             );
         self.post_status(crate::poller_status::pr_status_not_saved(
             session_id, &label, error,

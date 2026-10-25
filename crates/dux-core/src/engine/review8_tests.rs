@@ -249,7 +249,7 @@ fn adding_a_project_inside_a_folder_being_removed_is_refused() {
         panic!("the add answers with a refusal");
     };
     assert!(
-        status.message.to_string().contains("add a project there"),
+        status.message.clone().contains("add a project there"),
         "{}",
         status.message
     );

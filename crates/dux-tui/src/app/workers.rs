@@ -1626,7 +1626,7 @@ impl App {
                 }
             }
             Err(error) => {
-                let error = error.to_string();
+                let error = error.clone();
                 if !self.resolve_persist_op(
                     status_op_id,
                     PersistFinalOutcome::ConfigWriteFailed(error.clone()),

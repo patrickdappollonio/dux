@@ -3458,7 +3458,7 @@ mod recreate_tests {
 
     fn final_message(outcome: &crate::engine::ResolvedFinal) -> String {
         match &outcome.outcome {
-            crate::engine::Final::Message { text, .. } => text.to_string(),
+            crate::engine::Final::Message { text, .. } => text.clone(),
             crate::engine::Final::Clear => panic!("expected a message, got a clear"),
         }
     }

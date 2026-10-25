@@ -20688,7 +20688,7 @@ not_a_real_action = ["x"]
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let message = app.status.message().to_string();
+        let message = app.status.message().clone();
         assert!(
             message.contains("https://example.com/pr/1")
                 && message.contains("no such file or directory")
@@ -20734,7 +20734,7 @@ not_a_real_action = ["x"]
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let message = app.status.message().to_string();
+        let message = app.status.message().clone();
         assert!(
             message.contains(needle),
             "expected a status containing {needle:?}, got {message:?}"
@@ -25926,7 +25926,7 @@ cyan = "#00ffff"
             crate::statusline::StatusTone::Warning,
             "status should be a warning, not an error"
         );
-        let message = app.status.message().to_string();
+        let message = app.status.message().clone();
         assert!(
             message.contains("still running") && message.contains("opencode"),
             "status should explain the agent still runs the old provider, got: {message}"
@@ -32422,7 +32422,7 @@ cyan = "#00ffff"
         app.reconcile_scroll_mode();
 
         assert!(!app.scroll_mode_active(), "the mode must end");
-        let msg = app.status.message().to_string();
+        let msg = app.status.message().clone();
         assert!(
             msg.contains("Scroll mode ended"),
             "the end of the mode must be announced; got {msg:?}"
@@ -32451,7 +32451,7 @@ cyan = "#00ffff"
             .unwrap()
             .set_scrollback(0);
         interactive.reconcile_scroll_mode();
-        let msg = interactive.status.message().to_string();
+        let msg = interactive.status.message().clone();
         assert!(
             msg.contains("keystrokes reach it again"),
             "in interactive mode the promise is true and worth making; got {msg:?}"
@@ -32464,7 +32464,7 @@ cyan = "#00ffff"
             .unwrap()
             .set_scrollback(0);
         non_interactive.reconcile_scroll_mode();
-        let msg = non_interactive.status.message().to_string();
+        let msg = non_interactive.status.message().clone();
         assert!(
             msg.contains("Scroll mode ended"),
             "the mode still ends out loud; got {msg:?}"

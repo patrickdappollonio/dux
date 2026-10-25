@@ -943,7 +943,7 @@ fn header_lines(urls: &[String], uptime_secs: u64) -> Vec<ScreenLine> {
     lines.push(vec![(String::new(), Role::Spacer)]);
     lines.push(vec![("dux server running".to_string(), Role::Heading)]);
     for url in urls {
-        lines.push(vec![(url.to_string(), Role::Url)]);
+        lines.push(vec![(url.clone(), Role::Url)]);
     }
     lines.push(vec![(
         format!("up {}", format_uptime(uptime_secs)),

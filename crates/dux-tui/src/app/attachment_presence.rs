@@ -427,7 +427,7 @@ mod tests {
             .folder_repo_statuses
             .insert(session_id.clone(), dux_core::git::FolderRepoStatus::Missing);
         let _watch = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
-        let recreating = dux_core::engine::InFlightKey::RecreateWorkingCopy(session_id.to_string());
+        let recreating = dux_core::engine::InFlightKey::RecreateWorkingCopy(session_id.clone());
 
         app.confirm_recreate_selected_working_copy()
             .expect("open the recreate dialog");

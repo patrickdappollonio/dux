@@ -433,10 +433,7 @@ fn a_relaunch_waits_for_the_previous_run_of_its_provider() {
         }
         match fx.engine.worker_rx.try_recv() {
             Ok(crate::worker::WorkerEvent::PollerStatus(status)) => {
-                waited_out_loud |= status
-                    .message
-                    .to_string()
-                    .contains("Waiting for the previous");
+                waited_out_loud |= status.message.clone().contains("Waiting for the previous");
             }
             Ok(crate::worker::WorkerEvent::AgentLaunchReady(_)) => break Instant::now(),
             Ok(crate::worker::WorkerEvent::AgentLaunchFailed(data)) => {

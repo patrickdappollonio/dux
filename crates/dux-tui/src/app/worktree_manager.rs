@@ -617,7 +617,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             app.drain_events();
-            let message = app.status.message().to_string();
+            let message = app.status.message().clone();
             if message.contains(needle) || std::time::Instant::now() > deadline {
                 return message;
             }

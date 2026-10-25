@@ -457,13 +457,13 @@ fn parse_set_args(args: &[String]) -> Result<SetArgs> {
     }
     match positionals.as_slice() {
         [path] => Ok(SetArgs {
-            path: path.to_string(),
+            path: (*path).clone(),
             value: None,
             stdin,
         }),
         [path, value] => Ok(SetArgs {
-            path: path.to_string(),
-            value: Some(value.to_string()),
+            path: (*path).clone(),
+            value: Some((*value).clone()),
             stdin,
         }),
         [] => bail!(
