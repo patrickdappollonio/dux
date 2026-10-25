@@ -117,7 +117,7 @@ async fn a_reloaded_search_index_cap_bounds_the_next_walk() {
 
     // `truncated` is omitted when false, so absence is the uncapped answer.
     let full = list_files(addr).await;
-    assert!(full["truncated"].as_bool() != Some(true));
+    assert_ne!(full["truncated"].as_bool(), Some(true));
     assert_eq!(full["files"].as_array().unwrap().len(), 8);
 
     limits.set_search_index_max_files(3);
