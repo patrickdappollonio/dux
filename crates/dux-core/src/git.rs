@@ -5806,24 +5806,7 @@ pub fn discard_confirmed<'c>(
                  deleted; refresh the changes and look again before deleting it."
             )))
         };
-        if !meta.is_dir() {
-            match confirmed {
-                // No confirmation is what an older client sends for a file,
-                // and deleting one file is what it always meant. A symbolic
-                // link is cleared first, judged at its own path: an agent's
-                // folder or a project's repository can be the link itself.
-                None | Some(ConfirmedEntry::File) => {
-                    if meta.file_type().is_symlink() {
-                        clear().map_err(anyhow::Error::new)?.require(&full)?;
-                    }
-                    fs::remove_file(&full)?;
-                }
-                Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
-                    return Err(changed("a file, not a folder"));
-                }
-            }
-            return Ok(1);
-        } else {
+        if meta.is_dir() {
             // A directory goes only when the delete names what it is: a file
             // row that a folder has since replaced, or a request that says
             // nothing, must not clean a folder nobody was shown.
@@ -5880,6 +5863,23 @@ pub fn discard_confirmed<'c>(
                     return Ok(going);
                 }
             }
+        } else {
+            match confirmed {
+                // No confirmation is what an older client sends for a file,
+                // and deleting one file is what it always meant. A symbolic
+                // link is cleared first, judged at its own path: an agent's
+                // folder or a project's repository can be the link itself.
+                None | Some(ConfirmedEntry::File) => {
+                    if meta.file_type().is_symlink() {
+                        clear().map_err(anyhow::Error::new)?.require(&full)?;
+                    }
+                    fs::remove_file(&full)?;
+                }
+                Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
+                    return Err(changed("a file, not a folder"));
+                }
+            }
+            return Ok(1);
         }
     }
     // A tracked path is one file restored from HEAD; a folder confirmation

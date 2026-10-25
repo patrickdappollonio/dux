@@ -1533,10 +1533,10 @@ impl App {
     }
 
     fn toggle_center_fullscreen(&mut self) -> Result<()> {
-        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            self.close_top_overlay();
-        } else {
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
             self.activate_center_agent(true, true)?;
+        } else {
+            self.close_top_overlay();
         }
         Ok(())
     }

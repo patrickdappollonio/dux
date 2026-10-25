@@ -1557,10 +1557,10 @@ impl App {
     }
 
     pub(crate) fn pty_size_for_launch(&self) -> (u16, u16) {
-        if self.last_pty_size != (0, 0) {
-            self.last_pty_size
-        } else {
+        if self.last_pty_size == (0, 0) {
             (24, 80)
+        } else {
+            self.last_pty_size
         }
     }
 

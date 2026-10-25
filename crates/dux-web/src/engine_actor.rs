@@ -5041,10 +5041,10 @@ fn handle_subscribe(
     // socket blips don't re-poll `gh` (mirrors the TUI's `previously_watched`
     // gate).
     if let Some(owner) = engine.owning_session_for_tab(&tab_id) {
-        if last_pr_foregrounded.as_deref() != Some(owner.as_str()) {
-            engine.spawn_foreground_pr_check(&owner);
-        } else {
+        if last_pr_foregrounded.as_deref() == Some(owner.as_str()) {
             engine.spawn_pr_check_for_session(&owner, dux_core::engine::PR_CHECK_MIN_INTERVAL);
+        } else {
+            engine.spawn_foreground_pr_check(&owner);
         }
         *last_pr_foregrounded = Some(owner);
     }

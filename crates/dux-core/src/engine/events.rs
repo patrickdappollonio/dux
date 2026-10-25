@@ -3780,9 +3780,7 @@ impl Engine {
         // lands then must name what they just changed rather than accuse them of
         // being logged out: the integration is off, so gh's verdict on the login
         // is not why the features are gone.
-        let cause = if !self.github_integration_enabled {
-            "the GitHub integration is turned off in your config".to_string()
-        } else {
+        let cause = if self.github_integration_enabled {
             match self.gh_status {
                 GhStatus::NotInstalled => {
                     "the gh CLI is not on PATH (install it from https://cli.github.com)".to_string()
@@ -3801,6 +3799,8 @@ impl Engine {
                     }
                 }
             }
+        } else {
+            "the GitHub integration is turned off in your config".to_string()
         };
         StatusUpdate::warning(format!(
             "GitHub features are paused: {cause}. {}",

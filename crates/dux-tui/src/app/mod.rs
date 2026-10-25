@@ -6860,14 +6860,14 @@ impl App {
         }
         self.clamp_files_cursor();
         if let Some(sid) = session_id {
-            if previously_watched.as_deref() != Some(sid.as_str()) {
-                // Genuine focus change → tight foreground refresh.
-                self.engine.spawn_foreground_pr_check(&sid);
-            } else {
+            if previously_watched.as_deref() == Some(sid.as_str()) {
                 // Incidental reload of the already-focused session → keep the
                 // normal background spacing so file ops don't over-poll `gh`.
                 self.engine
                     .spawn_pr_check_for_session(&sid, dux_core::engine::PR_CHECK_MIN_INTERVAL);
+            } else {
+                // Genuine focus change → tight foreground refresh.
+                self.engine.spawn_foreground_pr_check(&sid);
             }
         }
     }

@@ -4527,7 +4527,18 @@ impl Engine {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
                 AgentLaunchReadyView::Reconnect { status_message }
                 | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                    if !self.is_slot_tab(&outcome.session, TabIdRef::new(&outcome.tab_id)) {
+                    if self.is_slot_tab(&outcome.session, TabIdRef::new(&outcome.tab_id)) {
+                        // The session-slot tab: resolve its pending reconnect
+                        // op, which `reconnect_session` stashed under the
+                        // SESSION id, not the tab id.
+                        self.resolve_web_launch_op_or(
+                            &outcome.session.id,
+                            crate::engine::LaunchOutcome::Ready {
+                                status_message: status_message.clone(),
+                                quiet_on: outcome.status_quiet,
+                            },
+                        )
+                    } else {
                         // Support-tab launch success: no op is stashed under a tab
                         // id, so emit a status KEYED `tab-launch-<tab_id>` (matching
                         // the failure path) rather than an unkeyed one; otherwise an
@@ -4540,17 +4551,6 @@ impl Engine {
                             }],
                             clear_keys: Vec::new(),
                         }
-                    } else {
-                        // The session-slot tab: resolve its pending reconnect
-                        // op, which `reconnect_session` stashed under the
-                        // SESSION id, not the tab id.
-                        self.resolve_web_launch_op_or(
-                            &outcome.session.id,
-                            crate::engine::LaunchOutcome::Ready {
-                                status_message: status_message.clone(),
-                                quiet_on: outcome.status_quiet,
-                            },
-                        )
                     }
                 }
                 AgentLaunchReadyView::SessionMissing => self.resolve_web_launch_op_or(

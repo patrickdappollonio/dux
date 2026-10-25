@@ -5627,12 +5627,7 @@ impl App {
         )));
         {
             use crate::model::GhStatus;
-            let (icon, desc) = if !self.engine.github_integration_enabled {
-                (
-                    "○",
-                    "Disabled: enable via command palette (toggle-github-integration)".to_string(),
-                )
-            } else {
+            let (icon, desc) = if self.engine.github_integration_enabled {
                 match self.engine.gh_status {
                     GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
                     GhStatus::NotInstalled => (
@@ -5655,6 +5650,11 @@ impl App {
                         )
                     }
                 }
+            } else {
+                (
+                    "○",
+                    "Disabled: enable via command palette (toggle-github-integration)".to_string(),
+                )
             };
             let icon_color = match self.engine.gh_status {
                 GhStatus::Available if self.engine.github_integration_enabled => {

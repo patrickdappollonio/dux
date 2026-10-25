@@ -824,16 +824,16 @@ pub fn use_time_corrections_at(
         json(clipboard),
         json(&effective_clipboard_passthrough(capabilities).as_str()),
         &|| {
-            if !capabilities.passthrough {
-                "capabilities.passthrough = false turns every passthrough off, the clipboard's \
-                 included"
-                    .to_string()
-            } else {
+            if capabilities.passthrough {
                 worded(
                     ClipboardPassthroughMode::parse(clipboard).is_some(),
                     "focused, always and off",
                     "focused",
                 )
+            } else {
+                "capabilities.passthrough = false turns every passthrough off, the clipboard's \
+                 included"
+                    .to_string()
             }
         },
     );
