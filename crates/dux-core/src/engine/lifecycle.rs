@@ -2847,7 +2847,7 @@ impl Engine {
                 self.running_provider_pins.remove(tab_id);
             }
             None if !self.providers.contains_key(tab_id) => {
-                restart.report.not_restarted.push(launch.provider)
+                restart.report.not_restarted.push(launch.provider);
             }
             None if launch.fell_back => restart.report.fell_back.push(launch.provider),
             None if launch.resume && resuming => {

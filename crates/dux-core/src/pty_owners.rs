@@ -532,7 +532,7 @@ mod tests {
     ) -> (ResizeClaim, bool) {
         let applied = std::cell::Cell::new(false);
         let outcome = owners.claim_for_resize(pty, conn, takeover, expected_owner, None, |_| {
-            applied.set(true)
+            applied.set(true);
         });
         (outcome, applied.get())
     }

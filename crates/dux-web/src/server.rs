@@ -1969,7 +1969,7 @@ async fn ws_tab_pty_upgrade(
                 live_limits,
                 socket_auth,
             )
-            .await
+            .await;
         })
         .into_response()
 }
@@ -2688,7 +2688,7 @@ fn spawn_config_changed_forwarder(
             match reload_rx.recv().await {
                 Ok(()) => bus.emit(config_changed_event()),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    bus.emit(config_changed_event())
+                    bus.emit(config_changed_event());
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

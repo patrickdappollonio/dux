@@ -9459,7 +9459,7 @@ mod tests {
             .expect("apply");
         match reaction {
             EventReaction::Status(update) => {
-                assert_eq!(update.tone, crate::statusline::StatusTone::Error)
+                assert_eq!(update.tone, crate::statusline::StatusTone::Error);
             }
             _ => panic!("expected Error status"),
         }

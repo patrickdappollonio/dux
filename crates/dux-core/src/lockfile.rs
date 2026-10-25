@@ -133,7 +133,7 @@ impl std::fmt::Display for AcquireError {
                 // stray leading space sneaking in on a reformat.
                 match pid {
                     Some(pid) => {
-                        writeln!(f, "Another dux instance is already running (PID {pid}).")?
+                        writeln!(f, "Another dux instance is already running (PID {pid}).")?;
                     }
                     None => writeln!(
                         f,

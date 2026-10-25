@@ -797,7 +797,7 @@ fn merge_changed_at(
             // No base: the full patch, through the same in-place writes.
             match (ours_item, disk.get(key), target.get_mut(key)) {
                 (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
-                    merge_changed(t, disk_table, None, ours_table)
+                    merge_changed(t, disk_table, None, ours_table);
                 }
                 (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
                     *t = ours_array.clone();
@@ -1557,7 +1557,7 @@ fn mutate_config_file_ruled<T>(
         *slot.borrow_mut() = Some(FileWrite {
             before: before_token,
             after: read_token(Some(&text)),
-        })
+        });
     });
     Ok((outcome, remaining))
 }

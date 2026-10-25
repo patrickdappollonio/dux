@@ -250,7 +250,7 @@ impl Sessions {
                 "[server] could not write a web session to the session database: {error:#}"
             )),
             Err(error) => {
-                dux_core::logger::warn(&format!("[server] writing a web session stopped: {error}"))
+                dux_core::logger::warn(&format!("[server] writing a web session stopped: {error}"));
             }
         }
         Ok(token)
@@ -397,7 +397,7 @@ impl Sessions {
                 "[server] could not write a web session to the session database: {error:#}"
             )),
             Err(error) => {
-                dux_core::logger::warn(&format!("[server] writing a web session stopped: {error}"))
+                dux_core::logger::warn(&format!("[server] writing a web session stopped: {error}"));
             }
         }
     }

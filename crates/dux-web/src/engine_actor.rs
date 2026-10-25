@@ -4495,7 +4495,7 @@ fn handle_request(
                     status_tx,
                     config_reload_tx,
                     config_disk_ahead,
-                )
+                );
             });
         }
         EngineRequest::EmitStatus(status) => {
@@ -7678,29 +7678,29 @@ mod tests {
             ("host", |c| c.host = "0.0.0.0".into()),
             ("port", |c| c.port += 1),
             ("max_websocket_events_connections", |c| {
-                c.max_websocket_events_connections += 1
+                c.max_websocket_events_connections += 1;
             }),
             ("max_websocket_agent_connections", |c| {
-                c.max_websocket_agent_connections += 1
+                c.max_websocket_agent_connections += 1;
             }),
             ("max_websocket_terminal_connections", |c| {
-                c.max_websocket_terminal_connections += 1
+                c.max_websocket_terminal_connections += 1;
             }),
             ("max_websocket_tab_connections", |c| {
-                c.max_websocket_tab_connections += 1
+                c.max_websocket_tab_connections += 1;
             }),
             ("max_websocket_tabs_per_agent", |c| {
-                c.max_websocket_tabs_per_agent += 1
+                c.max_websocket_tabs_per_agent += 1;
             }),
             ("file_drop_max_bytes", |c| c.file_drop_max_bytes += 1),
             ("file_drop_max_concurrency", |c| {
-                c.file_drop_max_concurrency += 1
+                c.file_drop_max_concurrency += 1;
             }),
             ("tree_list_max_concurrency", |c| {
-                c.tree_list_max_concurrency += 1
+                c.tree_list_max_concurrency += 1;
             }),
             ("release_notes_max_concurrency", |c| {
-                c.release_notes_max_concurrency += 1
+                c.release_notes_max_concurrency += 1;
             }),
         ];
         for (setting, change) in rows {

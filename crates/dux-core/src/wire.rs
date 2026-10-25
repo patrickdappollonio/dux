@@ -4259,7 +4259,7 @@ impl Engine {
                         |action, branch, tx, id| {
                             crate::project_browser::run_add_project_checkout_job(
                                 action, branch, tx, id, &guard,
-                            )
+                            );
                         },
                     );
                 });
@@ -12132,7 +12132,7 @@ mod tests {
                     git_env: Vec::new(),
                 },
                 &worker_tx,
-            )
+            );
         });
         logged.extend(worker_lines);
         let reaction = engine.process_worker_event(worker_rx.recv().unwrap());

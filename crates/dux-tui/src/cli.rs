@@ -470,10 +470,10 @@ fn diff_node(
                     match (default_map.get(name), current_map.get(name)) {
                         (Some(d), Some(c)) => diff_node(raw, found, path, d, c),
                         (Some(d), None) => {
-                            push_missing(raw, found, path, &style, Side::DefaultOnly, d)
+                            push_missing(raw, found, path, &style, Side::DefaultOnly, d);
                         }
                         (None, Some(c)) => {
-                            push_missing(raw, found, path, &style, Side::CurrentOnly, c)
+                            push_missing(raw, found, path, &style, Side::CurrentOnly, c);
                         }
                         (None, None) => {}
                     }

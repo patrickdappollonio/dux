@@ -7544,7 +7544,7 @@ impl App {
             AgentSortMode::Manual => {}
             AgentSortMode::Created => items.sort_by_key(|(_, t)| std::cmp::Reverse(t.created_at)),
             AgentSortMode::Updated => {
-                items.sort_by_key(|(id, t)| std::cmp::Reverse(updated_at(id, t)))
+                items.sort_by_key(|(id, t)| std::cmp::Reverse(updated_at(id, t)));
             }
             AgentSortMode::NameAsc => items.sort_by_key(|(_, t)| name_key(t)),
             AgentSortMode::NameDesc => items.sort_by_key(|(_, t)| std::cmp::Reverse(name_key(t))),

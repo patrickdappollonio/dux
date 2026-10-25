@@ -991,7 +991,7 @@ pub fn resolve_reference_projects(
                 }
             }
             crate::git::RemoteResolution::Unresolved => {
-                uninspected(Uninspectable::AddressUnreadable)
+                uninspected(Uninspectable::AddressUnreadable);
             }
             crate::git::RemoteResolution::Denied => {
                 if !reference_host_is_askable {

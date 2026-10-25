@@ -11416,10 +11416,10 @@ impl App {
             PromptState::BrowseProjects { .. } => self.render_browse_projects_prompt(frame),
             PromptState::ChangeAgentProvider(_) => self.render_change_agent_provider_prompt(frame),
             PromptState::ChangeDefaultProvider(_) => {
-                self.render_change_default_provider_prompt(frame)
+                self.render_change_default_provider_prompt(frame);
             }
             PromptState::ChangeProjectDefaultProvider(_) => {
-                self.render_change_project_default_provider_prompt(frame)
+                self.render_change_project_default_provider_prompt(frame);
             }
             PromptState::SetTailscaleMode(_) => self.render_set_tailscale_mode_prompt(frame),
             PromptState::ChangeTheme(_) => self.render_change_theme_prompt(frame),
@@ -11439,55 +11439,55 @@ impl App {
     fn render_dialog_prompt_family(&mut self, frame: &mut Frame) -> bool {
         match &self.prompt {
             PromptState::ConfirmDeleteWorktree(_) => {
-                self.render_confirm_delete_worktree_prompt(frame)
+                self.render_confirm_delete_worktree_prompt(frame);
             }
             PromptState::ConfirmKillRunning(_) => self.render_confirm_kill_running_prompt(frame),
             PromptState::ConfigReloadFailed { .. } => {
-                self.render_config_reload_failed_prompt(frame)
+                self.render_config_reload_failed_prompt(frame);
             }
             PromptState::AddProjectFailed { .. } => self.render_add_project_failed_prompt(frame),
             PromptState::FirstLoad(_) => self.render_first_load_prompt_overlay(frame),
             PromptState::AgentInfo(_) => self.render_agent_info_prompt(frame),
             PromptState::ProjectInfo(_) => self.render_project_info_prompt(frame),
             PromptState::ConfirmChangeBaseBranch(_) => {
-                self.render_confirm_change_base_branch_prompt(frame)
+                self.render_confirm_change_base_branch_prompt(frame);
             }
             PromptState::ConfirmDeleteAgent { .. } => {
-                self.render_confirm_delete_agent_prompt(frame)
+                self.render_confirm_delete_agent_prompt(frame);
             }
             PromptState::ConfirmDeleteTerminal { .. } => {
-                self.render_confirm_delete_terminal_prompt(frame)
+                self.render_confirm_delete_terminal_prompt(frame);
             }
             PromptState::ConfirmCloseTab { .. } => self.render_confirm_close_tab_prompt(frame),
             PromptState::ConfirmStopTab { .. } => self.render_confirm_stop_tab_prompt(frame),
             PromptState::ConfirmRecreateWorkingCopy { .. } => {
-                self.render_confirm_recreate_working_copy_prompt(frame)
+                self.render_confirm_recreate_working_copy_prompt(frame);
             }
             PromptState::ConfirmCheckoutDefaultBranch { .. } => {
-                self.render_confirm_checkout_default_branch_prompt(frame)
+                self.render_confirm_checkout_default_branch_prompt(frame);
             }
             PromptState::ConfirmDeleteProject { .. } => {
-                self.render_confirm_delete_project_prompt(frame)
+                self.render_confirm_delete_project_prompt(frame);
             }
             PromptState::ConfirmRemoveProject { .. } => {
-                self.render_confirm_remove_project_prompt(frame)
+                self.render_confirm_remove_project_prompt(frame);
             }
             PromptState::ConfirmDetachAgent { .. } => {
-                self.render_confirm_detach_agent_prompt(frame)
+                self.render_confirm_detach_agent_prompt(frame);
             }
             PromptState::ConfirmQuit { .. } => self.render_confirm_quit_prompt(frame),
             PromptState::ConfirmDiscardFile { .. } => {
-                self.render_confirm_discard_file_prompt(frame)
+                self.render_confirm_discard_file_prompt(frame);
             }
             PromptState::ConfirmCreateInitialCommit { .. } => {
-                self.render_confirm_initial_commit_prompt(frame)
+                self.render_confirm_initial_commit_prompt(frame);
             }
             PromptState::ConfirmInitRepo { .. } => self.render_confirm_init_repo_prompt(frame),
             PromptState::ConfirmNonDefaultBranch { .. } => {
-                self.render_confirm_non_default_branch_prompt(frame)
+                self.render_confirm_non_default_branch_prompt(frame);
             }
             PromptState::ConfirmUseExistingBranch { .. } => {
-                self.render_confirm_use_existing_branch_prompt(frame)
+                self.render_confirm_use_existing_branch_prompt(frame);
             }
             _ => return false,
         }
@@ -11502,17 +11502,17 @@ impl App {
             PromptState::RenameSession { .. } => self.render_rename_session_prompt(frame),
             PromptState::EditMacros { .. } => self.render_edit_macros(frame),
             PromptState::ResourceMonitor { .. } => {
-                self.render_resource_monitor_prompt_overlay(frame)
+                self.render_resource_monitor_prompt_overlay(frame);
             }
             PromptState::DebugInput { .. } => self.render_debug_input_prompt(frame),
             PromptState::NameNewAgent { .. } => self.render_name_new_agent_prompt(frame),
             PromptState::CloneProject { .. } => self.render_clone_project_prompt(frame),
             PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
             PromptState::AttachPullRequestInput { .. } => {
-                self.render_attach_pull_request_input_prompt(frame)
+                self.render_attach_pull_request_input_prompt(frame);
             }
             PromptState::NameStandaloneAgent { .. } => {
-                self.render_name_standalone_agent_prompt(frame)
+                self.render_name_standalone_agent_prompt(frame);
             }
             _ => {}
         }

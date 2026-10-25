@@ -1227,7 +1227,7 @@ impl App {
                 |action, branch, tx, id| {
                     dux_core::project_browser::run_add_project_checkout_job(
                         action, branch, tx, id, &guard,
-                    )
+                    );
                 },
             );
         });
@@ -10810,14 +10810,14 @@ mod tests {
                 }
                 ProjectAction::CheckoutDefaultBranch => match prompt {
                     PromptState::ConfirmCheckoutDefaultBranch { project_id, .. } => {
-                        assert_eq!(project_id, &id)
+                        assert_eq!(project_id, &id);
                     }
                     other => panic!("{action:?}: got {other:?}"),
                 },
                 ProjectAction::ChangeBaseBranch => {
                     match prompt {
                         PromptState::ChangeBaseBranch(picker) => {
-                            assert_eq!(picker.project_id, id)
+                            assert_eq!(picker.project_id, id);
                         }
                         other => panic!("{action:?}: got {other:?}"),
                     }
@@ -10831,7 +10831,7 @@ mod tests {
                 },
                 ProjectAction::DefaultProvider => match prompt {
                     PromptState::ChangeProjectDefaultProvider(picker) => {
-                        assert_eq!(picker.project_id, id)
+                        assert_eq!(picker.project_id, id);
                     }
                     other => panic!("{action:?}: got {other:?}"),
                 },
@@ -10844,13 +10844,13 @@ mod tests {
                 }
                 ProjectAction::StartupCommand => match prompt {
                     PromptState::ConfigureStartupCommand { project_id, .. } => {
-                        assert_eq!(project_id, &id)
+                        assert_eq!(project_id, &id);
                     }
                     other => panic!("{action:?}: got {other:?}"),
                 },
                 ProjectAction::Environment => match prompt {
                     PromptState::ConfigureProjectEnv { project_id, .. } => {
-                        assert_eq!(project_id, &id)
+                        assert_eq!(project_id, &id);
                     }
                     other => panic!("{action:?}: got {other:?}"),
                 },
@@ -10865,7 +10865,7 @@ mod tests {
                 }
                 ProjectAction::Delete => match prompt {
                     PromptState::ConfirmDeleteProject { project_id, .. } => {
-                        assert_eq!(project_id, &id)
+                        assert_eq!(project_id, &id);
                     }
                     other => panic!("{action:?}: got {other:?}"),
                 },

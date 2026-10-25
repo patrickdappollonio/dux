@@ -1127,7 +1127,7 @@ impl App {
         self.server_flip_preflight_pending = false;
         match result {
             Ok((listeners, urls)) => {
-                self.apply_server_flip_preflight_success(listeners, urls, warning, startup)
+                self.apply_server_flip_preflight_success(listeners, urls, warning, startup);
             }
             Err(error) => {
                 if let Some(op) = self.pending_server_flip_op.take() {
@@ -3879,37 +3879,37 @@ mod tests {
             ("host", |server| server.host = "0.0.0.0".into()),
             ("port", |server| server.port += 1),
             ("max_websocket_events_connections", |server| {
-                server.max_websocket_events_connections += 1
+                server.max_websocket_events_connections += 1;
             }),
             ("max_websocket_agent_connections", |server| {
-                server.max_websocket_agent_connections += 1
+                server.max_websocket_agent_connections += 1;
             }),
             ("max_websocket_terminal_connections", |server| {
-                server.max_websocket_terminal_connections += 1
+                server.max_websocket_terminal_connections += 1;
             }),
             ("max_websocket_tab_connections", |server| {
-                server.max_websocket_tab_connections += 1
+                server.max_websocket_tab_connections += 1;
             }),
             ("max_websocket_tabs_per_agent", |server| {
-                server.max_websocket_tabs_per_agent += 1
+                server.max_websocket_tabs_per_agent += 1;
             }),
             ("file_drop_max_bytes", |server| {
-                server.file_drop_max_bytes += 1
+                server.file_drop_max_bytes += 1;
             }),
             ("file_drop_max_concurrency", |server| {
-                server.file_drop_max_concurrency += 1
+                server.file_drop_max_concurrency += 1;
             }),
             ("tree_list_max_concurrency", |server| {
-                server.tree_list_max_concurrency += 1
+                server.tree_list_max_concurrency += 1;
             }),
             ("release_notes_max_concurrency", |server| {
-                server.release_notes_max_concurrency += 1
+                server.release_notes_max_concurrency += 1;
             }),
             ("log_path", |server| server.log_path = "other.log".into()),
             ("log_max_bytes", |server| server.log_max_bytes += 1),
             ("log_keep", |server| server.log_keep += 1),
             ("log_compress", |server| {
-                server.log_compress = !server.log_compress
+                server.log_compress = !server.log_compress;
             }),
         ];
         for (setting, change) in changes {

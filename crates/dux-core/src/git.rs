@@ -5817,7 +5817,7 @@ pub fn discard_confirmed<'c>(
                     if meta.file_type().is_symlink() {
                         clear().map_err(anyhow::Error::new)?.require(&full)?;
                     }
-                    fs::remove_file(&full)?
+                    fs::remove_file(&full)?;
                 }
                 Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
                     return Err(changed("a file, not a folder"));

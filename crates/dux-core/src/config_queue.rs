@@ -131,7 +131,7 @@ impl ConfigWriteQueue {
                         lazy_inflight,
                         status_lane,
                         last_written,
-                    )
+                    );
                 }
             })
             .expect("spawn config-writer thread");
@@ -353,7 +353,7 @@ fn writer_loop(
     let counter = lazy_inflight.clone();
     // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        writer_loop_inner(rx, path, base, lazy_inflight, status_lane, last_written)
+        writer_loop_inner(rx, path, base, lazy_inflight, status_lane, last_written);
     })) {
         let msg = panic
             .downcast_ref::<&str>()

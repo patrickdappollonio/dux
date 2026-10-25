@@ -1352,7 +1352,7 @@ impl App {
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
-                    self.checkout_selected_project_default_branch()?
+                    self.checkout_selected_project_default_branch()?;
                 }
                 Action::ChangeProjectBaseBranch => self.change_selected_project_base_branch()?,
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
@@ -1592,7 +1592,7 @@ impl App {
             Action::RenameSession => self.open_rename_session()?,
             Action::OpenAgentInfo => self.open_agent_info()?,
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
-                self.open_current_pr_in_browser()
+                self.open_current_pr_in_browser();
             }
             Action::ReconnectAgent => self.activate_center_agent(true, false)?,
             _ => {}
@@ -2646,7 +2646,7 @@ impl App {
                                 "Did not send macro \"{name}\": {device} is driving this \
                                  terminal, so keystrokes from here are not reaching it. Press \
                                  Take over on the card covering it first."
-                            ))
+                            ));
                         }
                         // Nobody is driving it, so nothing was taken away; the
                         // macro still went nowhere, and saying it was sent would
@@ -2656,7 +2656,7 @@ impl App {
                                 "Did not send macro \"{name}\": nothing is driving this terminal \
                                  yet, so keystrokes from here are not reaching it. Press Take \
                                  over on the card covering it first."
-                            ))
+                            ));
                         }
                         None => {
                             let _ = self.write_into_focused_pty(&payload);
@@ -5997,7 +5997,7 @@ impl App {
                 ProviderPickerKind::Agent => self.apply_change_agent_provider()?,
                 ProviderPickerKind::GlobalDefault => self.apply_change_default_provider()?,
                 ProviderPickerKind::ProjectDefault => {
-                    self.apply_change_project_default_provider()?
+                    self.apply_change_project_default_provider()?;
                 }
             },
             _ => {}
@@ -6624,14 +6624,14 @@ impl App {
                 match action {
                     Action::ResizeShrink => self.set_right_width_pct(self.right_width_pct + 2),
                     Action::ResizeGrow => {
-                        self.set_right_width_pct(self.right_width_pct.saturating_sub(2))
+                        self.set_right_width_pct(self.right_width_pct.saturating_sub(2));
                     }
                     _ => {}
                 }
             } else {
                 match action {
                     Action::ResizeShrink => {
-                        self.set_left_width_pct(self.left_width_pct.saturating_sub(2))
+                        self.set_left_width_pct(self.left_width_pct.saturating_sub(2));
                     }
                     Action::ResizeGrow => self.set_left_width_pct(self.left_width_pct + 2),
                     _ => {}
@@ -8486,7 +8486,7 @@ impl App {
                 {
                     reservation.until_final(key);
                 }
-                self.apply_reaction(reaction)
+                self.apply_reaction(reaction);
             }
             Err(err) => self.set_error(format!("{err:#}")),
         }
@@ -8816,7 +8816,7 @@ impl App {
                         "Closed the agent's first tab. {next} took its place as the agent's first tab.{detached_tail}"
                     )),
                     (_, Some(closed), _) => {
-                        self.set_info(format!("Closed the {closed} tab.{detached_tail}"))
+                        self.set_info(format!("Closed the {closed} tab.{detached_tail}"));
                     }
                     (_, None, _) => self.set_info(format!("Tab closed.{detached_tail}")),
                 }
@@ -9366,7 +9366,7 @@ impl App {
         };
         match focus {
             NameNewAgentFocus::RandomizedNameCheckbox => {
-                self.toggle_name_new_agent_randomized_name()
+                self.toggle_name_new_agent_randomized_name();
             }
             NameNewAgentFocus::CopyChangesCheckbox => self.toggle_name_new_agent_copy_changes(),
             NameNewAgentFocus::ReviewCopyCheckbox => self.toggle_name_new_agent_review_copy(),
@@ -11212,7 +11212,7 @@ impl App {
                 let advice = crate::keybindings::NO_PANE_CHORD_ADVICE;
                 self.set_ui_hint_warning(format!(
                     "{handed_over} But {advice} Press {palette_key} to open the palette and toggle back."
-                ))
+                ));
             }
         }
     }
@@ -11245,7 +11245,7 @@ impl App {
             .saturating_sub(self.last_help_height.max(1));
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help)
+                *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help);
             }
             MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16),
             _ => {}
@@ -11642,14 +11642,14 @@ impl App {
     fn route_mouse_wheel(&mut self, mouse: MouseEvent, down: bool) {
         match self.mouse_target(mouse.column, mouse.row) {
             Some(MouseTarget::LeftRow(_)) => {
-                self.handle_left_mouse_wheel(down, mouse.column, mouse.row)
+                self.handle_left_mouse_wheel(down, mouse.column, mouse.row);
             }
             Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
             Some(MouseTarget::UnstagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Unstaged, down)
+                self.scroll_file_selection(RightSection::Unstaged, down);
             }
             Some(MouseTarget::StagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Staged, down)
+                self.scroll_file_selection(RightSection::Staged, down);
             }
             Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
                 self.focus = FocusPane::Files;
@@ -11663,7 +11663,7 @@ impl App {
     fn dispatch_mouse_event(&mut self, mouse: MouseEvent, windowed: bool) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_primary_mouse_down(&mouse, windowed)
+                self.handle_primary_mouse_down(&mouse, windowed);
             }
             MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
                 self.begin_center_mouse_forward(&mouse);
@@ -16071,7 +16071,7 @@ not_a_real_action = ["x"]
                 assert_eq!(
                     prompt.focus,
                     KillRunningFocus::Footer(KillRunningFooterAction::Cancel)
-                )
+                );
             }
             other => panic!("expected kill-running prompt, got {other:?}"),
         }
@@ -16100,7 +16100,7 @@ not_a_real_action = ["x"]
                 assert_eq!(
                     prompt.focus,
                     KillRunningFocus::Footer(KillRunningFooterAction::Visible)
-                )
+                );
             }
             other => panic!("expected kill-running prompt, got {other:?}"),
         }
@@ -18170,7 +18170,7 @@ not_a_real_action = ["x"]
             .unwrap();
         match &app.prompt {
             PromptState::NameNewAgent { focus, .. } => {
-                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox)
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
             }
             other => panic!("expected NameNewAgent prompt, got {other:?}"),
         }
@@ -23410,7 +23410,7 @@ not_a_real_action = ["x"]
             .unwrap();
         match &app.prompt {
             PromptState::Command { input, .. } => {
-                assert_eq!(input.text, "toggle-tab-to-agent")
+                assert_eq!(input.text, "toggle-tab-to-agent");
             }
             other => panic!("expected the palette, got {other:?}"),
         }
@@ -33596,7 +33596,7 @@ cyan = "#00ffff"
         );
         match &app.prompt {
             PromptState::Command { input, .. } => {
-                assert_eq!(input.text, "x", "the prompt must have received the key")
+                assert_eq!(input.text, "x", "the prompt must have received the key");
             }
             other => panic!("palette should still be open, got {other:?}"),
         }
@@ -38379,7 +38379,7 @@ cyan = "#00ffff"
         );
         match &app.prompt {
             PromptState::PullRequestInput { input, .. } => {
-                assert_eq!(input.text, "acme/gadget#2", "nor replace what they typed")
+                assert_eq!(input.text, "acme/gadget#2", "nor replace what they typed");
             }
             other => panic!("expected the PR modal, got {other:?}"),
         }
@@ -38455,7 +38455,7 @@ cyan = "#00ffff"
                 assert!(
                     project.is_some(),
                     "the project menu path stays project-first"
-                )
+                );
             }
             other => panic!("expected the PR modal, got {other:?}"),
         }

@@ -3557,7 +3557,7 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentFailed { message, .. } => {
-                    run.failure = Some(message.to_string())
+                    run.failure = Some(message.to_string());
                 }
                 WorkerEvent::AgentLaunchReady(ready) => {
                     run.launch_env = Some(ready.request.env.clone());

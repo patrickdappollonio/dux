@@ -334,7 +334,7 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
                 "-m",
                 message,
             ],
-        )
+        );
     };
     git_isolated(&hand_made, &["branch", "behind"]);
     commit("pull request work");

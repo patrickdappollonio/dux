@@ -3086,7 +3086,7 @@ impl EventListener for EventProxy {
             // Taking the bell from both places would arm the flag twice for one
             // ding and split one signal set across two mechanisms.
             Event::ColorRequest(index, formatter) => {
-                self.push(PendingReply::Color { index, formatter })
+                self.push(PendingReply::Color { index, formatter });
             }
             // `Event::TextAreaSizeRequest` (the child's `CSI 14 t`, the text area
             // measured in PIXELS) is deliberately NOT answered. This emulator is

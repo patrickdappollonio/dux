@@ -253,7 +253,7 @@ mod tests {
         for b in s.bytes() {
             match b {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                    out.push(b as char)
+                    out.push(b as char);
                 }
                 _ => out.push_str(&format!("%{b:02X}")),
             }

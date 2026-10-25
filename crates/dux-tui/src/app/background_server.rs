@@ -860,7 +860,7 @@ impl App {
                 if !self.background_server_is_serving() {
                     self.note_reload_serve_change_started();
                 }
-                self.stop_background_server()
+                self.stop_background_server();
             }
             // Already where the config asks for. Nothing to say: a reload that
             // did not change this should not report on it.

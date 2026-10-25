@@ -199,7 +199,7 @@ pub(crate) fn run_get(
                     "({at}: config.toml says {in_file}; {name} uses {used} because {reason})"
                 )?,
                 (None, Some(used)) if !hide => {
-                    writeln!(err, "({at}: {name} uses {used}: {reason})")?
+                    writeln!(err, "({at}: {name} uses {used}: {reason})")?;
                 }
                 _ => writeln!(err, "({at}: {reason})")?,
             }

@@ -728,7 +728,7 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
     let this_machine = matches!(target, Target::Local).then_some(&paths);
     match client_if_running(&target, &paths)? {
         Some(client) if follow => {
-            server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?
+            server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?;
         }
         Some(client) => print_tail(
             server_inspect::tail_or_file(&client, this_machine, lines)?,

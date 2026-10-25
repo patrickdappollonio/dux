@@ -134,7 +134,7 @@ fn finish_tallies(
                     match repository_kind(common.as_deref(), &worktree.join(rel)) {
                         UntrackedDirectoryKind::LinkedWorktree => linked_worktrees += 1,
                         UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
-                            nested_repositories += 1
+                            nested_repositories += 1;
                         }
                     }
                 }
@@ -593,7 +593,7 @@ pub(super) fn fold_added_directories(
         match kind {
             UntrackedDirectoryKind::LinkedWorktree => contents.linked_worktrees += 1,
             UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder => {
-                contents.nested_repositories += 1
+                contents.nested_repositories += 1;
             }
         }
     }
@@ -1335,7 +1335,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
             match link {
                 Some(UntrackedDirectoryKind::LinkedWorktree) => contents.linked_worktrees += 1,
                 Some(UntrackedDirectoryKind::Repository | UntrackedDirectoryKind::Folder) => {
-                    contents.nested_repositories += 1
+                    contents.nested_repositories += 1;
                 }
                 None => contents.file_count += 1,
             }
