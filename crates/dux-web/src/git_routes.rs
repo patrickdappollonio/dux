@@ -631,40 +631,39 @@ async fn discard(
         ) => true,
         _ => deletes_a_link,
     };
-    let claim = match claim {
-        true => {
-            let ops = state.engine.worktree_ops().clone();
-            let claimed = target.clone();
-            match tokio::task::spawn_blocking(move || {
-                ops.claim_for_destructive_as(
-                    &claimed,
-                    dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
-                    "a changes-pane delete",
+    let claim = if claim {
+        let ops = state.engine.worktree_ops().clone();
+        let claimed = target.clone();
+        match tokio::task::spawn_blocking(move || {
+            ops.claim_for_destructive_as(
+                &claimed,
+                dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+                "a changes-pane delete",
+            )
+        })
+        .await
+        {
+            Ok(Ok(claim)) => Some(claim),
+            Ok(Err(reason)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "dux did not delete {}: {reason}.",
+                        dux_core::home_path::shorten_home(&target)
+                    ),
                 )
-            })
-            .await
-            {
-                Ok(Ok(claim)) => Some(claim),
-                Ok(Err(reason)) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "dux did not delete {}: {reason}.",
-                            dux_core::home_path::shorten_home(&target)
-                        ),
-                    )
-                        .into_response();
-                }
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("claim task failed: {e}"),
-                    )
-                        .into_response();
-                }
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("claim task failed: {e}"),
+                )
+                    .into_response();
             }
         }
-        false => None,
+    } else {
+        None
     };
     let Some(check) = state.engine.destructive_check(target.clone()).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "engine unavailable").into_response();

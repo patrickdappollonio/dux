@@ -681,9 +681,10 @@ fn server_restart_warning_copy(
              starts.",
         );
     }
-    match sentences.is_empty() {
-        true => None,
-        false => Some(sentences.join(" ")),
+    if sentences.is_empty() {
+        None
+    } else {
+        Some(sentences.join(" "))
     }
 }
 

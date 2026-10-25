@@ -2204,15 +2204,16 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 /// naming the changed `settings`.
 pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
     let named = settings.join(", ");
-    match serving_in_background {
-        true => format!(
+    if serving_in_background {
+        format!(
             "Server settings changed in config ({named}), but a listener that is already bound \
-             cannot adopt them. Stop the background server and start it again to apply them."
-        ),
-        false => format!(
+         cannot adopt them. Stop the background server and start it again to apply them."
+        )
+    } else {
+        format!(
             "Server settings changed in config ({named}). Nothing is serving right now, so they \
-             apply the next time a server starts."
-        ),
+         apply the next time a server starts."
+        )
     }
 }
 
