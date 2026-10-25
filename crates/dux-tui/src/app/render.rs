@@ -2714,11 +2714,7 @@ impl App {
         let term_inner = term_block.inner(term_area);
         // Reserve a top row and side gutters for the framed selection. The
         // content rect owns clicks and frame edges; the body holds list text.
-        let term_top_margin: u16 = if term_count > 0 && term_inner.height >= 4 {
-            1
-        } else {
-            0
-        };
+        let term_top_margin: u16 = u16::from(term_count > 0 && term_inner.height >= 4);
         let term_top_pad_y = (term_top_margin == 1).then_some(term_inner.y);
         let term_content = Rect {
             y: term_inner.y + term_top_margin,
@@ -2880,7 +2876,7 @@ impl App {
         } else {
             None
         };
-        let pr_banner_height: u16 = if pr_info.is_some() { 1 } else { 0 };
+        let pr_banner_height: u16 = u16::from(pr_info.is_some());
 
         let (pr_area, pane_area) = if self.pr_banner_at_bottom {
             let [pane_area, pr_area] = Layout::default()
@@ -9221,7 +9217,7 @@ impl App {
         } else {
             0
         };
-        let checkbox_spacing = if *branch_named { 1 } else { 0 };
+        let checkbox_spacing = u16::from(*branch_named);
         let area = centered_rect_exact(
             dialog_width,
             9 + checkbox_spacing + checkbox_height,

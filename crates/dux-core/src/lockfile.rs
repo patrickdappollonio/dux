@@ -416,7 +416,7 @@ mod tests {
         if child == 0 {
             // SAFETY: see above.
             unsafe {
-                let code = if libc::listen(fd, 128) == 0 { 0 } else { 1 };
+                let code = i32::from(libc::listen(fd, 128) != 0);
                 libc::_exit(code);
             }
         }
