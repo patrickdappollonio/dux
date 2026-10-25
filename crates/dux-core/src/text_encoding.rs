@@ -51,6 +51,26 @@ pub struct DecodedText {
     pub unwritable: Option<Unwritable>,
 }
 
+impl DecodedText {
+    /// Whether the file began with a byte-order mark.
+    pub fn byte_order_mark(&self) -> ByteOrderMark {
+        if self.bom {
+            ByteOrderMark::Written
+        } else {
+            ByteOrderMark::Omitted
+        }
+    }
+}
+
+/// Whether encoded text begins with its encoding's byte-order mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteOrderMark {
+    /// The mark is written before the text.
+    Written,
+    /// The text is written with no mark.
+    Omitted,
+}
+
 /// Why a file that reads as text in an encoding still cannot be saved in it
 /// without changing bytes nobody edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +182,13 @@ pub struct SavedVerdict {
     pub line_endings: LineEndings,
 }
 
-/// The verdict on `text` saved in `encoding` (with a mark when `bom`): what a
-/// read of the bytes written would say, so the editor never assumes how a save
-/// left the file: a conversion is not assumed writable in its new encoding.
-pub fn saved_verdict(text: &str, encoding: &'static Encoding, bom: bool) -> SavedVerdict {
+/// The verdict on `text` saved in `encoding` (with or without its mark): what
+/// a read of the bytes written would say, so the editor never assumes how a
+/// save left the file: a conversion is not assumed writable in its new
+/// encoding.
+pub fn saved_verdict(text: &str, encoding: &'static Encoding, mark: ByteOrderMark) -> SavedVerdict {
     let read =
-        encode(text, encoding, bom)
+        encode(text, encoding, mark)
             .ok()
             .and_then(|bytes| match decode(&bytes, Some(encoding)) {
                 Ok(Decoded::Text(t)) => Some(t),
@@ -394,7 +415,7 @@ fn unwritable(bytes: &[u8], t: &DecodedText) -> Option<Unwritable> {
             Unwritable::LeadingMark
         });
     }
-    match encode(&t.text, t.encoding, t.bom) {
+    match encode(&t.text, t.encoding, t.byte_order_mark()) {
         Ok(back) if back == bytes => None,
         _ => Some(Unwritable::RoundTrip),
     }
@@ -485,12 +506,17 @@ fn decode_reporting(bytes: &[u8], encoding: &'static Encoding) -> Result<String,
     }
 }
 
-/// Encode editor text into `encoding`, with the byte-order mark when `bom`.
+/// Encode editor text into `encoding`, with or without its byte-order mark.
 ///
 /// UTF-16 is encoded by hand: `encoding_rs`'s encoder writes UTF-8 for it, the
 /// way a browser submits a form, which is right for the web and wrong for a
 /// file. Line endings are whatever the text holds; nothing is normalised.
-pub fn encode(text: &str, encoding: &'static Encoding, bom: bool) -> anyhow::Result<Vec<u8>> {
+pub fn encode(
+    text: &str,
+    encoding: &'static Encoding,
+    mark: ByteOrderMark,
+) -> anyhow::Result<Vec<u8>> {
+    let bom = mark == ByteOrderMark::Written;
     if bom && !has_bom(encoding) {
         anyhow::bail!(
             "{} has no byte-order mark, so a save cannot write one",
@@ -847,7 +873,10 @@ mod tests {
         every.extend_from_slice(b"\r\nline two\r\n");
         let t = text(decode(&every, None));
         assert!(t.fallback);
-        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), every);
+        assert_eq!(
+            encode(&t.text, t.encoding, t.byte_order_mark()).unwrap(),
+            every
+        );
     }
 
     #[test]
@@ -865,7 +894,10 @@ mod tests {
             let t = text(decode(&bytes, None));
             assert_eq!(t.encoding, encoding);
             assert_eq!(t.text, content);
-            assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), bytes);
+            assert_eq!(
+                encode(&t.text, t.encoding, t.byte_order_mark()).unwrap(),
+                bytes
+            );
         }
     }
 
@@ -873,9 +905,12 @@ mod tests {
     fn utf8_with_a_mark_round_trips_and_crlf_is_kept() {
         let bytes = b"\xEF\xBB\xBFone\r\ntwo\r\n";
         let t = text(decode(bytes, None));
-        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), bytes);
         assert_eq!(
-            encode("a\r\nb\n", WINDOWS_1252, false).unwrap(),
+            encode(&t.text, t.encoding, t.byte_order_mark()).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            encode("a\r\nb\n", WINDOWS_1252, ByteOrderMark::Omitted).unwrap(),
             b"a\r\nb\n"
         );
     }
@@ -884,27 +919,35 @@ mod tests {
     fn shift_jis_round_trips() {
         let sjis = [0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, b'\n'];
         let t = text(decode(&sjis, Some(encoding_rs::SHIFT_JIS)));
-        assert_eq!(encode(&t.text, t.encoding, t.bom).unwrap(), sjis);
+        assert_eq!(
+            encode(&t.text, t.encoding, t.byte_order_mark()).unwrap(),
+            sjis
+        );
     }
 
     #[test]
     fn a_best_fit_character_that_would_come_back_as_another_is_refused() {
         // Shift_JIS writes the yen sign as 5C, which reads back as a backslash:
         // the save would succeed and the file would hold a different text.
-        let err = encode("ok\n\u{a5}1\n", encoding_rs::SHIFT_JIS, false).unwrap_err();
+        let err = encode(
+            "ok\n\u{a5}1\n",
+            encoding_rs::SHIFT_JIS,
+            ByteOrderMark::Omitted,
+        )
+        .unwrap_err();
         let refused = err.downcast_ref::<Unmappable>().expect("typed refusal");
         assert_eq!(refused.character, '\u{a5}');
         assert_eq!((refused.line, refused.column), (2, 1));
         // The overline comes back as a tilde.
-        let err = encode("\u{203e}", encoding_rs::SHIFT_JIS, false).unwrap_err();
+        let err = encode("\u{203e}", encoding_rs::SHIFT_JIS, ByteOrderMark::Omitted).unwrap_err();
         assert_eq!(
             err.downcast_ref::<Unmappable>().unwrap().character,
             '\u{203e}'
         );
         // EUC-JP has the same near fit; ISO-2022-JP writes the yen sign
         // through its JIS-Roman escape, which reads back as the yen sign.
-        assert!(encode("\u{a5}", encoding_rs::EUC_JP, false).is_err());
-        let iso = encode("\u{a5}", encoding_rs::ISO_2022_JP, false).unwrap();
+        assert!(encode("\u{a5}", encoding_rs::EUC_JP, ByteOrderMark::Omitted).is_err());
+        let iso = encode("\u{a5}", encoding_rs::ISO_2022_JP, ByteOrderMark::Omitted).unwrap();
         assert_eq!(
             decode_reporting(&iso, encoding_rs::ISO_2022_JP).unwrap(),
             "\u{a5}"
@@ -919,10 +962,10 @@ mod tests {
         // would take it as one, so the text and the file would disagree. The
         // mark is a choice of its own, never a character in the text.
         for (encoding, bom) in [
-            (UTF_8, false),
-            (UTF_8, true),
-            (UTF_16LE, true),
-            (UTF_16BE, false),
+            (UTF_8, ByteOrderMark::Omitted),
+            (UTF_8, ByteOrderMark::Written),
+            (UTF_16LE, ByteOrderMark::Written),
+            (UTF_16BE, ByteOrderMark::Omitted),
         ] {
             let err = encode("\u{feff}a", encoding, bom).unwrap_err();
             let refused = err
@@ -932,30 +975,49 @@ mod tests {
             assert!(err.to_string().contains("nothing was written"));
         }
         // Anywhere else in the text it is an ordinary character.
-        assert!(encode("a\u{feff}", UTF_8, false).is_ok());
+        assert!(encode("a\u{feff}", UTF_8, ByteOrderMark::Omitted).is_ok());
         // An encoding with no mark writes it as its own bytes.
-        assert!(encode("\u{feff}a", encoding_rs::GB18030, false).is_ok());
+        assert!(encode("\u{feff}a", encoding_rs::GB18030, ByteOrderMark::Omitted).is_ok());
     }
 
     #[test]
     fn exact_encodings_are_not_refused_by_the_read_back_check() {
         let latin = "caf\u{e9} \u{20ac} na\u{ef}ve\n";
-        assert!(encode(latin, WINDOWS_1252, false).is_ok());
-        assert!(encode("\u{416}\u{436}", encoding_rs::WINDOWS_1251, false).is_ok());
+        assert!(encode(latin, WINDOWS_1252, ByteOrderMark::Omitted).is_ok());
+        assert!(
+            encode(
+                "\u{416}\u{436}",
+                encoding_rs::WINDOWS_1251,
+                ByteOrderMark::Omitted
+            )
+            .is_ok()
+        );
         assert!(
             encode(
                 "\u{65e5}\u{672c} \u{1f600} \u{a5}",
                 encoding_rs::GB18030,
-                false
+                ByteOrderMark::Omitted
             )
             .is_ok()
         );
-        assert!(encode("\u{65e5}\u{672c}\u{8a9e}", encoding_rs::SHIFT_JIS, false).is_ok());
+        assert!(
+            encode(
+                "\u{65e5}\u{672c}\u{8a9e}",
+                encoding_rs::SHIFT_JIS,
+                ByteOrderMark::Omitted
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn a_character_the_encoding_cannot_hold_is_refused_with_where() {
-        let err = encode("caf\u{e9}\nok \u{65e5}\n", WINDOWS_1252, false).unwrap_err();
+        let err = encode(
+            "caf\u{e9}\nok \u{65e5}\n",
+            WINDOWS_1252,
+            ByteOrderMark::Omitted,
+        )
+        .unwrap_err();
         let unmappable = err.downcast_ref::<Unmappable>().expect("typed refusal");
         assert_eq!(unmappable.character, '\u{65e5}');
         assert_eq!((unmappable.line, unmappable.column), (2, 4));
@@ -967,14 +1029,14 @@ mod tests {
     fn an_unmappable_character_deep_in_a_long_text_is_still_found() {
         let mut long = "a".repeat(100_000);
         long.push('\u{2603}');
-        let err = encode(&long, encoding_rs::ISO_8859_15, false).unwrap_err();
+        let err = encode(&long, encoding_rs::ISO_8859_15, ByteOrderMark::Omitted).unwrap_err();
         let unmappable = err.downcast_ref::<Unmappable>().unwrap();
         assert_eq!((unmappable.line, unmappable.column), (1, 100_001));
     }
 
     #[test]
     fn a_mark_is_refused_for_an_encoding_that_has_none() {
-        assert!(encode("x", WINDOWS_1252, true).is_err());
+        assert!(encode("x", WINDOWS_1252, ByteOrderMark::Written).is_err());
     }
 
     /// The browser's encoding menus (`EDITOR_ENCODINGS` in the web's

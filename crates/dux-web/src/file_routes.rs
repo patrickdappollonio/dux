@@ -846,7 +846,15 @@ async fn write_file<R: EditorRoot>(
             (
                 stamp,
                 encoding.map(|save| {
-                    dux_core::text_encoding::saved_verdict(&content, save.encoding, save.bom)
+                    dux_core::text_encoding::saved_verdict(
+                        &content,
+                        save.encoding,
+                        if save.bom {
+                            dux_core::text_encoding::ByteOrderMark::Written
+                        } else {
+                            dux_core::text_encoding::ByteOrderMark::Omitted
+                        },
+                    )
                 }),
             )
         })

@@ -780,9 +780,17 @@ pub fn write_file_encoded(
     expected: Option<&FileStamp>,
 ) -> anyhow::Result<FileStamp> {
     let bytes: std::borrow::Cow<'_, [u8]> = match encoding {
-        Some(save) => crate::text_encoding::encode(content, save.encoding, save.bom)
-            .map_err(|e| leading_mark_from_file(e, worktree, rel_path, save))?
-            .into(),
+        Some(save) => crate::text_encoding::encode(
+            content,
+            save.encoding,
+            if save.bom {
+                crate::text_encoding::ByteOrderMark::Written
+            } else {
+                crate::text_encoding::ByteOrderMark::Omitted
+            },
+        )
+        .map_err(|e| leading_mark_from_file(e, worktree, rel_path, save))?
+        .into(),
         None => content.as_bytes().into(),
     };
     if bytes.len() as u64 > MAX_SAVED_BYTES {
