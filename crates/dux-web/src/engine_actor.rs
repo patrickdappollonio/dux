@@ -9395,13 +9395,12 @@ mod tests {
             svc.run_maintenance(&mut engine);
             if let Ok(status) = statuses.try_recv() {
                 break status;
-            } else {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the detach outcome never reached the status stream"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the detach outcome never reached the status stream"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(final_status.key.as_deref(), Some("detach-agent:s1"));
         assert_eq!(final_status.tone, "info");
