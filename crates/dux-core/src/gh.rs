@@ -1240,8 +1240,7 @@ pub fn probe_github_hosts(program: &OsStr) -> GhProbe {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .is_ok_and(|s| s.success());
     if !on_path {
         return GhProbe::NotInstalled;
     }
@@ -1664,8 +1663,10 @@ pub(crate) fn format_pr_change(
 }
 
 fn describe_pr_badge(pr: Option<&PrInfo>) -> String {
-    pr.map(|p| format!("#{} {}", p.number, pr_state_word(&p.state)))
-        .unwrap_or_else(|| "none".to_string())
+    pr.map_or_else(
+        || "none".to_string(),
+        |p| format!("#{} {}", p.number, pr_state_word(&p.state)),
+    )
 }
 
 /// Whether a discovery node is a pull request of the repository the alias was
@@ -1897,8 +1898,10 @@ fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) ->
         .get("url")
         .and_then(|v| v.as_str())
         .filter(|v| !v.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| pull_request_url(host, owner_repo, number));
+        .map_or_else(
+            || pull_request_url(host, owner_repo, number),
+            str::to_string,
+        );
     let state = match state_str {
         "OPEN" => PrState::Open,
         "MERGED" => PrState::Merged,

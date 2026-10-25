@@ -253,16 +253,13 @@ pub fn resolve_worktree_path_for_read(
     // Also check whether the canonical real path passes through a `.git`
     // directory, covering symlinks that redirect INTO a `.git/` dir even when
     // the literal path has no `.git` component.
-    let is_git_canonical = real
-        .strip_prefix(&real_worktree)
-        .map(|rel| {
-            rel.components().any(|comp| {
-                comp.as_os_str()
-                    .to_str()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
-            })
+    let is_git_canonical = real.strip_prefix(&real_worktree).is_ok_and(|rel| {
+        rel.components().any(|comp| {
+            comp.as_os_str()
+                .to_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
         })
-        .unwrap_or(false);
+    });
 
     let is_git = is_git_literal || is_git_canonical;
     Ok((joined, is_git, is_outside))

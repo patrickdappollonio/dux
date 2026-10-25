@@ -356,9 +356,7 @@ mod tests {
         // Two burners plus the test thread; on any multi-core box this exceeds
         // 100% for the process. Skip the assertion on a single-core machine
         // rather than fail it spuriously.
-        let cores = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(1);
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         if cores < 4 {
             return;
         }
@@ -1021,9 +1019,7 @@ mod tests {
 
         use std::os::unix::process::CommandExt;
 
-        let cores = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(1);
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         // Four spinning subshells under one `sh`: a real multi-process tree
         // whose aggregate must exceed 100% on a box with cores to spare.
         //

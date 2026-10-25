@@ -39,9 +39,7 @@ pub fn dir_is_usable(path: &Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
-    std::fs::metadata(path.join("."))
-        .map(|meta| meta.is_dir())
-        .unwrap_or(false)
+    std::fs::metadata(path.join(".")).is_ok_and(|meta| meta.is_dir())
 }
 
 /// The directory a standalone terminal opens in, given the resolved home.

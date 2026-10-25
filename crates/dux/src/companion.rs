@@ -73,9 +73,10 @@ impl WebCompanion {
         let error = server.stop();
         // The control socket outlives the web serve that failed.
         self.start_control_socket(engine);
-        let detail = error
-            .map(|e| format!("{e:#}"))
-            .unwrap_or_else(|| "the listener stopped accepting connections".to_string());
+        let detail = error.map_or_else(
+            || "the listener stopped accepting connections".to_string(),
+            |e| format!("{e:#}"),
+        );
         dux_core::logger::error(&format!(
             "[server] the background web server stopped serving: {detail}. The terminal UI and \
              every agent are unaffected; use start-background-server to serve again."

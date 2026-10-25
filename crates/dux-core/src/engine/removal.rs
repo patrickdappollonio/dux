@@ -562,11 +562,10 @@ impl Engine {
                 );
             }
             if let Some(reason) = failure {
-                let path = deletion
-                    .paths
-                    .get(session_id)
-                    .map(|path| crate::home_path::shorten_home(Path::new(path)))
-                    .unwrap_or_else(|| session_id.to_string());
+                let path = deletion.paths.get(session_id).map_or_else(
+                    || session_id.to_string(),
+                    |path| crate::home_path::shorten_home(Path::new(path)),
+                );
                 deletion.failures.push((path, reason.to_string()));
             }
         }

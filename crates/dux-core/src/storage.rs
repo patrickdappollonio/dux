@@ -1980,13 +1980,7 @@ impl SessionStore {
         let worktree_path = managed
             .map(|m| m.worktree_path.as_str())
             .unwrap_or_default();
-        let branch_provenance = managed
-            .map(|m| m.branch_provenance.as_str())
-            // Never read back: the read path decides on `workspace_kind`
-            // first, and a folder row has no provenance to parse. Written as
-            // the safe word anyway, so a row inspected by hand cannot suggest
-            // dux may delete a branch here.
-            .unwrap_or("unknown");
+        let branch_provenance = managed.map_or("unknown", |m| m.branch_provenance.as_str());
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the
         // min(sort_order) placement query below. Three columns are therefore

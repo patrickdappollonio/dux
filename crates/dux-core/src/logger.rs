@@ -67,10 +67,10 @@ fn install_panic_hook() {
                 .map(|s| (*s).to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            let location = info
-                .location()
-                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-                .unwrap_or_else(|| "<unknown location>".to_string());
+            let location = info.location().map_or_else(
+                || "<unknown location>".to_string(),
+                |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+            );
             error(&format!(
                 "thread '{name}' panicked at {location}: {message}"
             ));
@@ -309,7 +309,7 @@ impl RotatingLog {
         // Seeded from the file on disk, so a log that grew past the limit under
         // an older dux rotates on the first line rather than after another
         // whole limit's worth.
-        let size = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let size = fs::metadata(&path).map_or(0, |meta| meta.len());
         Ok(Self {
             path,
             state: Arc::new(Mutex::new(LogState {
@@ -626,9 +626,7 @@ fn compress_open_file(
         encoder.finish()?.sync_all()?;
 
         let _guard = lock_state(state);
-        let still_ours = fs::symlink_metadata(source)
-            .map(|meta| file_id(&meta) == id)
-            .unwrap_or(false);
+        let still_ours = fs::symlink_metadata(source).is_ok_and(|meta| file_id(&meta) == id);
         if !still_ours {
             return Err(std::io::Error::other(
                 "the rotated copy moved while it was being compressed",

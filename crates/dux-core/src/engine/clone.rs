@@ -499,8 +499,10 @@ impl Engine {
                 let reason = crate::wire::wire_statuses_from_reaction(&reaction)
                     .into_iter()
                     .find(|status| status.tone == "error")
-                    .map(|status| StatusText::from_parts(status.message, status.segments))
-                    .unwrap_or_else(|| "the create did not start.".into());
+                    .map_or_else(
+                        || "the create did not start.".into(),
+                        |status| StatusText::from_parts(status.message, status.segments),
+                    );
                 pending.op.resolve(&not_created(reason)).into_reaction()
             }
             (_, Err(error)) => pending

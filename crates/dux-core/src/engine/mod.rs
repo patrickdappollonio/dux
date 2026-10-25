@@ -1985,10 +1985,9 @@ pub fn pr_pause_notice(
         .as_ref()
         .filter(|r| r.remaining < crate::gh::RATE_LIMIT_BACKOFF_FLOOR)
     {
-        let secs_until = r
-            .reset_at
-            .map(|t| (t - now).num_seconds().clamp(0, 3600) as u64)
-            .unwrap_or(PR_RATE_LIMIT_BACKOFF_SECS);
+        let secs_until = r.reset_at.map_or(PR_RATE_LIMIT_BACKOFF_SECS, |t| {
+            (t - now).num_seconds().clamp(0, 3600) as u64
+        });
         let when = r
             .reset_at
             .map(|t| {
@@ -4340,8 +4339,10 @@ impl Engine {
                     .sessions
                     .iter()
                     .find(|s| s.id == tab.session_id)
-                    .map(super::model::AgentSession::display_label)
-                    .unwrap_or_else(|| tab.session_id.clone());
+                    .map_or_else(
+                        || tab.session_id.clone(),
+                        super::model::AgentSession::display_label,
+                    );
                 let provider = self
                     .running_provider_pins
                     .get(tab_id)
@@ -4842,8 +4843,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(super::model::AgentSession::supports_branch_git)
-            .unwrap_or(true);
+            .map_or(true, super::model::AgentSession::supports_branch_git);
         if name.is_empty() {
             // An empty name resets the label to the branch (or, for a
             // standalone agent, the folder) name. A branch cannot be renamed
@@ -5476,8 +5476,7 @@ impl Engine {
         session
             .project_id()
             .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+            .map_or_else(|| "unknown".to_string(), |p| p.name.clone())
     }
 
     /// Plan a standalone-agent create: validate the folder, resolve the title
@@ -5913,8 +5912,10 @@ impl Engine {
     pub fn default_provider_for_new_tab(&self, project_id: Option<&str>) -> ProviderKind {
         project_id
             .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
-            .map(|p| p.default_provider.clone())
-            .unwrap_or_else(|| self.config.default_provider())
+            .map_or_else(
+                || self.config.default_provider(),
+                |p| p.default_provider.clone(),
+            )
     }
 
     /// Whether a tab launching `session` with `provider` may resume that
@@ -5941,8 +5942,7 @@ impl Engine {
         }
         self.agent_tabs
             .get(tab_id)
-            .map(|t| t.provider.clone())
-            .unwrap_or_else(|| session.provider.clone())
+            .map_or_else(|| session.provider.clone(), |t| t.provider.clone())
     }
 
     /// The single source of truth for "does this tab launch resume?". Resume is
@@ -6283,10 +6283,10 @@ impl Engine {
                 )),
             }
             let message = match reaction {
-                Ok(EventReaction::DispatchAgentLaunchView(view)) => view
-                    .status
-                    .map(|s| s.message)
-                    .unwrap_or_else(|| "the tab could not be launched".to_string()),
+                Ok(EventReaction::DispatchAgentLaunchView(view)) => view.status.map_or_else(
+                    || "the tab could not be launched".to_string(),
+                    |s| s.message,
+                ),
                 Err(err) => err.to_string(),
                 Ok(_) => "the tab could not be launched".to_string(),
             };
@@ -6501,8 +6501,10 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(super::model::AgentSession::display_label)
-            .unwrap_or_else(|| tab_id.to_string());
+            .map_or_else(
+                || tab_id.to_string(),
+                super::model::AgentSession::display_label,
+            );
         self.begin_close_provider(TabIdRef::new(tab_id), label, Some(owner));
         self.clear_tab_runtime(TabIdRef::new(tab_id));
         self.agent_tabs.remove(TabIdRef::new(tab_id));
@@ -6595,8 +6597,7 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|session| self.tab_resume_decision(session, tab_id_ref, &provider, true))
-            .unwrap_or(false);
+            .is_some_and(|session| self.tab_resume_decision(session, tab_id_ref, &provider, true));
 
         Ok(ChangeAgentProviderOutcome {
             previous,
@@ -8600,8 +8601,7 @@ mod tests {
             if engine
                 .providers
                 .get(TabIdRef::new(tab))
-                .map(super::super::pty::PtyClient::passthrough_pending)
-                .unwrap_or(0)
+                .map_or(0, super::super::pty::PtyClient::passthrough_pending)
                 > 0
             {
                 return tmp;

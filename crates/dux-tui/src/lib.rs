@@ -181,10 +181,7 @@ fn lock_for_config_subcommand(
     config_args: &[String],
     paths: &config::DuxPaths,
 ) -> Result<ConfigLock> {
-    let sub = config_args
-        .first()
-        .map(std::string::String::as_str)
-        .unwrap_or("");
+    let sub = config_args.first().map_or("", std::string::String::as_str);
     Ok(match sub {
         // Decided here, so a missing root is not created just to take a lock.
         "reset" if !paths.root.exists() => ConfigLock::NothingToReset,

@@ -25,7 +25,7 @@ pub fn asks_for_help(args: &[String]) -> bool {
 }
 
 pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
-    let sub = args.first().map(std::string::String::as_str).unwrap_or("");
+    let sub = args.first().map_or("", std::string::String::as_str);
     match sub {
         "reset" => {
             let all = args[1..].iter().any(|a| a == "--all");
@@ -735,10 +735,10 @@ fn print_restore_report(restored: &config::RestoredConfig) {
 /// potential secrets.
 fn backup_config(config_path: &Path, raw: &str) -> Result<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let base = config_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "config.toml".to_string());
+    let base = config_path.file_name().map_or_else(
+        || "config.toml".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let dir = config_path
         .parent()
         .ok_or_else(|| anyhow!("config path {} has no parent", config_path.display()))?;

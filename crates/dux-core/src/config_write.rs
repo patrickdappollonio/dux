@@ -3036,7 +3036,7 @@ fn collect_unmanaged(
                 }
             }
             leaf => {
-                let already_rendered = rendered.map(|r| r.contains_key(key)).unwrap_or(false);
+                let already_rendered = rendered.is_some_and(|r| r.contains_key(key));
                 if !already_rendered && let Some(owned_key) = orig.key(key) {
                     carry.push(CarriedLeaf {
                         path: path.clone(),

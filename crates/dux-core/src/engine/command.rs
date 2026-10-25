@@ -631,8 +631,7 @@ impl Engine {
                         .projects
                         .iter()
                         .find(|project| project.id == project_id)
-                        .map(|project| project.name.clone())
-                        .unwrap_or_else(|| project_id.to_string());
+                        .map_or_else(|| project_id.to_string(), |project| project.name.clone());
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         crate::status_text![
                             "Project ",
@@ -953,8 +952,7 @@ impl Engine {
                 {
                     let pid = client
                         .child_process_id()
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
+                        .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
                     crate::logger::warn(&format!(
                         "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": \
                          process {pid} is already running in it"

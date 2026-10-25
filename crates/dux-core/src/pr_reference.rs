@@ -466,10 +466,7 @@ fn classify(input: &str) -> Result<Form, String> {
     // `git@github.com:acme/widget` is unaffected: its leading run holds an `@`,
     // so it is not a scheme token. Matched case-insensitively, because this text
     // is never handed to git.
-    let scheme = input
-        .split_once(':')
-        .map(|(scheme, _)| scheme)
-        .unwrap_or("");
+    let scheme = input.split_once(':').map_or("", |(scheme, _)| scheme);
     if is_scheme_token(scheme) {
         match scheme.to_ascii_lowercase().as_str() {
             "http" | "https" => {
@@ -698,7 +695,7 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
             let segments = path_segments(body);
             if looks_like_host(segments.first().copied().unwrap_or_default()) {
                 let host = host_from_authority(segments[0], false)?;
-                let rest = body.split_once('/').map(|(_, rest)| rest).unwrap_or("");
+                let rest = body.split_once('/').map_or("", |(_, rest)| rest);
                 (Some(host), rest)
             } else {
                 (None, body)

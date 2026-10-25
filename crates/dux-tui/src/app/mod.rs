@@ -4742,8 +4742,7 @@ impl App {
             redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as usize)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_millis() as usize),
             welcome_logo_visible: false,
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
@@ -6847,8 +6846,7 @@ impl App {
                 let label = session_id
                     .as_deref()
                     .and_then(|id| self.engine.sessions.iter().find(|s| s.id == id))
-                    .map(|s| self.session_label(s))
-                    .unwrap_or_else(|| "this agent".to_string());
+                    .map_or_else(|| "this agent".to_string(), |s| self.session_label(s));
                 let key = format!("refresh-changes:{}", session_id.as_deref().unwrap_or(""));
                 self.begin_changed_files_refresh(
                     key,
@@ -7115,8 +7113,7 @@ impl App {
         let next_index = matches
             .iter()
             .position(|candidate| *candidate == current)
-            .map(|index| (index + 1) % matches.len())
-            .unwrap_or(0);
+            .map_or(0, |index| (index + 1) % matches.len());
 
         self.apply_files_match(matches[next_index]);
         true
@@ -7326,8 +7323,9 @@ impl App {
 
     pub(crate) fn selected_companion_terminal_status(&self) -> CompanionTerminalStatus {
         self.selected_session()
-            .map(|session| self.companion_terminal_status(&session.id))
-            .unwrap_or(CompanionTerminalStatus::NotLaunched)
+            .map_or(CompanionTerminalStatus::NotLaunched, |session| {
+                self.companion_terminal_status(&session.id)
+            })
     }
 
     pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
@@ -7434,25 +7432,26 @@ impl App {
                 .sessions
                 .iter()
                 .find(|s| &s.id == sid)
-                .map(|s| {
-                    let agent = s.display_label();
-                    // A standalone agent has no project to qualify the label
-                    // with, so the terminal's owner is just the agent's name.
-                    match s.project_id().and_then(|project_id| {
-                        self.engine.projects.iter().find(|p| p.id == project_id)
-                    }) {
-                        Some(p) => format!("{agent}@{}", p.name),
-                        None => agent,
-                    }
-                })
-                .unwrap_or_else(|| sid.clone()),
+                .map_or_else(
+                    || sid.clone(),
+                    |s| {
+                        let agent = s.display_label();
+                        // A standalone agent has no project to qualify the label
+                        // with, so the terminal's owner is just the agent's name.
+                        match s.project_id().and_then(|project_id| {
+                            self.engine.projects.iter().find(|p| p.id == project_id)
+                        }) {
+                            Some(p) => format!("{agent}@{}", p.name),
+                            None => agent,
+                        }
+                    },
+                ),
             TerminalOwner::Project(pid) => self
                 .engine
                 .projects
                 .iter()
                 .find(|p| &p.id == pid)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| pid.clone()),
+                .map_or_else(|| pid.clone(), |p| p.name.clone()),
             // No owner to name, so the row names the DIRECTORY instead, with the
             // home directory collapsed to `~`. Truthful, useful, ellipsizes
             // cleanly as the left element on that line must, and gives the
@@ -7534,11 +7533,10 @@ impl App {
             self.engine
                 .pty_activity
                 .get(id)
-                .map(|last| {
+                .map_or(t.created_at, |last| {
                     let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
                     chrono::Utc::now() - ago
                 })
-                .unwrap_or(t.created_at)
         };
 
         match mode {
@@ -7866,8 +7864,7 @@ impl App {
         // an unconfigured surface keeps the ordinary behaviour.
         let capacity = self
             .selected_terminal_surface_client()
-            .map(dux_core::pty::PtyClient::scrollback_capacity)
-            .unwrap_or(0);
+            .map_or(0, dux_core::pty::PtyClient::scrollback_capacity);
         SelectionOrigin {
             history_saturated: capacity > 0 && self.snapshot_buf.scrollback_total >= capacity,
             grid_generation: self.grid_generation,
@@ -8172,8 +8169,10 @@ pub(crate) fn runtime_project_to_config(
             existing.id == project.id
                 && expanded_project_path(existing).is_some_and(|expanded| expanded == project.path)
         })
-        .map(|existing| existing.path.clone())
-        .unwrap_or_else(|| portable_project_path(&project.path));
+        .map_or_else(
+            || portable_project_path(&project.path),
+            |existing| existing.path.clone(),
+        );
 
     crate::config::ProjectConfig {
         id: project.id.clone(),

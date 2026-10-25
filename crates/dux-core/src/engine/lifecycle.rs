@@ -986,8 +986,7 @@ fn force_survivors_and_count_exited<'a>(clients: impl Iterator<Item = &'a mut Pt
             "a child that was sent SIGKILL at shutdown (pid {}) had still not exited after {}s",
             client
                 .child_process_id()
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
             crate::process_sessions::KILL_SETTLE.as_secs()
         ));
     }
@@ -1124,12 +1123,10 @@ impl Engine {
             }
             let (owner, label) = match &owning {
                 Some(sid) => {
-                    let branch = self
-                        .sessions
-                        .iter()
-                        .find(|s| &s.id == sid)
-                        .map(super::super::model::AgentSession::display_label)
-                        .unwrap_or_else(|| sid.clone());
+                    let branch = self.sessions.iter().find(|s| &s.id == sid).map_or_else(
+                        || sid.clone(),
+                        super::super::model::AgentSession::display_label,
+                    );
                     let label = if is_session_slot {
                         branch
                     } else {
@@ -2586,10 +2583,10 @@ impl Engine {
                 })
                 .into_reaction();
         }
-        let label = self
-            .session_by_id(session_id)
-            .map(super::super::model::AgentSession::display_label)
-            .unwrap_or_else(|| session_id.to_string());
+        let label = self.session_by_id(session_id).map_or_else(
+            || session_id.to_string(),
+            super::super::model::AgentSession::display_label,
+        );
         for (id, _) in &tabs {
             let owner = self.terminating_owner_for_tab(session_id, id.as_ref_id());
             self.begin_close_provider(id, label.clone(), Some(owner));
@@ -2883,10 +2880,10 @@ impl Engine {
     ) -> Option<crate::status_text::StatusText> {
         let restart = self.restart_awaiting(tab_id)?;
         let (_, provider) = restart.tabs.iter().find(|(id, _)| id == tab_id)?;
-        let label = self
-            .session_by_id(&restart.session_id)
-            .map(super::super::model::AgentSession::display_label)
-            .unwrap_or_else(|| restart.session_id.clone());
+        let label = self.session_by_id(&restart.session_id).map_or_else(
+            || restart.session_id.clone(),
+            super::super::model::AgentSession::display_label,
+        );
         Some(crate::working_copy::restart_pending_launch_refusal(
             &label,
             provider.as_str(),

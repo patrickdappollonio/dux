@@ -523,8 +523,7 @@ fn agent(api_base: &str) -> ureq::Agent {
 fn is_loopback_base(base: &str) -> bool {
     let authority = base
         .split_once("//")
-        .map(|(_, rest)| rest)
-        .unwrap_or(base)
+        .map_or(base, |(_, rest)| rest)
         .split('/')
         .next()
         .unwrap_or_default();
@@ -532,18 +531,14 @@ fn is_loopback_base(base: &str) -> bool {
     // colons inside the host, so the bracket form must be handled explicitly
     // rather than by splitting on the last colon.
     let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+        rest.split_once(']').map_or(rest, |(h, _)| h)
     } else {
-        authority
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(authority)
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
     };
     host == "localhost"
         || host
             .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Fetches ONE release by its tag. BLOCKING: worker only.
@@ -709,10 +704,7 @@ pub fn cached_notes(path: &Path, version: &str, ttl: Duration, now: DateTime<Utc
     }
     // `to_std` errors on a negative span, which is a clock that moved backwards;
     // treat that as "age unknown" and refetch rather than trusting the entry.
-    let fresh = (now - file.fetched_at)
-        .to_std()
-        .map(|age| age < ttl)
-        .unwrap_or(false);
+    let fresh = (now - file.fetched_at).to_std().is_ok_and(|age| age < ttl);
     if fresh {
         CacheLookup::Fresh(file.notes)
     } else {

@@ -622,8 +622,7 @@ async fn project_exists(state: &AppState, id: &str) -> bool {
         .engine
         .spine()
         .await
-        .map(|spine| spine.projects.iter().any(|p| p.id == id))
-        .unwrap_or(false)
+        .is_some_and(|spine| spine.projects.iter().any(|p| p.id == id))
 }
 
 fn unknown_project() -> Response {

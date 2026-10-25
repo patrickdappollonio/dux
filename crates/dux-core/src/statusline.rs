@@ -1763,9 +1763,7 @@ impl KeyedStatusController {
     /// The tone of the status on the line, or `Info` when nothing
     /// is open (mirrors the previous `StatusLine::tone()` API).
     pub fn tone(&self) -> StatusTone {
-        self.most_recent_tui()
-            .map(|(t, _)| t)
-            .unwrap_or(StatusTone::Info)
+        self.most_recent_tui().map_or(StatusTone::Info, |(t, _)| t)
     }
 
     /// The rendered text of the status on the line (spinner

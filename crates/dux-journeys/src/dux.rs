@@ -671,8 +671,7 @@ impl Dux {
 fn strip_port(address: &str) -> String {
     let host = address
         .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or(address)
+        .map_or(address, |(host, _)| host)
         .trim_start_matches('[')
         .trim_end_matches(']');
     host.trim_start_matches("::ffff:").to_string()

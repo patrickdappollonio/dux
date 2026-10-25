@@ -2389,8 +2389,7 @@ impl ServeCore {
             for listener in listeners {
                 let addr = listener
                     .local_addr()
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|_| "<unknown address>".to_string());
+                    .map_or_else(|_| "<unknown address>".to_string(), |a| a.to_string());
                 if let Err(err) = listener.set_nonblocking(true) {
                     dux_core::logger::error(&format!(
                         "[server] could not adopt the pre-bound listener on {addr} \
@@ -2469,8 +2468,7 @@ impl ServeCore {
             // Funnel check runs whatever happened to the primary.
             let identity_port = primary
                 .or(tailscale_leg)
-                .map(|addr| addr.port())
-                .unwrap_or(config.server.port);
+                .map_or(config.server.port, |addr| addr.port());
             tailscale_loop = tailscale_loop.with_identity(
                 Arc::new(move || dux_core::tailscale::detect_identity(identity_port)),
                 None,

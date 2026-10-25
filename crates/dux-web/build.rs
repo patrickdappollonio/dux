@@ -373,8 +373,7 @@ fn deps_stale(web: &Path) -> bool {
         .any(|manifest| {
             std::fs::metadata(web.join(manifest))
                 .and_then(|m| m.modified())
-                .map(|mtime| mtime > snapshot_mtime)
-                .unwrap_or(false)
+                .is_ok_and(|mtime| mtime > snapshot_mtime)
         })
 }
 
@@ -484,8 +483,7 @@ fn copy_tree(from: &Path, to: &Path) {
         let compressible = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| COMPRESSIBLE.contains(&e))
-            .unwrap_or(false);
+            .is_some_and(|e| COMPRESSIBLE.contains(&e));
         let out = if compressible {
             // The gzip magic-byte check is still needed: a checkout whose dist
             // was gzipped IN PLACE by the ancient in-place version of this

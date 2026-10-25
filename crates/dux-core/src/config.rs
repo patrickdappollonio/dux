@@ -2172,8 +2172,7 @@ impl ProviderCommandConfig {
     pub fn supports_session_resume(&self) -> bool {
         self.resume_args
             .as_ref()
-            .map(|args| !args.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|args| !args.is_empty())
     }
 
     /// The effective [`WebDragDropPaste`] for this provider: the configured value when
@@ -2209,10 +2208,10 @@ impl ProviderCommandConfig {
     /// command, or one that is nothing but separators), so the answer is never
     /// silently empty.
     pub fn command_file_name(&self) -> String {
-        std::path::Path::new(&self.command)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.command.clone())
+        std::path::Path::new(&self.command).file_name().map_or_else(
+            || self.command.clone(),
+            |n| n.to_string_lossy().into_owned(),
+        )
     }
 }
 
@@ -5811,16 +5810,15 @@ pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::
         return Ok(());
     }
 
-    let hint = config
-        .install_hint
-        .as_ref()
-        .map(|h| format!("Install with: {h}"))
-        .unwrap_or_else(|| {
+    let hint = config.install_hint.as_ref().map_or_else(
+        || {
             format!(
                 "Make sure '{}' is installed and on your PATH.",
                 config.command
             )
-        });
+        },
+        |h| format!("Install with: {h}"),
+    );
     Err(format!(
         "CLI tool '{}' not found on PATH. {hint}",
         config.command
@@ -5837,9 +5835,7 @@ fn provider_command_available(command: &str) -> bool {
         return is_executable_file(path);
     }
 
-    env::var_os("PATH")
-        .map(|paths| provider_command_available_in_path(command, &paths))
-        .unwrap_or(false)
+    env::var_os("PATH").is_some_and(|paths| provider_command_available_in_path(command, &paths))
 }
 
 fn provider_command_available_in_path(command: &str, paths: &std::ffi::OsStr) -> bool {
@@ -9144,8 +9140,10 @@ mod printed_paths_and_carried_values_tests {
             let reason = corrections
                 .iter()
                 .find(|(corrected, _)| *corrected == key_path(key))
-                .map(|(_, reason)| reason.as_str())
-                .unwrap_or_else(|| panic!("{key:?}: {corrections:?}"));
+                .map_or_else(
+                    || panic!("{key:?}: {corrections:?}"),
+                    |(_, reason)| reason.as_str(),
+                );
             assert!(reason.contains(said), "{key:?}: {reason}");
         }
         // A loopback bind writes nothing (the default already covers it),

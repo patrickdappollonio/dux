@@ -1320,14 +1320,13 @@ impl Engine {
             // map it back onto wall clock (now minus how long ago it fired) to
             // match `created_at`'s RFC 3339 representation. No activity yet →
             // fall back to the spawn time.
-            updated_at: self
-                .pty_activity
-                .get(id)
-                .map(|last| {
+            updated_at: self.pty_activity.get(id).map_or_else(
+                || t.created_at.to_rfc3339(),
+                |last| {
                     let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
                     (chrono::Utc::now() - ago).to_rfc3339()
-                })
-                .unwrap_or_else(|| t.created_at.to_rfc3339()),
+                },
+            ),
         }
     }
 
@@ -1471,8 +1470,7 @@ impl Engine {
             has_output: self
                 .providers
                 .get(id)
-                .map(super::pty::PtyClient::has_output)
-                .unwrap_or(false),
+                .is_some_and(super::pty::PtyClient::has_output),
             has_live_process: self.providers.contains_key(id),
             last_run_failed: self.tab_last_run_failed(id.as_str()),
             last_run_verdict: self.tab_run_verdict(id.as_str()).map(TabRunVerdictView::of),

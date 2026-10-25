@@ -166,10 +166,7 @@ impl ServeShutdown {
     /// to "is dux actually serving this address", so the serve loop reconciles its
     /// watcher-facing bookkeeping against it rather than keeping a second truth.
     pub(crate) fn has_leg(&self, addr: SocketAddr) -> bool {
-        self.legs
-            .lock()
-            .map(|legs| legs.contains_key(&addr))
-            .unwrap_or(false)
+        self.legs.lock().is_ok_and(|legs| legs.contains_key(&addr))
     }
 
     /// Trigger a graceful, non-error wind-down of the WHOLE server: the parent

@@ -127,10 +127,12 @@ impl Agent {
         }
         match &self.workspace {
             Workspace::Managed { branch_name, .. } => branch_name.clone(),
-            Workspace::Folder { folder_path, .. } => Path::new(folder_path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| folder_path.clone()),
+            Workspace::Folder { folder_path, .. } => {
+                Path::new(folder_path).file_name().map_or_else(
+                    || folder_path.clone(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            }
         }
     }
 

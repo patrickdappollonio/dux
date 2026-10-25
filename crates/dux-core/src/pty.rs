@@ -1444,7 +1444,7 @@ impl PtyClient {
     /// A count for a label, so a poisoned lock answers zero rather than taking the
     /// process down over an indicator.
     pub fn subscriber_count(&self) -> usize {
-        self.subscribers.lock().map(|subs| subs.len()).unwrap_or(0)
+        self.subscribers.lock().map_or(0, |subs| subs.len())
     }
 
     /// Subscribe to the live raw-byte stream. Returns a [`PtyViewerGuard`] and a
@@ -1680,10 +1680,7 @@ impl PtyClient {
     /// round: it starts a fresh session rather than sitting on words nobody can
     /// read.
     pub fn has_readable_output(&self) -> bool {
-        self.terminal
-            .lock()
-            .map(|t| t.has_readable_output())
-            .unwrap_or(false)
+        self.terminal.lock().is_ok_and(|t| t.has_readable_output())
     }
 
     /// Returns `true` if the terminal has only minimal output (no scrollback
@@ -1692,8 +1689,7 @@ impl PtyClient {
     pub fn has_minimal_output(&self, threshold: usize) -> bool {
         self.terminal
             .lock()
-            .map(|t| t.has_minimal_output(threshold))
-            .unwrap_or(true)
+            .map_or(true, |t| t.has_minimal_output(threshold))
     }
 
     /// Returns a short plain-text excerpt from the visible terminal viewport.
@@ -1762,7 +1758,7 @@ impl PtyClient {
     /// avoid observing a half-applied scan.
     #[cfg(test)]
     pub(crate) fn passthrough_pending(&self) -> usize {
-        self.passthrough.lock().map(|ring| ring.len()).unwrap_or(0)
+        self.passthrough.lock().map_or(0, |ring| ring.len())
     }
 
     /// The most recent `OSC 9;4` progress report, if the agent emitted one. This
@@ -2320,12 +2316,12 @@ impl SignalTargets {
     /// group already went) is benign.
     pub fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
         let signal_group = |pgid: u32| {
-            rustix::process::Pid::from_raw(pgid as i32)
-                .map(|group| rustix::process::kill_process_group(group, sig))
-                .unwrap_or(Ok(()))
+            rustix::process::Pid::from_raw(pgid as i32).map_or(Ok(()), |group| {
+                rustix::process::kill_process_group(group, sig)
+            })
         };
-        let child_res = self.child.map(signal_group).unwrap_or(Ok(()));
-        let fg_res = self.foreground.map(signal_group).unwrap_or(Ok(()));
+        let child_res = self.child.map_or(Ok(()), signal_group);
+        let fg_res = self.foreground.map_or(Ok(()), signal_group);
         child_res.and(fg_res)
     }
 
@@ -2457,8 +2453,7 @@ fn join_reader_bounded(reader: ReaderToJoin) {
              (session {}), so its reader thread was left to finish on its own",
             reader
                 .sid
-                .map(|sid| sid.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .map_or_else(|| "unknown".to_string(), |sid| sid.to_string()),
         ));
     }
 }
@@ -3242,11 +3237,13 @@ fn convert_terminal_color(
     match color {
         TermColor::Spec(Rgb { r, g, b }) => CellColor::Rgb(r, g, b),
         TermColor::Indexed(index) => palette[index as usize]
-            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
-            .unwrap_or(CellColor::Indexed(index)),
-        TermColor::Named(named) => palette[named]
-            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
-            .unwrap_or_else(|| named_color_to_tui(named)),
+            .map_or(CellColor::Indexed(index), |rgb| {
+                CellColor::Rgb(rgb.r, rgb.g, rgb.b)
+            }),
+        TermColor::Named(named) => palette[named].map_or_else(
+            || named_color_to_tui(named),
+            |rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b),
+        ),
     }
 }
 

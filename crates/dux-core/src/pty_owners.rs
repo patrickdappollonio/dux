@@ -482,8 +482,7 @@ impl PtySizeOwners {
             .unwrap()
             .applied
             .get(pty_id)
-            .map(|landed| landed.seq)
-            .unwrap_or(0)
+            .map_or(0, |landed| landed.seq)
     }
 
     /// The owner-map mutation counter, read by the engine actor's spine check as

@@ -4645,13 +4645,15 @@ impl App {
                         .sessions
                         .iter()
                         .find(|session| session.id == *session_id)
-                        .map(|session| {
-                            (
-                                self.engine.project_name_for_session(session),
-                                self.session_label(session),
-                            )
-                        })
-                        .unwrap_or_else(|| ("unknown".to_string(), session_id.clone()));
+                        .map_or_else(
+                            || ("unknown".to_string(), session_id.clone()),
+                            |session| {
+                                (
+                                    self.engine.project_name_for_session(session),
+                                    self.session_label(session),
+                                )
+                            },
+                        );
                     format!("on agent \"{session_label}\" under project \"{project_name}\"")
                 }
                 TerminalOwner::Project(project_id) => {
@@ -4660,8 +4662,7 @@ impl App {
                         .projects
                         .iter()
                         .find(|project| project.id == *project_id)
-                        .map(|project| project.name.clone())
-                        .unwrap_or_else(|| project_id.clone());
+                        .map_or_else(|| project_id.clone(), |project| project.name.clone());
                     format!("at the repo root of project \"{project_name}\"")
                 }
                 // No owner to name, so the kill overlay says where it is instead,
@@ -5966,8 +5967,7 @@ mod tests {
             .arg("-u")
             .output()
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-            .unwrap_or(false)
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         {
             return; // root bypasses the read-only trick
         }

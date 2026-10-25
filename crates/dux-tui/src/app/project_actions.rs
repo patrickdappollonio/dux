@@ -457,10 +457,10 @@ impl App {
             },
             words(
                 "Added",
-                project
-                    .created_at
-                    .map(|at| at.format("%b %-d, %Y").to_string())
-                    .unwrap_or_else(|| "Unknown".to_string()),
+                project.created_at.map_or_else(
+                    || "Unknown".to_string(),
+                    |at| at.format("%b %-d, %Y").to_string(),
+                ),
             ),
             name("Default provider", provider),
             words(

@@ -353,8 +353,7 @@ async fn dispatch_create(
     if outcome_is_error(&outcome) {
         let msg = outcome
             .status
-            .map(|s| s.message)
-            .unwrap_or_else(|| "create rejected".to_string());
+            .map_or_else(|| "create rejected".to_string(), |s| s.message);
         return Err((StatusCode::CONFLICT, msg));
     }
     Ok(outcome)
@@ -829,7 +828,7 @@ async fn reconnect_session(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
     }
-    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    let force = body.is_some_and(|Json(b)| b.force);
     let command = WireCommand::ReconnectSession {
         session_id: id,
         force,
@@ -929,7 +928,7 @@ async fn kill_session(
     }
     // Absent body means the polite path, which is what every per-agent gesture
     // sends; only the panic button asks for `force`.
-    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    let force = body.is_some_and(|Json(b)| b.force);
     let command = WireCommand::DetachAgent {
         session_id: id,
         force,

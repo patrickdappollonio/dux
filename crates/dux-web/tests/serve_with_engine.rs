@@ -381,8 +381,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         let exited = returned_engine
             .companion_terminals
             .get(&terminal_id_for_thread)
-            .map(|t| child_is_shut_down(&t.client))
-            .unwrap_or(true);
+            .map_or(true, |t| child_is_shut_down(&t.client));
         result_tx.send((exit, exited)).unwrap();
     });
 
@@ -523,8 +522,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
         let alive = returned_engine
             .companion_terminals
             .get(&terminal_id_for_thread)
-            .map(|t| !t.client.is_exited())
-            .unwrap_or(false);
+            .is_some_and(|t| !t.client.is_exited());
         result_tx.send((exit, alive)).unwrap();
     });
 

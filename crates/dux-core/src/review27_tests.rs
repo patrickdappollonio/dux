@@ -5,12 +5,10 @@ use crate::pty::PtyClient;
 use std::time::{Duration, Instant};
 
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|s| {
-            let close = s.rfind(')').unwrap();
-            !s[close + 1..].trim_start().starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        let close = s.rfind(')').unwrap();
+        !s[close + 1..].trim_start().starts_with('Z')
+    })
 }
 
 fn kill(pid: u32) {

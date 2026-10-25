@@ -118,8 +118,7 @@ pub fn seed_gitignore(repo: &Path) -> Result<bool> {
                 .args(["check-ignore", "-q", c.dir])
                 .stdin(Stdio::null())
                 .output()
-                .map(|out| out.status.code() == Some(0))
-                .unwrap_or(false);
+                .is_ok_and(|out| out.status.code() == Some(0));
             !already_ignored
         })
         .collect();

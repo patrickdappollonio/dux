@@ -248,7 +248,7 @@ fn accepts_br(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .map(|v| {
+        .is_some_and(|v| {
             v.split(',').any(|token| {
                 token
                     .trim()
@@ -257,7 +257,6 @@ fn accepts_br(headers: &HeaderMap) -> bool {
                     .is_some_and(|t| t.trim() == "br")
             })
         })
-        .unwrap_or(false)
 }
 
 /// Build a response for an embedded asset, transparently handling the

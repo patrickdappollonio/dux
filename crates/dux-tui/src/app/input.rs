@@ -1368,8 +1368,7 @@ impl App {
                     if self.selected_session().is_some()
                         && self
                             .selected_session()
-                            .map(|s| self.engine.providers.contains_key(s.slot_tab_id()))
-                            .unwrap_or(false)
+                            .is_some_and(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                     {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
@@ -2447,19 +2446,11 @@ impl App {
                 }
             }
             Some(Action::ScrollPageDown) => {
-                let page = self
-                    .mouse_layout
-                    .agent_term
-                    .map(|area| area.height)
-                    .unwrap_or(10);
+                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(page.max(1) as i16);
             }
             Some(Action::ScrollPageUp) => {
-                let page = self
-                    .mouse_layout
-                    .agent_term
-                    .map(|area| area.height)
-                    .unwrap_or(10);
+                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(-(page.max(1) as i16));
             }
             Some(Action::ScrollLineDown | Action::MoveDown) => {
@@ -3499,8 +3490,9 @@ impl App {
         let forward_scroll = self.selected_surface_forward_scroll();
         let (alt_screen, mouse_mode) = self
             .selected_terminal_surface_client()
-            .map(|provider| (provider.is_alt_screen(), provider.has_mouse_mode()))
-            .unwrap_or((false, false));
+            .map_or((false, false), |provider| {
+                (provider.is_alt_screen(), provider.has_mouse_mode())
+            });
         if should_forward_wheel(forward_scroll, alt_screen, mouse_mode) {
             self.terminal_selection = None;
             if self.write_into_focused_pty(raw) {
@@ -4536,7 +4528,7 @@ impl App {
             OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => Some(body),
             _ => None,
         };
-        let page = body.map(|body| body.height.max(1)).unwrap_or(10) as i16;
+        let page = body.map_or(10, |body| body.height.max(1)) as i16;
 
         // Search owns text and caret keys; unconsumed navigation continues
         // through the picker ladder below against the filtered entries.
@@ -8012,7 +8004,7 @@ impl App {
         let prefix_lower = prefix.to_lowercase();
         let mut candidates: Vec<String> = read
             .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_dir()))
             .filter(|entry| {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 !name.starts_with('.') && name.starts_with(&prefix_lower)
@@ -10375,8 +10367,7 @@ impl App {
                 self.reload_changed_files();
                 if self
                     .selected_session()
-                    .map(|s| self.engine.providers.contains_key(s.slot_tab_id()))
-                    .unwrap_or(false)
+                    .is_some_and(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                 {
                     if allow_launch {
                         // Enter (and the sidebar double-click) lands on the
@@ -10609,8 +10600,7 @@ impl App {
         let fs = self.selected_surface_forward_scroll();
         let (alt, mouse_mode) = self
             .selected_terminal_surface_client()
-            .map(|p| (p.is_alt_screen(), p.has_mouse_mode()))
-            .unwrap_or((false, false));
+            .map_or((false, false), |p| (p.is_alt_screen(), p.has_mouse_mode()));
 
         if should_forward_wheel(fs, alt, mouse_mode) {
             // Reconstruct the SGR wheel report the child expects, translated
@@ -21562,8 +21552,7 @@ not_a_real_action = ["x"]
         }
         rows.into_iter()
             .find(|(_, line)| line.trim().starts_with(needle))
-            .map(|(row, _)| row)
-            .unwrap_or_else(|| panic!("no viewport row holds {needle}"))
+            .map_or_else(|| panic!("no viewport row holds {needle}"), |(row, _)| row)
     }
 
     /// Select one row's text and stamp the frame it was read in, exactly as a
@@ -36808,8 +36797,7 @@ cyan = "#00ffff"
                         option
                             .provider
                             .as_ref()
-                            .map(|provider| provider.as_str() == "claude")
-                            .unwrap_or(false)
+                            .is_some_and(|provider| provider.as_str() == "claude")
                     })
                     .expect("claude option present");
             }

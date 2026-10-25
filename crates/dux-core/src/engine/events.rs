@@ -1636,10 +1636,8 @@ impl Engine {
         if let Some(running) = self.providers.get(tab_id)
             && running.is_live()
         {
-            let describe = |pid: Option<u32>| {
-                pid.map(|pid| pid.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            };
+            let describe =
+                |pid: Option<u32>| pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
             logger::warn(&format!(
                 "dropping the PTY just launched for tab {tab_id} (process {}): \
                  process {} is already running in it",
@@ -3900,8 +3898,10 @@ impl Engine {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map(|session| session.display_label().to_string())
-            .unwrap_or_else(|| session_id.to_string());
+            .map_or_else(
+                || session_id.to_string(),
+                |session| session.display_label().to_string(),
+            );
         self.post_status(crate::poller_status::pr_status_not_saved(
             session_id, &label, error,
         ));

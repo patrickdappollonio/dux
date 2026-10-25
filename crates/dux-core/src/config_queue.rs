@@ -152,8 +152,7 @@ impl ConfigWriteQueue {
     pub fn last_written(&self) -> (u64, Option<crate::config::SourceText>) {
         self.last_written
             .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or((0, None))
+            .map_or((0, None), |guard| guard.clone())
     }
 
     /// Deferred, coalesced, fire-and-forget. A dead writer is surfaced lazily via
@@ -194,8 +193,7 @@ impl ConfigWriteQueue {
                 if self
                     .writer
                     .as_ref()
-                    .map(std::thread::JoinHandle::is_finished)
-                    .unwrap_or(true)
+                    .map_or(true, std::thread::JoinHandle::is_finished)
                 {
                     Err("config writer thread died; config was not saved".into())
                 } else {

@@ -307,9 +307,7 @@ async fn list_worktree_counts(State(state): State<AppState>) -> Response {
     match tokio::task::spawn_blocking(move || {
         let mut counts = BTreeMap::new();
         for (id, found) in inputs {
-            let n = classify_managed_worktrees(&found, &ops)
-                .map(|entries| entries.len())
-                .unwrap_or(0);
+            let n = classify_managed_worktrees(&found, &ops).map_or(0, |entries| entries.len());
             counts.insert(id, n);
         }
         counts

@@ -371,8 +371,7 @@ fn global_recurse_worktree_add() {
     crate::git::add_worktree_existing_branch_at(&repo, &existing, "bumped").unwrap();
     for worktree in [&fresh, &existing] {
         let populated = std::fs::read_dir(worktree.join("sub"))
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false);
+            .is_ok_and(|mut entries| entries.next().is_some());
         assert!(
             !populated,
             "the new worktree's submodule was left unpopulated: {}",

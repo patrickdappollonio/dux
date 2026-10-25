@@ -204,17 +204,17 @@ impl Engine {
             let what = match owner.as_ref() {
                 crate::model::TerminalOwnerRef::Session(session_id) => format!(
                     "terminal \"{name}\" of agent \"{}\"",
-                    self.session_by_id(session_id)
-                        .map(super::super::model::AgentSession::display_label)
-                        .unwrap_or_else(|| session_id.to_string())
+                    self.session_by_id(session_id).map_or_else(
+                        || session_id.to_string(),
+                        super::super::model::AgentSession::display_label
+                    )
                 ),
                 crate::model::TerminalOwnerRef::Project(project_id) => format!(
                     "project terminal \"{name}\" of project \"{}\"",
                     self.projects
                         .iter()
                         .find(|project| project.id == project_id)
-                        .map(|project| project.name.clone())
-                        .unwrap_or_else(|| project_id.to_string())
+                        .map_or_else(|| project_id.to_string(), |project| project.name.clone())
                 ),
                 crate::model::TerminalOwnerRef::Standalone => {
                     format!("standalone terminal \"{name}\"")

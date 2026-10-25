@@ -235,8 +235,7 @@ pub fn is_git_repo(path: &Path) -> bool {
             "--git-dir",
         ])
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Where a path sits relative to git repositories, for the add-project and
@@ -2660,9 +2659,7 @@ pub fn create_worktree_from_start_point_claimed(
     custom_name: Option<&str>,
     claim: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<(String, PathBuf)> {
-    let branch_name = custom_name
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(docker_style_name);
+    let branch_name = custom_name.map_or_else(docker_style_name, std::string::ToString::to_string);
     let worktree_path = managed_worktree_path(worktrees_root, project_name, &branch_name);
     claim(&worktree_path)?;
     fs::create_dir_all(worktrees_root.join(project_name))?;
@@ -3763,8 +3760,7 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
             &format!("refs/heads/{branch_name}"),
         ])
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Remove a worktree from disk and from git's registry, and DO NOT touch its
@@ -4259,16 +4255,13 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
         let (is_dir, expandable) = if is_symlink {
             // Follow the link to learn whether the target is a directory; a
             // dangling symlink is a plain non-expandable leaf.
-            let target_is_dir = std::fs::metadata(entry.path())
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
+            let target_is_dir = std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
             if target_is_dir {
                 // Expandable only when the resolved target stays inside the
                 // worktree: an escaping symlinked dir is shown but can never
                 // be walked out of the tree.
                 let in_tree = crate::worktree_file::resolve_worktree_path_for_read(worktree, &path)
-                    .map(|(_, _, is_outside)| !is_outside)
-                    .unwrap_or(false);
+                    .is_ok_and(|(_, _, is_outside)| !is_outside);
                 (in_tree, in_tree)
             } else {
                 (false, false)
@@ -4884,9 +4877,8 @@ fn untracked_file_stat(path: &Path) -> DiffStat {
         return DiffStat::Text(0, 0);
     };
     if meta.file_type().is_symlink() {
-        let lines = fs::read_link(path)
-            .map(|target| usize::from(!target.as_os_str().is_empty()))
-            .unwrap_or(0);
+        let lines =
+            fs::read_link(path).map_or(0, |target| usize::from(!target.as_os_str().is_empty()));
         return DiffStat::Text(lines, 0);
     }
     if !meta.is_file() {
@@ -6476,16 +6468,13 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// parent dir is checked). Returns false if either path can't be canonicalized.
 pub(crate) fn resolves_into_git_dir(worktree: &Path, candidate: &Path) -> bool {
     match (worktree.canonicalize(), candidate.canonicalize()) {
-        (Ok(wt), Ok(c)) => c
-            .strip_prefix(&wt)
-            .map(|rel| {
-                rel.components().any(|comp| {
-                    comp.as_os_str()
-                        .to_str()
-                        .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
-                })
+        (Ok(wt), Ok(c)) => c.strip_prefix(&wt).is_ok_and(|rel| {
+            rel.components().any(|comp| {
+                comp.as_os_str()
+                    .to_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
             })
-            .unwrap_or(false),
+        }),
         _ => false,
     }
 }
@@ -14300,8 +14289,7 @@ mod tests {
             .arg("-u")
             .output()
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-            .unwrap_or(false)
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
     }
 
     #[test]

@@ -2318,8 +2318,7 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
                 let message = view
                     .status
                     .as_ref()
-                    .map(|s| s.message.clone())
-                    .unwrap_or_else(|| "launch refused".to_string());
+                    .map_or_else(|| "launch refused".to_string(), |s| s.message.clone());
                 dux_core::logger::info(&format!("Auto-reopen skipped for {id}: {message}"));
             }
             Ok(_) => launched += 1,
@@ -4656,8 +4655,10 @@ fn handle_request(
                     Ok(()) => {
                         let launched = engine
                             .session_for_slot_tab(TabIdRef::new(&tab_id))
-                            .map(|session| session.slot_tab_id().to_string())
-                            .unwrap_or_else(|| tab_id.clone());
+                            .map_or_else(
+                                || tab_id.clone(),
+                                |session| session.slot_tab_id().to_string(),
+                            );
                         engine.operations.await_key(
                             &ticket.id,
                             &dux_core::operations::launch_binding_key(&launched),
@@ -5281,11 +5282,10 @@ fn dispatch_launch(engine: &mut Engine, request: AgentLaunchRequest) -> Result<(
     if let EventReaction::DispatchAgentLaunchView(view) = &reaction
         && !view.launched
     {
-        let message = view
-            .status
-            .as_ref()
-            .map(|s| s.message.clone())
-            .unwrap_or_else(|| "Agent launch was refused.".to_string());
+        let message = view.status.as_ref().map_or_else(
+            || "Agent launch was refused.".to_string(),
+            |s| s.message.clone(),
+        );
         return Err(message);
     }
     Ok(())

@@ -175,8 +175,7 @@ pub(crate) fn plan_pane_card(
     // padding it sits inside: forgetting the padding here is what let a button
     // paint clipped inside a ring that looked wide enough.
     let min_inner = paintable_button
-        .map(|width| width.saturating_add(SIDE_PADDING * 2))
-        .unwrap_or(MIN_INNER)
+        .map_or(MIN_INNER, |width| width.saturating_add(SIDE_PADDING * 2))
         .max(MIN_INNER);
     // WIDTH decides whether a ring is possible at all, exactly as the take-over
     // card does: a pane too narrow to hold the measure plus two columns of

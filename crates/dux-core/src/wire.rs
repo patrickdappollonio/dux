@@ -1370,8 +1370,10 @@ impl ProjectAddResult {
         self.statuses
             .iter()
             .find(|s| s.tone == "error")
-            .map(|s| StatusText::from_parts(s.message.clone(), s.segments.clone()))
-            .unwrap_or_else(|| fallback.clone())
+            .map_or_else(
+                || fallback.clone(),
+                |s| StatusText::from_parts(s.message.clone(), s.segments.clone()),
+            )
     }
 }
 
@@ -3908,8 +3910,7 @@ impl Engine {
                 let origin = status_op_id
                     .as_ref()
                     .and_then(|id| self.pending_web_pr_lookup_ops.get(id))
-                    .map(|op| op.scope().clone())
-                    .unwrap_or(crate::statusline::StatusScope::All);
+                    .map_or(crate::statusline::StatusScope::All, |op| op.scope().clone());
                 self.current_origin = origin;
                 self.last_created_op_id = None;
                 let statuses = match self.apply(Command::DispatchCreateAgentRequest {
@@ -4091,8 +4092,7 @@ impl Engine {
         let origin = status_op_id
             .as_ref()
             .and_then(|id| self.pending_web_add_project_ops.get(id))
-            .map(|op| op.scope().clone())
-            .unwrap_or(crate::statusline::StatusScope::All);
+            .map_or(crate::statusline::StatusScope::All, |op| op.scope().clone());
         let added = self.add_project_without_op(
             ProjectAdd {
                 path,
@@ -4515,7 +4515,7 @@ impl Engine {
                 &report.key,
                 report.tab_id.as_deref(),
                 report.launched,
-                first.map(|s| s.message.as_str()).unwrap_or(""),
+                first.map_or("", |s| s.message.as_str()),
                 first.and_then(|s| s.segments.as_deref()),
             );
         }
@@ -4993,8 +4993,10 @@ impl Engine {
                     .projects
                     .iter()
                     .find(|p| p.id == project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id)),
+                    .map_or_else(
+                        || crate::sidebar::short_project_id(&project_id),
+                        |p| p.name.clone(),
+                    ),
                 project_id,
             },
             WireCommand::DeleteProject { project_id } => Command::DeleteProject {
@@ -5002,8 +5004,10 @@ impl Engine {
                     .projects
                     .iter()
                     .find(|p| p.id == project_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id)),
+                    .map_or_else(
+                        || crate::sidebar::short_project_id(&project_id),
+                        |p| p.name.clone(),
+                    ),
                 project_id,
             },
             command => return Ok(WireCommandMapping::Unhandled(command)),

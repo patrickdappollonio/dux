@@ -78,9 +78,10 @@ pub fn resolve_start_dir(config: &Config) -> PathBuf {
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
         .unwrap_or_else(|| {
-            std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            std::env::var("HOME").map_or_else(
+                |_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                PathBuf::from,
+            )
         })
 }
 
@@ -111,9 +112,7 @@ pub fn leading_branch_for_project(path: &Path, current_branch: Option<&str>) -> 
         Some(default) => default,
         // No remote default: use the current branch when available, else
         // fall back to "main" (the same heuristic used in load_projects).
-        None => current_branch
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| "main".to_string()),
+        None => current_branch.map_or_else(|| "main".to_string(), std::string::ToString::to_string),
     }
 }
 
@@ -159,8 +158,7 @@ pub fn load_projects(
         let provider = project
             .default_provider
             .as_deref()
-            .map(ProviderKind::from_str)
-            .unwrap_or_else(|| config.default_provider());
+            .map_or_else(|| config.default_provider(), ProviderKind::from_str);
         let current_branch = if missing {
             String::new()
         } else {

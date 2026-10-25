@@ -312,10 +312,7 @@ impl TextInput {
 
     /// Current scroll offset (first visible visual line index). Returns 0 in single-line mode.
     pub fn scroll_offset(&self) -> usize {
-        self.multiline
-            .as_ref()
-            .map(|m| m.scroll_offset)
-            .unwrap_or(0)
+        self.multiline.as_ref().map_or(0, |m| m.scroll_offset)
     }
 
     /// Returns the visual lines currently visible for rendering
@@ -509,11 +506,7 @@ impl TextInput {
 
 fn prev_char_boundary(text: &str, index: usize) -> usize {
     let index = index.min(text.len());
-    text[..index]
-        .char_indices()
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+    text[..index].char_indices().last().map_or(0, |(i, _)| i)
 }
 
 fn next_char_boundary(text: &str, index: usize) -> usize {
@@ -521,8 +514,7 @@ fn next_char_boundary(text: &str, index: usize) -> usize {
     text[index..]
         .char_indices()
         .nth(1)
-        .map(|(offset, _)| index + offset)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(offset, _)| index + offset)
 }
 
 pub(crate) fn clamp_cursor(text: &str, cursor: usize) -> usize {

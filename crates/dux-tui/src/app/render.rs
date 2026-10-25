@@ -2537,14 +2537,10 @@ impl App {
                         ListItem::new(vec![label, Line::from("")])
                     }
                 }
-                LeftItem::Session(index) => self
-                    .engine
-                    .sessions
-                    .get(*index)
-                    .map(|session| self.render_agent_row(session, row_text_width))
-                    .unwrap_or_else(|| {
-                        ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")])
-                    }),
+                LeftItem::Session(index) => self.engine.sessions.get(*index).map_or_else(
+                    || ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]),
+                    |session| self.render_agent_row(session, row_text_width),
+                ),
             })
             .collect();
         let heights = left_items
@@ -3367,8 +3363,7 @@ impl App {
             self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
             self.welcome_logo_alt = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() % 2 == 0)
-                .unwrap_or(false);
+                .is_ok_and(|d| d.subsec_nanos() % 2 == 0);
         }
         self.welcome_logo_visible = true;
         self.welcome_tip_selection = self.selected_left;
@@ -3870,8 +3865,7 @@ impl App {
         // here. A tab hint on a single-tab agent is noise, so it needs 2+.
         let tab_count = self
             .selected_session()
-            .map(|s| self.session_tab_ids(&s.id).len())
-            .unwrap_or(0);
+            .map_or(0, |s| self.session_tab_ids(&s.id).len());
         if matches!(active_surface, SessionSurface::Agent) && tab_count >= 2 {
             hints.push(Hint::key(next_tab, "next tab"));
         }
@@ -6820,8 +6814,10 @@ impl App {
                         entry
                             .path
                             .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| entry.path.display().to_string())
+                            .map_or_else(
+                                || entry.path.display().to_string(),
+                                |name| name.to_string_lossy().to_string(),
+                            )
                             .as_str(),
                         path_col,
                     );
@@ -8167,8 +8163,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map(|s| self.session_label(s))
-            .unwrap_or_else(|| session_id.clone());
+            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
 
         let tail = confirm_close_tab_tail_prose(will_detach, promoted_label.as_deref());
         let mut lines = vec![
@@ -8238,8 +8233,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map(|s| self.session_label(s))
-            .unwrap_or_else(|| session_id.clone());
+            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
         let tail = Prose::new()
             .text(" This ends the tab's session, interrupting whatever it is doing. The tab stays in the strip, ready to start again.")
             .text(if *last_running {
@@ -10463,10 +10457,10 @@ impl App {
                 .iter()
                 .filter_map(|index| prompt.entries.get(*index))
                 .map(|entry| {
-                    let modified = entry
-                        .modified_at
-                        .map(|ts| ts.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_else(|| "unknown time".to_string());
+                    let modified = entry.modified_at.map_or_else(
+                        || "unknown time".to_string(),
+                        |ts| ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    );
                     let lines = vec![
                         Line::from(Span::styled(
                             entry.display_name.clone(),
@@ -12147,16 +12141,15 @@ impl App {
         let area = centered_rect(96, 94, frame.area());
         self.paint_modal_surface(frame, area, self.theme.app_bg);
 
-        let title = self
-            .startup_log_viewer
-            .as_ref()
-            .map(|viewer| {
+        let title = self.startup_log_viewer.as_ref().map_or_else(
+            || " Startup command log ".to_string(),
+            |viewer| {
                 format!(
                     " Startup command log · {} · {} ",
                     viewer.scope_label, viewer.display_name
                 )
-            })
-            .unwrap_or_else(|| " Startup command log ".to_string());
+            },
+        );
         let outer_block = self.themed_block(&title, true);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
@@ -18250,8 +18243,10 @@ mod tests {
             .agent_tab_regions
             .iter()
             .find(|(id, _)| id == tab_id)
-            .map(|(_, rect)| *rect)
-            .unwrap_or_else(|| panic!("no recorded region for {tab_id}"));
+            .map_or_else(
+                || panic!("no recorded region for {tab_id}"),
+                |(_, rect)| *rect,
+            );
         rect.x + 2 + ord_w + 1
     }
 

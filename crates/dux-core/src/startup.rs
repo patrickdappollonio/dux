@@ -434,10 +434,10 @@ pub fn run_claimed_startup_command(
             } else {
                 Err(format!(
                     "exit status {}",
-                    outcome
-                        .code
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "terminated by signal".to_string())
+                    outcome.code.map_or_else(
+                        || "terminated by signal".to_string(),
+                        |code| code.to_string()
+                    )
                 ))
             }
         }
@@ -865,8 +865,7 @@ fn write_log(path: &Path, run: &StartupCommandRun, outcome: &CommandOutcome) -> 
 }
 
 fn format_exit_code(code: Option<i32>) -> String {
-    code.map(|code| code.to_string())
-        .unwrap_or_else(|| "none".to_string())
+    code.map_or_else(|| "none".to_string(), |code| code.to_string())
 }
 
 fn sanitize_file_component(value: &str) -> String {

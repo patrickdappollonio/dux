@@ -552,14 +552,11 @@ fn spine_has_project_terminal(spine: &serde_json::Value, terminal_id: &str) -> b
 }
 
 fn spine_terminal_has_owner_kind(spine: &serde_json::Value, terminal_id: &str, kind: &str) -> bool {
-    spine["terminals"]
-        .as_array()
-        .map(|terminals| {
-            terminals.iter().any(|t| {
-                t["id"].as_str() == Some(terminal_id) && t["owner"]["kind"].as_str() == Some(kind)
-            })
+    spine["terminals"].as_array().is_some_and(|terminals| {
+        terminals.iter().any(|t| {
+            t["id"].as_str() == Some(terminal_id) && t["owner"]["kind"].as_str() == Some(kind)
         })
-        .unwrap_or(false)
+    })
 }
 
 // ── REST action endpoints + the events/PTY sockets ───────────────────────────
@@ -1204,8 +1201,10 @@ async fn tabs_of_one_browser_count_once_but_still_block_each_other() {
         listed
             .as_array()
             .and_then(|rows| rows.iter().find(|row| row["id"] == tab))
-            .map(|row| row["browser"].clone())
-            .unwrap_or_else(|| panic!("{tab} is listed: {listed}"))
+            .map_or_else(
+                || panic!("{tab} is listed: {listed}"),
+                |row| row["browser"].clone(),
+            )
     };
     assert_eq!(browser_of(&tab_a), "01234567");
     assert_eq!(browser_of(&tab_b), "01234567");
@@ -2005,14 +2004,11 @@ async fn rest_create_session_idempotency_replays_same_session() {
         .json()
         .await
         .unwrap();
-    let p1_count = sessions
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
-                .count()
-        })
-        .unwrap_or(0);
+    let p1_count = sessions.as_array().map_or(0, |arr| {
+        arr.iter()
+            .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
+            .count()
+    });
     assert_eq!(p1_count, 1, "idempotent replay must not create a duplicate");
 
     // Followed as an operation, the key is kept just the same: a retry, while
@@ -2056,14 +2052,11 @@ async fn rest_create_session_idempotency_replays_same_session() {
         .json()
         .await
         .unwrap();
-    let count = sessions
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
-                .count()
-        })
-        .unwrap_or(0);
+    let count = sessions.as_array().map_or(0, |arr| {
+        arr.iter()
+            .filter(|s| s["workspace"]["project_id"].as_str() == Some("p1"))
+            .count()
+    });
     assert_eq!(count, 2, "the followed retries created nothing");
 }
 
@@ -3598,17 +3591,14 @@ async fn a_standalone_terminal_opens_streams_and_closes_at_un_nested_addresses()
     assert!(
         wait_for_workspace(addr, |spine| {
             spine_has_standalone_terminal(spine, &tid)
-                && spine["terminals"]
-                    .as_array()
-                    .map(|ts| {
-                        ts.iter().any(|t| {
-                            t["id"].as_str() == Some(tid.as_str())
-                                && t["owner"]["cwd_label"]
-                                    .as_str()
-                                    .is_some_and(|l| !l.is_empty())
-                        })
+                && spine["terminals"].as_array().is_some_and(|ts| {
+                    ts.iter().any(|t| {
+                        t["id"].as_str() == Some(tid.as_str())
+                            && t["owner"]["cwd_label"]
+                                .as_str()
+                                .is_some_and(|l| !l.is_empty())
                     })
-                    .unwrap_or(false)
+                })
         })
         .await,
         "a standalone terminal must reach the browser tagged, with its directory"

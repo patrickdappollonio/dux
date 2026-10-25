@@ -34,8 +34,7 @@ impl ProjectWorktreeEntry {
         self.path
             .file_name()
             .and_then(|part| part.to_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| self.path.display().to_string())
+            .map_or_else(|| self.path.display().to_string(), str::to_string)
     }
 }
 

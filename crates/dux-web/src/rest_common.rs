@@ -291,8 +291,9 @@ pub fn scope_from_headers(headers: &HeaderMap, registry: &ConnectionRegistry) ->
         // Only EVENTS-class connections are ever disclosed to clients; a PTY-class
         // id in the header must not scope-and-silence toasts.
         .filter(|id| registry.class_of(id) == Some(ConnClass::Events))
-        .map(|id| StatusScope::Connection(id.to_string()))
-        .unwrap_or(StatusScope::All)
+        .map_or(StatusScope::All, |id| {
+            StatusScope::Connection(id.to_string())
+        })
 }
 
 /// 404 response for an unknown or over-length session id. Shared across the REST
