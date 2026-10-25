@@ -34,23 +34,21 @@ export function LauncherCorner({ className }: { className?: string }) {
         onBlur={() => setFocused(false)}
       >
         <Plus />
-        {/* Every word sits in the same grid cell, so the box is as wide as the
-          * widest one and nothing beside it moves while the words change. */}
-        <span
-          aria-hidden="true"
-          className="inline-grid min-w-0 justify-items-start overflow-hidden"
-        >
+        {/* Only the shown word takes up room, so the plus and that word stay
+          * centred together and re-centre when it changes. The others lie over
+          * it out of flow, centred on it, waiting or leaving. */}
+        <span aria-hidden="true" className="relative min-w-0 overflow-hidden">
           {LAUNCHER_LABELS.map((label, i) => (
             <span
               key={label}
               data-shown={i === index ? "" : undefined}
               className={cn(
-                "[grid-area:1/1] whitespace-nowrap transition-[transform,opacity] duration-[125ms] ease-out motion-reduce:transition-none",
+                "flex justify-center whitespace-nowrap transition-[transform,opacity] duration-[125ms] ease-out motion-reduce:transition-none",
                 i === index
                   ? "translate-y-0 opacity-100"
                   : i === previous
-                    ? "-translate-y-full opacity-0"
-                    : "translate-y-full opacity-0",
+                    ? "absolute inset-x-0 top-0 -translate-y-full opacity-0"
+                    : "absolute inset-x-0 top-0 translate-y-full opacity-0",
               )}
             >
               {label}
