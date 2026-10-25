@@ -4142,7 +4142,7 @@ impl AttachmentGuard {
         let linked = client.link.clone().filter(|events| {
             attachments.linkable(events, client.address, std::time::Instant::now())
         });
-        let own_connection = if let Some(_) = linked {
+        let own_connection = if linked.is_some() {
             None
         } else {
             attachments.register(
