@@ -374,7 +374,7 @@ impl Transport for UnixTransport {
 }
 
 /// How long a stream's body may take as a whole: longer than any run of dux.
-const NO_DEADLINE: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+const NO_DEADLINE: Duration = Duration::from_hours(8760);
 
 /// The most a streamed body hands over at once.
 const STREAM_PIECE: usize = 8 * 1024;

@@ -100,7 +100,7 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Generous on purpose. It is a backstop for a bug, not a timeout: a value a
 /// slow clone or a long fetch could plausibly cross would reintroduce the false
 /// "timed out" this mechanism exists to remove.
-pub const BUSY_LIVE_CEILING: Duration = Duration::from_secs(30 * 60);
+pub const BUSY_LIVE_CEILING: Duration = Duration::from_mins(30);
 
 /// The keys of status operations the engine is still running.
 ///

@@ -659,7 +659,7 @@ fn from_api(release: ApiRelease) -> ReleaseNotes {
 /// unauthenticated 60/hour per-IP limit, however many times dux is launched, and
 /// it comfortably covers a single working session (the realistic case: launch,
 /// glance at the notes, dismiss, relaunch a dozen times).
-pub const CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+pub const CACHE_TTL: Duration = Duration::from_hours(6);
 
 /// The cache file inside the dux state directory (`DuxPaths::root`).
 ///
@@ -1695,12 +1695,9 @@ Its description.
     fn the_cache_ttl_is_short_enough_to_pick_up_an_edited_release_body() {
         // Live fetching is the point of the feature; a day-long TTL would pin a
         // typo on screen long after it was fixed.
-        assert!(
-            CACHE_TTL <= Duration::from_secs(12 * 60 * 60),
-            "{CACHE_TTL:?}"
-        );
+        assert!(CACHE_TTL <= Duration::from_hours(12), "{CACHE_TTL:?}");
         // ...and long enough that repeated launches in one session don't refetch.
-        assert!(CACHE_TTL >= Duration::from_secs(60 * 60), "{CACHE_TTL:?}");
+        assert!(CACHE_TTL >= Duration::from_hours(1), "{CACHE_TTL:?}");
     }
 
     #[test]

@@ -210,7 +210,7 @@ pub(crate) struct PrCloneAwaiting {
 
 /// How long a started clone waits for such a question. A clone and the agent
 /// create after it take minutes at the outside.
-const PR_CLONE_AWAITING_BOUND: Duration = Duration::from_secs(60 * 60);
+const PR_CLONE_AWAITING_BOUND: Duration = Duration::from_hours(1);
 
 /// A folder check's answer, from its worker.
 pub(crate) struct PrCloneFolderAnswer {

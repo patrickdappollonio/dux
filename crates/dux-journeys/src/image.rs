@@ -52,7 +52,7 @@ const IMAGE_INPUTS: &[&str] = &[
 
 /// How long the one-time setup (an image build, the pulls) may take. Generous on
 /// purpose: a first build on a slow connection downloads Chromium.
-const SETUP_DEADLINE: Duration = Duration::from_secs(30 * 60);
+const SETUP_DEADLINE: Duration = Duration::from_mins(30);
 
 /// One pinned image reference (`name:tag@sha256:...`) from journey-images.env.
 pub fn pinned(key: &str) -> String {

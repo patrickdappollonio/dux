@@ -292,7 +292,7 @@ fn still_running(id: &str) -> CliError {
 }
 
 /// The longest any wait lasts: a day.
-pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_hours(24);
 
 /// How long a change waits: `--wait-timeout` when given, else `[cli]
 /// wait_timeout_seconds` from this machine's config file, or its default when
@@ -597,10 +597,10 @@ mod tests {
         // At most a day, from the flag or the file.
         assert_eq!(
             wait_timeout(Some(u64::MAX), &config),
-            Duration::from_secs(86_400)
+            Duration::from_hours(24)
         );
         std::fs::write(&config, "[cli]\nwait_timeout_seconds = 99999999999\n").unwrap();
-        assert_eq!(wait_timeout(None, &config), Duration::from_secs(86_400));
+        assert_eq!(wait_timeout(None, &config), Duration::from_hours(24));
         // A file that cannot be read waits the usual 10 minutes rather than
         // failing the change.
         std::fs::write(&config, "[cli\n").unwrap();

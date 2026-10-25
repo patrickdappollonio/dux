@@ -3091,7 +3091,7 @@ mod host_policy_tests {
                 !gh_reprobe_is_due(
                     GhStatus::Available,
                     true,
-                    Some(Duration::from_secs(9_000)),
+                    Some(Duration::from_mins(150)),
                     INTERVAL,
                 ),
                 "nothing is waiting on an answer, so dux stops spawning gh",
@@ -3101,7 +3101,7 @@ mod host_policy_tests {
             assert!(gh_reprobe_is_due(
                 GhStatus::Unreachable,
                 true,
-                Some(Duration::from_secs(9_000)),
+                Some(Duration::from_mins(150)),
                 INTERVAL,
             ));
         }
@@ -3111,7 +3111,7 @@ mod host_policy_tests {
             assert!(!gh_reprobe_is_due(
                 GhStatus::Unreachable,
                 false,
-                Some(Duration::from_secs(9_000)),
+                Some(Duration::from_mins(150)),
                 INTERVAL,
             ));
         }
@@ -3121,7 +3121,7 @@ mod host_policy_tests {
             assert!(!gh_reprobe_is_due(
                 GhStatus::Unreachable,
                 true,
-                Some(Duration::from_secs(9_000)),
+                Some(Duration::from_mins(150)),
                 Duration::ZERO,
             ));
         }
@@ -4426,7 +4426,7 @@ mod tests {
             "a cycle that has just run is not due again"
         );
         assert!(!inactive_sweep_due(Duration::from_secs(43_199), 43_200));
-        assert!(inactive_sweep_due(Duration::from_secs(43_200), 43_200));
+        assert!(inactive_sweep_due(Duration::from_hours(12), 43_200));
         assert!(inactive_sweep_due(Duration::from_secs(999_999), 43_200));
     }
 
