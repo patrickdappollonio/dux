@@ -174,7 +174,7 @@ fn removing_a_worktree_never_ends_what_a_deleted_standalone_agent_left_running()
 
     // Delete the standalone agent: dux's record of it, nothing else.
     assert!(matches!(
-        engine.begin_delete_session("s-alone", false, None),
+        engine.begin_delete_session("s-alone", crate::engine::WorktreeOnDelete::Keep, None),
         BeginDeleteSessionOutcome::Inline { .. }
     ));
     engine.finish_delete_session_memory("s-alone");
@@ -185,7 +185,7 @@ fn removing_a_worktree_never_ends_what_a_deleted_standalone_agent_left_running()
 
     // Delete the managed agent with its worktree.
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -265,7 +265,7 @@ fn a_removal_finished_at_the_next_start_ends_a_closed_terminals_job_first() {
     first.providers.insert(TabId::new(tab.as_str()), client);
 
     assert!(matches!(
-        first.begin_delete_session("s-agent", true, None),
+        first.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     first.finish_delete_session_memory("s-agent");
@@ -340,7 +340,7 @@ fn removing_a_worktree_never_ends_a_live_standalone_agents_processes() {
     register_leaderless(&engine, "s-alone", session, &inside);
 
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -390,7 +390,7 @@ fn a_survivor_recorded_after_the_delete_is_written_into_the_pending_row() {
     )
     .expect("spawn sh");
     engine.providers.insert(TabId::new(tab.as_str()), client);
-    let _ = engine.begin_delete_session("s-agent", true, None);
+    let _ = engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None);
     engine.finish_delete_session_memory("s-agent");
 
     // A closed terminal's job, recorded only now.
@@ -535,7 +535,7 @@ fn removals_of_a_folder_and_one_inside_it_both_finish() {
     // The inner one is deleted first (its record goes), then the outer one.
     for id in ["s-inner", "s-outer"] {
         assert!(matches!(
-            engine.begin_delete_session(id, true, Some(true)),
+            engine.begin_delete_session(id, crate::engine::WorktreeOnDelete::Remove, Some(true)),
             BeginDeleteSessionOutcome::AsyncStarted { .. }
         ));
         engine.finish_delete_session_memory(id);

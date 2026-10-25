@@ -36,6 +36,16 @@ pub struct CommandWorkerSpec {
     pub panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
+/// Whether a status op's completion has the surfaces read the changed-files
+/// listing again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChangedFiles {
+    /// The work changed files, so the listing is read again.
+    ReadAgain,
+    /// The listing stays as it is.
+    Unchanged,
+}
+
 /// Format a `Box<dyn Any + Send>` panic payload as a human-readable string,
 /// matching the `&str` and `String` cases the default panic hook surfaces.
 pub fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
@@ -191,7 +201,7 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.spawn_status_op_with(op, work, false)
+        self.spawn_status_op_with(op, work, ChangedFiles::Unchanged)
     }
 
     /// [`Self::spawn_status_op`] for work that changes a worktree's files:
@@ -207,14 +217,14 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.spawn_status_op_with(op, work, true)
+        self.spawn_status_op_with(op, work, ChangedFiles::ReadAgain)
     }
 
     fn spawn_status_op_with<T, E, F>(
         &mut self,
         op: crate::engine::StatusOp<T, E>,
         work: F,
-        reloads_changes: bool,
+        changed_files: ChangedFiles,
     ) -> EventReaction
     where
         T: Send + 'static,
@@ -260,7 +270,7 @@ impl Engine {
                     }
                     .with_scope(origin);
                     let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-                    if reloads_changes {
+                    if changed_files == ChangedFiles::ReadAgain {
                         let _ = tx.send(WorkerEvent::WorktreeFilesChanged);
                     }
                 })

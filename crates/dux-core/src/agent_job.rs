@@ -2967,7 +2967,11 @@ fn run_agent_launch_job_with(
     rollback: Option<&Rollback>,
     gate: &crate::process_sessions::SpawnGate,
 ) {
-    let launch_args = request.provider_config.interactive_args(request.resume);
+    let launch_args = request.provider_config.interactive_args(if request.resume {
+        crate::model::ConversationStart::Resume
+    } else {
+        crate::model::ConversationStart::Fresh
+    });
     let (rows, cols) = request.pty_size;
     logger::debug(&format!(
         "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",

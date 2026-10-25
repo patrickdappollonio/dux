@@ -25,6 +25,8 @@ mod rename;
 mod resume_fallback;
 mod spawn_worker;
 #[cfg(any(test, feature = "test-support"))]
+pub use clone::CloneAskedBy;
+pub use reload_origin::ReloadSlot;
 pub use spawn_worker::fail_next_worker_spawn;
 pub mod status_op;
 
@@ -85,7 +87,7 @@ pub use events::{
     BeginDeleteSessionOutcome, BeginDeleteSessionView, BranchDeleteInputs, DeleteTerminalView,
     DetachedSession, DispatchAgentLaunchView, EventReaction, FinishDeleteSessionOutcome,
     FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, RemovedBranches,
-    StatusUpdate, WorktreeRemoval, survivors_kept_worktree_message,
+    StatusUpdate, WorktreeOnDelete, WorktreeRemoval, survivors_kept_worktree_message,
 };
 pub(crate) use events::{
     RemovalCoordinationInputs, cwd_keeps, end_agent_processes_before_removal, occupant_after_wait,
@@ -101,10 +103,11 @@ pub use lifecycle::{
     ClosedTabExit, DeferredWorktreeRemoval, DetachSessionOutcome, ForceDetachOutcome,
     GroupWorktreeRemoval, PendingDetach, PendingTabRestart, PrunedPty, PrunedPtyKind, PtyGone,
     PtyGoneNotice, RAPID_EXIT_WINDOW, ReapedTerminations, RecreateRestartSweep, RemovalProcesses,
-    ShutdownReport, TerminatingOwner, TerminatingPty, agent_exit_with_companion_notice,
-    clean_exit_closes_tab_row, closed_tab_exit_notice, closed_terminal_notice, detach_busy_message,
-    detach_confirm_body, detach_confirm_prose, detach_final, detach_not_running_message,
-    detach_status_key, detached_agent_notice, format_shutdown_result, format_shutdown_start,
+    RunUse, ShutdownReport, TabExit, TabsAfterRecreate, TerminatingOwner, TerminatingPty,
+    agent_exit_with_companion_notice, clean_exit_closes_tab_row, closed_tab_exit_notice,
+    closed_terminal_notice, detach_busy_message, detach_clean_final, detach_confirm_body,
+    detach_confirm_prose, detach_forced_final, detach_not_running_message, detach_status_key,
+    detached_agent_notice, format_shutdown_result, format_shutdown_start,
 };
 pub use pending_removals::recorded_at_or_through_link;
 pub(crate) use pending_removals::{
@@ -116,7 +119,7 @@ pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
     removal_waiting_message,
 };
-pub use rename::{branch_rename_refusal, rename_branch_note_prose};
+pub use rename::{BranchPushed, BranchRename, branch_rename_refusal, rename_branch_note_prose};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
@@ -1241,8 +1244,12 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
             None => Final::info(change_base_branch_message(
                 project_name,
                 branch,
-                *folder_was_on_it,
-                base.moved(),
+                if *folder_was_on_it {
+                    FolderOnBranch::Already
+                } else {
+                    FolderOnBranch::CheckedOut
+                },
+                base,
             )),
         },
         ChangeBaseOutcome::Refused {
@@ -1380,10 +1387,10 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
 pub fn change_base_branch_message(
     project_name: &str,
     branch: &str,
-    folder_was_on_it: bool,
-    base_moved: bool,
+    folder: FolderOnBranch,
+    base: &ProjectBaseAdoption,
 ) -> StatusText {
-    if folder_was_on_it && !base_moved {
+    if folder == FolderOnBranch::Already && !base.moved() {
         return status_text![
             "Project ",
             q(project_name),
@@ -1392,7 +1399,16 @@ pub fn change_base_branch_message(
             ", and its folder is on it."
         ];
     }
-    checkout_default_branch_message(project_name, branch, base_moved)
+    checkout_default_branch_message(project_name, branch, base)
+}
+
+/// Whether a project's folder was on the branch a change made its base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderOnBranch {
+    /// The folder was already on it, so nothing was checked out.
+    Already,
+    /// The change checked it out.
+    CheckedOut,
 }
 
 /// The refusal for a "Change base branch" on a project whose folder is gone,
@@ -1422,7 +1438,7 @@ pub fn change_base_branch_busy_message(project_name: &str, branch: &str) -> Stat
 pub fn checkout_default_branch_message(
     project_name: &str,
     target_branch: &str,
-    base_moved: bool,
+    base: &ProjectBaseAdoption,
 ) -> StatusText {
     status_text![
         "Checked out ",
@@ -1430,7 +1446,7 @@ pub fn checkout_default_branch_message(
         " for project ",
         q(project_name),
         ".",
-        base_moved_suffix(target_branch, base_moved)
+        base_moved_suffix(target_branch, base)
     ]
 }
 
@@ -1439,7 +1455,7 @@ pub fn checkout_default_branch_message(
 pub fn already_on_default_branch_message(
     project_name: &str,
     current_branch: &str,
-    base_moved: bool,
+    base: &ProjectBaseAdoption,
 ) -> StatusText {
     status_text![
         "Project ",
@@ -1447,7 +1463,7 @@ pub fn already_on_default_branch_message(
         " is already on the leading branch ",
         q(current_branch),
         ".",
-        base_moved_suffix(current_branch, base_moved)
+        base_moved_suffix(current_branch, base)
     ]
 }
 
@@ -1571,8 +1587,8 @@ pub fn checkout_default_branch_project_gone_message(project_name: &str) -> Statu
     ]
 }
 
-fn base_moved_suffix(branch: &str, base_moved: bool) -> StatusText {
-    if base_moved {
+fn base_moved_suffix(branch: &str, base: &ProjectBaseAdoption) -> StatusText {
+    if base.moved() {
         status_text![" New worktrees branch from ", q(branch), " now."]
     } else {
         StatusText::new()
@@ -1772,10 +1788,10 @@ fn attention_engaged(
 fn apply_attention_decision(
     needs_attention: &mut HashSet<TabId>,
     fired: &[TabId],
-    enabled: bool,
+    indicator: AttentionIndicator,
     engaged: impl Fn(&TabIdRef) -> bool,
 ) {
-    if !enabled {
+    if indicator == crate::engine::AttentionIndicator::Off {
         needs_attention.clear();
         return;
     }
@@ -1792,6 +1808,47 @@ fn apply_attention_decision(
             needs_attention.insert(tab.clone());
         }
     }
+}
+
+/// Whether the attention indicator is switched on (`[ui] attention_indicator`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttentionIndicator {
+    On,
+    Off,
+}
+
+/// How [`Engine::take_host_passthrough`] hands the captured sequences on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassthroughWrap {
+    /// Wrapped in a tmux passthrough envelope, for the tmux dux runs under.
+    Tmux,
+    /// As captured.
+    Plain,
+}
+
+/// How [`Engine::reconnect_plan`] starts an agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectMode {
+    /// Reconnect, refusing while its provider is live, resuming when it can.
+    Normal,
+    /// Kill whatever runs and start fresh.
+    Force,
+}
+
+/// Whether the GitHub integration is switched on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubIntegration {
+    On,
+    Off,
+}
+
+/// Who asks `gh` again for the answer a config reload owes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GhReprobe {
+    /// This apply asks.
+    Now,
+    /// The surface's own apply, which runs next, asks.
+    LeftToSurface,
 }
 
 /// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
@@ -2531,7 +2588,12 @@ impl Engine {
         let viewed = &self.agent_viewed;
         let typed = &self.pty_input;
         let engaged = |tab: &TabIdRef| attention_engaged(viewed, typed, tab, now);
-        apply_attention_decision(&mut self.needs_attention, &fired, enabled, engaged);
+        let indicator = if enabled {
+            crate::engine::AttentionIndicator::On
+        } else {
+            crate::engine::AttentionIndicator::Off
+        };
+        apply_attention_decision(&mut self.needs_attention, &fired, indicator, engaged);
     }
 
     /// Drain every provider's captured passthrough ring and return the bytes to
@@ -2550,7 +2612,7 @@ impl Engine {
     pub fn take_host_passthrough(
         &mut self,
         focused_tab: Option<&str>,
-        wrap_for_tmux: bool,
+        wrap: PassthroughWrap,
     ) -> Vec<u8> {
         let master = self.config.capabilities.passthrough;
         // Pure on the per-tick path: an unrecognized value is said once, at
@@ -2579,7 +2641,7 @@ impl Engine {
                 if !forward {
                     continue;
                 }
-                if wrap_for_tmux {
+                if wrap == crate::engine::PassthroughWrap::Tmux {
                     out.extend_from_slice(&crate::attention::tmux_wrap(&seq.bytes));
                 } else {
                     out.extend_from_slice(&seq.bytes);
@@ -2962,7 +3024,7 @@ impl Engine {
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
-        self.apply_reloaded_config_probing(config, true)
+        self.apply_reloaded_config_probing(config, GhReprobe::Now)
     }
 
     /// [`Self::apply_reloaded_config`] that leaves the `gh` probe a reload
@@ -2970,10 +3032,14 @@ impl Engine {
     /// only to drain the deferred commands, then hands it back to the surface,
     /// whose own apply asks once.
     pub(crate) fn apply_reloaded_config_for_drain(&mut self, config: Config) -> anyhow::Result<()> {
-        self.apply_reloaded_config_probing(config, false)
+        self.apply_reloaded_config_probing(config, GhReprobe::LeftToSurface)
     }
 
-    fn apply_reloaded_config_probing(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
+    fn apply_reloaded_config_probing(
+        &mut self,
+        config: Config,
+        probe: GhReprobe,
+    ) -> anyhow::Result<()> {
         let fallback = config.clone();
         let result = self.apply_reloaded_config_inner(config, probe);
         if result.is_err() {
@@ -2992,9 +3058,10 @@ impl Engine {
     /// the reasons to perform it is having just fixed `gh`, so waiting out the
     /// timer would be needless. A reload with everything working stays a
     /// no-op, because there is nothing to recover and a probe costs a process.
-    pub fn probe_gh_after_reload(&mut self, github_was_enabled: bool) {
+    pub fn probe_gh_after_reload(&mut self, before: GithubIntegration) {
         if self.github_integration_enabled
-            && (!github_was_enabled || !matches!(self.gh_status, crate::model::GhStatus::Available))
+            && (before == GithubIntegration::Off
+                || !matches!(self.gh_status, crate::model::GhStatus::Available))
         {
             self.spawn_gh_status_check();
         }
@@ -3011,6 +3078,16 @@ impl Engine {
     /// the apply failed), the engine's projects are derived from the kept
     /// config's own projects alone, so memory, the writer's base and the
     /// file still agree.
+    /// Whether the GitHub integration is on now, for a reload to compare
+    /// against what it turns it into.
+    pub fn github_integration(&self) -> GithubIntegration {
+        if self.github_integration_enabled {
+            GithubIntegration::On
+        } else {
+            GithubIntegration::Off
+        }
+    }
+
     pub fn keep_reloaded_config(&mut self, config: Config) {
         self.github_integration_enabled = config.ui.github_integration;
         let derived = self
@@ -3054,11 +3131,12 @@ impl Engine {
     /// re-seeded first so a manually attached PR's badge survives the reload
     /// without waiting for a cycle. Turned on, the `gh` probe the reload asked
     /// for decides, so nothing is armed here. Every surface's reload runs it.
-    pub fn retune_pr_sync_after_reload(&mut self, github_was_enabled: bool) {
+    pub fn retune_pr_sync_after_reload(&mut self, before: GithubIntegration) {
         if !self.github_integration_enabled {
             self.pr_statuses.clear();
             self.disarm_pr_sync();
-        } else if github_was_enabled && matches!(self.gh_status, crate::model::GhStatus::Available)
+        } else if before == GithubIntegration::On
+            && matches!(self.gh_status, crate::model::GhStatus::Available)
         {
             self.seed_pr_statuses_from_store();
             self.update_pr_sync_sessions();
@@ -3067,11 +3145,15 @@ impl Engine {
         }
     }
 
-    fn apply_reloaded_config_inner(&mut self, config: Config, probe: bool) -> anyhow::Result<()> {
-        let github_was_enabled = self.github_integration_enabled;
+    fn apply_reloaded_config_inner(
+        &mut self,
+        config: Config,
+        probe: GhReprobe,
+    ) -> anyhow::Result<()> {
+        let before = self.github_integration();
         self.github_integration_enabled = config.ui.github_integration;
-        if probe {
-            self.probe_gh_after_reload(github_was_enabled);
+        if probe == GhReprobe::Now {
+            self.probe_gh_after_reload(before);
         }
         self.projects = crate::project_browser::load_projects(
             &self.session_store.load_projects()?,
@@ -4740,7 +4822,12 @@ impl Engine {
         changed
     }
 
-    pub fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
+    pub fn mark_session_desired_running(
+        &mut self,
+        session_id: &str,
+        desired_state: crate::model::DesiredRunning,
+    ) {
+        let desired = desired_state.is_running();
         if let Some(session) = self
             .sessions
             .iter_mut()
@@ -4757,7 +4844,10 @@ impl Engine {
                     session.id,
                 ));
             }
-        } else if let Err(err) = self.session_store.set_desired_running(session_id, desired) {
+        } else if let Err(err) = self
+            .session_store
+            .set_desired_running(session_id, desired_state)
+        {
             crate::logger::error(&format!(
                 "failed to persist desired_running override for {session_id}: {err}",
             ));
@@ -4832,8 +4922,9 @@ impl Engine {
         &mut self,
         session_id: &str,
         new_name: &str,
-        rename_branch: bool,
+        branch: BranchRename,
     ) -> BranchRenamePlan {
+        let rename_branch = branch == BranchRename::AlsoTheBranch;
         let name = new_name.trim().to_string();
         let branch_named = self
             .sessions
@@ -5703,10 +5794,10 @@ impl Engine {
     pub fn agent_reconnect_status_message(
         &self,
         session: &AgentSession,
-        resume: bool,
+        start: crate::model::ConversationStart,
     ) -> StatusText {
         let location = self.session_location_phrase(session);
-        if resume {
+        if start.is_resume() {
             crate::status_text![
                 "Resumed ",
                 n(session.provider.as_str()),
@@ -5746,9 +5837,10 @@ impl Engine {
     pub fn reconnect_plan(
         &mut self,
         session_id: &str,
-        force: bool,
+        mode: ReconnectMode,
         pty_size: (u16, u16),
     ) -> anyhow::Result<ReconnectPlan> {
+        let force = mode == ReconnectMode::Force;
         let session = self
             .sessions
             .iter()
@@ -5812,9 +5904,14 @@ impl Engine {
         // The one resume decision: collision-aware, used for BOTH the request and
         // the announced message. Force never resumes.
         let resume = if force {
-            false
+            crate::model::ConversationStart::Fresh
         } else {
-            self.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true)
+            self.tab_resume_decision(
+                &session,
+                session.slot_tab_id(),
+                &session.provider,
+                crate::model::ConversationStart::Resume,
+            )
         };
         let mut msg = self.agent_reconnect_status_message(&session, resume);
         if let Some(detached) = &detached_label {
@@ -5860,7 +5957,7 @@ impl Engine {
         // sentence is the only thing that says why.
         let request = self
             .build_agent_launch_request(session, resume, pty_size, kind)
-            .quiet_status_on(if resume {
+            .quiet_status_on(if resume.is_resume() {
                 crate::statusline::QuietSurfaces::BOTH
             } else {
                 crate::statusline::QuietSurfaces::LOUD
@@ -5873,7 +5970,7 @@ impl Engine {
         Ok(ReconnectPlan::Launch {
             request: Box::new(request),
             busy_message,
-            resume,
+            resume: resume.is_resume(),
             detached_label,
         })
     }
@@ -5955,10 +6052,11 @@ impl Engine {
         session: &AgentSession,
         tab_id: &TabIdRef,
         provider: &ProviderKind,
-        requested: bool,
-    ) -> bool {
-        if !requested || !self.should_resume_provider(session, provider) {
-            return false;
+        requested: crate::model::ConversationStart,
+    ) -> crate::model::ConversationStart {
+        use crate::model::ConversationStart;
+        if !requested.is_resume() || !self.should_resume_provider(session, provider) {
+            return ConversationStart::Fresh;
         }
         let others_same_provider = self.tab_ids_for_session(&session.id).into_iter().any(|id| {
             id != tab_id
@@ -5967,7 +6065,11 @@ impl Engine {
         });
         // A tab a working-copy recreate is about to start again is getting the
         // conversation back, though its old process is still shutting down.
-        !others_same_provider && !self.restart_will_resume(&session.id, tab_id, provider)
+        if !others_same_provider && !self.restart_will_resume(&session.id, tab_id, provider) {
+            ConversationStart::Resume
+        } else {
+            ConversationStart::Fresh
+        }
     }
 
     /// The agent record for `session_id`, or `None`. A plain identity lookup by
@@ -6162,13 +6264,17 @@ impl Engine {
 
         // The resume decision is asked of a TAB, compared against this session's
         // sibling tab ids: the tab being retargeted is the session-slot one.
-        let resume_available =
-            self.tab_resume_decision(&updated, updated.slot_tab_id(), provider, true);
+        let resume_available = self.tab_resume_decision(
+            &updated,
+            updated.slot_tab_id(),
+            provider,
+            crate::model::ConversationStart::Resume,
+        );
 
         Ok(ChangeAgentProviderOutcome {
             previous,
             running,
-            resume_available,
+            resume_available: resume_available.is_resume(),
         })
     }
 
@@ -6244,7 +6350,7 @@ impl Engine {
             TabId::new(tab_id.clone()),
             Some(provider),
             session,
-            false,
+            crate::model::ConversationStart::Fresh,
             pty_size,
             crate::worker::AgentLaunchKind::Tab {
                 is_fresh: true,
@@ -6522,7 +6628,10 @@ impl Engine {
             // gesture rather than to the tab, and leaving it set would reopen an
             // agent the user just closed.
             if promoted.is_some() {
-                self.mark_session_desired_running(session_id, false);
+                self.mark_session_desired_running(
+                    session_id,
+                    crate::model::DesiredRunning::Stopped,
+                );
             }
             if self.mark_session_status(session_id, crate::model::SessionStatus::Detached) {
                 self.update_pr_sync_sessions();
@@ -6593,7 +6702,15 @@ impl Engine {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .is_some_and(|session| self.tab_resume_decision(session, tab_id_ref, provider, true));
+            .is_some_and(|session| {
+                self.tab_resume_decision(
+                    session,
+                    tab_id_ref,
+                    provider,
+                    crate::model::ConversationStart::Resume,
+                )
+                .is_resume()
+            });
 
         Ok(ChangeAgentProviderOutcome {
             previous,
@@ -7320,7 +7437,11 @@ mod tests {
             .push(sample_standalone_session("sa1", "/home/someone/My Notes"));
 
         assert_eq!(
-            engine.prepare_branch_rename("sa1", "My Notes (2026)", false),
+            engine.prepare_branch_rename(
+                "sa1",
+                "My Notes (2026)",
+                crate::engine::BranchRename::NameOnly
+            ),
             BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
         );
         assert_eq!(
@@ -7329,7 +7450,11 @@ mod tests {
             "nothing was written"
         );
 
-        let plan = engine.prepare_branch_rename("sa1", "My-Notes-2026", true);
+        let plan = engine.prepare_branch_rename(
+            "sa1",
+            "My-Notes-2026",
+            crate::engine::BranchRename::AlsoTheBranch,
+        );
         assert!(
             matches!(&plan, BranchRenamePlan::TitleWritten { name, sync_branches: false } if name == "My-Notes-2026"),
             "a standalone rename writes the title and syncs no branch, got {plan:?}"
@@ -7339,7 +7464,7 @@ mod tests {
         // With no branch to rename, the branch flag is no reason to refuse
         // clearing it.
         assert_eq!(
-            engine.prepare_branch_rename("sa1", "   ", true),
+            engine.prepare_branch_rename("sa1", "   ", crate::engine::BranchRename::AlsoTheBranch),
             BranchRenamePlan::TitleCleared
         );
         assert_eq!(engine.sessions[0].title, None);
@@ -7356,7 +7481,11 @@ mod tests {
             .push(crate::engine::test_support::sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         assert!(matches!(
-            engine.prepare_branch_rename("s1", "My Notes", true),
+            engine.prepare_branch_rename(
+                "s1",
+                "My Notes",
+                crate::engine::BranchRename::AlsoTheBranch
+            ),
             BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
         ));
     }
@@ -7547,13 +7676,18 @@ mod tests {
         engine.sessions.push(session);
 
         for empty in ["", "   "] {
-            let plan = engine.prepare_branch_rename("s1", empty, true);
+            let plan = engine.prepare_branch_rename(
+                "s1",
+                empty,
+                crate::engine::BranchRename::AlsoTheBranch,
+            );
             assert_eq!(
                 plan,
                 BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName)
             );
         }
-        let plan = engine.prepare_branch_rename("s1", "-nope", true);
+        let plan =
+            engine.prepare_branch_rename("s1", "-nope", crate::engine::BranchRename::AlsoTheBranch);
         assert_eq!(
             plan,
             BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
@@ -7577,7 +7711,11 @@ mod tests {
             .push(sample_session("s1", "p1", "old-branch"));
         engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
 
-        let plan = engine.prepare_branch_rename("s1", "new-name", true);
+        let plan = engine.prepare_branch_rename(
+            "s1",
+            "new-name",
+            crate::engine::BranchRename::AlsoTheBranch,
+        );
         assert_eq!(
             plan,
             BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight)
@@ -7594,7 +7732,8 @@ mod tests {
         session.title = Some("before".into());
         engine.sessions.push(session);
 
-        let plan = engine.prepare_branch_rename("s1", "  after  ", false);
+        let plan =
+            engine.prepare_branch_rename("s1", "  after  ", crate::engine::BranchRename::NameOnly);
         assert_eq!(
             plan,
             BranchRenamePlan::TitleWritten {
@@ -7635,7 +7774,11 @@ mod tests {
             .sessions
             .push(sample_session("s1", "p1", "same-branch"));
 
-        let plan = engine.prepare_branch_rename("s1", "same-branch", true);
+        let plan = engine.prepare_branch_rename(
+            "s1",
+            "same-branch",
+            crate::engine::BranchRename::AlsoTheBranch,
+        );
         assert_eq!(
             plan,
             BranchRenamePlan::TitleWritten {
@@ -7662,7 +7805,11 @@ mod tests {
         session.title = Some("previous-title".into());
         engine.sessions.push(session);
 
-        let plan = engine.prepare_branch_rename("s1", "new-name", true);
+        let plan = engine.prepare_branch_rename(
+            "s1",
+            "new-name",
+            crate::engine::BranchRename::AlsoTheBranch,
+        );
         assert_eq!(
             plan,
             BranchRenamePlan::RenameBranch(BranchRenameDispatch {
@@ -7697,7 +7844,11 @@ mod tests {
         // If the session vanished, prepare mutates nothing and returns Noop so
         // the surface stays silent (the pre-extraction early return).
         let (mut engine, _tmp) = test_engine();
-        let plan = engine.prepare_branch_rename("ghost", "new-name", true);
+        let plan = engine.prepare_branch_rename(
+            "ghost",
+            "new-name",
+            crate::engine::BranchRename::AlsoTheBranch,
+        );
         assert_eq!(plan, BranchRenamePlan::Noop);
         assert!(engine.rename_expected.is_empty());
     }
@@ -8414,7 +8565,12 @@ mod tests {
     #[test]
     fn apply_attention_decision_sets_flag_when_not_engaged() {
         let mut set = HashSet::new();
-        apply_attention_decision(&mut set, &[TabId::new("s1")], true, |_| false);
+        apply_attention_decision(
+            &mut set,
+            &[TabId::new("s1")],
+            crate::engine::AttentionIndicator::On,
+            |_| false,
+        );
         assert!(
             set.contains(TabIdRef::new("s1")),
             "a fired, unengaged tab must be flagged"
@@ -8426,7 +8582,12 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(TabId::new("s1"));
         // Engaged: the fired signal is suppressed AND the existing flag is cleared.
-        apply_attention_decision(&mut set, &[TabId::new("s1")], true, |_| true);
+        apply_attention_decision(
+            &mut set,
+            &[TabId::new("s1")],
+            crate::engine::AttentionIndicator::On,
+            |_| true,
+        );
         assert!(
             !set.contains(TabIdRef::new("s1")),
             "engagement must both suppress the new signal and clear the old flag"
@@ -8438,7 +8599,12 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(TabId::new("s1"));
         // No new signal this tick, but the user is now engaged → clear.
-        apply_attention_decision(&mut set, &[], true, |tab| tab.as_str() == "s1");
+        apply_attention_decision(
+            &mut set,
+            &[],
+            crate::engine::AttentionIndicator::On,
+            |tab| tab.as_str() == "s1",
+        );
         assert!(!set.contains(TabIdRef::new("s1")));
     }
 
@@ -8446,7 +8612,9 @@ mod tests {
     fn apply_attention_decision_retains_flag_while_unengaged() {
         let mut set = HashSet::new();
         set.insert(TabId::new("s1"));
-        apply_attention_decision(&mut set, &[], true, |_| false);
+        apply_attention_decision(&mut set, &[], crate::engine::AttentionIndicator::On, |_| {
+            false
+        });
         assert!(
             set.contains(TabIdRef::new("s1")),
             "an unviewed flag must persist across ticks"
@@ -8457,7 +8625,12 @@ mod tests {
     fn apply_attention_decision_disabled_clears_everything() {
         let mut set = HashSet::new();
         set.insert(TabId::new("s1"));
-        apply_attention_decision(&mut set, &[TabId::new("s2")], false, |_| false);
+        apply_attention_decision(
+            &mut set,
+            &[TabId::new("s2")],
+            crate::engine::AttentionIndicator::Off,
+            |_| false,
+        );
         assert!(set.is_empty(), "the feature being off must drop every flag");
     }
 
@@ -8613,12 +8786,14 @@ mod tests {
         engine.config.capabilities.passthrough = false;
         let _wt = seed_passthrough_provider(&mut engine, "s1");
 
-        let out = engine.take_host_passthrough(Some("s1"), false);
+        let out = engine.take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Plain);
         assert!(out.is_empty(), "master off forwards nothing");
         // The ring was still drained, so a later enable does not replay the backlog.
         engine.config.capabilities.passthrough = true;
         assert!(
-            engine.take_host_passthrough(Some("s1"), false).is_empty(),
+            engine
+                .take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Plain)
+                .is_empty(),
             "no stale replay after toggling the master switch on"
         );
     }
@@ -8631,7 +8806,7 @@ mod tests {
         let _wt = seed_passthrough_provider(&mut engine, "s1");
 
         // Not the focused tab: notify + progress forward, clipboard does not.
-        let bg = engine.take_host_passthrough(Some("other"), false);
+        let bg = engine.take_host_passthrough(Some("other"), crate::engine::PassthroughWrap::Plain);
         assert!(bg.windows(4).any(|w| w == b"]9;h"), "notify forwarded");
         assert!(
             !bg.windows(4).any(|w| w == b"]52;"),
@@ -8640,7 +8815,7 @@ mod tests {
 
         // Focused tab: clipboard forwards too.
         let _wt2 = seed_passthrough_provider(&mut engine, "s1");
-        let fg = engine.take_host_passthrough(Some("s1"), false);
+        let fg = engine.take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Plain);
         assert!(
             fg.windows(4).any(|w| w == b"]52;"),
             "focused clipboard must forward"
@@ -8654,7 +8829,7 @@ mod tests {
 
         engine.config.capabilities.clipboard_passthrough = "off".to_string();
         let _a = seed_passthrough_provider(&mut engine, "s1");
-        let off = engine.take_host_passthrough(Some("s1"), false);
+        let off = engine.take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Plain);
         // Prove the pipe is live before claiming the clipboard is not on it: a
         // forward of nothing at all also carries no `]52;`.
         assert!(
@@ -8668,7 +8843,8 @@ mod tests {
 
         engine.config.capabilities.clipboard_passthrough = "always".to_string();
         let _b = seed_passthrough_provider(&mut engine, "s1");
-        let always = engine.take_host_passthrough(Some("other"), false);
+        let always =
+            engine.take_host_passthrough(Some("other"), crate::engine::PassthroughWrap::Plain);
         assert!(
             always.windows(4).any(|w| w == b"]52;"),
             "clipboard always forwards even for a background tab"
@@ -8685,7 +8861,9 @@ mod tests {
         engine.discard_passthrough_backlog();
         // A subsequent forward sees an empty ring: the backlog was not replayed.
         assert!(
-            engine.take_host_passthrough(Some("s1"), false).is_empty(),
+            engine
+                .take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Plain)
+                .is_empty(),
             "discarded backlog must not be forwarded on the next drain"
         );
     }
@@ -8696,7 +8874,7 @@ mod tests {
         engine.config.capabilities.passthrough = true;
         let _wt = seed_passthrough_provider(&mut engine, "s1");
 
-        let out = engine.take_host_passthrough(Some("s1"), true);
+        let out = engine.take_host_passthrough(Some("s1"), crate::engine::PassthroughWrap::Tmux);
         assert!(
             out.starts_with(b"\x1bPtmux;"),
             "wrap_for_tmux must emit a tmux passthrough envelope"
@@ -8716,14 +8894,15 @@ mod tests {
         // branch: a standalone agent has no branch, so every message that used
         // to reach for one now goes through the shared label rule.
         assert_eq!(
-            engine.agent_reconnect_status_message(&session, true),
+            engine
+                .agent_reconnect_status_message(&session, crate::model::ConversationStart::Resume),
             "Resumed claude agent \"s1-title\" in project \"p1-name\"."
         );
 
         // Fresh → the no-resume variant, pointing at the provider's own resume
         // command rather than naming a slash command not every CLI has.
         assert_eq!(
-            engine.agent_reconnect_status_message(&session, false),
+            engine.agent_reconnect_status_message(&session, crate::model::ConversationStart::Fresh),
             "Started fresh claude session for agent \"s1-title\" in project \"p1-name\". \
              Your provider's own resume command can bring back an earlier conversation."
         );
@@ -11589,7 +11768,7 @@ mod tab_ops_tests {
                 TabId::new("tab-1"),
                 Some(ProviderKind::new("codex")),
                 session.clone(),
-                true,
+                crate::model::ConversationStart::Resume,
                 (24, 80),
                 AgentLaunchKind::Tab {
                     is_fresh: false,
@@ -11636,7 +11815,7 @@ mod tab_ops_tests {
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-oc")));
         let main = engine.build_agent_launch_request(
             session.clone(),
-            true,
+            crate::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::Reconnect {
                 status_message: "x".into(),
@@ -11653,7 +11832,7 @@ mod tab_ops_tests {
             TabId::new("tab-oc"),
             Some(ProviderKind::new("opencode")),
             session,
-            true,
+            crate::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: false,
@@ -11675,7 +11854,7 @@ mod tab_ops_tests {
         // Session-slot tab (claude), no other tab live → resumes.
         let main = engine.build_agent_launch_request(
             session.clone(),
-            true,
+            crate::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::Reconnect {
                 status_message: "x".into(),
@@ -11688,7 +11867,7 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         let main2 = engine.build_agent_launch_request(
             session,
-            true,
+            crate::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::Reconnect {
                 status_message: "x".into(),
@@ -11720,7 +11899,14 @@ mod tab_ops_tests {
             "the session provider is resume-eligible on its own"
         );
         assert!(
-            !engine.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true),
+            !engine
+                .tab_resume_decision(
+                    &session,
+                    session.slot_tab_id(),
+                    &session.provider,
+                    crate::model::ConversationStart::Resume
+                )
+                .is_resume(),
             "a live same-provider extra tab downgrades the session-slot launch to fresh"
         );
     }
@@ -11755,7 +11941,7 @@ mod tab_ops_tests {
         );
 
         let plan = engine
-            .reconnect_plan("s1", false, (24, 80))
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
             .expect("plan builds");
         match plan {
             ReconnectPlan::Launch {
@@ -11788,7 +11974,10 @@ mod tab_ops_tests {
             .providers
             .insert(TabId::new("s1-slot"), spawn_cat(tmp.path()));
 
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::AlreadyConnected { message } => {
                 assert!(message.contains("already connected"), "{message}");
             }
@@ -11807,7 +11996,10 @@ mod tab_ops_tests {
             .worktree_path = "/nonexistent/worktree/path".to_string();
         engine.sessions.push(session);
 
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::WorktreeMissing { message } => {
                 assert!(message.contains("no longer exists"), "{message}");
                 assert!(message.contains("/nonexistent/worktree/path"), "{message}");
@@ -11871,7 +12063,7 @@ mod tab_ops_tests {
         engine.mark_in_flight(InFlightKey::AgentLaunch(slot.clone()));
 
         match engine
-            .reconnect_plan("s1", false, (24, 80))
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
             .expect("plan builds")
         {
             ReconnectPlan::Launch {
@@ -12478,7 +12670,7 @@ mod tab_ops_tests {
             TabId::new("t2"),
             Some(ProviderKind::new("codex")),
             stale,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: false,
@@ -12517,7 +12709,7 @@ mod tab_ops_tests {
             TabId::new("s1-slot"),
             Some(ProviderKind::new("claude")),
             stale,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: false,
@@ -12551,7 +12743,7 @@ mod tab_ops_tests {
             TabId::new("s1-slot"),
             Some(ProviderKind::new("claude")),
             stale,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Reconnect {
                 status_message: "x".into(),
@@ -12599,7 +12791,7 @@ mod tab_ops_tests {
             TabId::new("t2"),
             Some(ProviderKind::new("codex")),
             stale,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: true,
@@ -12712,23 +12904,31 @@ mod tab_ops_tests {
         engine.close_tab("s1", "s1-slot").expect("promotion");
 
         let session = engine.sessions[0].clone();
-        assert!(engine.tab_resume_decision(
-            &session,
-            session.slot_tab_id(),
-            &ProviderKind::new("codex"),
-            true
-        ));
+        assert!(
+            engine
+                .tab_resume_decision(
+                    &session,
+                    session.slot_tab_id(),
+                    &ProviderKind::new("codex"),
+                    crate::model::ConversationStart::Resume
+                )
+                .is_resume()
+        );
         // A live sibling running codex owns that conversation, so the slot's
         // launch is fresh instead.
         engine
             .providers
             .insert(TabId::new("t3"), spawn_cat(tmp.path()));
-        assert!(!engine.tab_resume_decision(
-            &session,
-            session.slot_tab_id(),
-            &ProviderKind::new("codex"),
-            true
-        ));
+        assert!(
+            !engine
+                .tab_resume_decision(
+                    &session,
+                    session.slot_tab_id(),
+                    &ProviderKind::new("codex"),
+                    crate::model::ConversationStart::Resume
+                )
+                .is_resume()
+        );
     }
 
     #[test]
@@ -12794,7 +12994,10 @@ mod tab_ops_tests {
         let (mut engine, tmp) = test_engine();
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
 
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch {
                 request, resume, ..
             } => {
@@ -12822,7 +13025,10 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(TabId::new("t4"), rival);
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("t4")));
 
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch {
                 request, resume, ..
             } => {
@@ -12843,7 +13049,10 @@ mod tab_ops_tests {
         let (mut engine, tmp) = test_engine();
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
 
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch { request, .. } => {
                 assert!(request.resume);
                 assert_eq!(
@@ -12857,7 +13066,10 @@ mod tab_ops_tests {
 
         let (mut engine, tmp) = test_engine();
         agent_with_a_promoted_codex_slot(&mut engine, tmp.path());
-        match engine.reconnect_plan("s1", true, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Force, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch { request, .. } => {
                 assert!(!request.resume, "a forced reconnect never resumes");
                 assert_eq!(
@@ -12880,7 +13092,10 @@ mod tab_ops_tests {
             .providers
             .insert(TabId::new("t2"), spawn_cat(tmp.path()));
 
-        match engine.reconnect_plan("s1", true, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Force, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch { request, .. } => {
                 assert_eq!(request.tab_id, TabId::new("t2"));
                 assert_eq!(request.provider.as_str(), "codex");
@@ -12919,7 +13134,7 @@ mod tab_ops_tests {
         );
         let request = engine.build_agent_launch_request(
             candidates[0].clone(),
-            true,
+            crate::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::StartupAutoReopen,
         );
@@ -13047,7 +13262,10 @@ mod tab_ops_tests {
             "opencode",
             "the retarget wrote the row the pointer names, not a row named after the session"
         );
-        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+        match engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan")
+        {
             ReconnectPlan::Launch { request, .. } => {
                 assert_eq!(request.tab_id, TabId::new("t2"));
                 assert_eq!(request.provider.as_str(), "opencode");
@@ -13088,7 +13306,7 @@ mod tab_ops_tests {
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         // A dormant agent nobody asked to be reopened, which is what an extra
         // tab's launch must leave alone.
-        engine.mark_session_desired_running("s1", false);
+        engine.mark_session_desired_running("s1", crate::model::DesiredRunning::Stopped);
         let tab = AgentTab {
             id: "tab-1".to_string(),
             session_id: "s1".to_string(),
@@ -13104,7 +13322,7 @@ mod tab_ops_tests {
             TabId::new("tab-1"),
             Some(ProviderKind::new("codex")),
             session,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: false,
@@ -13137,7 +13355,7 @@ mod tab_ops_tests {
             TabId::new("tab-1"),
             Some(ProviderKind::new("codex")),
             session,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             AgentLaunchKind::Tab {
                 is_fresh: false,

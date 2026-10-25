@@ -1957,7 +1957,7 @@ impl Engine {
                     review_copy,
                 };
                 let busy = self
-                    .begin_clone_project(&request, true)
+                    .begin_clone_project(&request, crate::engine::CloneAskedBy::Browser)
                     .map_err(|refused| anyhow::anyhow!("{refused}"))?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     WireStatus::from_update(&busy),
@@ -2743,7 +2743,14 @@ impl Engine {
         if !self.sessions.iter().any(|s| s.id == session_id) {
             anyhow::bail!("unknown session: {session_id}");
         }
-        let reaction = self.begin_recreate_working_copy(session_id, restart_tabs)?;
+        let reaction = self.begin_recreate_working_copy(
+            session_id,
+            if restart_tabs {
+                crate::engine::TabsAfterRecreate::Restart
+            } else {
+                crate::engine::TabsAfterRecreate::Leave
+            },
+        )?;
         wire_status_from_reaction(&reaction)
             .ok_or_else(|| anyhow::anyhow!("recreating the working copy raised no status"))
     }
@@ -2794,7 +2801,15 @@ impl Engine {
         title: &str,
         rename_branch: bool,
     ) -> anyhow::Result<WireStatus> {
-        let reaction = self.rename_agent(session_id, title, rename_branch)?;
+        let reaction = self.rename_agent(
+            session_id,
+            title,
+            if rename_branch {
+                crate::engine::BranchRename::AlsoTheBranch
+            } else {
+                crate::engine::BranchRename::NameOnly
+            },
+        )?;
         wire_status_from_reaction(&reaction)
             .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))
     }
@@ -3046,7 +3061,15 @@ impl Engine {
         // TUI. The web sources no PTY size, so it uses the subscribe-launch
         // default `(24, 80)` (rows, cols); the focused pane re-attaches via the
         // subscribe machinery once the new provider comes up.
-        let (request, busy) = match self.reconnect_plan(session_id, force, (24, 80))? {
+        let (request, busy) = match self.reconnect_plan(
+            session_id,
+            if force {
+                crate::engine::ReconnectMode::Force
+            } else {
+                crate::engine::ReconnectMode::Normal
+            },
+            (24, 80),
+        )? {
             crate::engine::ReconnectPlan::AlreadyConnected { message } => {
                 return Ok(Some(WireStatus::new("info", message)));
             }
@@ -3265,7 +3288,7 @@ impl Engine {
                         None => Final::info(crate::engine::checkout_default_branch_message(
                             &project_name,
                             target_branch,
-                            base.moved(),
+                            base,
                         )),
                     },
                     // STICKY: the checkout stopped part-way and the repository
@@ -3294,7 +3317,7 @@ impl Engine {
                         None => Final::info(crate::engine::already_on_default_branch_message(
                             &project_name,
                             current_branch,
-                            base.moved(),
+                            base,
                         )),
                     },
                     // STICKY: same shape, same instruction. dux cannot proceed
@@ -4522,7 +4545,11 @@ impl Engine {
             self.finish_launch_operations(
                 &report.key,
                 report.tab_id.as_deref(),
-                report.launched,
+                if report.launched {
+                    crate::operations::LaunchEnded::Launched
+                } else {
+                    crate::operations::LaunchEnded::Failed
+                },
                 first.map_or("", |s| s.message.as_str()),
                 first.and_then(|s| s.segments.as_deref()),
             );
@@ -5850,7 +5877,7 @@ mod tests {
         let outcome = match crate::engine::test_support::delete_through_pipeline(
             &mut engine,
             "s1",
-            true,
+            crate::engine::WorktreeOnDelete::Remove,
             None,
         ) {
             Ok(Some(outcome)) => outcome,
@@ -5882,7 +5909,7 @@ mod tests {
         let outcome = match crate::engine::test_support::delete_through_pipeline(
             &mut engine,
             "sa1",
-            false,
+            crate::engine::WorktreeOnDelete::Keep,
             None,
         ) {
             Ok(Some(outcome)) => outcome,
@@ -5933,7 +5960,7 @@ mod tests {
         let message = match crate::engine::test_support::delete_through_pipeline(
             &mut engine,
             "sa1",
-            true,
+            crate::engine::WorktreeOnDelete::Remove,
             None,
         ) {
             Err(err) => err.to_string(),
@@ -7842,7 +7869,7 @@ mod tests {
         .expect("spawn cat provider");
         engine.providers.insert(TabId::new("s1-slot"), client);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
-        engine.mark_session_desired_running("s1", true);
+        engine.mark_session_desired_running("s1", crate::model::DesiredRunning::Running);
         // Seed an auxiliary resume-state map the kill must also clear.
         engine
             .pty_input
@@ -8024,7 +8051,7 @@ mod tests {
         engine.providers.insert(TabId::new("s1-slot"), spawn("cat"));
         engine.providers.insert(TabId::new("tab-2"), spawn("cat"));
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
-        engine.mark_session_desired_running("s1", true);
+        engine.mark_session_desired_running("s1", crate::model::DesiredRunning::Running);
 
         let outcome = engine
             .apply_wire(WireCommand::DetachAgent {

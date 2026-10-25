@@ -3959,9 +3959,12 @@ agent_scrollback_lines = 10000
             forward_scroll: None,
             web_dragdrop_paste: None,
         };
-        assert_eq!(cfg.interactive_args(false), ["--interactive"]);
         assert_eq!(
-            cfg.interactive_args(true),
+            cfg.interactive_args(dux_core::model::ConversationStart::Fresh),
+            ["--interactive"]
+        );
+        assert_eq!(
+            cfg.interactive_args(dux_core::model::ConversationStart::Resume),
             ["--interactive", "--resume", "--last"]
         );
 
@@ -3974,7 +3977,10 @@ agent_scrollback_lines = 10000
             forward_scroll: None,
             web_dragdrop_paste: None,
         };
-        assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
+        assert_eq!(
+            unsupported.interactive_args(dux_core::model::ConversationStart::Resume),
+            ["--interactive"]
+        );
         assert!(!unsupported.supports_session_resume());
     }
 
@@ -4079,7 +4085,10 @@ agent_scrollback_lines = 10000
             .expect("custom provider should exist");
         assert_eq!(provider.resume_args, None);
         assert_eq!(provider.resume_wait_timeout_ms, None);
-        assert_eq!(provider.interactive_args(true), ["chat"]);
+        assert_eq!(
+            provider.interactive_args(dux_core::model::ConversationStart::Resume),
+            ["chat"]
+        );
     }
 
     #[test]

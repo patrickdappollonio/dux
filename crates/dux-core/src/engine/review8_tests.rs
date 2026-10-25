@@ -87,7 +87,7 @@ fn review8_a_project_added_inside_a_worktree_being_removed_is_not_deleted() {
         .hold_path_for_in_flight(&pull, &worktree, crate::worktree_ops::WorktreeOpKind::Pull)
         .unwrap();
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -277,7 +277,7 @@ fn the_last_look_keeps_a_worktree_holding_a_projects_repository() {
         .hold_path_for_in_flight(&pull, &worktree, crate::worktree_ops::WorktreeOpKind::Pull)
         .unwrap();
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -352,7 +352,7 @@ fn a_keep_worktree_delete_ends_the_startup_command() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let started = Instant::now();
-    let _ = engine.begin_delete_session("s-agent", false, None);
+    let _ = engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Keep, None);
     engine.finish_delete_session_memory("s-agent");
     let result = handle.join().unwrap();
     assert!(

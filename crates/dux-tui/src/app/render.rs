@@ -9189,7 +9189,15 @@ impl App {
                 (Prose::new().text(RENAME_BRANCH_NEEDS_A_NAME), true)
             } else {
                 (
-                    dux_core::engine::rename_branch_note_prose(branch, *open_pr, *pushed),
+                    dux_core::engine::rename_branch_note_prose(
+                        branch,
+                        *open_pr,
+                        if *pushed {
+                            dux_core::engine::BranchPushed::Pushed
+                        } else {
+                            dux_core::engine::BranchPushed::NotPushed
+                        },
+                    ),
                     open_pr.is_some() || *pushed,
                 )
             };

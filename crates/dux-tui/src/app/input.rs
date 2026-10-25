@@ -8470,10 +8470,14 @@ impl App {
         } else {
             None
         };
-        match self
-            .engine
-            .begin_recreate_working_copy(&session_id, restart_tabs)
-        {
+        match self.engine.begin_recreate_working_copy(
+            &session_id,
+            if restart_tabs {
+                dux_core::engine::TabsAfterRecreate::Restart
+            } else {
+                dux_core::engine::TabsAfterRecreate::Leave
+            },
+        ) {
             Ok(reaction) => {
                 // The tabs stop only once the checkout lands, under the same
                 // key, so nobody attaches to them until its final.
@@ -13786,7 +13790,9 @@ not_a_real_action = ["x"]
         let ask_for_a_reload = |app: &mut App, id: &str| {
             app.engine
                 .open_operation(id, dux_core::operations::OperationKind::ConfigReload);
-            app.engine.operations.await_reload(id, false);
+            app.engine
+                .operations
+                .await_reload(id, dux_core::engine::ReloadSlot::Now);
             app.engine.operations.reload_closed();
         };
         let record_of = |app: &App, id: &str| {
@@ -31604,7 +31610,8 @@ cyan = "#00ffff"
         app.engine
             .providers
             .insert(TabId::new(slot_tab.clone()), client);
-        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_desired_running(&session_id, dux_core::model::DesiredRunning::Running);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
@@ -31638,7 +31645,8 @@ cyan = "#00ffff"
         app.engine
             .providers
             .insert(TabId::new(slot_tab.clone()), client);
-        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_desired_running(&session_id, dux_core::model::DesiredRunning::Running);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
 
@@ -31675,7 +31683,8 @@ cyan = "#00ffff"
         app.engine
             .providers
             .insert(TabId::new(slot_tab.clone()), client);
-        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_desired_running(&session_id, dux_core::model::DesiredRunning::Running);
         app.engine
             .mark_session_status(&session_id, SessionStatus::Active);
         app.selected_left = 1;

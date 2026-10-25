@@ -354,7 +354,11 @@ mod tests {
             "rename_branch_note" => crate::engine::rename_branch_note_prose(
                 &s("branch"),
                 args["open_pr"].as_u64(),
-                args["pushed"].as_bool().expect("pushed"),
+                if args["pushed"].as_bool().expect("pushed") {
+                    crate::engine::BranchPushed::Pushed
+                } else {
+                    crate::engine::BranchPushed::NotPushed
+                },
             ),
             "pr_clone_offer" => crate::pr_reference::pr_clone_offer_prose(
                 &s("repository"),

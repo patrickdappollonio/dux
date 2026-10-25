@@ -197,14 +197,14 @@ fn a_removal_finished_at_the_next_start_never_ends_a_standalone_agents_job() {
 
     // Delete the standalone agent (its record only).
     assert!(matches!(
-        first.begin_delete_session("s-alone", false, None),
+        first.begin_delete_session("s-alone", crate::engine::WorktreeOnDelete::Keep, None),
         BeginDeleteSessionOutcome::Inline { .. }
     ));
     first.finish_delete_session_memory("s-alone");
 
     // Delete the managed agent with its worktree; it waits for its CLI.
     assert!(matches!(
-        first.begin_delete_session("s-agent", true, None),
+        first.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     first.finish_delete_session_memory("s-agent");
@@ -254,7 +254,7 @@ fn a_session_registered_after_the_delete_is_kept_current_in_the_pending_row() {
 
     // ... the delete lands ...
     assert!(matches!(
-        first.begin_delete_session("s-agent", true, None),
+        first.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     first.finish_delete_session_memory("s-agent");

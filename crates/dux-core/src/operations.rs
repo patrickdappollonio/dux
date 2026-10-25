@@ -160,6 +160,23 @@ impl OperationKind {
     }
 }
 
+/// Whether a recorded wire command stamps its operation's key onto a status
+/// that has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyStamp {
+    Stamp,
+    Leave,
+}
+
+/// How a launch a record waits on ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchEnded {
+    /// The provider came up.
+    Launched,
+    /// It did not.
+    Failed,
+}
+
 /// How a record holds an admission key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HoldMode {
@@ -770,7 +787,8 @@ impl Operations {
 
     /// Make the running record `id` wait for the next reload to read the file:
     /// the open barrier's, or with `queued` (one is already reading) its follow-up.
-    pub fn await_reload(&self, id: &str, queued: bool) {
+    pub fn await_reload(&self, id: &str, slot: crate::engine::ReloadSlot) {
+        let queued = slot == crate::engine::ReloadSlot::AfterTheRunningOne;
         self.with(|registry| {
             let key = reload_key(registry.reload_epoch + u64::from(queued));
             if let Some(record) = registry.records.get_mut(id)
@@ -1167,7 +1185,7 @@ impl crate::engine::Engine {
         command: crate::wire::WireCommand,
         kind: OperationKind,
     ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
-        self.apply_wire_followed(command, kind, true)
+        self.apply_wire_followed(command, kind, KeyStamp::Stamp)
     }
 
     /// [`Self::apply_wire_operation`] for a change nobody asked to follow: the
@@ -1177,15 +1195,16 @@ impl crate::engine::Engine {
         command: crate::wire::WireCommand,
         kind: OperationKind,
     ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
-        self.apply_wire_followed(command, kind, false)
+        self.apply_wire_followed(command, kind, KeyStamp::Leave)
     }
 
     fn apply_wire_followed(
         &mut self,
         command: crate::wire::WireCommand,
         kind: OperationKind,
-        stamp_key: bool,
+        stamp: KeyStamp,
     ) -> anyhow::Result<crate::wire::WireCommandOutcome> {
+        let stamp_key = stamp == KeyStamp::Stamp;
         let now = Instant::now();
         let provisional = mint_operation_id();
         self.open_operation(&provisional, kind);
@@ -1371,12 +1390,12 @@ impl crate::engine::Engine {
         &self,
         key: &str,
         tab_id: Option<&str>,
-        launched: bool,
+        ended: LaunchEnded,
         message: &str,
         segments: Option<&[ProseSegment]>,
     ) {
         let now = Instant::now();
-        if launched {
+        if ended == LaunchEnded::Launched {
             self.operations.finish_awaiting_as(
                 key,
                 OperationState::Succeeded,
@@ -1435,7 +1454,7 @@ mod tests {
         let open = || {
             let ops = Operations::default();
             ops.open("r", OperationKind::ConfigReload, POLICY, t0);
-            ops.await_reload("r", false);
+            ops.await_reload("r", crate::engine::ReloadSlot::Now);
             ops.reload_closed();
             ops
         };

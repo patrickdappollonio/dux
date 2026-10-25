@@ -153,7 +153,8 @@ fn wait_for_writers(pidfile: &Path, count: usize) {
 /// Delete the agent with its worktree the way both surfaces do, driving the
 /// reaper as their tick does, and return what the removal worker reported.
 fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
-    let outcome = engine.begin_delete_session("s1", true, Some(true));
+    let outcome =
+        engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
     assert!(
         matches!(outcome, BeginDeleteSessionOutcome::AsyncStarted { .. }),
         "a worktree-removing delete is the deferred path"
@@ -411,7 +412,7 @@ fn a_relaunch_waits_for_the_previous_run_of_its_provider() {
     let session = fx.engine.sessions[0].clone();
     let request = fx.engine.build_agent_launch_request(
         session,
-        true,
+        crate::model::ConversationStart::Resume,
         (24, 80),
         crate::worker::AgentLaunchKind::Reconnect {
             status_message: "Reconnecting".to_string().into(),
@@ -663,7 +664,9 @@ fn stubborn_tab(fx: &mut Fixture) {
 fn a_removal_is_recorded_until_it_has_run() {
     let mut fx = fixture();
     stubborn_tab(&mut fx);
-    let outcome = fx.engine.begin_delete_session("s1", true, Some(true));
+    let outcome =
+        fx.engine
+            .begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
     assert!(matches!(
         outcome,
         BeginDeleteSessionOutcome::AsyncStarted { .. }
@@ -704,7 +707,9 @@ fn a_removal_is_recorded_until_it_has_run() {
 fn a_clean_quit_finishes_a_removal_still_waiting_on_the_agent() {
     let mut fx = fixture();
     stubborn_tab(&mut fx);
-    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+    let _ =
+        fx.engine
+            .begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
 
     let _report = fx.engine.shutdown_ptys(Duration::from_secs(1));
 
@@ -728,7 +733,9 @@ fn a_clean_quit_finishes_a_removal_still_waiting_on_the_agent() {
 fn the_next_start_finishes_a_removal_the_last_run_left_behind() {
     let mut fx = fixture();
     stubborn_tab(&mut fx);
-    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+    let _ =
+        fx.engine
+            .begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
     // What both surfaces do next: the agent leaves the list at once.
     fx.engine
         .finish_delete_session("s1")
@@ -834,7 +841,9 @@ fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
 fn a_force_stop_overtaking_a_delete_still_dispatches_its_removal_exactly_once() {
     let mut fx = fixture();
     stubborn_tab(&mut fx);
-    let _ = fx.engine.begin_delete_session("s1", true, Some(true));
+    let _ =
+        fx.engine
+            .begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
     assert_eq!(fx.engine.pending_group_removals.len(), 1);
 
     let outcome = fx.engine.force_detach_session("s1");

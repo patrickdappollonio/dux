@@ -90,7 +90,8 @@ fn review12_a_worktree_removal_keeps_a_standalone_agent_recorded_at_a_link_insid
             "s-alone",
             link.to_str().unwrap(),
         ));
-    let started = engine.begin_delete_session("s-agent", true, None);
+    let started =
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None);
     if matches!(started, BeginDeleteSessionOutcome::AsyncStarted { .. }) {
         engine.finish_delete_session_memory("s-agent");
         let outcome = pump_until_removed(&mut engine);

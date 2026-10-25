@@ -1778,8 +1778,16 @@ impl App {
         resume: bool,
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
-        self.engine
-            .build_agent_launch_request(session, resume, self.pty_size_for_launch(), kind)
+        self.engine.build_agent_launch_request(
+            session,
+            if resume {
+                dux_core::model::ConversationStart::Resume
+            } else {
+                dux_core::model::ConversationStart::Fresh
+            },
+            self.pty_size_for_launch(),
+            kind,
+        )
     }
 
     /// Build the keyed status op for a reconnect or fresh-restart launch. The
@@ -4098,7 +4106,15 @@ impl App {
             }
         };
         let pty_size = self.pty_size_for_launch();
-        match self.engine.reconnect_plan(session_id, force, pty_size)? {
+        match self.engine.reconnect_plan(
+            session_id,
+            if force {
+                dux_core::engine::ReconnectMode::Force
+            } else {
+                dux_core::engine::ReconnectMode::Normal
+            },
+            pty_size,
+        )? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
                 self.set_info(message);
             }
@@ -9375,7 +9391,7 @@ mod tests {
                 .expect("spawn"),
         );
         app.engine
-            .begin_recreate_working_copy("s1", true)
+            .begin_recreate_working_copy("s1", dux_core::engine::TabsAfterRecreate::Restart)
             .expect("the recreate starts");
         app.engine
             .process_worker_event(dux_core::worker::WorkerEvent::WorkingCopyRecreated {

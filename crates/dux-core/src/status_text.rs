@@ -345,12 +345,7 @@ mod tests {
         assert_eq!(status.message(), "Deleted \"featxe\" in /r");
         assert_eq!(
             status.segments().expect("built from parts"),
-            &[
-                text("Deleted "),
-                name("featxe", true),
-                text(" in "),
-                name("/r", false)
-            ]
+            &[text("Deleted "), quoted("featxe"), text(" in "), bare("/r")]
         );
     }
 
@@ -358,10 +353,17 @@ mod tests {
         ProseSegment::Text(s.to_string())
     }
 
-    fn name(s: &str, quoted: bool) -> ProseSegment {
+    fn bare(s: &str) -> ProseSegment {
         ProseSegment::Name {
             name: s.to_string(),
-            quoted,
+            quoted: false,
+        }
+    }
+
+    fn quoted(s: &str) -> ProseSegment {
+        ProseSegment::Name {
+            name: s.to_string(),
+            quoted: true,
         }
     }
 
@@ -382,9 +384,9 @@ mod tests {
             built.segments().unwrap(),
             &[
                 text("Checked out "),
-                name("main", true),
+                quoted("main"),
                 text(" for project "),
-                name("p1-name", true),
+                quoted("p1-name"),
                 text("."),
             ]
         );
@@ -396,7 +398,7 @@ mod tests {
         assert_eq!(built.message(), "Saved to /tmp/a b/c.txt.");
         assert_eq!(
             built.segments().unwrap(),
-            &[text("Saved to "), name("/tmp/a b/c.txt", false), text(".")]
+            &[text("Saved to "), bare("/tmp/a b/c.txt"), text(".")]
         );
     }
 
@@ -405,7 +407,7 @@ mod tests {
         let built = crate::status_text![q("feature"), " is gone."];
         assert_eq!(
             built.segments().unwrap(),
-            &[name("feature", true), text(" is gone.")]
+            &[quoted("feature"), text(" is gone.")]
         );
     }
 
@@ -428,9 +430,9 @@ mod tests {
             built.segments().unwrap(),
             &[
                 text("Checked out "),
-                name("main", true),
+                quoted("main"),
                 text(". New worktrees branch from "),
-                name("main", true),
+                quoted("main"),
                 text(" now."),
             ]
         );
@@ -449,7 +451,7 @@ mod tests {
         assert_eq!(built.message(), "Removed \"dev\"");
         assert_eq!(
             built.segments().unwrap(),
-            &[text("Removed "), name("dev", true)]
+            &[text("Removed "), quoted("dev")]
         );
     }
 
@@ -460,7 +462,7 @@ mod tests {
         assert_eq!(built.message(), "Stopped agent \"feat\".");
         assert_eq!(
             built.segments().unwrap(),
-            &[text("Stopped agent "), name("feat", true), text(".")]
+            &[text("Stopped agent "), quoted("feat"), text(".")]
         );
     }
 
@@ -470,7 +472,7 @@ mod tests {
         assert_eq!(built.message(), "Añadido \"rama-ñ✓\" ✓");
         assert_eq!(
             built.segments().unwrap(),
-            &[text("Añadido "), name("rama-ñ✓", true), text(" ✓")]
+            &[text("Añadido "), quoted("rama-ñ✓"), text(" ✓")]
         );
     }
 

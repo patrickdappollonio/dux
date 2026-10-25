@@ -11,6 +11,48 @@ use crate::pty::PtyClient;
 /// switched from off to on and on every config reload, on both surfaces. It is
 /// last-known-good rather than a once-per-process value: a decisive probe
 /// replaces it, and a transient failure leaves the previous value standing.
+/// Whether an agent should be running: what auto-reopen brings back on the
+/// next start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesiredRunning {
+    /// It should be running.
+    Running,
+    /// It was stopped on purpose.
+    Stopped,
+}
+
+impl DesiredRunning {
+    /// Whether the agent should be running.
+    pub fn is_running(self) -> bool {
+        self == Self::Running
+    }
+}
+
+/// Whether startup auto-reopen is switched on for one agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoReopen {
+    /// Reopen it when dux starts.
+    Enabled,
+    /// Leave it stopped when dux starts.
+    Disabled,
+}
+
+/// How a provider launch starts its conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationStart {
+    /// Continue the provider's previous conversation in this directory.
+    Resume,
+    /// Start a new conversation.
+    Fresh,
+}
+
+impl ConversationStart {
+    /// Whether the launch continues the previous conversation.
+    pub fn is_resume(self) -> bool {
+        self == Self::Resume
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GhStatus {
     /// Not yet checked.

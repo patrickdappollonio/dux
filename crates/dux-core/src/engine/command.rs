@@ -371,7 +371,15 @@ impl Engine {
                     },
                 )
                 .map_err(|err| format!("{err:#}"))?;
-                Ok(discard_message(&path, is_untracked, confirmed)(0))
+                Ok(discard_message(
+                    &path,
+                    if is_untracked {
+                        FileTracking::Untracked
+                    } else {
+                        FileTracking::Tracked
+                    },
+                    confirmed,
+                )(0))
             }));
         }
         let claim = self
@@ -406,15 +414,30 @@ impl Engine {
                 || check.clear(&[&claim], "delete"),
             )
             .map_err(|err| format!("{err:#}"))?;
-            Ok(discard_message(&path, is_untracked, confirmed)(went))
+            Ok(discard_message(
+                &path,
+                if is_untracked {
+                    FileTracking::Untracked
+                } else {
+                    FileTracking::Tracked
+                },
+                confirmed,
+            )(went))
         }))
     }
 }
 
 /// What a discard of `path` says once it is done, given how many files went.
+/// Whether the file a discard removes was ever committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTracking {
+    Untracked,
+    Tracked,
+}
+
 fn discard_message(
     path: &str,
-    is_untracked: bool,
+    tracking: FileTracking,
     confirmed: crate::git::ConfirmedEntry,
 ) -> impl Fn(usize) -> crate::status_text::StatusText + Send + 'static {
     let path = path.to_string();
@@ -433,7 +456,7 @@ fn discard_message(
                 crate::model::count_words(went, "file", "files")
             )
         ],
-        crate::git::ConfirmedEntry::File if is_untracked => {
+        crate::git::ConfirmedEntry::File if tracking == FileTracking::Untracked => {
             crate::status_text!["Deleted untracked file ", q(path.clone()), "."]
         }
         crate::git::ConfirmedEntry::File => crate::status_text![
@@ -553,8 +576,12 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
             } => {
-                let outcome =
-                    self.begin_delete_session(&session_id, delete_worktree, delete_branch);
+                let worktree = if delete_worktree {
+                    crate::engine::WorktreeOnDelete::Remove
+                } else {
+                    crate::engine::WorktreeOnDelete::Keep
+                };
+                let outcome = self.begin_delete_session(&session_id, worktree, delete_branch);
                 Ok(EventReaction::BeginDeleteSessionView(Box::new(
                     BeginDeleteSessionView {
                         session_id,
@@ -586,7 +613,9 @@ impl Engine {
                     review_copy,
                 };
                 Ok(EventReaction::Status(
-                    match self.begin_clone_project(&request, false) {
+                    match self
+                        .begin_clone_project(&request, super::clone::CloneAskedBy::OtherSurface)
+                    {
                         Ok(busy) => busy,
                         Err(refused) => StatusUpdate::error(refused),
                     },
@@ -1175,8 +1204,14 @@ impl Engine {
                     self.session_store.upsert_session(&candidate)?;
                     *current = candidate;
                 } else {
-                    self.session_store
-                        .set_auto_reopen_enabled(&session_id, new_enabled)?;
+                    self.session_store.set_auto_reopen_enabled(
+                        &session_id,
+                        if new_enabled {
+                            crate::model::AutoReopen::Enabled
+                        } else {
+                            crate::model::AutoReopen::Disabled
+                        },
+                    )?;
                 }
                 Ok(EventReaction::Status(StatusUpdate::info(
                     crate::status_text![
@@ -1248,7 +1283,8 @@ impl Engine {
                     // A client waiting on this one follows the reload that
                     // reads the file after the one running.
                     if let Some(id) = &self.operation_in_dispatch {
-                        self.operations.await_reload(id, true);
+                        self.operations
+                            .await_reload(id, crate::engine::ReloadSlot::AfterTheRunningOne);
                     }
                     return Ok(EventReaction::Status(StatusUpdate::info(
                         "A config reload is already running; another runs right after it, so \
@@ -1278,7 +1314,8 @@ impl Engine {
                 self.reloading = true;
                 self.reload_guard = Some(guard);
                 if let Some(id) = &self.operation_in_dispatch {
-                    self.operations.await_reload(id, false);
+                    self.operations
+                        .await_reload(id, crate::engine::ReloadSlot::Now);
                 }
                 self.surface
                     .reload(self.paths.clone(), self.worker_tx.clone());
@@ -2746,7 +2783,7 @@ mod tests {
 
         let request = engine.build_agent_launch_request(
             session,
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             crate::worker::AgentLaunchKind::Reconnect {
                 status_message: crate::status_text::StatusText::default(),
@@ -2796,7 +2833,7 @@ mod tests {
 
         let request = engine.build_agent_launch_request(
             session.clone(),
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             crate::worker::AgentLaunchKind::Reconnect {
                 status_message: crate::status_text::StatusText::default(),
@@ -2847,7 +2884,7 @@ mod tests {
 
         let request = engine.build_agent_launch_request(
             session.clone(),
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             crate::worker::AgentLaunchKind::Reconnect {
                 status_message: crate::status_text::StatusText::default(),
@@ -2877,7 +2914,7 @@ mod tests {
         );
         let request = engine.build_agent_launch_request(
             session.clone(),
-            false,
+            crate::model::ConversationStart::Fresh,
             (24, 80),
             crate::worker::AgentLaunchKind::Reconnect {
                 status_message: crate::status_text::StatusText::default(),

@@ -5021,11 +5021,14 @@ impl App {
         let focused_tab = self.focused_host_passthrough_tab();
         let under_tmux = self.engine.host_under_tmux();
         let mut bytes = std::mem::take(&mut self.host_forward_carry);
-        bytes.extend_from_slice(
-            &self
-                .engine
-                .take_host_passthrough(focused_tab.as_deref(), under_tmux),
-        );
+        bytes.extend_from_slice(&self.engine.take_host_passthrough(
+            focused_tab.as_deref(),
+            if under_tmux {
+                dux_core::engine::PassthroughWrap::Tmux
+            } else {
+                dux_core::engine::PassthroughWrap::Plain
+            },
+        ));
         if bytes.is_empty() {
             return;
         }
@@ -6259,7 +6262,11 @@ impl App {
     /// that failed but adopted the config anyway, so neither claims a
     /// setting that is not in force.
     pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
-        self.engine.probe_gh_after_reload(github_was_enabled);
+        self.engine.probe_gh_after_reload(if github_was_enabled {
+            dux_core::engine::GithubIntegration::On
+        } else {
+            dux_core::engine::GithubIntegration::Off
+        });
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -6270,7 +6277,12 @@ impl App {
         // filter may have moved.
         self.rebuild_left_items();
         self.engine.update_branch_sync_sessions();
-        self.engine.retune_pr_sync_after_reload(github_was_enabled);
+        self.engine
+            .retune_pr_sync_after_reload(if github_was_enabled {
+                dux_core::engine::GithubIntegration::On
+            } else {
+                dux_core::engine::GithubIntegration::Off
+            });
         self.reload_changed_files();
         self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live
@@ -7293,10 +7305,15 @@ impl App {
     ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
-        match self
-            .engine
-            .rename_agent(session_id, &new_name, rename_branch)
-        {
+        match self.engine.rename_agent(
+            session_id,
+            &new_name,
+            if rename_branch {
+                dux_core::engine::BranchRename::AlsoTheBranch
+            } else {
+                dux_core::engine::BranchRename::NameOnly
+            },
+        ) {
             Ok(reaction) => {
                 self.apply_reaction(reaction);
                 true
@@ -8317,7 +8334,11 @@ mod tests {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let update = dux_core::engine::StatusUpdate::info(
-            dux_core::engine::checkout_default_branch_message("app", "main", true),
+            dux_core::engine::checkout_default_branch_message(
+                "app",
+                "main",
+                &dux_core::engine::ProjectBaseAdoption::Moved,
+            ),
         );
         assert!(update.segments.is_some(), "the sentence carries its parts");
         app.apply_reaction(dux_core::engine::EventReaction::Status(update));

@@ -13,16 +13,25 @@ use crate::pr_reference::PullRequestCloneTarget;
 use crate::status_text::StatusText;
 use crate::worker::CreateAgentRequest;
 
+/// Who asked for a clone, which decides who drives its follow-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloneAskedBy {
+    /// A browser asked; the web layer drives the follow-up.
+    Browser,
+    /// Another surface asked; whoever drains the worker event drives it.
+    OtherSurface,
+}
+
 impl Engine {
     /// Start a clone: run the checks that need neither git nor the
     /// destination, take the destination's in-flight key and hold, and spawn
     /// the worker. Answers the clone's keyed busy, or the sentence of the check
-    /// that refused it, in which case nothing was started. `from_web` says a
-    /// browser asked, whose follow-up the web layer drives.
+    /// that refused it, in which case nothing was started. `asked_by` says
+    /// whether a browser asked, whose follow-up the web layer drives.
     pub fn begin_clone_project(
         &mut self,
         request: &CloneRequest,
-        from_web: bool,
+        asked_by: CloneAskedBy,
     ) -> Result<StatusUpdate, StatusText> {
         let mode = if request.add_existing {
             CloneMode::AddExisting
@@ -142,7 +151,7 @@ impl Engine {
             op_id.clone(),
             PendingClone {
                 op,
-                from_web,
+                from_web: asked_by == CloneAskedBy::Browser,
                 repository_key: repository_key.clone(),
                 mode,
                 destination: destination.clone(),

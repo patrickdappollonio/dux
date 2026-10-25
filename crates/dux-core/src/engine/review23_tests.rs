@@ -18,9 +18,16 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A project checkout on `main` that tracks a symbolic link `work` pointing at
-/// a folder outside it, and a branch `feat` that deletes (or, with `replace`,
+/// a folder outside it, and a branch `feat` that deletes (or, with [`LinkOnFeat::ReplacedByFile`],
 /// turns into a file) that link.
-fn link_fixture(tmp: &Path, replace: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+/// What `feat` does to the tracked link.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkOnFeat {
+    Deleted,
+    ReplacedByFile,
+}
+
+fn link_fixture(tmp: &Path, link: LinkOnFeat) -> (std::path::PathBuf, std::path::PathBuf) {
     let shared = tmp.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
     std::fs::write(shared.join("notes.md"), "mine\n").unwrap();
@@ -35,7 +42,7 @@ fn link_fixture(tmp: &Path, replace: bool) -> (std::path::PathBuf, std::path::Pa
     git(&repo, &["commit", "-q", "-m", "base"]);
     git(&repo, &["switch", "-q", "-c", "feat"]);
     git(&repo, &["rm", "-q", "work"]);
-    if replace {
+    if link == LinkOnFeat::ReplacedByFile {
         std::fs::write(repo.join("work"), "now a file\n").unwrap();
         git(&repo, &["add", "work"]);
     }
@@ -51,9 +58,9 @@ fn link_fixture(tmp: &Path, replace: bool) -> (std::path::PathBuf, std::path::Pa
     (repo, shared)
 }
 
-fn standalone_at_link_survives_switch(replace: bool) {
+fn standalone_at_link_survives_switch(link: LinkOnFeat) {
     let (mut engine, tmp) = test_engine();
-    let (repo, _shared) = link_fixture(tmp.path(), replace);
+    let (repo, _shared) = link_fixture(tmp.path(), link);
     let folder = repo.join("work");
     engine
         .projects
@@ -88,7 +95,7 @@ fn standalone_at_link_survives_switch(replace: bool) {
 /// the folders they leave empty, and a link at the top level has none.
 #[test]
 fn review23_switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
-    standalone_at_link_survives_switch(false);
+    standalone_at_link_survives_switch(LinkOnFeat::Deleted);
 }
 
 /// The same link, replaced by a tracked file: git unlinks the agent's folder
@@ -96,7 +103,7 @@ fn review23_switch_deletes_a_standalone_agents_folder_that_is_a_tracked_link() {
 /// to git.
 #[test]
 fn review23_switch_replaces_a_standalone_agents_folder_that_is_a_tracked_link() {
-    standalone_at_link_survives_switch(true);
+    standalone_at_link_survives_switch(LinkOnFeat::ReplacedByFile);
 }
 
 /// The removal's order ends "last look, git", but the git step runs git TWICE

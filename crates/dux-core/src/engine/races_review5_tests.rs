@@ -144,8 +144,12 @@ fn a_job_an_agent_left_running_before_a_clean_quit_is_not_removed_from_under() {
     next.projects
         .push(sample_project("p1", repo.to_str().unwrap()));
     next.sessions.push(session);
-    let outcome =
-        crate::engine::test_support::delete_through_pipeline(&mut next, "s-agent", true, None);
+    let outcome = crate::engine::test_support::delete_through_pipeline(
+        &mut next,
+        "s-agent",
+        crate::engine::WorktreeOnDelete::Remove,
+        None,
+    );
 
     let running = alive(job);
     let removed = !worktree.exists();

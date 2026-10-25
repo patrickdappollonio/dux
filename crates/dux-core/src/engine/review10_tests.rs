@@ -173,7 +173,7 @@ fn review10_an_agent_delete_does_not_fail_because_a_refused_editor_claim_was_hel
 
     // The user deletes the agent with its worktree at that moment.
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");

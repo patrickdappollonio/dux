@@ -44,12 +44,15 @@ pub enum ResumeFallbackDecision {
 /// continue" in one line has told the user something, and dux keeps that ending
 /// and repeats the words rather than silently starting over.
 pub(crate) fn resume_fallback_decision(
-    exited: bool,
-    readable: bool,
-    has_output: bool,
+    screen: ResumedScreen,
     timeout_ms: Option<u64>,
     elapsed: Duration,
 ) -> ResumeFallbackDecision {
+    let ResumedScreen {
+        exited,
+        readable,
+        has_output,
+    } = screen;
     if exited {
         return if readable {
             ResumeFallbackDecision::DropSpokenExit
@@ -63,6 +66,18 @@ pub(crate) fn resume_fallback_decision(
         }
         _ => ResumeFallbackDecision::Wait,
     }
+}
+
+/// What a resumed provider's pane shows, as [`resume_fallback_decision`]
+/// reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResumedScreen {
+    /// The provider has exited.
+    pub(crate) exited: bool,
+    /// The screen holds a printable, non-whitespace character.
+    pub(crate) readable: bool,
+    /// The provider has written any output at all.
+    pub(crate) has_output: bool,
 }
 
 /// Outcome of an attempted resume-fallback retry. Three states because the
@@ -113,13 +128,13 @@ impl Engine {
     pub fn build_agent_launch_request(
         &self,
         session: AgentSession,
-        resume: bool,
+        start: crate::model::ConversationStart,
         pty_size: (u16, u16),
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
         // Session-slot launch: the slot tab id, provider == session.provider.
         let tab_id = session.slot_tab_id().to_owned();
-        self.build_tab_launch_request(tab_id, None, session, resume, pty_size, kind)
+        self.build_tab_launch_request(tab_id, None, session, start, pty_size, kind)
     }
 
     /// Tab-aware launch-request builder. `tab_provider = None` uses the
@@ -136,13 +151,15 @@ impl Engine {
         tab_id: TabId,
         tab_provider: Option<ProviderKind>,
         session: AgentSession,
-        resume: bool,
+        start: crate::model::ConversationStart,
         pty_size: (u16, u16),
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
         let provider = tab_provider.unwrap_or_else(|| session.provider.clone());
         // Resume is decided per-provider in one place; see `tab_resume_decision`.
-        let resume = self.tab_resume_decision(&session, &tab_id, &provider, resume);
+        let resume = self
+            .tab_resume_decision(&session, &tab_id, &provider, start)
+            .is_resume();
         let provider_config = crate::config::provider_config(&self.config, &provider);
         // A standalone agent has no project to overlay, so it gets the global
         // environment, not the empty one a missed project lookup falls to.
@@ -205,8 +222,13 @@ impl Engine {
             .find(|s| s.id == tab.session_id)?
             .clone();
         let provider = provider.clone();
-        let resume = self.tab_resume_decision(&session, tab_id, &provider, true);
-        let status_message = if resume {
+        let resume = self.tab_resume_decision(
+            &session,
+            tab_id,
+            &provider,
+            crate::model::ConversationStart::Resume,
+        );
+        let status_message = if resume.is_resume() {
             format!(
                 "Resumed the {} conversation in this tab.",
                 provider.as_str()
@@ -231,7 +253,7 @@ impl Engine {
                     status_message: status_message.into(),
                 },
             )
-            .quiet_status_on(if resume {
+            .quiet_status_on(if resume.is_resume() {
                 crate::statusline::QuietSurfaces::BOTH
             } else {
                 crate::statusline::QuietSurfaces::LOUD
@@ -286,7 +308,7 @@ impl Engine {
         let request = if is_session_slot {
             self.build_agent_launch_request(
                 session,
-                false,
+                crate::model::ConversationStart::Fresh,
                 pty_size,
                 AgentLaunchKind::ResumeFallback { status_message },
             )
@@ -295,7 +317,7 @@ impl Engine {
                 tab_id.to_owned(),
                 Some(provider),
                 session,
-                false,
+                crate::model::ConversationStart::Fresh,
                 pty_size,
                 AgentLaunchKind::Tab {
                     is_fresh: false,
@@ -323,7 +345,14 @@ impl Engine {
         {
             self.update_pr_sync_sessions();
         }
-        self.note_restart_resume_fell_back(tab_id, launched);
+        self.note_restart_resume_fell_back(
+            tab_id,
+            if launched {
+                crate::engine::lifecycle::FreshLaunch::Started
+            } else {
+                crate::engine::lifecycle::FreshLaunch::Failed
+            },
+        );
         ResumeFallbackOutcome::Retried {
             reaction: Box::new(reaction),
         }
@@ -372,9 +401,11 @@ impl Engine {
             let timeout_ms =
                 crate::config::provider_config(&self.config, &provider).resume_wait_timeout_ms;
             let decision = resume_fallback_decision(
-                client.is_exited(),
-                client.has_readable_output(),
-                client.has_output(),
+                ResumedScreen {
+                    exited: client.is_exited(),
+                    readable: client.has_readable_output(),
+                    has_output: client.has_output(),
+                },
                 timeout_ms,
                 started_at.elapsed(),
             );
@@ -544,7 +575,15 @@ mod tests {
         // screen, so there is nothing for the user to read and nothing that was
         // resumed. Retry fresh.
         assert_eq!(
-            resume_fallback_decision(true, false, false, Some(3000), Duration::from_secs(1)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: true,
+                    readable: false,
+                    has_output: false
+                },
+                Some(3000),
+                Duration::from_secs(1)
+            ),
             D::RetryExitedSilent,
         );
     }
@@ -556,7 +595,15 @@ mod tests {
         // Either way the words are the answer: drop the candidate and let the
         // exit-prune path keep the dormant tab and quote them.
         assert_eq!(
-            resume_fallback_decision(true, true, true, Some(3000), Duration::from_secs(1)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: true,
+                    readable: true,
+                    has_output: true
+                },
+                Some(3000),
+                Duration::from_secs(1)
+            ),
             D::DropSpokenExit,
         );
     }
@@ -566,7 +613,15 @@ mod tests {
         // Window (b): still running, past `resume_wait_timeout_ms`, produced no
         // visible output => treat the resume as hung and retry fresh.
         assert_eq!(
-            resume_fallback_decision(false, false, false, Some(2000), Duration::from_millis(2500)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: false,
+                    readable: false,
+                    has_output: false
+                },
+                Some(2000),
+                Duration::from_millis(2500)
+            ),
             D::RetryHungTimeout,
         );
     }
@@ -838,22 +893,54 @@ mod tests {
     fn a_healthy_resume_waits() {
         // Still running, within the timeout: leave it alone.
         assert_eq!(
-            resume_fallback_decision(false, false, false, Some(3000), Duration::from_millis(500)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: false,
+                    readable: false,
+                    has_output: false
+                },
+                Some(3000),
+                Duration::from_millis(500)
+            ),
             D::Wait,
         );
         // Still running, past the timeout but it HAS produced output: healthy.
         assert_eq!(
-            resume_fallback_decision(false, true, true, Some(2000), Duration::from_secs(5)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: false,
+                    readable: true,
+                    has_output: true
+                },
+                Some(2000),
+                Duration::from_secs(5)
+            ),
             D::Wait,
         );
         // Still running, no timeout configured: never treated as hung.
         assert_eq!(
-            resume_fallback_decision(false, false, false, None, Duration::from_secs(60)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: false,
+                    readable: false,
+                    has_output: false
+                },
+                None,
+                Duration::from_secs(60)
+            ),
             D::Wait,
         );
         // Still running, timeout of 0 disables the hung window.
         assert_eq!(
-            resume_fallback_decision(false, false, false, Some(0), Duration::from_secs(60)),
+            resume_fallback_decision(
+                ResumedScreen {
+                    exited: false,
+                    readable: false,
+                    has_output: false
+                },
+                Some(0),
+                Duration::from_secs(60)
+            ),
             D::Wait,
         );
     }

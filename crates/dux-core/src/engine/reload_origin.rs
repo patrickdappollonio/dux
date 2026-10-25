@@ -14,12 +14,13 @@ enum Asker {
     DuxAfterOwnWrite,
 }
 
-/// When an asked-for reload runs.
+/// Which reload something waits on: the one running now, or the follow-up
+/// queued behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReloadSlot {
-    /// Nothing is reloading, so it runs now.
+pub enum ReloadSlot {
+    /// The reload running now, or, when none runs, the one that starts now.
     Now,
-    /// A reload is running, so it runs after that one.
+    /// The follow-up queued behind the reload that is running.
     AfterTheRunningOne,
 }
 

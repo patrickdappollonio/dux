@@ -2188,7 +2188,9 @@ pub(crate) mod tests {
     fn ask_for_a_reload(app: &mut App, id: &str) {
         app.engine
             .open_operation(id, dux_core::operations::OperationKind::ConfigReload);
-        app.engine.operations.await_reload(id, false);
+        app.engine
+            .operations
+            .await_reload(id, dux_core::engine::ReloadSlot::Now);
         app.engine.operations.reload_closed();
     }
 

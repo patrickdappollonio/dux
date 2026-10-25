@@ -398,7 +398,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut client = crate::pty::PtyClient::spawn_with_env(
             &resolved.command,
-            &resolved.interactive_args(true),
+            &resolved.interactive_args(crate::model::ConversationStart::Resume),
             tmp.path(),
             24,
             80,

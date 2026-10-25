@@ -84,8 +84,12 @@ fn a_project_terminal_standing_in_a_worktree_keeps_it() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let outcome =
-        crate::engine::test_support::delete_through_pipeline(&mut engine, "s-agent", true, None);
+    let outcome = crate::engine::test_support::delete_through_pipeline(
+        &mut engine,
+        "s-agent",
+        crate::engine::WorktreeOnDelete::Remove,
+        None,
+    );
 
     let removed = !worktree.exists();
     let still_there = cwd_of(pid);
@@ -182,8 +186,12 @@ fn an_old_session_with_a_live_job_is_not_forgotten_by_the_per_agent_cap() {
         );
     }
 
-    let outcome =
-        crate::engine::test_support::delete_through_pipeline(&mut engine, "s-agent", true, None);
+    let outcome = crate::engine::test_support::delete_through_pipeline(
+        &mut engine,
+        "s-agent",
+        crate::engine::WorktreeOnDelete::Remove,
+        None,
+    );
     let running = alive(job);
     let removed = !worktree.exists();
     if let Some(pid) = rustix::process::Pid::from_raw(job) {
@@ -229,8 +237,12 @@ fn the_kept_message_names_the_terminal_standing_in_the_worktree() {
         assert!(std::time::Instant::now() < deadline, "the shell never cd'd");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let outcome =
-        crate::engine::test_support::delete_through_pipeline(&mut engine, "s-agent", true, None);
+    let outcome = crate::engine::test_support::delete_through_pipeline(
+        &mut engine,
+        "s-agent",
+        crate::engine::WorktreeOnDelete::Remove,
+        None,
+    );
     let alive = cwd_of(pid).is_some();
     if let Some(terminal) = engine.companion_terminals.remove(&terminal_id) {
         terminal.client.force_terminate();

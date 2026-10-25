@@ -128,7 +128,7 @@ fn review11_a_shell_that_enters_the_worktree_while_the_removal_waits_for_an_over
         .expect("the claim");
 
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -168,7 +168,7 @@ fn review11_control_a_shell_already_in_the_worktree_keeps_it() {
         .register(crate::process_sessions::UNOWNED_PTYS, session, &repo);
     std::thread::sleep(Duration::from_millis(500));
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -220,8 +220,12 @@ fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
     let mut n = 0;
     while Instant::now() < deadline {
         n += 1;
-        if let crate::engine::BranchRenamePlan::RenameBranch(dispatch) =
-            engine.prepare_branch_rename("s-agent", &format!("renamed-{n}"), true)
+        if let crate::engine::BranchRenamePlan::RenameBranch(dispatch) = engine
+            .prepare_branch_rename(
+                "s-agent",
+                &format!("renamed-{n}"),
+                crate::engine::BranchRename::AlsoTheBranch,
+            )
         {
             let held = ops
                 .holders(&worktree)

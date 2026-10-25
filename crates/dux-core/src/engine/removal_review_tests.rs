@@ -186,7 +186,7 @@ fn the_manager_does_not_remove_a_worktree_a_stopping_agent_still_runs_in() {
 
     // The delete dialog's "keep the worktree" answer, as a surface runs it.
     assert!(matches!(
-        engine.begin_delete_session("s-agent", false, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Keep, None),
         BeginDeleteSessionOutcome::Inline { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -318,7 +318,7 @@ fn a_standalone_agent_created_in_a_folder_being_removed_does_not_lose_its_folder
         .unwrap();
 
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -410,7 +410,7 @@ fn the_manager_lists_a_folder_a_stopping_agent_still_runs_in_as_busy() {
     )
     .expect("spawn");
     engine.providers.insert(tab, client);
-    let _ = engine.begin_delete_session("s-agent", false, None);
+    let _ = engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Keep, None);
     engine.finish_delete_session_memory("s-agent");
 
     let project = engine.projects[0].clone();
@@ -458,7 +458,7 @@ fn nothing_new_starts_in_a_folder_being_removed() {
     let session = engine.sessions[0].clone();
     let request = engine.build_agent_launch_request(
         session,
-        false,
+        crate::model::ConversationStart::Fresh,
         (24, 80),
         crate::worker::AgentLaunchKind::Reconnect {
             status_message: "Reconnecting".to_string().into(),

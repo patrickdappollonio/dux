@@ -1359,11 +1359,11 @@ impl WorktreeRemoval {
     /// decision, given user intent and whether siblings share the worktree.
     /// `performed` is `Some(result)` when git actually removed the worktree,
     /// `None` when it was not run. The caller guarantees `performed.is_some()`
-    /// exactly when `delete_worktree && !other_sessions`.
+    /// exactly when the worktree was to be removed and no other agent shares it.
     fn from_decision(
         session: &AgentSession,
-        delete_worktree: bool,
-        other_sessions_on_worktree: bool,
+        worktree: WorktreeOnDelete,
+        sharing: WorktreeSharing,
         performed: Option<RemovedBranches>,
     ) -> Self {
         // A standalone agent never had a worktree, so none of the worktree
@@ -1377,17 +1377,43 @@ impl WorktreeRemoval {
                 )),
             };
         }
-        match (delete_worktree, other_sessions_on_worktree, performed) {
+        match (worktree, sharing, performed) {
             (_, _, Some(branches)) => WorktreeRemoval::Performed { branches },
-            (true, true, None) => WorktreeRemoval::SkippedForSiblings,
-            (false, true, None) => WorktreeRemoval::PreservedShared,
-            (false, false, None) => WorktreeRemoval::PreservedOrphan,
+            (WorktreeOnDelete::Remove, WorktreeSharing::SharedWithAnotherAgent, None) => {
+                WorktreeRemoval::SkippedForSiblings
+            }
+            (WorktreeOnDelete::Keep, WorktreeSharing::SharedWithAnotherAgent, None) => {
+                WorktreeRemoval::PreservedShared
+            }
+            (WorktreeOnDelete::Keep, WorktreeSharing::Alone, None) => {
+                WorktreeRemoval::PreservedOrphan
+            }
             // delete requested, no siblings, but git did not run: impossible by
             // the caller's contract. Default to the most truthful preserved
             // state rather than panicking.
-            (true, false, None) => WorktreeRemoval::PreservedOrphan,
+            (WorktreeOnDelete::Remove, WorktreeSharing::Alone, None) => {
+                WorktreeRemoval::PreservedOrphan
+            }
         }
     }
+}
+
+/// What deleting an agent does with the agent's worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorktreeOnDelete {
+    /// Remove the worktree with the agent, unless another agent shares it.
+    Remove,
+    /// Leave the worktree where it is.
+    Keep,
+}
+
+/// Whether another agent works in the same worktree as the one being deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorktreeSharing {
+    /// Another agent shares it, so it stays.
+    SharedWithAnotherAgent,
+    /// No other agent works in it.
+    Alone,
 }
 
 /// Result of `Engine::finish_delete_session`. Carries the deleted session
@@ -1990,7 +2016,7 @@ impl Engine {
         // not persist desired_running, or the agent comes back running the
         // provider of a tab nobody asked to be the agent.
         if is_slot_tab {
-            self.mark_session_desired_running(&session.id, true);
+            self.mark_session_desired_running(&session.id, crate::model::DesiredRunning::Running);
         }
         // STATUS is an any-tab rollup, exactly like liveness and attention, so
         // any tab coming up makes the agent active. Adding a tab to a dormant
@@ -2284,7 +2310,10 @@ impl Engine {
         session_id: &str,
     ) -> Option<FinishDeleteSessionOutcome> {
         let session = self.sessions.iter().find(|s| s.id == session_id).cloned()?;
-        self.stop_agent_restarts(session_id, true);
+        self.stop_agent_restarts(
+            session_id,
+            crate::engine::lifecycle::RestartsStop::AgentDeleted,
+        );
         // The session is being removed now, so drop any "closing" marker set at the
         // start of its delete (both the async and synchronous delete paths clear it
         // here, in addition to the async worktree-removal-completed path).
@@ -2609,7 +2638,7 @@ impl Engine {
     pub fn begin_delete_session(
         &mut self,
         session_id: &str,
-        delete_worktree: bool,
+        worktree: WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> BeginDeleteSessionOutcome {
         if self.pending_deletions.contains(session_id) {
@@ -2622,7 +2651,9 @@ impl Engine {
         // The explicit wire contract: a worktree-removing
         // delete of a standalone agent is refused rather than silently
         // downgraded to an ordinary one.
-        if delete_worktree && !session.workspace.deletion_may_remove_directory() {
+        if worktree == WorktreeOnDelete::Remove
+            && !session.workspace.deletion_may_remove_directory()
+        {
             return BeginDeleteSessionOutcome::Refused {
                 message: standalone_delete_directory_refusal(
                     &session.display_label(),
@@ -2661,7 +2692,7 @@ impl Engine {
             s.id != session.id
                 && crate::project_browser::same_directory(s.directory(), session.directory())
         });
-        let should_remove_worktree = delete_worktree
+        let should_remove_worktree = worktree == WorktreeOnDelete::Remove
             && session.workspace.deletion_may_remove_directory()
             && !other_sessions_on_worktree
             && project.is_some();
@@ -2715,7 +2746,10 @@ impl Engine {
 
         // A working-copy recreate waiting to start this agent's tabs again
         // starts none of them, and says the agent was deleted.
-        self.stop_agent_restarts(&session.id, true);
+        self.stop_agent_restarts(
+            &session.id,
+            crate::engine::lifecycle::RestartsStop::AgentDeleted,
+        );
         self.begin_session_tab_shutdown(&session, worktree_removal);
 
         if let Some(busy_message) = busy_message {
@@ -2734,13 +2768,17 @@ impl Engine {
                 "deleting session {} at {} (delete_worktree={}, no worktree removal)",
                 session.id,
                 session.directory(),
-                delete_worktree
+                worktree == WorktreeOnDelete::Remove
             ));
             BeginDeleteSessionOutcome::Inline {
                 removal: WorktreeRemoval::from_decision(
                     &session,
-                    delete_worktree,
-                    other_sessions_on_worktree,
+                    worktree,
+                    if other_sessions_on_worktree {
+                        WorktreeSharing::SharedWithAnotherAgent
+                    } else {
+                        WorktreeSharing::Alone
+                    },
                     None,
                 ),
             }
@@ -2920,7 +2958,7 @@ impl Engine {
                 self.finish_launch_operations(
                     &crate::operations::launch_binding_key(tab_id.as_str()),
                     Some(tab_id.as_str()),
-                    false,
+                    crate::operations::LaunchEnded::Failed,
                     &format!(
                         "Agent {} could not resume its conversation, and starting it fresh \
                          failed too: {message}",
@@ -2965,7 +3003,7 @@ impl Engine {
                     self.finish_launch_operations(
                         &crate::operations::launch_binding_key(tab_id.as_str()),
                         Some(tab_id.as_str()),
-                        false,
+                        crate::operations::LaunchEnded::Failed,
                         "",
                         None,
                     );
@@ -4300,7 +4338,11 @@ impl Engine {
             String,
             crate::engine::ProjectBaseAdoption,
         ) -> crate::engine::WebCheckoutOutcome,
-        message: fn(&str, &str, bool) -> crate::status_text::StatusText,
+        message: fn(
+            &str,
+            &str,
+            &crate::engine::ProjectBaseAdoption,
+        ) -> crate::status_text::StatusText,
     ) -> EventReaction {
         let base = self.adopt_project_base(project, &branch);
         if let Some(id) = status_op_id
@@ -4312,7 +4354,7 @@ impl Engine {
         // disk, a locked database), and then the checkout has to run again.
         let update = match base.save_failure_message(&project.name, &branch) {
             Some(error) => StatusUpdate::error(error).sticky(),
-            None => StatusUpdate::info(message(&project.name, &branch, base.moved())),
+            None => StatusUpdate::info(message(&project.name, &branch, &base)),
         };
         EventReaction::Status(update)
     }
@@ -4947,8 +4989,12 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let result =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None);
+        let result = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        );
 
         assert!(
             result.is_err(),
@@ -5023,10 +5069,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
-                .unwrap()
-                .expect("the delete should have run");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        )
+        .unwrap()
+        .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
@@ -5138,9 +5188,14 @@ mod tests {
             .collect();
         let before = branches(&repo);
 
-        crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, Some(true))
-            .unwrap()
-            .expect("the delete should have run");
+        crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            Some(true),
+        )
+        .unwrap()
+        .expect("the delete should have run");
 
         let gone: std::collections::BTreeSet<String> =
             before.difference(&branches(&repo)).cloned().collect();
@@ -5235,10 +5290,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
-                .unwrap()
-                .expect("the delete should have run");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        )
+        .unwrap()
+        .expect("the delete should have run");
 
         assert_eq!(
             outcome.removal,
@@ -5284,7 +5343,7 @@ mod tests {
         let outcome = crate::engine::test_support::delete_through_pipeline(
             &mut engine,
             "s1",
-            true,
+            crate::engine::WorktreeOnDelete::Remove,
             Some(true),
         )
         .unwrap()
@@ -5333,7 +5392,7 @@ mod tests {
         let outcome = crate::engine::test_support::delete_through_pipeline(
             &mut engine,
             "s1",
-            true,
+            crate::engine::WorktreeOnDelete::Remove,
             Some(false),
         )
         .unwrap()
@@ -5373,7 +5432,7 @@ mod tests {
             let Err(err) = crate::engine::test_support::delete_through_pipeline(
                 &mut engine,
                 "sa1",
-                true,
+                crate::engine::WorktreeOnDelete::Remove,
                 answer,
             ) else {
                 panic!("a worktree-removing delete of a standalone agent must be refused");
@@ -5426,10 +5485,14 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
-                .unwrap()
-                .expect("ran");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        )
+        .unwrap()
+        .expect("ran");
 
         let branches = branch_list(&repo);
         assert!(
@@ -5546,9 +5609,14 @@ mod tests {
         engine.sessions.push(first);
 
         // Delete WITHOUT the checkbox: worktree and branch stay, row goes.
-        crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", false, None)
-            .unwrap()
-            .expect("ran");
+        crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Keep,
+            None,
+        )
+        .unwrap()
+        .expect("ran");
         assert!(worktree.exists());
 
         // Re-adopt the orphan.
@@ -5566,10 +5634,14 @@ mod tests {
         engine.session_store.upsert_session(&second).unwrap();
         engine.sessions.push(second);
 
-        let outcome =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s2", true, None)
-                .unwrap()
-                .expect("ran");
+        let outcome = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s2",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        )
+        .unwrap()
+        .expect("ran");
 
         assert_eq!(
             outcome.removal,
@@ -8933,13 +9005,21 @@ mod tests {
 
     /// Build failed-launch data for an extra tab: `tab_id` differs from the
     /// session id, mirroring a real extra-tab launch.
+    /// Whether a failed tab launch was a brand-new tab or a reopened one.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TabLaunch {
+        NewTab,
+        Reopened,
+    }
+
     fn make_tab_failed_data(
         session_id: &str,
         tab_id: &str,
         branch: &str,
-        is_fresh: bool,
+        launch: TabLaunch,
         message: &str,
     ) -> AgentLaunchFailedData {
+        let is_fresh = launch == TabLaunch::NewTab;
         let session = sample_session(session_id, "project-1", branch);
         AgentLaunchFailedData {
             request: AgentLaunchRequest {
@@ -8978,7 +9058,7 @@ mod tests {
         };
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
-        let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", TabLaunch::NewTab, "boom");
         let (outcome, _) = engine.process_agent_launch_failed(data);
 
         assert!(matches!(
@@ -9024,7 +9104,7 @@ mod tests {
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
 
-        let data = make_tab_failed_data("s1", "tab-1", "feat/x", false, "boom");
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", TabLaunch::Reopened, "boom");
         let (outcome, _) = engine.process_agent_launch_failed(data);
 
         assert!(matches!(
@@ -9074,7 +9154,7 @@ mod tests {
             .operations
             .await_key("op-tab", &crate::operations::launch_binding_key("tab-1"));
 
-        let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", TabLaunch::NewTab, "boom");
         let (outcome, create_final) = engine.process_agent_launch_failed(data);
 
         assert!(matches!(outcome, AgentLaunchFailedOutcome::Silent));
@@ -9289,7 +9369,8 @@ mod tests {
     fn begin_delete_session_already_in_flight_returns_already_in_flight() {
         let (mut engine, _tmp) = test_engine();
         engine.pending_deletions.insert("s1".to_string());
-        let outcome = engine.begin_delete_session("s1", true, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AlreadyInFlight
@@ -9299,7 +9380,8 @@ mod tests {
     #[test]
     fn begin_delete_session_unknown_id_returns_not_found() {
         let (mut engine, _tmp) = test_engine();
-        let outcome = engine.begin_delete_session("missing", true, None);
+        let outcome =
+            engine.begin_delete_session("missing", crate::engine::WorktreeOnDelete::Remove, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::NotFound));
     }
 
@@ -9317,7 +9399,8 @@ mod tests {
         // in `providers`, so it is invisible to the live-tab check. Deleting must
         // refuse rather than race the worktree removal against the spawn.
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("tab-1")));
-        let outcome = engine.begin_delete_session("s1", true, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::TabLaunching));
     }
 
@@ -9331,7 +9414,11 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("standalone", true, None);
+        let outcome = engine.begin_delete_session(
+            "standalone",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        );
 
         assert!(matches!(
             outcome,
@@ -9359,7 +9446,8 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("standalone", false, None);
+        let outcome =
+            engine.begin_delete_session("standalone", crate::engine::WorktreeOnDelete::Keep, None);
 
         assert!(matches!(
             outcome,
@@ -9379,7 +9467,8 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         // delete_worktree=false → no git work needed → inline path
-        let outcome = engine.begin_delete_session("s1", false, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Keep, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::Inline {
@@ -9399,7 +9488,8 @@ mod tests {
         // Even requesting worktree removal, a missing project takes the inline
         // path (we cannot run git worktree remove without the repo), NOT NotFound,
         // which would silently no-op the user's delete.
-        let outcome = engine.begin_delete_session("s1", true, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, None);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline { .. }));
     }
 
@@ -9541,7 +9631,8 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
-        let outcome = engine.begin_delete_session("s1", false, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Keep, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::PreservedOrphan);
@@ -9569,7 +9660,8 @@ mod tests {
         engine.sessions.push(a);
         engine.sessions.push(b);
 
-        let outcome = engine.begin_delete_session("s1", false, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Keep, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::PreservedShared);
@@ -9599,7 +9691,8 @@ mod tests {
 
         // delete_worktree=true but a sibling shares the worktree → skipped,
         // so this stays on the inline path (no git removal needed).
-        let outcome = engine.begin_delete_session("s1", true, None);
+        let outcome =
+            engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, None);
         match outcome {
             BeginDeleteSessionOutcome::Inline { removal } => {
                 assert_eq!(removal, WorktreeRemoval::SkippedForSiblings);
@@ -9615,7 +9708,7 @@ mod tests {
             crate::engine::test_support::delete_through_pipeline(
                 &mut engine,
                 "missing",
-                false,
+                crate::engine::WorktreeOnDelete::Keep,
                 None
             )
             .unwrap()
@@ -9635,9 +9728,12 @@ mod tests {
         engine.sessions.push(session);
         engine.pending_deletions.insert("s1".to_string());
 
-        let Err(refused) =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
-        else {
+        let Err(refused) = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        ) else {
             panic!("a second delete is refused while the first is running");
         };
         assert!(
@@ -9664,9 +9760,12 @@ mod tests {
         // `AgentSession::slot_tab_id` resolves to for this fixture.
         engine.mark_in_flight(InFlightKey::AgentLaunch(TabId::new("s1-slot")));
 
-        let Err(refused) =
-            crate::engine::test_support::delete_through_pipeline(&mut engine, "s1", true, None)
-        else {
+        let Err(refused) = crate::engine::test_support::delete_through_pipeline(
+            &mut engine,
+            "s1",
+            crate::engine::WorktreeOnDelete::Remove,
+            None,
+        ) else {
             panic!("refused while a tab is launching");
         };
         assert!(refused.to_string().contains("still launching"), "{refused}");
@@ -10043,7 +10142,15 @@ mod tests {
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
     }
 
-    fn host_signal(host: &str, remaining: Option<i64>, hard_failed: bool) -> crate::gh::HostSignal {
+    /// How one host's `gh` call ended.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum HostCall {
+        HardFailed,
+        Answered,
+    }
+
+    fn host_signal(host: &str, remaining: Option<i64>, call: HostCall) -> crate::gh::HostSignal {
+        let hard_failed = call == HostCall::HardFailed;
         crate::gh::HostSignal {
             host: host.to_string(),
             rate: remaining.map(|remaining| crate::gh::RateLimitInfo {
@@ -10069,7 +10176,11 @@ mod tests {
     fn apply_pr_backoff_pauses_and_warns_when_low_per_host() {
         let (tx, rx) = std::sync::mpsc::channel();
         let shared = backoff_map();
-        Engine::apply_pr_backoff(&shared, &[host_signal("github.com", Some(5), false)], &tx);
+        Engine::apply_pr_backoff(
+            &shared,
+            &[host_signal("github.com", Some(5), HostCall::Answered)],
+            &tx,
+        );
 
         // The window is set for that host, ~120s out (the reset), not "now".
         let until = *shared
@@ -10120,7 +10231,7 @@ mod tests {
     fn apply_pr_backoff_warns_only_once_while_active() {
         let (tx, rx) = std::sync::mpsc::channel();
         let shared = backoff_map();
-        let sig = [host_signal("github.com", Some(5), false)];
+        let sig = [host_signal("github.com", Some(5), HostCall::Answered)];
         Engine::apply_pr_backoff(&shared, &sig, &tx);
         Engine::apply_pr_backoff(&shared, &sig, &tx);
         // First call warns; the second (window still active) must be silent.
@@ -10137,7 +10248,11 @@ mod tests {
         // off (regression guard for the masking bug).
         let (tx, _rx) = std::sync::mpsc::channel();
         let shared = backoff_map();
-        Engine::apply_pr_backoff(&shared, &[host_signal("github.com", Some(5000), true)], &tx);
+        Engine::apply_pr_backoff(
+            &shared,
+            &[host_signal("github.com", Some(5000), HostCall::HardFailed)],
+            &tx,
+        );
         assert!(
             shared.lock().unwrap().contains_key("github.com"),
             "a hard failure must pause even with a healthy quota reading",
@@ -10152,8 +10267,8 @@ mod tests {
         Engine::apply_pr_backoff(
             &shared,
             &[
-                host_signal("github.com", Some(5000), false),
-                host_signal("ghe.corp", None, true),
+                host_signal("github.com", Some(5000), HostCall::Answered),
+                host_signal("ghe.corp", None, HostCall::HardFailed),
             ],
             &tx,
         );
@@ -10172,7 +10287,7 @@ mod tests {
         );
         Engine::apply_pr_backoff(
             &shared,
-            &[host_signal("github.com", Some(5000), false)],
+            &[host_signal("github.com", Some(5000), HostCall::Answered)],
             &tx,
         );
         assert!(
@@ -10190,7 +10305,7 @@ mod tests {
         let shared = backoff_map();
         Engine::apply_pr_backoff(
             &shared,
-            &[host_signal("github.com", Some(5000), false)],
+            &[host_signal("github.com", Some(5000), HostCall::Answered)],
             &tx,
         );
         assert!(shared.lock().unwrap().is_empty());

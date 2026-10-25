@@ -2303,7 +2303,7 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
         let id = session.id.clone();
         let request = engine.build_agent_launch_request(
             session,
-            true,
+            dux_core::model::ConversationStart::Resume,
             (24, 80),
             AgentLaunchKind::StartupAutoReopen,
         );
@@ -3000,7 +3000,11 @@ impl EngineService {
         if let Some((before, github_was_enabled, error)) = adopted {
             // The engine applied this config only to drain the commands it had
             // deferred, and left the `gh` probe a reload owes to this apply.
-            engine.probe_gh_after_reload(github_was_enabled);
+            engine.probe_gh_after_reload(if github_was_enabled {
+                dux_core::engine::GithubIntegration::On
+            } else {
+                dux_core::engine::GithubIntegration::Off
+            });
             self.config_in_force(engine, &before, github_was_enabled, true);
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&error),
@@ -3064,7 +3068,11 @@ impl EngineService {
         github_was_enabled: bool,
         for_reload: bool,
     ) -> Option<String> {
-        engine.retune_pr_sync_after_reload(github_was_enabled);
+        engine.retune_pr_sync_after_reload(if github_was_enabled {
+            dux_core::engine::GithubIntegration::On
+        } else {
+            dux_core::engine::GithubIntegration::Off
+        });
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
         self.config_disk_ahead = false;
@@ -3739,7 +3747,11 @@ impl StatusEmitter {
                 status.segments.clone(),
             ),
             status.scope.clone(),
-            status.sticky,
+            if status.sticky {
+                dux_core::statusline::Stickiness::Sticky
+            } else {
+                dux_core::statusline::Stickiness::Dismisses
+            },
         );
         if let Some(ref k) = status.key {
             self.generations.insert(k.clone(), generation);
@@ -5212,8 +5224,12 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         // session-slot launch to fresh (per-provider collision), and the toast
         // must not claim "Resumed" when the dispatch actually starts fresh.
         // The launch is for the agent's session-slot tab.
-        let resume =
-            engine.tab_resume_decision(&session, session.slot_tab_id(), &session.provider, true);
+        let resume = engine.tab_resume_decision(
+            &session,
+            session.slot_tab_id(),
+            &session.provider,
+            dux_core::model::ConversationStart::Resume,
+        );
         // Use the SAME completion message the TUI shows on reconnect-ready rather
         // than a static "attaching…" placeholder (which left the status line stuck).
         let status_message = engine.agent_reconnect_status_message(&session, resume);
@@ -5226,7 +5242,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
                 (24, 80),
                 AgentLaunchKind::Reconnect { status_message },
             )
-            .quiet_status_on(if resume {
+            .quiet_status_on(if resume.is_resume() {
                 QuietSurfaces::BOTH
             } else {
                 QuietSurfaces::LOUD
@@ -5397,7 +5413,9 @@ mod tests {
             "reload-op",
             dux_core::operations::OperationKind::ConfigReload,
         );
-        engine.operations.await_reload("reload-op", false);
+        engine
+            .operations
+            .await_reload("reload-op", dux_core::engine::ReloadSlot::Now);
         engine.operations.reload_closed();
         // The adopted config also changes the Tailscale mode, which the serve
         // refuses (it was started with --no-tailscale): the reload is not over
@@ -6163,7 +6181,7 @@ mod tests {
             PtyClient::spawn_with_env("cat", &[], &paths.root, 24, 80, 1000, &[]).expect("spawn"),
         );
         engine
-            .begin_recreate_working_copy("s1", true)
+            .begin_recreate_working_copy("s1", dux_core::engine::TabsAfterRecreate::Restart)
             .expect("the recreate starts");
         engine.process_worker_event(dux_core::worker::WorkerEvent::WorkingCopyRecreated {
             session_id: "s1".to_string(),

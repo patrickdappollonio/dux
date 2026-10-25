@@ -2168,9 +2168,9 @@ impl Default for ProvidersConfig {
 }
 
 impl ProviderCommandConfig {
-    pub fn interactive_args(&self, resume_session: bool) -> Vec<String> {
+    pub fn interactive_args(&self, start: crate::model::ConversationStart) -> Vec<String> {
         let mut args = self.args.clone();
-        if resume_session
+        if start.is_resume()
             && let Some(resume_args) = self.resume_args.as_deref().filter(|args| !args.is_empty())
         {
             args.extend(resume_args.iter().cloned());

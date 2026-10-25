@@ -41,7 +41,8 @@ pub fn branch_rename_refusal(rejection: &BranchRenameRejection) -> &'static str 
 /// Renaming moves the branch on this machine only, so when the branch has an
 /// open pull request or a pushed copy, the line says which of them stays on the
 /// old name; otherwise it only says what the box does.
-pub fn rename_branch_note_prose(branch: &str, open_pr: Option<u64>, pushed: bool) -> Prose {
+pub fn rename_branch_note_prose(branch: &str, open_pr: Option<u64>, pushed: BranchPushed) -> Prose {
+    let pushed = pushed == BranchPushed::Pushed;
     let lead = Prose::new().text("Renames ").name(branch);
     match (open_pr, pushed) {
         (None, false) => lead.text(" to the new name."),
@@ -59,6 +60,24 @@ pub fn rename_branch_note_prose(branch: &str, open_pr: Option<u64>, pushed: bool
             lead.text(" on this machine only: the pushed branch on the remote keeps the old name.")
         }
     }
+}
+
+/// What a rename does about the agent's git branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchRename {
+    /// Rename the branch to the new name as well.
+    AlsoTheBranch,
+    /// Change only the agent's name.
+    NameOnly,
+}
+
+/// Whether a branch has a pushed copy on the remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchPushed {
+    /// It has been pushed.
+    Pushed,
+    /// Nothing of it is on the remote.
+    NotPushed,
 }
 
 fn branch_rename_failed(old_branch: &str, new_branch: &str, err: &str) -> StatusText {
@@ -105,7 +124,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         name: &str,
-        rename_branch: bool,
+        branch_rename: BranchRename,
     ) -> anyhow::Result<EventReaction> {
         let Some(branch) = self
             .sessions
@@ -116,7 +135,7 @@ impl Engine {
             anyhow::bail!("unknown session: {session_id}");
         };
         let scope = self.current_origin.clone();
-        let status = match self.prepare_branch_rename(session_id, name, rename_branch) {
+        let status = match self.prepare_branch_rename(session_id, name, branch_rename) {
             BranchRenamePlan::Rejected(rejection) => {
                 anyhow::bail!(branch_rename_refusal(&rejection))
             }
@@ -361,7 +380,7 @@ mod tests {
         engine.current_origin = StatusScope::Connection("c1".into());
 
         let reaction = engine
-            .rename_agent("s1", "new-name", true)
+            .rename_agent("s1", "new-name", crate::engine::BranchRename::AlsoTheBranch)
             .expect("the rename starts");
         let busy = only_status(&reaction);
         assert_eq!(busy.tone, StatusTone::Busy);
@@ -372,7 +391,7 @@ mod tests {
         );
         assert!(engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
         let again = engine
-            .rename_agent("s1", "other", true)
+            .rename_agent("s1", "other", crate::engine::BranchRename::AlsoTheBranch)
             .err()
             .expect("refused");
         assert_eq!(
@@ -454,7 +473,7 @@ mod tests {
     fn a_branch_rename_dux_could_not_save_is_reported() {
         let (mut engine, _tmp) = engine_with_a_repository();
         engine
-            .rename_agent("s1", "new-name", true)
+            .rename_agent("s1", "new-name", crate::engine::BranchRename::AlsoTheBranch)
             .expect("the rename starts");
         refuse_session_writes(&engine);
 
@@ -482,7 +501,7 @@ mod tests {
     fn a_name_dux_could_not_put_back_is_reported() {
         let (mut engine, _tmp) = engine_with_a_repository();
         engine
-            .rename_agent("s1", "taken", true)
+            .rename_agent("s1", "taken", crate::engine::BranchRename::AlsoTheBranch)
             .expect("the rename starts");
         refuse_session_writes(&engine);
 
@@ -509,7 +528,9 @@ mod tests {
     fn a_title_only_rename_says_the_branch_kept_its_name() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let reaction = engine.rename_agent("s1", " shiny ", false).unwrap();
+        let reaction = engine
+            .rename_agent("s1", " shiny ", crate::engine::BranchRename::NameOnly)
+            .unwrap();
         let status = only_status(&reaction);
         assert_eq!(status.tone, StatusTone::Info);
         assert_eq!(
@@ -531,7 +552,11 @@ mod tests {
             .sessions
             .push(sample_standalone_session("sa1", "/home/someone/My Notes"));
 
-        let status = only_status(&engine.rename_agent("s1", "  ", false).unwrap());
+        let status = only_status(
+            &engine
+                .rename_agent("s1", "  ", crate::engine::BranchRename::NameOnly)
+                .unwrap(),
+        );
         assert_eq!(engine.sessions[0].title, None);
         assert_eq!(
             status.message,
@@ -540,7 +565,11 @@ mod tests {
 
         // The box means nothing for an agent with no branch, so it is no reason
         // to refuse the reset.
-        let status = only_status(&engine.rename_agent("sa1", "", true).unwrap());
+        let status = only_status(
+            &engine
+                .rename_agent("sa1", "", crate::engine::BranchRename::AlsoTheBranch)
+                .unwrap(),
+        );
         assert_eq!(engine.sessions[1].title, None);
         assert_eq!(
             status.message,
@@ -554,7 +583,10 @@ mod tests {
     fn an_empty_name_with_the_branch_box_ticked_is_refused() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let err = engine.rename_agent("s1", " ", true).err().expect("refused");
+        let err = engine
+            .rename_agent("s1", " ", crate::engine::BranchRename::AlsoTheBranch)
+            .err()
+            .expect("refused");
         assert_eq!(
             err.to_string(),
             branch_rename_refusal(&BranchRenameRejection::EmptyName)
@@ -580,7 +612,19 @@ mod tests {
             ("s1", "feat", true),
             ("s2", "custom", false),
         ] {
-            let status = only_status(&engine.rename_agent(id, name, rename_branch).unwrap());
+            let status = only_status(
+                &engine
+                    .rename_agent(
+                        id,
+                        name,
+                        if rename_branch {
+                            crate::engine::BranchRename::AlsoTheBranch
+                        } else {
+                            crate::engine::BranchRename::NameOnly
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(status.tone, StatusTone::Info);
             assert!(
                 status
@@ -600,7 +644,11 @@ mod tests {
     fn renaming_the_branch_to_its_own_name_renames_nothing() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let status = only_status(&engine.rename_agent("s1", "feat", true).unwrap());
+        let status = only_status(
+            &engine
+                .rename_agent("s1", "feat", crate::engine::BranchRename::AlsoTheBranch)
+                .unwrap(),
+        );
         assert_eq!(
             status.message,
             "The git branch is already called \"feat\", so nothing was renamed in git. \
@@ -621,7 +669,19 @@ mod tests {
             engine.session_store.upsert_session(&session).unwrap();
             engine.sessions.push(session);
 
-            let status = only_status(&engine.rename_agent("s1", "feat", rename_branch).unwrap());
+            let status = only_status(
+                &engine
+                    .rename_agent(
+                        "s1",
+                        "feat",
+                        if rename_branch {
+                            crate::engine::BranchRename::AlsoTheBranch
+                        } else {
+                            crate::engine::BranchRename::NameOnly
+                        },
+                    )
+                    .unwrap(),
+            );
             assert_eq!(status.tone, StatusTone::Info, "{rename_branch}");
             assert_eq!(engine.sessions[0].title, None, "{rename_branch}");
             let stored = engine.session_store.load_sessions().unwrap();
@@ -648,7 +708,15 @@ mod tests {
                 .unwrap();
 
             let err = engine
-                .rename_agent("s1", "renamed", rename_branch)
+                .rename_agent(
+                    "s1",
+                    "renamed",
+                    if rename_branch {
+                        crate::engine::BranchRename::AlsoTheBranch
+                    } else {
+                        crate::engine::BranchRename::NameOnly
+                    },
+                )
                 .err()
                 .expect("refused");
             assert!(
@@ -681,7 +749,7 @@ mod tests {
         let live_before = engine.live_status_keys.len();
         crate::engine::fail_next_worker_spawn();
         let err = engine
-            .rename_agent("s1", "renamed", true)
+            .rename_agent("s1", "renamed", crate::engine::BranchRename::AlsoTheBranch)
             .err()
             .expect("refused");
         assert!(err.to_string().contains("reverted the agent name"), "{err}");
@@ -699,7 +767,7 @@ mod tests {
     fn an_unknown_agent_is_an_unknown_session() {
         let (mut engine, _tmp) = test_engine();
         let err = engine
-            .rename_agent("ghost", "x", false)
+            .rename_agent("ghost", "x", crate::engine::BranchRename::NameOnly)
             .err()
             .expect("refused");
         assert_eq!(err.to_string(), "unknown session: ghost");

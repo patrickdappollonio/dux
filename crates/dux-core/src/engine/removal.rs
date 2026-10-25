@@ -439,7 +439,11 @@ impl Engine {
             // project rather than each agent's branch, so the provenance default
             // stands. That is what keeps a project removal from taking a user's
             // `develop` with it.
-            match self.begin_delete_session(session_id, true, None) {
+            match self.begin_delete_session(
+                session_id,
+                crate::engine::WorktreeOnDelete::Remove,
+                None,
+            ) {
                 BeginDeleteSessionOutcome::AsyncStarted { .. } => {
                     pending.insert(session_id.clone());
                     paths.insert(session_id.clone(), path);
@@ -924,7 +928,8 @@ mod tests {
             .hold_path_for_in_flight(&pull, worktree, WorktreeOpKind::Pull)
             .unwrap();
 
-        let outcome = engine.begin_delete_session("s-agent", true, None);
+        let outcome =
+            engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None);
         assert!(matches!(
             outcome,
             BeginDeleteSessionOutcome::AsyncStarted { .. }
@@ -965,15 +970,17 @@ mod tests {
         let (mut engine, tmp) = test_engine();
         let (repo, worktrees) = world(&mut engine, tmp.path(), &["old"]);
         let worktree = worktrees[0].clone();
-        let crate::engine::BranchRenamePlan::RenameBranch(dispatch) =
-            engine.prepare_branch_rename("s-old", "new", true)
-        else {
+        let crate::engine::BranchRenamePlan::RenameBranch(dispatch) = engine.prepare_branch_rename(
+            "s-old",
+            "new",
+            crate::engine::BranchRename::AlsoTheBranch,
+        ) else {
             panic!("a real rename is planned");
         };
         engine.mark_in_flight(InFlightKey::BranchRename("s-old".into()));
 
         assert!(matches!(
-            engine.begin_delete_session("s-old", true, None),
+            engine.begin_delete_session("s-old", crate::engine::WorktreeOnDelete::Remove, None),
             BeginDeleteSessionOutcome::AsyncStarted { .. }
         ));
         pump_until(&mut engine, is_waiting);
@@ -1026,7 +1033,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            engine.begin_delete_session("s-agent", true, None),
+            engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
             BeginDeleteSessionOutcome::AsyncStarted { .. }
         ));
         pump_until(&mut engine, is_waiting);

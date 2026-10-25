@@ -652,7 +652,7 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
             .expect("upsert");
         store.set_last_seen_version("v0.7.0").expect("app state");
         store
-            .set_desired_running("sess-1", true)
+            .set_desired_running("sess-1", dux_core::model::DesiredRunning::Running)
             .expect("desired running");
         store
             .set_last_focused_tab("sess-1", Some("tab-x"))

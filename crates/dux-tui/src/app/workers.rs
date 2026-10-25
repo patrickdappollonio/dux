@@ -2984,7 +2984,7 @@ mod tests {
             StatusTone::Busy,
             "Launching...",
             dux_core::statusline::StatusScope::All,
-            true,
+            dux_core::statusline::Stickiness::Sticky,
         );
 
         app.apply_reaction(EventReaction::Status(
@@ -3803,7 +3803,9 @@ mod tests {
             "reload-op",
             dux_core::operations::OperationKind::ConfigReload,
         );
-        app.engine.operations.await_reload("reload-op", false);
+        app.engine
+            .operations
+            .await_reload("reload-op", dux_core::engine::ReloadSlot::Now);
         app.engine.operations.reload_closed();
 
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));

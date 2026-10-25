@@ -2371,10 +2371,14 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn set_desired_running(&self, id: &str, desired_running: bool) -> Result<()> {
+    pub fn set_desired_running(
+        &self,
+        id: &str,
+        desired: crate::model::DesiredRunning,
+    ) -> Result<()> {
         self.conn.execute(
             "update agent_sessions set desired_running = ?2, updated_at = ?3 where id = ?1",
-            params![id, desired_running, Utc::now().to_rfc3339()],
+            params![id, desired.is_running(), Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -2394,7 +2398,12 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn set_auto_reopen_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+    pub fn set_auto_reopen_enabled(
+        &self,
+        id: &str,
+        auto_reopen: crate::model::AutoReopen,
+    ) -> Result<()> {
+        let enabled = auto_reopen == crate::model::AutoReopen::Enabled;
         self.conn.execute(
             "update agent_sessions set auto_reopen_enabled = ?2, updated_at = ?3 where id = ?1",
             params![id, enabled, Utc::now().to_rfc3339()],
@@ -4250,8 +4259,12 @@ mod tests {
         assert!(loaded[0].desired_running);
         assert!(!loaded[0].auto_reopen_enabled);
 
-        store.set_auto_reopen_enabled("auto", true).unwrap();
-        store.set_desired_running("auto", false).unwrap();
+        store
+            .set_auto_reopen_enabled("auto", crate::model::AutoReopen::Enabled)
+            .unwrap();
+        store
+            .set_desired_running("auto", crate::model::DesiredRunning::Stopped)
+            .unwrap();
         let loaded = store.load_sessions().unwrap();
         assert!(!loaded[0].desired_running);
         assert!(loaded[0].auto_reopen_enabled);

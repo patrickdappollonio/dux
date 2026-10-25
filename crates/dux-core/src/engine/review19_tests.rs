@@ -102,11 +102,19 @@ fn checkout(tmp: &Path, engine: &mut Engine) -> (PathBuf, PathBuf) {
 /// A local branch `feat` whose commit adds a gitlink at `alone`, checked out
 /// with a guarded switch from `main`, where `alone` is an ignored link to a
 /// standalone agent's folder and is recorded as that agent's folder.
-fn switch_over_link(ignore_all: bool) -> (Result<(), String>, std::fs::FileType) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubmoduleIgnore {
+    /// `.gitmodules` says `ignore = all`.
+    All,
+    /// `.gitmodules` says nothing about ignoring it.
+    Unset,
+}
+
+fn switch_over_link(ignore: SubmoduleIgnore) -> (Result<(), String>, std::fs::FileType) {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");
     init(&repo);
-    let gitmodules = if ignore_all {
+    let gitmodules = if ignore == SubmoduleIgnore::All {
         "[submodule \"alone\"]\n\tpath = alone\n\turl = ./alone\n\tignore = all\n"
     } else {
         "[submodule \"alone\"]\n\tpath = alone\n\turl = ./alone\n"
@@ -160,7 +168,7 @@ fn switch_over_link(ignore_all: bool) -> (Result<(), String>, std::fs::FileType)
 /// Control: the guard refuses the switch and the link stays (review 18's fix).
 #[test]
 fn review19_control_a_guarded_switch_keeps_a_linked_standalone_folder() {
-    let (result, kind) = switch_over_link(false);
+    let (result, kind) = switch_over_link(SubmoduleIgnore::Unset);
     assert!(result.is_err(), "{result:?}");
     assert!(kind.is_symlink());
 }
@@ -171,7 +179,7 @@ fn review19_control_a_guarded_switch_keeps_a_linked_standalone_folder() {
 /// empty directory.
 #[test]
 fn review19_ignore_all_hides_a_submodule_over_a_linked_standalone_folder() {
-    let (result, kind) = switch_over_link(true);
+    let (result, kind) = switch_over_link(SubmoduleIgnore::All);
     assert!(
         kind.is_symlink(),
         "the standalone agent's folder link was replaced by {kind:?} (switch result {result:?})"

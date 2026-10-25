@@ -206,7 +206,7 @@ fn every_removal_path_keeps_a_folder_a_dormant_agents_worktree_lives_in() {
         managed.branch_name = "b".to_string();
     }
     assert!(matches!(
-        engine.begin_delete_session("s-a", true, Some(true)),
+        engine.begin_delete_session("s-a", crate::engine::WorktreeOnDelete::Remove, Some(true)),
         crate::engine::BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-a");

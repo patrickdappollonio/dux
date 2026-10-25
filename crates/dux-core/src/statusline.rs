@@ -315,6 +315,25 @@ fn ceil_secs(duration: Duration) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(pub u64);
 
+/// Whether a status waits for the user rather than leaving on the surface's
+/// own timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stickiness {
+    /// It stays until the user dismisses it.
+    Sticky,
+    /// It dismisses itself on its window.
+    Dismisses,
+}
+
+/// Which queued statuses a status line looks at when it must drop one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waiters {
+    /// Infos only.
+    InfosOnly,
+    /// Any tone.
+    Any,
+}
+
 /// One open status, keyed or anonymous.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyedStatus {
@@ -666,7 +685,7 @@ impl KeyedStatusController {
             tone,
             StatusText::plain(message),
             StatusScope::All,
-            false,
+            Stickiness::Dismisses,
         )
     }
 
@@ -683,8 +702,9 @@ impl KeyedStatusController {
         tone: StatusTone,
         message: impl Into<StatusText>,
         scope: StatusScope,
-        sticky: bool,
+        stickiness: Stickiness,
     ) -> Generation {
+        let sticky = stickiness == Stickiness::Sticky;
         let (message, segments) = message.into().into_parts();
         let generation = Generation(self.next_gen);
         let seq = self.next_seq;
@@ -1007,8 +1027,8 @@ impl KeyedStatusController {
             // reader. Among the waiters the oldest `Info` goes first, and with
             // none left the oldest waiter of any tone.
             let Some(doomed) = self
-                .oldest_waiter(true)
-                .or_else(|| self.oldest_waiter(false))
+                .oldest_waiter(Waiters::InfosOnly)
+                .or_else(|| self.oldest_waiter(Waiters::Any))
             else {
                 return;
             };
@@ -1023,7 +1043,8 @@ impl KeyedStatusController {
     /// pre-empting tones are pushed to the front, so position 1 is the second
     /// newest of them, and evicting it would drop the freshest news while
     /// keeping a backlog of older warnings nobody can reach.
-    fn oldest_waiter(&self, only_infos: bool) -> Option<String> {
+    fn oldest_waiter(&self, waiters: Waiters) -> Option<String> {
+        let only_infos = waiters == Waiters::InfosOnly;
         self.queue
             .iter()
             .skip(1)
@@ -1918,7 +1939,7 @@ mod tests {
             StatusTone::Busy,
             "anonymous busy",
             super::StatusScope::Connection("anon".into()),
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         c.set_scoped(
             t0,
@@ -1926,7 +1947,7 @@ mod tests {
             StatusTone::Busy,
             "keyed busy",
             super::StatusScope::Connection("keyed".into()),
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
 
         let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
@@ -2043,7 +2064,7 @@ mod tests {
             StatusTone::Warning,
             "Saved the file but could not paste its path.",
             super::StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         c.set_scoped(
             t0,
@@ -2051,7 +2072,7 @@ mod tests {
             StatusTone::Info,
             "Saved the file but could not paste its path.",
             super::StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
@@ -2528,7 +2549,7 @@ mod tests {
             StatusTone::Info,
             named(),
             super::StatusScope::All,
-            false,
+            crate::statusline::Stickiness::Dismisses,
         );
         c.set(t0, None, StatusTone::Warning, "plain words");
         let snapshot = c.snapshot();
@@ -2558,7 +2579,7 @@ mod tests {
             StatusTone::Busy,
             busy.clone(),
             super::StatusScope::All,
-            false,
+            crate::statusline::Stickiness::Dismisses,
         );
         let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
         assert_eq!(changes.refreshed.len(), 1);
@@ -2576,7 +2597,7 @@ mod tests {
             StatusTone::Busy,
             busy,
             super::StatusScope::All,
-            false,
+            crate::statusline::Stickiness::Dismisses,
         );
         let changes = c.tick(t0 + BUSY_TIMEOUT, BUSY_TIMEOUT);
         assert_eq!(changes.upgraded[0].message, "timed out, check dux.log");
@@ -2594,7 +2615,7 @@ mod tests {
             StatusTone::Error,
             named(),
             super::StatusScope::All,
-            false,
+            crate::statusline::Stickiness::Dismisses,
         );
         c.mark_unwatched(Some("pr"));
         let _ = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
@@ -2614,7 +2635,7 @@ mod tests {
             StatusTone::Info,
             named(),
             super::StatusScope::All,
-            false,
+            crate::statusline::Stickiness::Dismisses,
         );
         assert_eq!(
             c.text().as_bytes(),
@@ -2790,7 +2811,11 @@ mod tests {
                 StatusTone::Warning,
                 "final",
                 super::StatusScope::All,
-                sticky,
+                if sticky {
+                    crate::statusline::Stickiness::Sticky
+                } else {
+                    crate::statusline::Stickiness::Dismisses
+                },
             );
             if pinned {
                 c.pin();
@@ -2907,7 +2932,7 @@ mod tests {
             T::Error,
             "Worktree delete failed.",
             StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         let snap = c.snapshot();
         let halfdone = snap
@@ -2938,7 +2963,7 @@ mod tests {
             StatusTone::Error,
             "Worktree delete failed.",
             super::StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         // Neither the generation-matched clear nor the unconditional one may
         // touch it, and both must SAY they did nothing so the caller does not
@@ -2974,7 +2999,7 @@ mod tests {
             StatusTone::Error,
             "Worktree delete failed.",
             super::StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         let changes = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
         assert!(
@@ -3273,7 +3298,7 @@ mod tests {
                     StatusTone::Info,
                     "sticky",
                     super::StatusScope::All,
-                    true,
+                    crate::statusline::Stickiness::Sticky,
                 );
             }),
             ("pinned", |c, t| {
@@ -3480,7 +3505,7 @@ mod tests {
             StatusTone::Error,
             "half-done, and you must act",
             super::StatusScope::All,
-            true,
+            crate::statusline::Stickiness::Sticky,
         );
         c.set(t0, None, StatusTone::Info, "something else happened");
         assert_eq!(

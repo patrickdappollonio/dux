@@ -320,11 +320,11 @@ pub(crate) struct PipelineDelete {
 pub(crate) fn delete_through_pipeline(
     engine: &mut Engine,
     session_id: &str,
-    delete_worktree: bool,
+    worktree: crate::engine::WorktreeOnDelete,
     delete_branch: Option<bool>,
 ) -> anyhow::Result<Option<PipelineDelete>> {
     use crate::engine::BeginDeleteSessionOutcome;
-    match engine.begin_delete_session(session_id, delete_worktree, delete_branch) {
+    match engine.begin_delete_session(session_id, worktree, delete_branch) {
         BeginDeleteSessionOutcome::NotFound => Ok(None),
         BeginDeleteSessionOutcome::AlreadyInFlight => {
             anyhow::bail!("a delete of this agent is already in progress")

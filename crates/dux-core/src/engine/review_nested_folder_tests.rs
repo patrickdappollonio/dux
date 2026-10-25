@@ -118,7 +118,7 @@ fn deleting_an_agent_keeps_a_worktree_a_standalone_agent_runs_inside() {
     std::fs::write(inside.join("notes.txt"), "the standalone agent's work").unwrap();
 
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
@@ -183,7 +183,7 @@ fn a_standalone_agent_cannot_be_created_inside_a_worktree_being_removed() {
         .hold_path_for_in_flight(&pull, &worktree, crate::worktree_ops::WorktreeOpKind::Pull)
         .unwrap();
     assert!(matches!(
-        engine.begin_delete_session("s-agent", true, None),
+        engine.begin_delete_session("s-agent", crate::engine::WorktreeOnDelete::Remove, None),
         BeginDeleteSessionOutcome::AsyncStarted { .. }
     ));
     engine.finish_delete_session_memory("s-agent");
