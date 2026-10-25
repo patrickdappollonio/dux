@@ -558,15 +558,7 @@ pub struct RecreateView {
     pub restart_offer: Vec<String>,
 }
 
-/// Whether an agent's provider resumes its prior conversation when it comes up
-/// in the same directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConversationResume {
-    /// It picks the prior conversation back up.
-    Resumes,
-    /// It starts a fresh one: it has no directory-scoped resume.
-    StartsFresh,
-}
+use crate::working_copy::ConversationResume;
 
 impl AgentWorkspaceView {
     /// Project the model workspace, folding in the live repository verdict a
@@ -590,8 +582,12 @@ impl AgentWorkspaceView {
                     worktree_path: managed.worktree_path.clone(),
                     worktree_label: crate::home_path::shorten_home(worktree),
                     worktree_missing: repo_status == crate::git::FolderRepoStatus::Missing,
-                    quiet_reason: crate::working_copy::quiet_reason(repo_status, worktree, true)
-                        .unwrap_or_default(),
+                    quiet_reason: crate::working_copy::quiet_reason(
+                        repo_status,
+                        worktree,
+                        crate::model::AgentWorkspaceKind::Managed,
+                    )
+                    .unwrap_or_default(),
                     conversation_resumes: conversation == ConversationResume::Resumes,
                     recreate,
                 }
@@ -605,7 +601,7 @@ impl AgentWorkspaceView {
                 quiet_reason: crate::working_copy::quiet_reason(
                     repo_status,
                     std::path::Path::new(&folder.folder_path),
-                    false,
+                    crate::model::AgentWorkspaceKind::Folder,
                 )
                 .unwrap_or_else(|| repo_status.quiet_reason().to_string()),
             },

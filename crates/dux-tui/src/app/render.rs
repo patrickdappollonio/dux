@@ -8363,7 +8363,11 @@ impl App {
             worktree_path,
             branch_name,
             source_branch,
-            *conversation_resumes,
+            if *conversation_resumes {
+                dux_core::working_copy::ConversationResume::Resumes
+            } else {
+                dux_core::working_copy::ConversationResume::StartsFresh
+            },
             running_tabs,
         );
         let inner_width = confirm_inner_width(frame.area());

@@ -2924,11 +2924,18 @@ mod tests {
             }
         }
 
-        fn save_as(encoding: &'static encoding_rs::Encoding, bom: bool) -> SaveEncoding {
+        fn save_as(encoding: &'static encoding_rs::Encoding) -> SaveEncoding {
             SaveEncoding {
                 encoding,
-                bom,
+                bom: false,
                 read_as: None,
+            }
+        }
+
+        fn save_with_bom(encoding: &'static encoding_rs::Encoding) -> SaveEncoding {
+            SaveEncoding {
+                bom: true,
+                ..save_as(encoding)
             }
         }
 
@@ -3159,7 +3166,10 @@ mod tests {
                 dir.path(),
                 "latin1.txt",
                 &edited,
-                Some(save_as(encoding, read.bom)),
+                Some(SaveEncoding {
+                    bom: read.bom,
+                    ..save_as(encoding)
+                }),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3179,7 +3189,10 @@ mod tests {
                 dir.path(),
                 "wide.txt",
                 "ab\n",
-                Some(save_as(encoding_rs::UTF_16BE, read.bom)),
+                Some(SaveEncoding {
+                    bom: read.bom,
+                    ..save_as(encoding_rs::UTF_16BE)
+                }),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3201,7 +3214,7 @@ mod tests {
                 dir.path(),
                 "latin1.txt",
                 &read.content,
-                Some(save_as(encoding_rs::UTF_8, false)),
+                Some(save_as(encoding_rs::UTF_8)),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3225,7 +3238,7 @@ mod tests {
                 dir.path(),
                 "nec.txt",
                 &read.content,
-                Some(save_as(encoding_rs::SHIFT_JIS, false)),
+                Some(save_as(encoding_rs::SHIFT_JIS)),
                 Some(&stamp_of(&read)),
             )
             .unwrap_err();
@@ -3238,7 +3251,7 @@ mod tests {
                 dir.path(),
                 "nec.txt",
                 &read.content,
-                Some(save_as(encoding_rs::UTF_8, false)),
+                Some(save_as(encoding_rs::UTF_8)),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3259,7 +3272,7 @@ mod tests {
                     dir.path(),
                     "two.txt",
                     "x",
-                    Some(save_as(encoding_rs::UTF_8, true)),
+                    Some(save_with_bom(encoding_rs::UTF_8)),
                     Some(&stamp_of(&read)),
                 )
                 .is_err()
@@ -3279,7 +3292,7 @@ mod tests {
                 dir.path(),
                 "euro.txt",
                 &euros,
-                Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                Some(save_as(encoding_rs::WINDOWS_1252)),
                 None,
             )
             .unwrap();
@@ -3295,7 +3308,7 @@ mod tests {
                 dir.path(),
                 "big.txt",
                 &over,
-                Some(save_as(encoding_rs::UTF_8, false)),
+                Some(save_as(encoding_rs::UTF_8)),
                 None,
             )
             .unwrap_err();
@@ -3312,7 +3325,7 @@ mod tests {
                 dir.path(),
                 "l.txt",
                 "caf\u{e9}!\n",
-                Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                Some(save_as(encoding_rs::WINDOWS_1252)),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3320,7 +3333,7 @@ mod tests {
                 dir.path(),
                 "l.txt",
                 "caf\u{e9}!\n",
-                Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                Some(save_as(encoding_rs::WINDOWS_1252)),
                 Some(&stamp),
             )
             .unwrap();
@@ -3329,7 +3342,7 @@ mod tests {
                 dir.path(),
                 "hello.txt",
                 "x\n",
-                Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                Some(save_as(encoding_rs::WINDOWS_1252)),
                 Some(&stamp_of(&read)),
             )
             .unwrap();
@@ -3347,7 +3360,7 @@ mod tests {
                 dir.path(),
                 "latin1.txt",
                 "caf\u{e9} \u{2603}\n",
-                Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                Some(save_as(encoding_rs::WINDOWS_1252)),
                 Some(&stamp_of(&read)),
             )
             .unwrap_err();
@@ -3366,7 +3379,7 @@ mod tests {
                     dir.path(),
                     "new.txt",
                     "\u{2603}",
-                    Some(save_as(encoding_rs::WINDOWS_1252, false)),
+                    Some(save_as(encoding_rs::WINDOWS_1252)),
                     None,
                 )
                 .is_err()

@@ -2337,7 +2337,11 @@ impl Engine {
                     slot.push(
                         session.provider.as_str(),
                         &self.provider_command_file_name(&session.provider),
-                        self.provider_resumes(&session.provider),
+                        if self.provider_resumes(&session.provider) {
+                            crate::working_copy::ConversationResume::Resumes
+                        } else {
+                            crate::working_copy::ConversationResume::StartsFresh
+                        },
                     );
                     slot
                 }
@@ -2375,7 +2379,11 @@ impl Engine {
                 running.push(
                     provider.as_str(),
                     &self.provider_command_file_name(&provider),
-                    self.provider_resumes(&provider),
+                    if self.provider_resumes(&provider) {
+                        crate::working_copy::ConversationResume::Resumes
+                    } else {
+                        crate::working_copy::ConversationResume::StartsFresh
+                    },
                 );
             }
         }
@@ -2402,7 +2410,11 @@ impl Engine {
             .filter(|(_, provider)| {
                 crate::working_copy::RunningTabFate::of(
                     &self.provider_command_file_name(provider),
-                    self.provider_resumes(provider),
+                    if self.provider_resumes(provider) {
+                        crate::working_copy::ConversationResume::Resumes
+                    } else {
+                        crate::working_copy::ConversationResume::StartsFresh
+                    },
                 ) == crate::working_copy::RunningTabFate::Restartable
             })
             .collect()

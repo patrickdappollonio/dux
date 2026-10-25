@@ -3667,7 +3667,7 @@ impl Engine {
         crate::working_copy::quiet_reason(
             status,
             Path::new(session.directory()),
-            session.workspace.as_managed().is_some(),
+            session.workspace.kind(),
         )
     }
 
@@ -5711,8 +5711,12 @@ impl Engine {
                     SessionGitAccess::ChangesOnly { directory }
                 } else {
                     SessionGitAccess::NoRepository {
-                        quiet_reason: crate::working_copy::quiet_reason(status, &directory, false)
-                            .unwrap_or_else(|| status.quiet_reason().to_string()),
+                        quiet_reason: crate::working_copy::quiet_reason(
+                            status,
+                            &directory,
+                            crate::model::AgentWorkspaceKind::Folder,
+                        )
+                        .unwrap_or_else(|| status.quiet_reason().to_string()),
                         directory,
                     }
                 }

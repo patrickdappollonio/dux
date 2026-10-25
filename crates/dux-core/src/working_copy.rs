@@ -187,17 +187,18 @@ pub const MISSING_FOLDER_INFO_LINE: &str =
 /// Why the changes region is quiet for one agent, or `None` when it is not.
 ///
 /// The one place both surfaces and the wire ask, so a directory that is gone
-/// reads the same everywhere. `managed` picks which remedy the missing-directory
+/// reads the same everywhere. `kind` picks which remedy the missing-directory
 /// sentence offers, because dux can put its own working copy back and never
 /// touches the user's own folder.
 pub fn quiet_reason(
     status: crate::git::FolderRepoStatus,
     directory: &Path,
-    managed: bool,
+    kind: crate::model::AgentWorkspaceKind,
 ) -> Option<String> {
     if status.changes_panel_works() {
         return None;
     }
+    let managed = kind == crate::model::AgentWorkspaceKind::Managed;
     Some(match status {
         crate::git::FolderRepoStatus::Missing if managed => missing_working_copy_reason(directory),
         crate::git::FolderRepoStatus::Missing => missing_folder_reason(directory),
@@ -270,18 +271,27 @@ pub enum RunningTabFate {
 
 impl RunningTabFate {
     /// `command` is the file name of the provider's command, which names the
-    /// CLI whatever the provider is called, and `resumes` is whether the
+    /// CLI whatever the provider is called, and `resume` is whether the
     /// provider's configuration carries resume arguments, the same answer
     /// every launch asks.
-    pub fn of(command: &str, resumes: bool) -> Self {
+    pub fn of(command: &str, resume: ConversationResume) -> Self {
         if command.eq_ignore_ascii_case("claude") {
             Self::Follows
-        } else if resumes {
+        } else if resume == ConversationResume::Resumes {
             Self::Restartable
         } else {
             Self::LeftRunning
         }
     }
+}
+
+/// Whether a provider's CLI picks a conversation back up in the same directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationResume {
+    /// Its configuration carries resume arguments, so it continues.
+    Resumes,
+    /// It has no way to pick a conversation back up, so it starts fresh.
+    StartsFresh,
 }
 
 /// The providers of the tabs running in a deleted working copy, one entry per
@@ -297,9 +307,9 @@ pub struct RunningTabs {
 impl RunningTabs {
     /// Sort one running tab of `provider`, whose command's file name is
     /// `command`, by its fate.
-    pub fn push(&mut self, provider: &str, command: &str, resumes: bool) {
+    pub fn push(&mut self, provider: &str, command: &str, resume: ConversationResume) {
         let provider = provider.to_string();
-        match RunningTabFate::of(command, resumes) {
+        match RunningTabFate::of(command, resume) {
             RunningTabFate::Follows => self.follows.push(provider),
             RunningTabFate::Restartable => self.restartable.push(provider),
             RunningTabFate::LeftRunning => self.left_running.push(provider),
@@ -398,7 +408,7 @@ pub fn recreate_restart_checkbox_prose(restartable: &[String]) -> Prose {
 /// run a subprocess to open a dialog. The final status names the arm that
 /// actually ran.
 ///
-/// `conversation_resumes` is the agent's provider's own answer rather than a
+/// `conversation` is the agent's provider's own answer rather than a
 /// constant: a provider that keeps no directory-scoped history (copilot ships
 /// with no resume arguments) would have this dialog promising something that
 /// cannot happen, and the same path buys it nothing.
@@ -410,17 +420,10 @@ pub fn recreate_confirm_body(
     worktree: &Path,
     branch_name: &str,
     source_branch: &str,
-    conversation_resumes: bool,
+    conversation: ConversationResume,
     running: &RunningTabs,
 ) -> String {
-    recreate_confirm_prose(
-        worktree,
-        branch_name,
-        source_branch,
-        conversation_resumes,
-        running,
-    )
-    .plain()
+    recreate_confirm_prose(worktree, branch_name, source_branch, conversation, running).plain()
 }
 
 /// [`recreate_confirm_body`] as prose, the path, every branch and every
@@ -430,10 +433,10 @@ pub fn recreate_confirm_prose(
     worktree: &Path,
     branch_name: &str,
     source_branch: &str,
-    conversation_resumes: bool,
+    conversation: ConversationResume,
     running: &RunningTabs,
 ) -> Prose {
-    let conversation = if conversation_resumes {
+    let conversation = if conversation == ConversationResume::Resumes {
         "The conversation may resume, because the agent's CLI keys its history by directory path \
          and dux recreates the working copy at the same path."
     } else {
@@ -762,7 +765,15 @@ mod tests {
     fn running(tabs: &[(&str, bool)]) -> RunningTabs {
         let mut running = RunningTabs::default();
         for (provider, resumes) in tabs {
-            running.push(provider, provider, *resumes);
+            running.push(
+                provider,
+                provider,
+                if *resumes {
+                    crate::working_copy::ConversationResume::Resumes
+                } else {
+                    crate::working_copy::ConversationResume::StartsFresh
+                },
+            );
         }
         running
     }
@@ -782,7 +793,7 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat\u{202E}txt.exe",
             "main",
-            true,
+            crate::working_copy::ConversationResume::Resumes,
             &running(&[("claude", true)]),
         );
         let plain = prose.plain();
@@ -813,19 +824,35 @@ mod tests {
     #[test]
     fn the_quiet_reason_picks_the_remedy_from_the_kind() {
         use crate::git::FolderRepoStatus;
-        let managed = quiet_reason(FolderRepoStatus::Missing, Path::new("/tmp/wt"), true)
-            .expect("a missing working copy is quiet");
+        let managed = quiet_reason(
+            FolderRepoStatus::Missing,
+            Path::new("/tmp/wt"),
+            crate::model::AgentWorkspaceKind::Managed,
+        )
+        .expect("a missing working copy is quiet");
         assert!(managed.contains("recreated"), "{managed}");
-        let folder = quiet_reason(FolderRepoStatus::Missing, Path::new("/tmp/mine"), false)
-            .expect("a missing folder is quiet");
+        let folder = quiet_reason(
+            FolderRepoStatus::Missing,
+            Path::new("/tmp/mine"),
+            crate::model::AgentWorkspaceKind::Folder,
+        )
+        .expect("a missing folder is quiet");
         assert!(folder.contains("Restore the folder"), "{folder}");
         assert_eq!(
-            quiet_reason(FolderRepoStatus::WorkingRepo, Path::new("/tmp/wt"), true),
+            quiet_reason(
+                FolderRepoStatus::WorkingRepo,
+                Path::new("/tmp/wt"),
+                crate::model::AgentWorkspaceKind::Managed
+            ),
             None,
             "a working repository is not quiet"
         );
-        let no_repo = quiet_reason(FolderRepoStatus::NoRepo, Path::new("/tmp/mine"), false)
-            .expect("a plain folder is quiet");
+        let no_repo = quiet_reason(
+            FolderRepoStatus::NoRepo,
+            Path::new("/tmp/mine"),
+            crate::model::AgentWorkspaceKind::Folder,
+        )
+        .expect("a plain folder is quiet");
         assert_eq!(no_repo, FolderRepoStatus::NoRepo.quiet_reason());
     }
 
@@ -838,7 +865,7 @@ mod tests {
                 Path::new("/worktrees/repo/feat"),
                 "feat",
                 "main",
-                true,
+                crate::working_copy::ConversationResume::Resumes,
                 &running(&[("claude", true)])
             ),
             "Recreate the working copy for this agent at /worktrees/repo/feat?\n\n\
@@ -860,26 +887,41 @@ mod tests {
     /// left running, whatever its name, a custom provider included.
     #[test]
     fn a_running_tab_is_sorted_by_its_cli() {
-        assert_eq!(RunningTabFate::of("claude", true), RunningTabFate::Follows);
-        assert_eq!(RunningTabFate::of("Claude", false), RunningTabFate::Follows);
         assert_eq!(
-            RunningTabFate::of("codex", true),
+            RunningTabFate::of("claude", crate::working_copy::ConversationResume::Resumes),
+            RunningTabFate::Follows
+        );
+        assert_eq!(
+            RunningTabFate::of(
+                "Claude",
+                crate::working_copy::ConversationResume::StartsFresh
+            ),
+            RunningTabFate::Follows
+        );
+        assert_eq!(
+            RunningTabFate::of("codex", crate::working_copy::ConversationResume::Resumes),
             RunningTabFate::Restartable
         );
         assert_eq!(
-            RunningTabFate::of("opencode", true),
+            RunningTabFate::of("opencode", crate::working_copy::ConversationResume::Resumes),
             RunningTabFate::Restartable
         );
         assert_eq!(
-            RunningTabFate::of("copilot", false),
+            RunningTabFate::of(
+                "copilot",
+                crate::working_copy::ConversationResume::StartsFresh
+            ),
             RunningTabFate::LeftRunning
         );
         assert_eq!(
-            RunningTabFate::of("my-cli", true),
+            RunningTabFate::of("my-cli", crate::working_copy::ConversationResume::Resumes),
             RunningTabFate::Restartable
         );
         assert_eq!(
-            RunningTabFate::of("my-cli", false),
+            RunningTabFate::of(
+                "my-cli",
+                crate::working_copy::ConversationResume::StartsFresh
+            ),
             RunningTabFate::LeftRunning
         );
     }
@@ -955,7 +997,7 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             "main",
-            true,
+            crate::working_copy::ConversationResume::Resumes,
             &running(&[("claude", true)]),
         );
         assert!(body.contains("checks it out there again"), "{body}");
@@ -972,7 +1014,7 @@ mod tests {
             Path::new("/tmp/wt"),
             "feat",
             "main",
-            false,
+            crate::working_copy::ConversationResume::StartsFresh,
             &running(&[("copilot", false)]),
         );
         assert!(no_resume.contains("will not resume"), "{no_resume}");
@@ -1149,8 +1191,12 @@ mod tests {
     #[test]
     fn an_unreachable_directory_gets_the_hedged_sentence_for_its_kind() {
         use crate::git::FolderRepoStatus;
-        let managed = quiet_reason(FolderRepoStatus::Indeterminate, Path::new("/mnt/wt"), true)
-            .expect("an unreachable working copy is quiet");
+        let managed = quiet_reason(
+            FolderRepoStatus::Indeterminate,
+            Path::new("/mnt/wt"),
+            crate::model::AgentWorkspaceKind::Managed,
+        )
+        .expect("an unreachable working copy is quiet");
         assert!(managed.contains("/mnt/wt"), "{managed}");
         assert!(managed.contains("mounted"), "{managed}");
         assert!(!managed.contains("no longer exists"), "{managed}");
@@ -1158,7 +1204,7 @@ mod tests {
         let folder = quiet_reason(
             FolderRepoStatus::Indeterminate,
             Path::new("/mnt/mine"),
-            false,
+            crate::model::AgentWorkspaceKind::Folder,
         )
         .expect("an unreachable folder is quiet");
         assert_eq!(folder, FolderRepoStatus::Indeterminate.quiet_reason());

@@ -20,7 +20,16 @@ fn kill(pid: u32) {
 /// Wire a client the way the engine does (events.rs / companion.rs), let its
 /// leader exit leaving a job in its group, observe the exit with `try_wait` (as
 /// the exit prune and the terminating reap do) and drop it in the same tick.
-fn run(wait_for_record: bool) -> (u32, bool) {
+/// Whether the drop waits for the leader-exit record to land first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordWait {
+    /// Wait for the record, then drop.
+    WaitForIt,
+    /// Drop right after the reap.
+    DropAtOnce,
+}
+
+fn run(record: RecordWait) -> (u32, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let pidfile = dir.path().join("job.pid");
     let args = vec![
@@ -48,7 +57,7 @@ fn run(wait_for_record: bool) -> (u32, bool) {
         .parse()
         .unwrap();
     assert!(process_start(job).is_some());
-    if wait_for_record {
+    if record == RecordWait::WaitForIt {
         registry.wait_for_recordings(&[process], Duration::from_secs(5));
     }
     drop(client);
@@ -60,7 +69,7 @@ fn run(wait_for_record: bool) -> (u32, bool) {
 
 #[test]
 fn review27_control_with_the_record_landed_the_drop_kills_the_group() {
-    let (job, survived) = run(true);
+    let (job, survived) = run(RecordWait::WaitForIt);
     assert!(
         !survived,
         "control: job {job} should have been SIGKILLed with its group"
@@ -69,7 +78,7 @@ fn review27_control_with_the_record_landed_the_drop_kills_the_group() {
 
 #[test]
 fn review27_a_drop_right_after_the_reap_leaves_the_groups_job_running() {
-    let (job, survived) = run(false);
+    let (job, survived) = run(RecordWait::DropAtOnce);
     assert!(
         !survived,
         "job {job}, in the reaped child's own process group, outlived the client's drop: \

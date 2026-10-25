@@ -214,12 +214,21 @@ pub fn resolve_removal(entries: Vec<ProjectWorktreeEntry>, requested: &Path) -> 
     }
 }
 
+/// Whether a worktree removal also deletes the branch it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchRemoval {
+    /// Delete the branch too.
+    Delete,
+    /// Keep the branch.
+    Keep,
+}
+
 /// Which branch, if any, a removal should delete. Pure, and the whole rule:
 /// the caller's request AND a branch to act on. A detached worktree sends
 /// nothing regardless of what was asked.
-pub fn branch_to_delete(delete_branch: bool, branch: Option<&str>) -> Option<&str> {
-    match (delete_branch, branch) {
-        (true, Some(branch)) => Some(branch),
+pub fn branch_to_delete(removal: BranchRemoval, branch: Option<&str>) -> Option<&str> {
+    match (removal, branch) {
+        (BranchRemoval::Delete, Some(branch)) => Some(branch),
         _ => None,
     }
 }
@@ -262,9 +271,9 @@ pub fn remove_managed_worktree(
     paths: &DuxPaths,
     sessions: &[AgentSession],
     requested: &Path,
-    delete_branch: bool,
+    branch_removal: BranchRemoval,
 ) -> Result<RemovalOutcome, String> {
-    remove_managed_worktree_once(project, paths, sessions, requested, delete_branch)
+    remove_managed_worktree_once(project, paths, sessions, requested, branch_removal)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -275,7 +284,7 @@ fn remove_managed_worktree_once(
     paths: &DuxPaths,
     sessions: &[AgentSession],
     requested: &Path,
-    delete_branch: bool,
+    branch_removal: BranchRemoval,
 ) -> anyhow::Result<RemovalOutcome> {
     let repo_path = PathBuf::from(&project.path);
     let worktrees = git::list_worktrees(&repo_path)?;
@@ -285,7 +294,7 @@ fn remove_managed_worktree_once(
         RemovalResolution::NotManaged => Ok(RemovalOutcome::NotManaged),
         RemovalResolution::Attached => Ok(RemovalOutcome::Attached),
         RemovalResolution::Removable { path, branch } => {
-            match branch_to_delete(delete_branch, branch.as_deref()) {
+            match branch_to_delete(branch_removal, branch.as_deref()) {
                 // The user asked for the branch too. `remove_worktree` deletes
                 // the branch the worktree is on; there is no second, drifted
                 // branch here, because a worktree with no agent has no record of
@@ -474,7 +483,17 @@ impl AdmittedRemoval {
             )
         };
         let outcome = crate::engine::remove_after_last_look(look, || {
-            remove_managed_worktree_once(&project, &paths, &[], &worktree, delete_branch)
+            remove_managed_worktree_once(
+                &project,
+                &paths,
+                &[],
+                &worktree,
+                if delete_branch {
+                    BranchRemoval::Delete
+                } else {
+                    BranchRemoval::Keep
+                },
+            )
         });
         lease.finish(match &outcome {
             Ok(RemovalOutcome::Removed {
@@ -765,14 +784,17 @@ mod tests {
 
     #[test]
     fn a_branch_is_deleted_only_when_asked_for_and_present() {
-        assert_eq!(branch_to_delete(true, Some("free")), Some("free"));
-        assert_eq!(branch_to_delete(false, Some("free")), None);
         assert_eq!(
-            branch_to_delete(true, None),
+            branch_to_delete(BranchRemoval::Delete, Some("free")),
+            Some("free")
+        );
+        assert_eq!(branch_to_delete(BranchRemoval::Keep, Some("free")), None);
+        assert_eq!(
+            branch_to_delete(BranchRemoval::Delete, None),
             None,
             "a detached worktree sends nothing however the checkbox was left"
         );
-        assert_eq!(branch_to_delete(false, None), None);
+        assert_eq!(branch_to_delete(BranchRemoval::Keep, None), None);
     }
 
     fn git_in(dir: &Path, args: &[&str]) {
@@ -835,7 +857,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (project, paths, worktree) = real_repo(root.path());
         let repo = PathBuf::from(&project.path);
-        let outcome = remove_managed_worktree(&project, &paths, &[], &worktree, false).unwrap();
+        let outcome =
+            remove_managed_worktree(&project, &paths, &[], &worktree, BranchRemoval::Keep).unwrap();
         assert!(matches!(
             outcome,
             RemovalOutcome::Removed { branch: None, .. }
@@ -849,7 +872,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (project, paths, worktree) = real_repo(root.path());
         let repo = PathBuf::from(&project.path);
-        let outcome = remove_managed_worktree(&project, &paths, &[], &worktree, true).unwrap();
+        let outcome =
+            remove_managed_worktree(&project, &paths, &[], &worktree, BranchRemoval::Delete)
+                .unwrap();
         let RemovalOutcome::Removed {
             branch: Some(branch),
             ..
@@ -868,8 +893,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (project, paths, worktree) = real_repo(root.path());
         let sessions = vec![session(&worktree)];
-        let outcome =
-            remove_managed_worktree(&project, &paths, &sessions, &worktree, true).unwrap();
+        let outcome = remove_managed_worktree(
+            &project,
+            &paths,
+            &sessions,
+            &worktree,
+            BranchRemoval::Delete,
+        )
+        .unwrap();
         assert_eq!(outcome, RemovalOutcome::Attached);
         assert!(worktree.exists(), "the attached worktree must survive");
         assert!(branch_exists(Path::new(&project.path), "free"));

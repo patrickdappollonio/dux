@@ -6507,7 +6507,11 @@ mod tests {
             worktree_path,
             branch_name,
             source_branch,
-            *conversation_resumes,
+            if *conversation_resumes {
+                dux_core::working_copy::ConversationResume::Resumes
+            } else {
+                dux_core::working_copy::ConversationResume::StartsFresh
+            },
             running_tabs,
         );
         assert!(body.contains("are gone either way"), "{body}");
@@ -6604,7 +6608,11 @@ mod tests {
             worktree_path,
             branch_name,
             source_branch,
-            *conversation_resumes,
+            if *conversation_resumes {
+                dux_core::working_copy::ConversationResume::Resumes
+            } else {
+                dux_core::working_copy::ConversationResume::StartsFresh
+            },
             running_tabs,
         );
         assert!(body.contains("A running Codex tab cannot follow"), "{body}");
