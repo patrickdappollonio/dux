@@ -325,10 +325,8 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
     // at CLI startup and the call is bounded. A failed detection warns and proceeds
     // on the configured host only, never blocks, and under `auto` the serve path
     // keeps watching, so the warning says so rather than sounding final.
-    let tailscale_mode = dux_core::config::effective_tailscale_mode(
-        config.server.tailscale_mode(),
-        overrides.no_tailscale,
-    );
+    let tailscale_mode =
+        dux_core::config::effective_tailscale_mode(config.server.tailscale_mode(), &overrides);
     // Warnings raised here print as the first lines of the server's log (the
     // same timestamped warning lines the flip's viewer shows), ahead of any bind.
     let mut startup_warnings = Vec::new();

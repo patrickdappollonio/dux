@@ -219,15 +219,16 @@ impl ServerAuthConfig {
     /// Problems name settings and positions, never values: they reach the
     /// status line, toasts and dux.log.
     pub fn problems(&self) -> Vec<String> {
-        self.problems_with(true)
+        self.problems_with(CrossKeyRules::Judged)
             .into_iter()
             .map(|problem| problem.message)
             .collect()
     }
 
-    /// [`Self::problems`], with the rules spanning keys only when
-    /// `cross_field`.
-    fn problems_with(&self, cross_field: bool) -> Vec<Problem> {
+    /// [`Self::problems`], with the rules spanning keys only when they are
+    /// [`CrossKeyRules::Judged`].
+    fn problems_with(&self, cross_key_rules: CrossKeyRules) -> Vec<Problem> {
+        let cross_field = cross_key_rules == CrossKeyRules::Judged;
         let mut problems = Vec::new();
         let key = |name: &str| auth_key(name);
         if !self.password_hash.is_empty()
@@ -303,6 +304,16 @@ impl ServerAuthConfig {
         }
         problems
     }
+}
+
+/// Whether the rules spanning keys are judged, which they are not when a
+/// key they involve does not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossKeyRules {
+    /// Judged with the rest.
+    Judged,
+    /// Left out: a key they involve does not read.
+    Skipped,
 }
 
 /// A problem that stops dux starting with a config file: the sentence shown
@@ -459,10 +470,15 @@ pub fn rule_problems_located(
     let Ok(raw) = toml::Value::Table(readable).try_into::<RawServerAuthConfig>() else {
         return problems;
     };
-    let cross_field = !unreadable
+    let cross_key_rules = if unreadable
         .iter()
-        .any(|key| key == "minimum_password_length" || key == "max_password_bytes");
-    problems.extend(ServerAuthConfig::from_raw(raw).problems_with(cross_field));
+        .any(|key| key == "minimum_password_length" || key == "max_password_bytes")
+    {
+        CrossKeyRules::Skipped
+    } else {
+        CrossKeyRules::Judged
+    };
+    problems.extend(ServerAuthConfig::from_raw(raw).problems_with(cross_key_rules));
     problems
 }
 

@@ -851,9 +851,9 @@ impl TailscaleModeOutcome {
 /// CLI flag cannot be honored on one code path and forgotten on another.
 pub fn effective_tailscale_mode(
     configured: TailscaleMode,
-    no_tailscale_flag: bool,
+    cli: &ServerCliOverrides,
 ) -> TailscaleMode {
-    if no_tailscale_flag {
+    if cli.no_tailscale {
         TailscaleMode::No
     } else {
         configured
@@ -6140,7 +6140,7 @@ pub fn resolve_server_plan(
     if let Some(problem) = port_zero_problem(&bind.ip().to_string(), bind.port()) {
         bail!(problem);
     }
-    let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli.no_tailscale);
+    let tailscale = effective_tailscale_mode(server.tailscale_mode(), cli);
     let ts = if tailscale.wants_tailscale() {
         tailscale_ip
     } else {
@@ -8489,14 +8489,18 @@ github_integration = false
 
     #[test]
     fn no_tailscale_flag_forces_the_no_mode_whatever_the_config_says() {
+        let flagged = ServerCliOverrides {
+            no_tailscale: true,
+            ..ServerCliOverrides::default()
+        };
         for configured in [TailscaleMode::Auto, TailscaleMode::Yes, TailscaleMode::No] {
             assert_eq!(
-                effective_tailscale_mode(configured, true),
+                effective_tailscale_mode(configured, &flagged),
                 TailscaleMode::No,
                 "--no-tailscale must win over {configured:?}"
             );
             assert_eq!(
-                effective_tailscale_mode(configured, false),
+                effective_tailscale_mode(configured, &ServerCliOverrides::default()),
                 configured,
                 "without the flag the configured mode stands"
             );

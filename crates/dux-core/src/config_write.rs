@@ -518,7 +518,11 @@ pub fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig])
     let Ok(written_doc) = written.parse::<DocumentMut>() else {
         return seen.to_string();
     };
-    union_tables(seen_doc.as_table_mut(), written_doc.as_table(), true);
+    union_tables(
+        seen_doc.as_table_mut(),
+        written_doc.as_table(),
+        Level::FileRoot,
+    );
     forget_gone_projects(&mut seen_doc, &written_doc, projects);
     clear_positions(seen_doc.as_table_mut());
     seen_doc.to_string()
@@ -566,14 +570,40 @@ fn clear_positions(table: &mut Table) {
     }
 }
 
-/// `root` when `seen` is the file itself (see [`merges_entries`]).
-fn union_tables(seen: &mut Table, written: &Table, root: bool) {
+/// Where a table sits in the file, which decides whether its arrays of
+/// tables merge entry by entry (see [`merges_entries`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Level {
+    /// The file itself.
+    FileRoot,
+    /// Any table inside it.
+    Nested,
+}
+
+/// How an array of tables is folded: entry by entry, or as one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArrayMerge {
+    /// Each written entry folded into the seen entry it is.
+    ByEntry,
+    /// The written array is the seen one.
+    Whole,
+}
+
+/// `level` says whether `seen` is the file itself (see [`merges_entries`]).
+fn union_tables(seen: &mut Table, written: &Table, level: Level) {
     for (key, item) in written {
         match seen.get_mut(key) {
             None => {
                 seen.insert(key, item.clone());
             }
-            Some(seen_item) => union_items(seen_item, item, merges_entries(key, root)),
+            Some(seen_item) => {
+                let merge = if merges_entries(key, level) {
+                    ArrayMerge::ByEntry
+                } else {
+                    ArrayMerge::Whole
+                };
+                union_items(seen_item, item, merge);
+            }
         }
     }
 }
@@ -582,18 +612,17 @@ fn union_tables(seen: &mut Table, written: &Table, root: bool) {
 /// a table in either form (a subtable, an inline table, one nested inline in
 /// another), and inside each entry of an array of tables matched to its
 /// written entry by the same assignment the merge uses, for `[[projects]]`
-/// (`by_entry`). Any other array of tables is one value to the merge, so it
+/// ([`ArrayMerge::ByEntry`]). Any other array of tables is one value to the merge, so it
 /// is seen as the one written; nothing is ever appended to it, because an
 /// entry with nothing to identify it by would be appended on every save. A
 /// value is already seen; its text does not matter here.
-fn union_items(seen: &mut Item, written: &Item, by_entry: bool) {
+fn union_items(seen: &mut Item, written: &Item, merge: ArrayMerge) {
     if let (Item::ArrayOfTables(seen_array), Item::ArrayOfTables(written_array)) =
         (&mut *seen, written)
     {
-        if by_entry {
-            union_arrays(seen_array, written_array);
-        } else {
-            *seen_array = written_array.clone();
+        match merge {
+            ArrayMerge::ByEntry => union_arrays(seen_array, written_array),
+            ArrayMerge::Whole => *seen_array = written_array.clone(),
         }
         return;
     }
@@ -601,10 +630,10 @@ fn union_items(seen: &mut Item, written: &Item, by_entry: bool) {
         return;
     };
     match seen {
-        Item::Table(seen_table) => union_tables(seen_table, &written_table, false),
+        Item::Table(seen_table) => union_tables(seen_table, &written_table, Level::Nested),
         Item::Value(Value::InlineTable(inline)) => {
             let mut table = inline.clone().into_table();
-            union_tables(&mut table, &written_table, false);
+            union_tables(&mut table, &written_table, Level::Nested);
             let decor = inline.decor().clone();
             *inline = table.into_inline_table();
             *inline.decor_mut() = decor;
@@ -631,7 +660,7 @@ fn union_arrays(seen: &mut toml_edit::ArrayOfTables, written: &toml_edit::ArrayO
     };
     for (entry, matched) in written_entries.into_iter().zip(matched) {
         match matched.and_then(|index| seen.get_mut(index)) {
-            Some(seen_entry) => union_tables(seen_entry, entry, false),
+            Some(seen_entry) => union_tables(seen_entry, entry, Level::Nested),
             None => seen.push(entry.clone()),
         }
     }
@@ -676,7 +705,7 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
                     base: with_base.as_table(),
                 }),
                 with_ours.as_table(),
-                true,
+                Level::FileRoot,
             );
         }
         None => merge_changed_at(
@@ -684,7 +713,7 @@ fn apply_patches_three_way(disk: &mut DocumentMut, base: Option<SaveBase<'_>>, o
             original.as_table(),
             None,
             with_ours.as_table(),
-            true,
+            Level::FileRoot,
         ),
     }
     if let Some(base) = base {
@@ -770,7 +799,7 @@ struct MergeBase<'a> {
 /// rules). `disk` is the file before this save. With no base, everything
 /// in `ours` counts as changed.
 fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, ours: &Table) {
-    merge_changed_at(target, disk, base, ours, false);
+    merge_changed_at(target, disk, base, ours, Level::Nested);
 }
 
 /// Whether the array of tables at `key` is one dux merges entry by entry:
@@ -780,17 +809,17 @@ fn merge_changed(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, 
 /// provider, a newer dux's) is one value: memory's when memory changed it,
 /// the file's otherwise, so an entry with nothing to identify it by is never
 /// written twice.
-fn merges_entries(key: &str, root: bool) -> bool {
-    root && key == "projects"
+fn merges_entries(key: &str, level: Level) -> bool {
+    level == Level::FileRoot && key == "projects"
 }
 
-/// [`merge_changed`] at one table, `root` when it is the file itself.
+/// [`merge_changed`] at one table, at `level` in the file.
 fn merge_changed_at(
     target: &mut Table,
     disk: &Table,
     base: Option<MergeBase<'_>>,
     ours: &Table,
-    root: bool,
+    level: Level,
 ) {
     for (key, ours_item) in ours {
         let Some(base_side) = base else {
@@ -862,7 +891,7 @@ fn merge_changed_at(
                     continue;
                 }
                 (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
-                    if merges_entries(key, root) =>
+                    if merges_entries(key, level) =>
                 {
                     let empty = toml_edit::ArrayOfTables::new();
                     let mut out = toml_edit::ArrayOfTables::new();
@@ -912,7 +941,7 @@ fn merge_changed_at(
                 Item::ArrayOfTables(ours_array),
                 Item::ArrayOfTables(disk_array),
                 Some(Item::ArrayOfTables(t)),
-            ) if merges_entries(key, root) && base_item.is_none_or(Item::is_array_of_tables) => {
+            ) if merges_entries(key, level) && base_item.is_none_or(Item::is_array_of_tables) => {
                 let empty = toml_edit::ArrayOfTables::new();
                 merge_array_of_tables(
                     t,
@@ -984,7 +1013,7 @@ fn merge_changed_at(
         // is merged entry by entry against an empty one, so an entry added on
         // disk by someone else stays; only the base's entries go.
         if let (Some(base_side), Some(Item::ArrayOfTables(disk_array))) = (base, disk.get(&key))
-            && merges_entries(&key, root)
+            && merges_entries(&key, level)
             && let Some(Item::ArrayOfTables(base_array)) = base_side.base.get(&key)
         {
             let raw_array = base_side
@@ -1156,7 +1185,7 @@ const CLOSEST: u8 = 2;
 /// `id` (each parse mints one for an id-less entry), then the same `name`,
 /// then nothing.
 fn entry_closeness(a: &Table, b: &Table) -> u8 {
-    if entry_text(a, true) == entry_text(b, true) {
+    if entry_text(a, EntryId::Ignored) == entry_text(b, EntryId::Ignored) {
         return CLOSEST;
     }
     let name = |table: &Table| table.get("name").map(item_text);
@@ -1181,12 +1210,21 @@ fn managed_keys(entry: &Table) -> Table {
     managed
 }
 
+/// Whether an entry's `id` takes part in comparing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryId {
+    /// The id is compared like any other key.
+    Compared,
+    /// The id is left out.
+    Ignored,
+}
+
 /// An entry's text for comparing base and memory. When the file's own entry
 /// has no `id`, the id is left out: each parse mints one, so it says nothing
 /// about whether memory changed the entry.
-fn entry_text(entry: &Table, ignore_id: bool) -> String {
+fn entry_text(entry: &Table, id: EntryId) -> String {
     let mut entry = entry.clone();
-    if ignore_id {
+    if id == EntryId::Ignored {
         entry.remove("id");
     }
     entry.to_string()
@@ -1274,10 +1312,15 @@ fn merge_array_of_tables(
         let base_index = base_of[slot];
         let raw_entry = raw_of[slot].map(|r| raws[r]);
         let disk_index = disk_of[slot];
-        let ignore_id = raw_entry.is_some_and(|r| !r.contains_key("id"))
-            || disk_index.is_some_and(|d| !disks[d].contains_key("id"));
-        let unchanged = base_index
-            .is_some_and(|b| entry_text(bases[b], ignore_id) == entry_text(entry, ignore_id));
+        let id = if raw_entry.is_some_and(|r| !r.contains_key("id"))
+            || disk_index.is_some_and(|d| !disks[d].contains_key("id"))
+        {
+            EntryId::Ignored
+        } else {
+            EntryId::Compared
+        };
+        let unchanged =
+            base_index.is_some_and(|b| entry_text(bases[b], id) == entry_text(entry, id));
         let Some(d) = disk_index else {
             // Not in the file: deleted by hand when the file once had it and
             // memory did not change it; otherwise memory's entry is written.
@@ -1780,19 +1823,19 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     // The AI commit-message feature was removed; drop its now-obsolete prompt key
     // from any existing config so saves stop carrying it forward.
     remove_table_key(doc, "defaults", "commit_prompt");
-    patch_table_bool(
+    patch_table_value(
         doc,
         "defaults",
         "enable_randomized_pet_name_by_default",
         config.defaults.enable_randomized_pet_name_by_default,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "defaults",
         "pull_before_creating_agent_by_default",
         config.defaults.pull_before_creating_agent_by_default,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "defaults",
         "copy_uncommitted_changes_by_default",
@@ -1808,7 +1851,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "logging", "path", &config.logging.path);
     patch_table_u64(doc, "logging", "max_bytes", config.logging.max_bytes);
     patch_table_u32(doc, "logging", "keep", config.logging.keep);
-    patch_table_bool(doc, "logging", "compress", config.logging.compress);
+    patch_table_value(doc, "logging", "compress", config.logging.compress);
 
     // --- [ui] ---
     patch_table_u16(doc, "ui", "left_width_pct", config.ui.left_width_pct);
@@ -1856,14 +1899,14 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "branch_sync_interval",
         config.ui.branch_sync_interval,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "show_diff_line_numbers",
         config.ui.show_diff_line_numbers,
     );
     patch_table_u16(doc, "ui", "diff_tab_width", config.ui.diff_tab_width);
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "github_integration",
@@ -1887,7 +1930,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "github_probe_interval_secs",
         config.ui.github_probe_interval_secs,
     );
-    patch_table_bool(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+    patch_table_value(doc, "ui", "copy_on_select", config.ui.copy_on_select);
     patch_table_str(
         doc,
         "ui",
@@ -1901,7 +1944,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.terminal_font_size,
     );
     patch_table_str(doc, "ui", "compose_bar", &config.ui.compose_bar);
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "mobile_accessory_bar",
@@ -1913,22 +1956,22 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "attention_grace_seconds",
         config.ui.attention_grace_seconds,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "auto_reopen_agents",
         config.ui.auto_reopen_agents,
     );
-    patch_table_bool(doc, "ui", "show_changes_pane", config.ui.show_changes_pane);
-    patch_table_bool(
+    patch_table_value(doc, "ui", "show_changes_pane", config.ui.show_changes_pane);
+    patch_table_value(
         doc,
         "ui",
         "always_show_tab_strip",
         config.ui.always_show_tab_strip,
     );
-    patch_table_bool(doc, "ui", "tab_reaches_agent", config.ui.tab_reaches_agent);
+    patch_table_value(doc, "ui", "tab_reaches_agent", config.ui.tab_reaches_agent);
     patch_table_str(doc, "ui", "upload_directory", &config.ui.upload_directory);
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "upload_write_gitignore",
@@ -1940,20 +1983,20 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "upload_pasted_text_chars",
         config.ui.upload_pasted_text_chars,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "attention_indicator",
         config.ui.attention_indicator,
     );
-    patch_table_bool(doc, "ui", "attention_on_bell", config.ui.attention_on_bell);
-    patch_table_bool(
+    patch_table_value(doc, "ui", "attention_on_bell", config.ui.attention_on_bell);
+    patch_table_value(
         doc,
         "ui",
         "disable_automated_welcome_screen",
         config.ui.disable_automated_welcome_screen,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "ui",
         "disable_release_notes",
@@ -1967,7 +2010,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "ui", "agent_sort", &config.ui.agent_sort);
     patch_table_str(doc, "ui", "theme", &config.ui.theme);
-    patch_table_bool(doc, "ui", "nerd_font_icons", config.ui.nerd_font_icons);
+    patch_table_value(doc, "ui", "nerd_font_icons", config.ui.nerd_font_icons);
 
     // --- [capabilities] ---
     patch_table_str(
@@ -1976,7 +2019,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "terminal_identity",
         &config.capabilities.terminal_identity,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "capabilities",
         "passthrough",
@@ -1988,13 +2031,13 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "clipboard_passthrough",
         &config.capabilities.clipboard_passthrough,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "capabilities",
         "hyperlinks",
         config.capabilities.hyperlinks,
     );
-    patch_table_bool(
+    patch_table_value(
         doc,
         "capabilities",
         "web_notifications",
@@ -2034,7 +2077,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     remove_table_key(doc, "server", "tailscale_enabled");
     patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
-    patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    patch_table_value(doc, "server", "access_log", config.server.access_log);
     patch_table_usize(
         doc,
         "server",
@@ -2044,9 +2087,9 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "server", "log_path", &config.server.log_path);
     patch_table_u64(doc, "server", "log_max_bytes", config.server.log_max_bytes);
     patch_table_u32(doc, "server", "log_keep", config.server.log_keep);
-    patch_table_bool(doc, "server", "log_compress", config.server.log_compress);
-    patch_table_bool(doc, "server", "qr_codes", config.server.qr_codes);
-    patch_table_bool(
+    patch_table_value(doc, "server", "log_compress", config.server.log_compress);
+    patch_table_value(doc, "server", "qr_codes", config.server.qr_codes);
+    patch_table_value(
         doc,
         "server",
         "serve_while_tui",
@@ -2228,7 +2271,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
 
     // --- [keys] ---
-    patch_table_bool(
+    patch_table_value(
         doc,
         "keys",
         "show_terminal_keys",
@@ -2328,7 +2371,12 @@ fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usi
     table[key] = toml_edit::value(value as i64);
 }
 
-fn patch_table_bool(doc: &mut DocumentMut, section: &str, key: &str, value: bool) {
+fn patch_table_value(
+    doc: &mut DocumentMut,
+    section: &str,
+    key: &str,
+    value: impl Into<toml_edit::Value>,
+) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(value);
 }
