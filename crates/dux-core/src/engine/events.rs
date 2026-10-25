@@ -1549,8 +1549,7 @@ impl Engine {
         }
 
         logger::info(&format!(
-            "auto-detached {} agent \"{}\" to avoid worktree conflict",
-            provider, label,
+            "auto-detached {provider} agent \"{label}\" to avoid worktree conflict",
         ));
         Some(DetachedSession {
             id: conflicting.id,

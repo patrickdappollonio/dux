@@ -3424,8 +3424,7 @@ mod independent_path_safety_check {
             let opened = DropDir::open(&dir);
             assert!(
                 opened.is_err(),
-                "must refuse a directory it cannot name: {:?}",
-                dir
+                "must refuse a directory it cannot name: {dir:?}"
             );
             assert!(
                 std::fs::read_dir(&dir).expect("read").next().is_none(),

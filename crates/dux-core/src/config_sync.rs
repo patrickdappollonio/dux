@@ -279,7 +279,7 @@ pub fn portable_project_path(path: &str) -> String {
         if relative.is_empty() {
             "$HOME".to_string()
         } else {
-            format!("$HOME/{}", relative)
+            format!("$HOME/{relative}")
         }
     } else {
         path.to_string()

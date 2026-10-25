@@ -5477,10 +5477,7 @@ mod tests {
         // nothing readable on screen, and this one left six rows of it.
         let client = PtyClient::spawn_with_env(
             "sh",
-            &[
-                "-c".to_string(),
-                format!("printf '{}'; exit 1", REFUSAL_ROWS),
-            ],
+            &["-c".to_string(), format!("printf '{REFUSAL_ROWS}'; exit 1")],
             worktree.path(),
             24,
             80,

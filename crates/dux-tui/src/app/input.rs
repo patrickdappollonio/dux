@@ -3901,7 +3901,7 @@ impl App {
                 ),
                 Span::raw(" │ "),
                 Span::styled(
-                    format!("{:<18}", label),
+                    format!("{label:<18}"),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" │ "),
@@ -9627,7 +9627,7 @@ impl App {
             ),
             Span::raw(" │ "),
             Span::styled(
-                format!("{:<18}", kind_label),
+                format!("{kind_label:<18}"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(" │ "),
@@ -10099,9 +10099,8 @@ impl App {
             | PromptMouseTarget::StartupCommandLogsClose => {
                 debug_assert!(
                     false,
-                    "button target {:?} should be dispatched via activate_button, not \
-                     dispatch_prompt_target_action",
-                    target
+                    "button target {target:?} should be dispatched via activate_button, not \
+                     dispatch_prompt_target_action"
                 );
             }
         }

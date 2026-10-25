@@ -1712,8 +1712,7 @@ impl CreatePlanContext<'_> {
                 match git::fetch_pull_request_head_commit(&repo_path, number) {
                     Err(err) => {
                         logger::error(&format!(
-                            "PR head fetch failed for {} #{}: {err}",
-                            owner_repo, number
+                            "PR head fetch failed for {owner_repo} #{number}: {err}"
                         ));
                         self.send_failure(crate::status_text![
                             "Failed to fetch PR ",
@@ -1820,8 +1819,7 @@ impl CreatePlanContext<'_> {
                 });
                 if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
                     logger::error(&format!(
-                        "PR worktree fetch failed for {} #{}: {err}",
-                        owner_repo, number
+                        "PR worktree fetch failed for {owner_repo} #{number}: {err}"
                     ));
                     let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: self.create_key.to_string(),
@@ -1849,8 +1847,7 @@ impl CreatePlanContext<'_> {
                 Ok(result) => result,
                 Err(err) => {
                     logger::error(&format!(
-                        "PR worktree creation failed for {} #{}: {err}",
-                        owner_repo, number
+                        "PR worktree creation failed for {owner_repo} #{number}: {err}"
                     ));
                     // The responsibility boundary: no worktree exists, so the
                     // provenance-driven rollback will not run and nothing else

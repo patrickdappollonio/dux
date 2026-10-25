@@ -2272,7 +2272,7 @@ impl Engine {
         }
         if let Some(raw) = favicon {
             candidate.server.favicon = crate::config_effective::parse_server_favicon(&raw)
-                .ok_or_else(|| anyhow::anyhow!("unknown favicon color \"{}\"", raw))?;
+                .ok_or_else(|| anyhow::anyhow!("unknown favicon color \"{raw}\""))?;
         }
         // Idempotent: skip the write (and the fan-out) when nothing changed.
         if candidate.server.title == self.config.server.title
@@ -12271,8 +12271,7 @@ mod tests {
         let final_status = statuses.last().expect("final status");
         assert_eq!(
             final_status.tone, "info",
-            "expected success, got: {:?}",
-            final_status
+            "expected success, got: {final_status:?}"
         );
     }
 

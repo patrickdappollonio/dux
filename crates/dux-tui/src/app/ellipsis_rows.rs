@@ -290,7 +290,7 @@ fn the_project_picker_cuts_a_wide_name_and_keeps_the_tail_of_a_wide_path() {
         base_branch: None,
         orphaned: false,
     };
-    let wide_path = format!("/srv/{}/{}/リーフ", LONG_CJK, LONG_CJK);
+    let wide_path = format!("/srv/{LONG_CJK}/{LONG_CJK}/リーフ");
     app.prompt = PromptState::PickProject {
         intent: ProjectChooserIntent::NewAgent,
         entries: vec![

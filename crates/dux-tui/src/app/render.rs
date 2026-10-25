@@ -7089,7 +7089,7 @@ impl App {
                             format!("  {}", pad_to_width(&name, path_col)),
                             style.add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(format!("  {:<8}", kind), kind_style),
+                        Span::styled(format!("  {kind:<8}"), kind_style),
                         Span::styled("  branch: ", branch_label_style),
                         Span::styled(entry.branch_name.as_str(), branch_value_style),
                         Span::styled(
@@ -21561,8 +21561,7 @@ mod tests {
         assert_eq!(spans_text(&hl), spans_text(&plain));
         assert!(
             hl.iter().all(|s| s.style != meta_hl_style()),
-            "a match cut off by the truncation must not highlight anything: {:?}",
-            hl,
+            "a match cut off by the truncation must not highlight anything: {hl:?}",
         );
     }
 

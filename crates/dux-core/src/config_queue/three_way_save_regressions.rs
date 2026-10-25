@@ -1072,7 +1072,7 @@ fn inline_sections_keep_their_form_and_comments_over_saves() {
         }
         q.save_eager(m.clone()).unwrap();
         let t = read(&path);
-        crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{:?}", e));
+        crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{e:?}"));
     }
     let t = read(&path);
     for c in [
@@ -1102,8 +1102,7 @@ fn dotted_top_level_keys_round_trip() {
         m.env.insert(format!("V{round}"), "x".into());
         q.save_eager(m.clone()).unwrap();
         let t = read(&path);
-        let c =
-            crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{:?}", e));
+        let c = crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(c.ui.left_width_pct, 30 + round);
     }
 }
@@ -1145,7 +1144,7 @@ fn the_full_patch_handles_inline_sections() {
     for _ in 0..3 {
         crate::config_write::patch_config_file(&path, &c).unwrap();
         let t = read(&path);
-        crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{:?}", e));
+        crate::config::config_from_text_as_written(&t).unwrap_or_else(|e| panic!("{e:?}"));
     }
 }
 
