@@ -686,7 +686,10 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
     // documents, so `example/application:tags` is not mistaken for an address.
     let (host, path) = match read_colon_form(body) {
         ColonForm::Ambiguous => return Err(AMBIGUOUS_PORT_OR_OWNER.to_string()),
-        ColonForm::Scp(authority, path) => (Some(host_from_authority(authority, true)?), path),
+        ColonForm::Scp(authority, path) => (
+            Some(host_from_authority(authority, AuthorityForm::SshLike)?),
+            path,
+        ),
         ColonForm::NotScp => {
             // A schemeless value is `owner/repo[/...]` or `host/owner/repo[/...]`,
             // told apart by the leading segment: a dot, a port or `localhost`
@@ -694,7 +697,7 @@ fn parse_schemeless_form(input: &str) -> Result<Parts, String> {
             // So `github.com/example` is a host with its repository missing.
             let segments = path_segments(body);
             if looks_like_host(segments.first().copied().unwrap_or_default()) {
-                let host = host_from_authority(segments[0], false)?;
+                let host = host_from_authority(segments[0], AuthorityForm::Web)?;
                 let rest = body.split_once('/').map_or("", |(_, rest)| rest);
                 (Some(host), rest)
             } else {
@@ -784,12 +787,22 @@ fn read_colon_form(input: &str) -> ColonForm<'_> {
 /// not reach a log line or a match. A port comes off only for the ssh family,
 /// where it is the transport's and says nothing about the server's API; a web
 /// port is KEPT, or the match lands on a different server.
-fn host_from_authority(authority: &str, ssh_like: bool) -> Result<String, String> {
+/// How an authority was written: the ssh family's, whose port belongs to the
+/// transport, or a web address's, whose port names the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityForm {
+    /// An ssh-like address (`git@host:...`, `ssh://`).
+    SshLike,
+    /// A web address.
+    Web,
+}
+
+fn host_from_authority(authority: &str, form: AuthorityForm) -> Result<String, String> {
     let host = match authority.rsplit_once('@') {
         Some((_, host)) => host,
         None => authority,
     };
-    let host = if ssh_like {
+    let host = if form == AuthorityForm::SshLike {
         host.split(':').next().unwrap_or(host)
     } else {
         host
@@ -801,7 +814,7 @@ fn host_from_authority(authority: &str, ssh_like: bool) -> Result<String, String
     // `gh` has never heard of `ssh.github.com`, GitHub's port-443 ssh endpoint,
     // and neither has a project's configured address once dux has read it, so
     // the same name is used here.
-    if ssh_like && host == "ssh.github.com" {
+    if form == AuthorityForm::SshLike && host == "ssh.github.com" {
         return Ok("github.com".to_string());
     }
     Ok(host)

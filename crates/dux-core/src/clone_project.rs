@@ -494,7 +494,9 @@ impl ClonedFor {
         // flag.
         let warning = crate::prose::Prose::from_segments(question.warning.clone());
         let how = if question.by_flag {
-            crate::status_text![crate::agent_job::review_copy_how(true)]
+            crate::status_text![crate::agent_job::review_copy_how(
+                crate::agent_job::AgreementChannel::CommandLineFlag
+            )]
         } else {
             crate::status_text![
                 " To go ahead anyway, use New agent from PR in project ",
@@ -769,8 +771,12 @@ fn refuse_unagreed_review_copy(
                 crate::status_text![
                     crate::prose::Prose::from_segments(warning),
                     crate::agent_job::review_copy_how_before(
-                        by_flag,
-                        mode == CloneMode::AddExisting
+                        if by_flag {
+                            crate::agent_job::AgreementChannel::CommandLineFlag
+                        } else {
+                            crate::agent_job::AgreementChannel::DialogBox
+                        },
+                        mode
                     ),
                     nothing_was
                 ]
@@ -896,8 +902,12 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         .ok()
         .flatten()
         .unwrap_or_default();
-    let leading_branch =
-        crate::project_browser::project_base_for_add(dest, Some(&branch), false).into_branch();
+    let leading_branch = crate::project_browser::project_base_for_add(
+        dest,
+        Some(&branch),
+        crate::add_project_plan::DefaultCheckout::StayOnCurrent,
+    )
+    .into_branch();
     // A pull request's create decides for itself what to do with a branch of
     // that name, so only a plain agent is refused one here.
     let name_taken = pull_request.is_none()
@@ -1016,7 +1026,7 @@ fn add_existing_checkout(
     let (leading_branch, leading_branch_guess) = match crate::add_project_plan::project_base_at_add(
         checked_out.as_deref(),
         local_default,
-        true,
+        crate::add_project_plan::DefaultCheckout::CheckOutDefault,
     ) {
         crate::add_project_plan::ProjectBase::RemoteDefault(branch) => (branch, None),
         crate::add_project_plan::ProjectBase::Other(branch) => {

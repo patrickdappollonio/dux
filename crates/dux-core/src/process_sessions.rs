@@ -966,6 +966,16 @@ pub fn describe(rows: &[ProcRow]) -> String {
         .join(", ")
 }
 
+/// Which sessions a folder lookup returns: the ones standalone agents started,
+/// or every other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionStarter {
+    /// Sessions a standalone agent started.
+    StandaloneAgent,
+    /// Sessions anything else started.
+    NotAStandaloneAgent,
+}
+
 /// The sessions every agent has started, kept for as long as the agent exists,
 /// so a worktree removal can end what an earlier run of a tab, a terminal that
 /// was already closed, or a startup command left behind. Shared, because the
@@ -2171,7 +2181,7 @@ impl AgentProcessRegistry {
     /// removal of the folder ends all of them, and its last look before git
     /// runs asks this again to see whether anything new arrived.
     pub fn sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
-        self.sessions_in_of_kind(folder, false)
+        self.sessions_in_of_kind(folder, SessionStarter::NotAStandaloneAgent)
     }
 
     /// Every session, of any owner and kind, whose recorded folder matches.
@@ -2212,14 +2222,15 @@ impl AgentProcessRegistry {
     /// The sessions standalone agents started in `folder` or inside it, live or
     /// retired. Never ended by a removal; while they run they occupy the folder.
     pub fn standalone_sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
-        self.sessions_in_of_kind(folder, true)
+        self.sessions_in_of_kind(folder, SessionStarter::StandaloneAgent)
     }
 
     fn sessions_in_of_kind(
         &self,
         folder: &std::path::Path,
-        standalone: bool,
+        starter: SessionStarter,
     ) -> Vec<ProcessSession> {
+        let standalone = starter == SessionStarter::StandaloneAgent;
         let inner = self.lock();
         let live = inner
             .sessions

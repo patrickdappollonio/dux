@@ -181,6 +181,16 @@ impl ProjectBase {
     }
 }
 
+/// Whether a project add first checks the folder out at the remote's default
+/// branch: the add dialog's "Check out the default branch before adding" box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultCheckout {
+    /// The box is ticked: the folder moves to the default branch.
+    CheckOutDefault,
+    /// The box is unticked: the folder stays on the branch it is on.
+    StayOnCurrent,
+}
+
 /// Which branch becomes a project's base when it is added.
 ///
 /// `check_out_default` is the add dialog's "Check out the default branch
@@ -193,10 +203,12 @@ impl ProjectBase {
 pub fn project_base_at_add(
     current_branch: Option<&str>,
     remote_default: Option<&str>,
-    check_out_default: bool,
+    check_out_default: DefaultCheckout,
 ) -> ProjectBase {
     match (current_branch, remote_default) {
-        (_, Some(default)) if check_out_default => ProjectBase::RemoteDefault(default.to_string()),
+        (_, Some(default)) if check_out_default == DefaultCheckout::CheckOutDefault => {
+            ProjectBase::RemoteDefault(default.to_string())
+        }
         (Some(current), Some(default)) if current == default => {
             ProjectBase::RemoteDefault(default.to_string())
         }
@@ -374,7 +386,7 @@ mod tests {
         name: &'static str,
         current_branch: Option<&'static str>,
         remote_default: Option<&'static str>,
-        check_out_default: bool,
+        check_out_default: DefaultCheckout,
         expect: ProjectBase,
     }
 
@@ -384,56 +396,56 @@ mod tests {
                 name: "known default, box ticked: the default branch",
                 current_branch: Some("feature"),
                 remote_default: Some("main"),
-                check_out_default: true,
+                check_out_default: DefaultCheckout::CheckOutDefault,
                 expect: ProjectBase::RemoteDefault("main".to_string()),
             },
             BaseVector {
                 name: "known default, box unticked: the branch the folder is on",
                 current_branch: Some("feature"),
                 remote_default: Some("main"),
-                check_out_default: false,
+                check_out_default: DefaultCheckout::StayOnCurrent,
                 expect: ProjectBase::Other("feature".to_string()),
             },
             BaseVector {
                 name: "no known default (heuristic): the current branch",
                 current_branch: Some("wip"),
                 remote_default: None,
-                check_out_default: false,
+                check_out_default: DefaultCheckout::StayOnCurrent,
                 expect: ProjectBase::Other("wip".to_string()),
             },
             BaseVector {
                 name: "already on the known default: the default branch",
                 current_branch: Some("main"),
                 remote_default: Some("main"),
-                check_out_default: false,
+                check_out_default: DefaultCheckout::StayOnCurrent,
                 expect: ProjectBase::RemoteDefault("main".to_string()),
             },
             BaseVector {
                 name: "detached HEAD with a known default: the default branch",
                 current_branch: None,
                 remote_default: Some("trunk"),
-                check_out_default: false,
+                check_out_default: DefaultCheckout::StayOnCurrent,
                 expect: ProjectBase::RemoteDefault("trunk".to_string()),
             },
             BaseVector {
                 name: "detached HEAD checked out to the known default: the default branch",
                 current_branch: None,
                 remote_default: Some("trunk"),
-                check_out_default: true,
+                check_out_default: DefaultCheckout::CheckOutDefault,
                 expect: ProjectBase::RemoteDefault("trunk".to_string()),
             },
             BaseVector {
                 name: "detached HEAD, nothing known: the main fallback",
                 current_branch: None,
                 remote_default: None,
-                check_out_default: false,
+                check_out_default: DefaultCheckout::StayOnCurrent,
                 expect: ProjectBase::Other("main".to_string()),
             },
             BaseVector {
                 name: "a checkout asked for with no known default cannot happen: current wins",
                 current_branch: Some("wip"),
                 remote_default: None,
-                check_out_default: true,
+                check_out_default: DefaultCheckout::CheckOutDefault,
                 expect: ProjectBase::Other("wip".to_string()),
             },
         ]

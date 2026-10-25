@@ -8959,7 +8959,7 @@ impl App {
         // The sentence follows the box: the core rule names the branch new
         // worktrees will start from, and only a branch other than the remote's
         // default is worth a warning.
-        let worktree_line = |checked: bool| {
+        let worktree_line = |checked: dux_core::add_project_plan::DefaultCheckout| {
             let base = dux_core::add_project_plan::project_base_at_add(
                 Some(current_branch.as_str()),
                 known_default,
@@ -8979,14 +8979,22 @@ impl App {
         };
         // Measured with the box both ways, so toggling it never resizes the
         // dialog under the pointer.
-        let worktree_line_height = [true, false]
-            .into_iter()
-            .map(|checked| wrapped_rows(&worktree_line(checked), inner_width))
-            .max()
-            .unwrap_or(1);
+        let worktree_line_height = [
+            dux_core::add_project_plan::DefaultCheckout::CheckOutDefault,
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
+        ]
+        .into_iter()
+        .map(|checked| wrapped_rows(&worktree_line(checked), inner_width))
+        .max()
+        .unwrap_or(1);
+        let checkout = if *checkout_default {
+            dux_core::add_project_plan::DefaultCheckout::CheckOutDefault
+        } else {
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent
+        };
         let worktree_line_extra = worktree_line_height
-            .saturating_sub(wrapped_rows(&worktree_line(*checkout_default), inner_width));
-        body_lines.extend(worktree_line(*checkout_default));
+            .saturating_sub(wrapped_rows(&worktree_line(checkout), inner_width));
+        body_lines.extend(worktree_line(checkout));
         for _ in 0..worktree_line_extra {
             body_lines.push(Line::from(""));
         }

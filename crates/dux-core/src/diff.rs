@@ -164,15 +164,23 @@ pub fn diff_head_via_git_as(
 
     // Everything past the spawn goes through this, so no early return can leave
     // a child behind.
-    fn reap(child: &mut std::process::Child, kill: bool) -> Option<i32> {
-        if kill {
+    /// Whether the child is killed before it is waited for.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Reap {
+        /// Kill it first: its output is no longer wanted.
+        KillFirst,
+        /// Let it finish on its own.
+        LetFinish,
+    }
+    fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
+        if how == Reap::KillFirst {
             let _ = child.kill();
         }
         child.wait().ok().and_then(|status| status.code())
     }
 
     let Some(stdout) = child.stdout.take() else {
-        reap(&mut child, true);
+        reap(&mut child, Reap::KillFirst);
         anyhow::bail!("git diff produced no output stream for {rel_path}");
     };
 
@@ -213,7 +221,14 @@ pub fn diff_head_via_git_as(
         }
     }
 
-    let code = reap(&mut child, total_is_at_least);
+    let code = reap(
+        &mut child,
+        if total_is_at_least {
+            Reap::KillFirst
+        } else {
+            Reap::LetFinish
+        },
+    );
     let stderr = stderr_reader.join().unwrap_or_default();
     if let Some(e) = read_error {
         return Err(e).with_context(|| format!("could not read git diff for {rel_path}"));

@@ -1248,7 +1248,9 @@ fn pull_request_anywhere(
                     Exit::Refused,
                     format!(
                         "{warning}{} {refusal_ending}",
-                        crate::agent_job::review_copy_how(true)
+                        crate::agent_job::review_copy_how(
+                            crate::agent_job::AgreementChannel::CommandLineFlag
+                        )
                     ),
                 ));
             }

@@ -451,7 +451,7 @@ pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
 /// case it was recorded in. On Linux the filesystem is case-sensitive and
 /// so is the comparison.
 pub fn spelled_under(inner: &Path, outer: &Path) -> bool {
-    under_with_case(inner, outer, cfg!(target_os = "macos"))
+    under_with_case(inner, outer, CaseRule::of_this_platform())
 }
 
 /// Whether two spellings name the same path, under the same comparison as
@@ -460,17 +460,37 @@ pub fn spelled_same(a: &Path, b: &Path) -> bool {
     spelled_under(a, b) && spelled_under(b, a)
 }
 
+/// How two spellings of a path compare by letter case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseRule {
+    /// Case is folded, as the filesystem does on macOS.
+    Folded,
+    /// Case is kept, as written.
+    Exact,
+}
+
+impl CaseRule {
+    /// The rule of the platform dux runs on: folded on macOS, exact elsewhere.
+    pub fn of_this_platform() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Folded
+        } else {
+            Self::Exact
+        }
+    }
+}
+
 /// A key two spellings of one relative path share under the same comparison
 /// as [`spelled_same`]: case folded on macOS, as written elsewhere. For
 /// comparing many names read from disk against paths git reports.
 pub fn case_key(path: &Path) -> PathBuf {
-    case_key_with(path, cfg!(target_os = "macos"))
+    case_key_with(path, CaseRule::of_this_platform())
 }
 
 /// [`case_key`] with the case rule spelled out, so it can be tested on either
 /// platform.
-pub fn case_key_with(path: &Path, ignore_case: bool) -> PathBuf {
-    if !ignore_case {
+pub fn case_key_with(path: &Path, case: CaseRule) -> PathBuf {
+    if case == CaseRule::Exact {
         return path.to_path_buf();
     }
     path.components()
@@ -478,8 +498,8 @@ pub fn case_key_with(path: &Path, ignore_case: bool) -> PathBuf {
         .collect()
 }
 
-fn under_with_case(inner: &Path, outer: &Path, ignore_case: bool) -> bool {
-    if !ignore_case {
+fn under_with_case(inner: &Path, outer: &Path, case: CaseRule) -> bool {
+    if case == CaseRule::Exact {
         return inner.starts_with(outer);
     }
     let mut inner = inner.components();
@@ -1059,17 +1079,17 @@ mod tests {
     fn spellings_compare_without_case_where_the_filesystem_does() {
         let outer = Path::new("/Users/Me/Work");
         let inner = Path::new("/users/me/work/agent");
-        assert!(under_with_case(inner, outer, true));
-        assert!(!under_with_case(inner, outer, false));
+        assert!(under_with_case(inner, outer, CaseRule::Folded));
+        assert!(!under_with_case(inner, outer, CaseRule::Exact));
         assert!(!under_with_case(
             Path::new("/users/me/workshop"),
             outer,
-            true
+            CaseRule::Folded
         ));
         assert!(under_with_case(
             Path::new("/Users/Me/Work/agent"),
             outer,
-            false
+            CaseRule::Exact
         ));
         assert_eq!(spelled_under(inner, outer), cfg!(target_os = "macos"));
     }

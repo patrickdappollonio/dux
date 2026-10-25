@@ -3368,7 +3368,11 @@ impl Engine {
     pub fn poll_gh_probe_schedule(&mut self) {
         if !crate::gh::gh_reprobe_is_due(
             self.gh_status,
-            self.github_integration_enabled,
+            if self.github_integration_enabled {
+                crate::gh::GithubIntegration::Enabled
+            } else {
+                crate::gh::GithubIntegration::Disabled
+            },
             self.gh_probe.last_probe_at.map(|at| at.elapsed()),
             self.github_probe_interval(),
         ) {

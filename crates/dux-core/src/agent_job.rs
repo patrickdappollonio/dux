@@ -558,15 +558,29 @@ fn review_copy_warning(copy: &FreshCopy, number: u64) -> crate::status_text::Sta
     review_copy_warning_after(why, number, &copy.new_branch)
 }
 
+/// Where the user gives the agreement to a review copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgreementChannel {
+    /// The command line's `--review-copy` flag.
+    CommandLineFlag,
+    /// A dialog's Create a review copy box.
+    DialogBox,
+}
+
 /// How a refusal made before the project exists says to give the agreement:
-/// the command line's flag, or a dialog's box and then its button again.
-pub(crate) fn review_copy_how_before(by_flag: bool, adding: bool) -> &'static str {
-    match (by_flag, adding) {
-        (true, _) => review_copy_how(true),
-        (false, false) => {
+/// the command line's flag, or a dialog's box and then its button again,
+/// which is Clone and create or Add this folder as a project by `mode`.
+pub(crate) fn review_copy_how_before(
+    channel: AgreementChannel,
+    mode: crate::clone_project::CloneMode,
+) -> &'static str {
+    use crate::clone_project::CloneMode;
+    match (channel, mode) {
+        (AgreementChannel::CommandLineFlag, _) => review_copy_how(channel),
+        (AgreementChannel::DialogBox, CloneMode::Clone) => {
             " To go ahead anyway, tick Create a review copy and press Clone and create again."
         }
-        (false, true) => {
+        (AgreementChannel::DialogBox, CloneMode::AddExisting) => {
             " To go ahead anyway, tick Create a review copy and press Add this folder as a \
              project again."
         }
@@ -575,11 +589,14 @@ pub(crate) fn review_copy_how_before(by_flag: bool, adding: bool) -> &'static st
 
 /// How a refusal for want of agreement says to give it: the command line's
 /// flag, or a dialog's box.
-pub(crate) fn review_copy_how(by_flag: bool) -> &'static str {
-    if by_flag {
-        " To go ahead anyway, run the command again with --review-copy."
-    } else {
-        " To go ahead anyway, tick Create a review copy and create the agent again."
+pub(crate) fn review_copy_how(channel: AgreementChannel) -> &'static str {
+    match channel {
+        AgreementChannel::CommandLineFlag => {
+            " To go ahead anyway, run the command again with --review-copy."
+        }
+        AgreementChannel::DialogBox => {
+            " To go ahead anyway, tick Create a review copy and create the agent again."
+        }
     }
 }
 
@@ -842,6 +859,42 @@ struct CreatePlanContext<'a> {
     attempted_name: Option<String>,
 }
 
+/// Whether a new agent attaches to a branch that already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchAttach {
+    /// Use the existing branch of that name.
+    AttachExisting,
+    /// Start a new branch.
+    CreateNew,
+}
+
+/// Whether a create pulls the project's leading branch first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreCreatePull {
+    /// Pull before the worktree is made.
+    PullFirst,
+    /// Make the worktree from the branch as it is.
+    Skip,
+}
+
+/// Whether a create copies the project checkout's uncommitted changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UncommittedCopy {
+    /// Copy them into the new worktree.
+    CopyIntoAgent,
+    /// Leave them in the project checkout only.
+    LeaveInProject,
+}
+
+/// Whether a branch that already has the agent's name refuses the create.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshBranch {
+    /// A clone's first agent: a branch of that name is refused.
+    Required,
+    /// An ordinary create: an existing branch may be attached to.
+    MayExist,
+}
+
 impl CreatePlanContext<'_> {
     /// Hold `path` for this create, from before `git worktree add` until the
     /// create ends (released by the engine when its launch lands or fails).
@@ -878,10 +931,26 @@ impl CreatePlanContext<'_> {
             } => self.plan_new_project(
                 project,
                 custom_name,
-                use_existing_branch,
-                pull_before_create,
-                copy_uncommitted_changes,
-                cloned.is_some(),
+                if use_existing_branch {
+                    BranchAttach::AttachExisting
+                } else {
+                    BranchAttach::CreateNew
+                },
+                if pull_before_create {
+                    PreCreatePull::PullFirst
+                } else {
+                    PreCreatePull::Skip
+                },
+                if copy_uncommitted_changes {
+                    UncommittedCopy::CopyIntoAgent
+                } else {
+                    UncommittedCopy::LeaveInProject
+                },
+                if cloned.is_some() {
+                    FreshBranch::Required
+                } else {
+                    FreshBranch::MayExist
+                },
             ),
             CreateAgentRequest::PullRequest {
                 project,
@@ -906,7 +975,11 @@ impl CreatePlanContext<'_> {
                 &state,
                 &head_branch,
                 custom_name,
-                use_existing_branch,
+                if use_existing_branch {
+                    BranchAttach::AttachExisting
+                } else {
+                    BranchAttach::CreateNew
+                },
                 &review_copy,
                 ask_id.as_deref(),
                 &agents,
@@ -1059,8 +1132,9 @@ impl CreatePlanContext<'_> {
         repo_path: &Path,
         leading_branch: &str,
         resolved_name: &str,
-        attach_existing: bool,
+        branch: BranchAttach,
     ) -> Option<(String, PathBuf)> {
+        let attach_existing = branch == BranchAttach::AttachExisting;
         let claim = |path: &Path| self.claim_worktree_path(path);
         let result = if attach_existing {
             git::create_worktree_existing_branch_claimed(
@@ -1108,10 +1182,10 @@ impl CreatePlanContext<'_> {
         &mut self,
         project: crate::model::Project,
         custom_name: Option<String>,
-        use_existing_branch: bool,
-        pull_before_create: bool,
-        copy_uncommitted_changes: bool,
-        require_fresh_branch: bool,
+        branch: BranchAttach,
+        pull: PreCreatePull,
+        uncommitted: UncommittedCopy,
+        fresh: FreshBranch,
     ) -> Option<ManagedCreatePlan> {
         let repo_path = PathBuf::from(&project.path);
         let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
@@ -1124,20 +1198,20 @@ impl CreatePlanContext<'_> {
         if self.refuse_occupied_folder(&project.name, &resolved_name) {
             return None;
         }
-        if pull_before_create {
+        if pull == PreCreatePull::PullFirst {
             self.try_pre_create_pull(&project, &repo_path, &leading_branch);
         }
         let existing = git::branch_exists(&repo_path, &resolved_name).is_some();
         // A clone's first agent starts a branch of its own; one that appeared
         // since the clone looked is refused, never attached to.
-        if require_fresh_branch && existing {
+        if fresh == FreshBranch::Required && existing {
             self.send_failure(
                 "a branch with that name already exists in the clone. Pick another name, or \
                  use New agent, which offers to attach to that branch.",
             );
             return None;
         }
-        let attach_existing = use_existing_branch || existing;
+        let attach_existing = branch == BranchAttach::AttachExisting || existing;
         if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
             self.send_failure(crate::status_text!["Cannot create agent for ", q(project.name), ": the repository at ", n(repo_path.display()), " has no commits yet. Create an initial commit (for example with git commit --allow-empty -m \"Initial commit\"), then try again."]);
             return None;
@@ -1172,7 +1246,11 @@ impl CreatePlanContext<'_> {
             &repo_path,
             &leading_branch,
             &resolved_name,
-            attach_existing,
+            if attach_existing {
+                BranchAttach::AttachExisting
+            } else {
+                BranchAttach::CreateNew
+            },
         )?;
         let status_message = if attach_existing {
             crate::status_text![
@@ -1193,7 +1271,7 @@ impl CreatePlanContext<'_> {
                 ". The new worktree is ready in a fresh session."
             ]
         };
-        let pending_copy = copy_uncommitted_changes.then(|| PendingCopy {
+        let pending_copy = (uncommitted == UncommittedCopy::CopyIntoAgent).then(|| PendingCopy {
             source: repo_path,
             source_desc: crate::status_text!["project ", q(project.name)],
             on_head_mismatch: HeadMismatch::SkipWithNote {
@@ -1532,7 +1610,12 @@ impl CreatePlanContext<'_> {
                 pull_request: None,
             },
         ));
-        self.send_failure(crate::status_text![warning, review_copy_how(by_flag)].with_ask(ask));
+        let channel = if by_flag {
+            AgreementChannel::CommandLineFlag
+        } else {
+            AgreementChannel::DialogBox
+        };
+        self.send_failure(crate::status_text![warning, review_copy_how(channel)].with_ask(ask));
     }
 
     /// The first agent of the request's project that has the pull request's
@@ -1683,7 +1766,7 @@ impl CreatePlanContext<'_> {
         state: &str,
         head_branch: &str,
         custom_name: Option<String>,
-        use_existing_branch: bool,
+        branch: BranchAttach,
         review_copy: &crate::worker::ReviewCopyConsent,
         ask_id: Option<&str>,
         agents: &[crate::worker::AgentAtWorktree],
@@ -1792,8 +1875,8 @@ impl CreatePlanContext<'_> {
                 return None;
             }
             let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
-            let attach_existing =
-                fresh_copy.is_none() && (use_existing_branch || local_branch_existed);
+            let attach_existing = fresh_copy.is_none()
+                && (branch == BranchAttach::AttachExisting || local_branch_existed);
 
             if attach_existing {
                 let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
@@ -2297,13 +2380,25 @@ fn compare_copy_heads(source: &Path, destination: &Path) -> CopyHeadCheck {
     }
 }
 
+/// Whether the create made the agent's worktree, and so takes it back when the
+/// create fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorktreeOwnership {
+    /// The create made the worktree.
+    CreatedByThisJob,
+    /// The worktree was there before the create, and outlives its failure.
+    Preexisting,
+}
+
 fn rollback_managed_create(
     repo_path: &Path,
     session: &AgentSession,
-    owns_worktree: bool,
+    ownership: WorktreeOwnership,
     rollback: &Rollback,
 ) {
-    if owns_worktree && let Some(managed) = session.workspace.as_managed() {
+    if ownership == WorktreeOwnership::CreatedByThisJob
+        && let Some(managed) = session.workspace.as_managed()
+    {
         rollback_created_worktree(repo_path, managed, &session.id, Some(rollback));
     }
 }
@@ -2314,7 +2409,7 @@ fn handle_copy_mismatch(
     check_error: Option<anyhow::Error>,
     session: &AgentSession,
     repo_path: &Path,
-    owns_worktree: bool,
+    ownership: WorktreeOwnership,
     worker_tx: &Sender<WorkerEvent>,
     create_key: &str,
     creation_notes: &mut Vec<crate::status_text::StatusText>,
@@ -2335,7 +2430,7 @@ fn handle_copy_mismatch(
                     session.directory()
                 ));
             }
-            rollback_managed_create(repo_path, session, owns_worktree, rollback);
+            rollback_managed_create(repo_path, session, ownership, rollback);
             let message = if let Some(error) = check_error {
                 crate::status_text![
                     "Failed to copy uncommitted changes from ",
@@ -2393,7 +2488,7 @@ fn apply_pending_copy(
     copy: PendingCopy,
     session: &AgentSession,
     repo_path: &Path,
-    owns_worktree: bool,
+    ownership: WorktreeOwnership,
     worker_tx: &Sender<WorkerEvent>,
     create_key: &str,
     creation_notes: &mut Vec<crate::status_text::StatusText>,
@@ -2428,7 +2523,7 @@ fn apply_pending_copy(
                     copy.source.display(),
                     session.directory()
                 ));
-                rollback_managed_create(repo_path, session, owns_worktree, rollback);
+                rollback_managed_create(repo_path, session, ownership, rollback);
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                     status_op_id: create_key.to_string(),
                     attempted_name: None,
@@ -2446,7 +2541,7 @@ fn apply_pending_copy(
             None,
             session,
             repo_path,
-            owns_worktree,
+            ownership,
             worker_tx,
             create_key,
             creation_notes,
@@ -2463,7 +2558,7 @@ fn apply_pending_copy(
                 Some(error),
                 session,
                 repo_path,
-                owns_worktree,
+                ownership,
                 worker_tx,
                 create_key,
                 creation_notes,
@@ -2717,7 +2812,11 @@ fn launch_managed_create(
             copy,
             &session,
             &repo_path,
-            owns_worktree,
+            if owns_worktree {
+                WorktreeOwnership::CreatedByThisJob
+            } else {
+                WorktreeOwnership::Preexisting
+            },
             worker_tx,
             create_key,
             &mut creation_notes,
@@ -3097,6 +3196,36 @@ mod tests {
 
     use super::*;
     use crate::model::{Project, ProjectBranchStatus, ProviderKind};
+
+    /// The flag is named on the command line; a dialog names its box and the
+    /// button to press again, which differs between a clone and an add.
+    #[test]
+    fn a_review_copy_refusal_says_how_to_agree_where_the_user_is() {
+        let flag = " To go ahead anyway, run the command again with --review-copy.";
+        use crate::clone_project::CloneMode;
+        use AgreementChannel::{CommandLineFlag, DialogBox};
+        assert_eq!(review_copy_how(CommandLineFlag), flag);
+        assert_eq!(
+            review_copy_how(DialogBox),
+            " To go ahead anyway, tick Create a review copy and create the agent again."
+        );
+        assert_eq!(
+            review_copy_how_before(CommandLineFlag, CloneMode::Clone),
+            flag
+        );
+        assert_eq!(
+            review_copy_how_before(CommandLineFlag, CloneMode::AddExisting),
+            flag
+        );
+        assert_eq!(
+            review_copy_how_before(DialogBox, CloneMode::Clone),
+            " To go ahead anyway, tick Create a review copy and press Clone and create again."
+        );
+        assert!(
+            review_copy_how_before(DialogBox, CloneMode::AddExisting)
+                .contains("Add this folder as a project again")
+        );
+    }
 
     /// Initialize a throwaway git repo with a single commit on `main`.
     fn init_test_repo() -> tempfile::TempDir {
@@ -3770,7 +3899,7 @@ mod tests {
         // to clean up (and leaving it behind is what makes recreating the agent
         // collide). Simulated with a local "remote" so no network is needed.
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None));
         assert_eq!(session.branch_name().unwrap(), "pr-head");
         assert_eq!(
             session.branch_provenance().unwrap(),
@@ -3805,7 +3934,7 @@ mod tests {
             !crate::git::local_branch_exists(repo.path(), "pr-head"),
             "the local branch must not exist before the create"
         );
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         let session = run.session.expect("a session");
         assert_eq!(
             git_stdout(Path::new(session.directory()), &["rev-parse", "HEAD"]),
@@ -3825,7 +3954,7 @@ mod tests {
             &agent_folder,
             &["branch", "-m", "pr-head", "pr-head-renamed"],
         );
-        let mut again = pull_request_request(repo.path(), None, false);
+        let mut again = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut again {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "earlier".to_string(),
@@ -3860,7 +3989,7 @@ mod tests {
         commit_local_work(repo.path(), 1);
         let own_tip = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
         git_in(repo.path(), &["checkout", "main"]);
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         let session = run.session.expect("a session");
         assert_eq!(session.branch_name().unwrap(), "pr-head");
         assert_eq!(
@@ -3887,7 +4016,7 @@ mod tests {
             &["branch", "-m", "pr-head", "pr-head-review-2"],
         );
         git_in(repo.path(), &["branch", "--", "pr-head", "origin/pr-head"]);
-        let mut again = pull_request_request(repo.path(), None, false);
+        let mut again = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut again {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "earlier".to_string(),
@@ -3911,7 +4040,7 @@ mod tests {
         commit_local_work(repo.path(), 1);
         git_in(repo.path(), &["checkout", "main"]);
         let unrelated = git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]);
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         let session = run.session.expect("a session");
         assert_eq!(session.branch_name().unwrap(), "pr-head-review");
         assert_eq!(
@@ -3944,7 +4073,7 @@ mod tests {
             format!("{blob}\n"),
         )
         .unwrap();
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         let session = run.session.expect("a session");
         assert_eq!(session.branch_name().unwrap(), "pr-head-review");
         let message = run.status_message.expect("a create message");
@@ -3962,7 +4091,7 @@ mod tests {
             repo.path(),
             &["branch", "--", "pr-head", "origin/pr-head~1"],
         );
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         assert!(run.failure.is_none(), "{:?}", run.failure);
         let session = run.session.expect("a session");
         assert_eq!(session.branch_name().unwrap(), "pr-head");
@@ -4003,7 +4132,7 @@ mod tests {
             &["branch", "--", "pr-head", "origin/pr-head~1"],
         );
         let before = git_stdout(repo.path(), &["rev-parse", "refs/heads/pr-head"]);
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
             // Fails after the worktree exists, the way a create can at any
             // later step.
@@ -4046,7 +4175,7 @@ mod tests {
             }
         };
         let with_agents = |agents: Vec<crate::worker::AgentAtWorktree>, name: Option<&str>| {
-            let mut request = pull_request_request(repo.path(), name, false);
+            let mut request = pull_request_request(repo.path(), name);
             if let CreateAgentRequest::PullRequest { agents: slot, .. } = &mut request {
                 *slot = agents;
             }
@@ -4075,7 +4204,7 @@ mod tests {
             ],
         );
         commit_local_work(&path, 1);
-        let mut typed = pull_request_request(repo2.path(), Some("my-own-name"), false);
+        let mut typed = pull_request_request(repo2.path(), Some("my-own-name"));
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut typed {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "first".to_string(),
@@ -4096,7 +4225,7 @@ mod tests {
     #[test]
     fn a_typed_review_copy_name_needs_the_agreement_and_any_other_typed_name_does_not() {
         let withheld = |repo: &Path, name: &str, consent| {
-            let mut request = pull_request_request(repo, Some(name), false);
+            let mut request = pull_request_request(repo, Some(name));
             if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut request {
                 *review_copy = consent;
             }
@@ -4151,7 +4280,7 @@ mod tests {
         let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
         let live = format!("busy:#42:pr-head-review:{}|live", holder.display());
         std::fs::remove_dir_all(&holder).unwrap();
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut request {
             *review_copy = crate::worker::ReviewCopyConsent::Warned(live);
         }
@@ -4213,7 +4342,7 @@ mod tests {
         ];
         for (repo, warned, warning) in cases {
             let worktrees_before = worktree_paths(repo);
-            let mut asking = pull_request_request(repo, None, false);
+            let mut asking = pull_request_request(repo, None);
             if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut asking {
                 *review_copy = crate::worker::ReviewCopyConsent::Withheld;
             }
@@ -4240,7 +4369,7 @@ mod tests {
             assert!(!crate::git::local_branch_exists(repo, "pr-head-review"));
 
             // A request that agrees with a flag is told the flag, not the box.
-            let mut by_flag = pull_request_request(repo, None, false);
+            let mut by_flag = pull_request_request(repo, None);
             if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut by_flag {
                 *review_copy = crate::worker::ReviewCopyConsent::WithheldByFlag;
             }
@@ -4256,7 +4385,7 @@ mod tests {
             );
 
             // Agreeing to a different copy than the one warned about asks again.
-            let mut other = pull_request_request(repo, None, false);
+            let mut other = pull_request_request(repo, None);
             if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut other {
                 *review_copy = crate::worker::ReviewCopyConsent::Warned(
                     "unknown:#42:pr-head-review:x".to_string(),
@@ -4267,7 +4396,7 @@ mod tests {
             assert!(again.failure_ask.is_some(), "{:?}", again.failure);
 
             // Agreeing to this one makes it.
-            let mut agreed = pull_request_request(repo, None, false);
+            let mut agreed = pull_request_request(repo, None);
             if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut agreed {
                 *review_copy = crate::worker::ReviewCopyConsent::Warned(warned.clone());
             }
@@ -4290,7 +4419,7 @@ mod tests {
             crate::git::branch_exists(repo.path(), "pr-head").is_none(),
             "a fork PR's head branch is on no ref of origin's"
         );
-        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None, false));
+        let session = drive_create_job(repo.path(), pull_request_request(repo.path(), None));
         assert_eq!(
             session.branch_provenance().unwrap(),
             crate::model::BranchProvenance::CreatedByDux
@@ -4305,7 +4434,7 @@ mod tests {
         git_in(repo.path(), &["fetch", "origin"]);
         let run = drive_create_job_run_with_setup(
             repo.path(),
-            pull_request_request(repo.path(), None, false),
+            pull_request_request(repo.path(), None),
             block_worktree_path,
         );
         assert!(run.failure.is_some(), "the worktree add must still fail");
@@ -4357,11 +4486,7 @@ mod tests {
         (origin, repo)
     }
 
-    fn pull_request_request(
-        repo: &Path,
-        custom_name: Option<&str>,
-        use_existing: bool,
-    ) -> CreateAgentRequest {
+    fn pull_request_request(repo: &Path, custom_name: Option<&str>) -> CreateAgentRequest {
         CreateAgentRequest::PullRequest {
             project: test_project(repo),
             host: "github.com".to_string(),
@@ -4371,7 +4496,7 @@ mod tests {
             state: "OPEN".to_string(),
             head_branch: "pr-head".to_string(),
             custom_name: custom_name.map(str::to_string),
-            use_existing_branch: use_existing,
+            use_existing_branch: false,
             // The tests of a copy are about the copy; the ones about asking
             // first take this away.
             review_copy: crate::worker::ReviewCopyConsent::Blanket,
@@ -4379,6 +4504,22 @@ mod tests {
             agents: Vec::new(),
             cloned: None,
         }
+    }
+
+    /// [`pull_request_request`] asking to attach to an existing branch.
+    fn pull_request_request_on_existing_branch(
+        repo: &Path,
+        custom_name: Option<&str>,
+    ) -> CreateAgentRequest {
+        let mut request = pull_request_request(repo, custom_name);
+        if let CreateAgentRequest::PullRequest {
+            use_existing_branch,
+            ..
+        } = &mut request
+        {
+            *use_existing_branch = true;
+        }
+        request
     }
 
     /// Put a plain FILE where the project's worktree folder wants to go: the
@@ -4399,7 +4540,7 @@ mod tests {
         let (_origin, repo) = pr_repo_with_fake_origin();
         let run = drive_create_job_run_with_setup(
             repo.path(),
-            pull_request_request(repo.path(), None, false),
+            pull_request_request(repo.path(), None),
             block_worktree_path,
         );
         let failure = run
@@ -4426,7 +4567,7 @@ mod tests {
         git_in(repo.path(), &["branch", "--", "pr-agent", "origin/pr-head"]);
         let run = drive_create_job_run_with_setup(
             repo.path(),
-            pull_request_request(repo.path(), Some("pr-agent"), true),
+            pull_request_request_on_existing_branch(repo.path(), Some("pr-agent")),
             block_worktree_path,
         );
         assert!(run.failure.is_some(), "the worktree add must still fail");
@@ -4498,7 +4639,7 @@ mod tests {
         // An agent that already has the pull request's code is pointed to, and
         // nothing is created.
         let worktrees_before = worktree_paths(repo.path());
-        let mut held_by_agent = pull_request_request(repo.path(), None, false);
+        let mut held_by_agent = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut held_by_agent {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "reviewer".to_string(),
@@ -4525,7 +4666,7 @@ mod tests {
 
         // With no agent among the project's agents, the same holder is just a
         // working copy somebody has: the fresh copy.
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -4593,7 +4734,7 @@ mod tests {
                 &git_stdout(repo.path(), &["rev-parse", "main"]),
             ],
         );
-        let mut diverged_agent = pull_request_request(repo.path(), None, false);
+        let mut diverged_agent = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut diverged_agent {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "reviewer".to_string(),
@@ -4608,7 +4749,7 @@ mod tests {
 
         // An earlier copy is an agent that already has the code, whichever
         // branch name it sits on: it is pointed to instead of a third copy.
-        let mut with_earlier_copy = pull_request_request(repo.path(), None, false);
+        let mut with_earlier_copy = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut with_earlier_copy {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "reviewer".to_string(),
@@ -4641,7 +4782,7 @@ mod tests {
             &["checkout", "-b", "pr-head", "origin/pr-head"],
         );
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -4680,7 +4821,7 @@ mod tests {
             .unwrap();
         assert!(!out.status.success(), "the rebase must stop part-way");
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -4708,7 +4849,7 @@ mod tests {
         std::fs::remove_dir_all(&holder).unwrap();
 
         // An agent whose folder is gone is not one to point the user to.
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { agents, .. } = &mut request {
             agents.push(crate::worker::AgentAtWorktree {
                 name: "reviewer".to_string(),
@@ -4739,7 +4880,7 @@ mod tests {
         let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
         create_branch(repo.path(), "pr-head-review");
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -4759,7 +4900,7 @@ mod tests {
 
         let run = drive_create_job_run_with_setup(
             repo.path(),
-            pull_request_request(repo.path(), None, false),
+            pull_request_request(repo.path(), None),
             |paths| {
                 std::fs::create_dir_all(paths.worktrees_root.join("repo").join("pr-head-review"))
                     .unwrap();
@@ -4785,7 +4926,7 @@ mod tests {
         let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
         create_branch(repo.path(), "pr-head-review/x");
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -4810,7 +4951,7 @@ mod tests {
 
         let run = drive_create_job_run_with_setup(
             repo.path(),
-            pull_request_request(repo.path(), None, false),
+            pull_request_request(repo.path(), None),
             |paths| std::fs::write(paths.worktrees_root.join("repo"), b"in the way").unwrap(),
         );
 
@@ -4858,7 +4999,7 @@ mod tests {
         );
         git_in(repo.path(), &["fetch", "origin"]);
         git_in(repo.path(), &["reset", "--hard", "origin/main"]);
-        let mut request = pull_request_request(repo.path(), Some("main"), false);
+        let mut request = pull_request_request(repo.path(), Some("main"));
         if let CreateAgentRequest::PullRequest { head_branch, .. } = &mut request {
             *head_branch = "main".to_string();
         }
@@ -4915,10 +5056,8 @@ mod tests {
             ],
         );
 
-        let run = drive_create_job_run(
-            &project_folder,
-            pull_request_request(&project_folder, None, false),
-        );
+        let run =
+            drive_create_job_run(&project_folder, pull_request_request(&project_folder, None));
 
         assert!(
             run.failure.is_none(),
@@ -4945,7 +5084,7 @@ mod tests {
         let branches_before = branches_in(repo.path());
         let worktrees_before = worktree_paths(repo.path());
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         let failure = run.failure.expect("the create must fail");
         assert!(
@@ -4975,10 +5114,8 @@ mod tests {
         let worktrees_before = worktree_paths(repo.path());
 
         // `main` is checked out in the project folder.
-        let run = drive_create_job_run(
-            repo.path(),
-            pull_request_request(repo.path(), Some("main"), false),
-        );
+        let run =
+            drive_create_job_run(repo.path(), pull_request_request(repo.path(), Some("main")));
 
         let failure = run.failure.expect("the create must fail");
         // git names a worktree by its real path, and macOS reaches the temp
@@ -5020,7 +5157,7 @@ mod tests {
         );
         std::fs::write(repo.path().join(".git").join("worktrees"), b"in the way").unwrap();
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         let failure = run
             .failure
@@ -5054,7 +5191,7 @@ mod tests {
         let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
         commit_local_work(&holder, 2);
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         assert!(
             run.failure.is_none(),
@@ -5078,7 +5215,7 @@ mod tests {
         let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
         commit_local_work(&holder, 1);
 
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
 
         let message = run.status_message.expect("a create message");
         assert!(
@@ -5096,7 +5233,7 @@ mod tests {
         let worktrees_before = worktree_paths(repo.path());
         let run = drive_create_job_run(
             repo.path(),
-            pull_request_request(repo.path(), Some("pr-agent"), false),
+            pull_request_request(repo.path(), Some("pr-agent")),
         );
         assert_eq!(
             run.failure.as_deref(),
@@ -5122,7 +5259,7 @@ mod tests {
             ],
         );
         let worktrees_before = worktree_paths(repo.path());
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         let failure = run.failure.expect("the create must stop");
         assert!(
             failure.starts_with("Failed to fetch PR #42 from owner/repo: git fetch failed:"),
@@ -5148,7 +5285,7 @@ mod tests {
 
         let session = drive_create_job(
             repo.path(),
-            pull_request_request(repo.path(), Some("pr-head"), false),
+            pull_request_request(repo.path(), Some("pr-head")),
         );
 
         assert_eq!(session.title.as_deref(), Some("pr-head-review"));
@@ -5160,7 +5297,7 @@ mod tests {
     fn an_invalid_project_environment_removes_the_worktree_and_the_branch_dux_made() {
         let (_origin, repo) = pr_repo_with_fake_origin();
         let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
             project
                 .env
@@ -5261,10 +5398,8 @@ mod tests {
     fn a_fresh_copy_is_pinned_to_its_pull_request_and_an_ordinary_create_is_not() {
         let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let reactions = drive_create_through_engine(
-            &mut engine,
-            pull_request_request(repo.path(), None, false),
-        );
+        let reactions =
+            drive_create_through_engine(&mut engine, pull_request_request(repo.path(), None));
         let ordinary_final = create_final(&reactions);
         assert_eq!(ordinary_final.tone, crate::statusline::StatusTone::Info);
         assert_eq!(
@@ -5296,10 +5431,8 @@ mod tests {
                 .directory(),
         );
         commit_local_work(&first_worktree, 2);
-        let reactions = drive_create_through_engine(
-            &mut engine,
-            pull_request_request(repo.path(), None, false),
-        );
+        let reactions =
+            drive_create_through_engine(&mut engine, pull_request_request(repo.path(), None));
         let refused = create_final(&reactions);
         assert_eq!(refused.tone, crate::statusline::StatusTone::Error);
         assert!(
@@ -5319,10 +5452,8 @@ mod tests {
         // just a working copy somebody has: the pull request gets a copy,
         // which lacks the two commits the holder added.
         engine.sessions.clear();
-        let reactions = drive_create_through_engine(
-            &mut engine,
-            pull_request_request(repo.path(), None, false),
-        );
+        let reactions =
+            drive_create_through_engine(&mut engine, pull_request_request(repo.path(), None));
         let copy_final = create_final(&reactions);
         assert_eq!(
             copy_final.tone,
@@ -5377,7 +5508,7 @@ mod tests {
         let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
         let (_origin, repo) = pr_repo_with_fake_origin();
         let (_holder_root, _holder) = hold_pr_branch_in_another_worktree(repo.path());
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { state, .. } = &mut request {
             *state = "DRAFTISH".to_string();
         }
@@ -5425,7 +5556,7 @@ mod tests {
         let (_origin, repo) = pr_repo_with_fake_origin();
         let (_holder_root, holder) = hold_pr_branch_in_another_worktree(repo.path());
         commit_local_work(&holder, 2);
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
             project.startup_command = Some("exit 3".to_string());
         }
@@ -5467,7 +5598,7 @@ mod tests {
     fn a_create_whose_startup_command_fails_names_the_clone_only_when_there_was_one() {
         let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest { project, .. } = &mut request {
             project.startup_command = Some("exit 3".to_string());
         }
@@ -5488,7 +5619,7 @@ mod tests {
         // agent exists.
         let (mut engine, _engine_dir) = crate::engine::test_support::test_engine();
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let mut request = pull_request_request(repo.path(), None, false);
+        let mut request = pull_request_request(repo.path(), None);
         if let CreateAgentRequest::PullRequest {
             project, cloned, ..
         } = &mut request
@@ -5673,15 +5804,15 @@ mod tests {
 
     fn new_project_request(
         repo: &Path,
-        pull_before_create: bool,
-        copy_uncommitted_changes: bool,
+        pull: PreCreatePull,
+        uncommitted: UncommittedCopy,
     ) -> CreateAgentRequest {
         CreateAgentRequest::NewProject {
             project: test_project(repo),
             custom_name: Some("copy-target".to_string()),
             use_existing_branch: false,
-            pull_before_create,
-            copy_uncommitted_changes,
+            pull_before_create: pull == PreCreatePull::PullFirst,
+            copy_uncommitted_changes: uncommitted == UncommittedCopy::CopyIntoAgent,
             cloned: None,
         }
     }
@@ -5693,7 +5824,14 @@ mod tests {
     #[test]
     fn a_plain_create_is_quiet_on_the_web_only_and_an_attach_is_loud() {
         let repo = init_test_repo();
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::Skip,
+                UncommittedCopy::LeaveInProject,
+            ),
+        );
         assert!(run.failure.is_none(), "creation must succeed");
         assert!(run.status_message.unwrap().starts_with("Created "));
         assert_eq!(run.status_quiet, crate::statusline::QuietSurfaces::WEB);
@@ -5720,7 +5858,7 @@ mod tests {
     #[test]
     fn the_pull_request_and_import_creates_are_quiet_on_the_web_only() {
         let (_origin, repo) = pr_repo_with_fake_origin();
-        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None, false));
+        let run = drive_create_job_run(repo.path(), pull_request_request(repo.path(), None));
         assert!(run.failure.is_none(), "creation must succeed");
         assert!(
             run.status_message
@@ -5849,7 +5987,14 @@ mod tests {
         }
 
         let (run, logged) = crate::logger::capture_for_test(|| {
-            drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true))
+            drive_create_job_run(
+                repo.path(),
+                new_project_request(
+                    repo.path(),
+                    PreCreatePull::Skip,
+                    UncommittedCopy::CopyIntoAgent,
+                ),
+            )
         });
         assert!(run.failure.is_none(), "creation must succeed");
         let status = run.status_message.unwrap();
@@ -5927,7 +6072,14 @@ mod tests {
         std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
         std::fs::write(repo.path().join("junk.log"), "ignored\n").unwrap();
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::Skip,
+                UncommittedCopy::CopyIntoAgent,
+            ),
+        );
         assert!(run.failure.is_none(), "creation must succeed");
         let worktree = PathBuf::from(run.session.as_ref().unwrap().directory());
         assert_eq!(
@@ -6018,7 +6170,14 @@ mod tests {
         let repo = init_test_repo();
         std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::Skip,
+                UncommittedCopy::LeaveInProject,
+            ),
+        );
         assert!(run.failure.is_none(), "creation must succeed");
         let worktree = PathBuf::from(run.session.as_ref().unwrap().directory());
         assert!(!worktree.join("note.txt").exists());
@@ -6033,7 +6192,14 @@ mod tests {
             &["remote", "add", "origin", "/nonexistent/dux-test-origin"],
         );
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, false));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::PullFirst,
+                UncommittedCopy::LeaveInProject,
+            ),
+        );
         assert!(run.failure.is_none(), "creation must survive a failed pull");
         let status = run.status_message.unwrap();
         assert!(
@@ -6110,7 +6276,14 @@ mod tests {
             &["update-ref", "-d", "refs/remotes/origin/main"],
         );
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, false));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::PullFirst,
+                UncommittedCopy::LeaveInProject,
+            ),
+        );
 
         assert!(
             run.failure.is_none(),
@@ -6185,7 +6358,11 @@ mod tests {
 
         let run = drive_create_job_run_with(
             repo.path(),
-            new_project_request(repo.path(), true, false),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::PullFirst,
+                UncommittedCopy::LeaveInProject,
+            ),
             |_| {},
             registries,
         );
@@ -6250,7 +6427,14 @@ mod tests {
         // A tracked local edit that would have tripped the old dirty gate.
         std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, true));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::PullFirst,
+                UncommittedCopy::CopyIntoAgent,
+            ),
+        );
         assert!(
             run.failure.is_none(),
             "a dirty checkout must not block creation: {:?}",
@@ -6276,7 +6460,14 @@ mod tests {
         let repo = init_test_repo();
         std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
 
-        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, true));
+        let run = drive_create_job_run(
+            repo.path(),
+            new_project_request(
+                repo.path(),
+                PreCreatePull::PullFirst,
+                UncommittedCopy::CopyIntoAgent,
+            ),
+        );
         assert!(run.failure.is_none());
         let session = run.session.unwrap();
         let worktree = PathBuf::from(session.directory());

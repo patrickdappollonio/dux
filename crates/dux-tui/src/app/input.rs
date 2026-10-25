@@ -9028,7 +9028,11 @@ impl App {
         let leading_branch = dux_core::add_project_plan::project_base_at_add(
             Some(branch.as_str()),
             default_branch.as_deref(),
-            checkout_default,
+            if checkout_default {
+                dux_core::add_project_plan::DefaultCheckout::CheckOutDefault
+            } else {
+                dux_core::add_project_plan::DefaultCheckout::StayOnCurrent
+            },
         )
         .into_branch();
         self.prompt = PromptState::None;

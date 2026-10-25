@@ -210,7 +210,7 @@ impl App {
         let leading_branch = dux_core::project_browser::project_base_for_add(
             &path,
             (!branch.is_empty()).then_some(branch.as_str()),
-            false,
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
         )
         .into_branch();
         let path_str = path.to_string_lossy().to_string();

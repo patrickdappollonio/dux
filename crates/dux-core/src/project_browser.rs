@@ -124,7 +124,7 @@ pub fn leading_branch_for_project(path: &Path, current_branch: Option<&str>) -> 
 pub fn project_base_for_add(
     path: &Path,
     current_branch: Option<&str>,
-    check_out_default: bool,
+    check_out_default: crate::add_project_plan::DefaultCheckout,
 ) -> crate::add_project_plan::ProjectBase {
     crate::add_project_plan::project_base_at_add(
         current_branch,

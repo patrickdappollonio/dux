@@ -3472,7 +3472,7 @@ impl Engine {
         let leading_branch = crate::add_project_plan::project_base_at_add(
             branch.as_deref(),
             Some(&default_branch),
-            true,
+            crate::add_project_plan::DefaultCheckout::CheckOutDefault,
         )
         .into_branch();
         let path_str = validated.to_string_lossy().to_string();
@@ -5030,7 +5030,7 @@ impl Engine {
                 let leading_branch = crate::project_browser::project_base_for_add(
                     &validated,
                     branch.as_deref(),
-                    false,
+                    crate::add_project_plan::DefaultCheckout::StayOnCurrent,
                 )
                 .into_branch();
                 let path_str = validated.to_string_lossy().to_string();

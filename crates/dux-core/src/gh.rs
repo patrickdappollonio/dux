@@ -1194,6 +1194,15 @@ pub(crate) fn decide_gh_probe(
     }
 }
 
+/// Whether the GitHub integration (`[ui] github_integration`) is switched on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubIntegration {
+    /// The integration is on.
+    Enabled,
+    /// The integration is off, so nothing asks `gh` anything.
+    Disabled,
+}
+
 /// Whether the periodic `gh` re-check is due, as a pure function of the four
 /// things that decide it. The engine owns the clock; this owns the rule.
 ///
@@ -1212,11 +1221,13 @@ pub(crate) fn decide_gh_probe(
 ///   probe themselves, and answering "due" before it lands would double it.
 pub fn gh_reprobe_is_due(
     status: crate::model::GhStatus,
-    integration_enabled: bool,
+    integration: GithubIntegration,
     since_last_probe: Option<Duration>,
     interval: Duration,
 ) -> bool {
-    if !integration_enabled || matches!(status, crate::model::GhStatus::Available) {
+    if integration == GithubIntegration::Disabled
+        || matches!(status, crate::model::GhStatus::Available)
+    {
         return false;
     }
     if interval.is_zero() {
@@ -3077,11 +3088,21 @@ mod host_policy_tests {
                 GhStatus::Unreachable,
             ] {
                 assert!(
-                    gh_reprobe_is_due(status, true, Some(Duration::from_secs(300)), INTERVAL),
+                    gh_reprobe_is_due(
+                        status,
+                        crate::gh::GithubIntegration::Enabled,
+                        Some(Duration::from_secs(300)),
+                        INTERVAL
+                    ),
                     "{status:?} is not a working gh, so it is re-checked",
                 );
                 assert!(
-                    !gh_reprobe_is_due(status, true, Some(Duration::from_secs(299)), INTERVAL),
+                    !gh_reprobe_is_due(
+                        status,
+                        crate::gh::GithubIntegration::Enabled,
+                        Some(Duration::from_secs(299)),
+                        INTERVAL
+                    ),
                     "{status:?} waits out the interval",
                 );
             }
@@ -3092,9 +3113,9 @@ mod host_policy_tests {
             assert!(
                 !gh_reprobe_is_due(
                     GhStatus::Available,
-                    true,
+                    crate::gh::GithubIntegration::Enabled,
                     Some(Duration::from_mins(150)),
-                    INTERVAL,
+                    INTERVAL
                 ),
                 "nothing is waiting on an answer, so dux stops spawning gh",
             );
@@ -3102,9 +3123,9 @@ mod host_policy_tests {
             // clock with a failed status is due again immediately.
             assert!(gh_reprobe_is_due(
                 GhStatus::Unreachable,
-                true,
+                crate::gh::GithubIntegration::Enabled,
                 Some(Duration::from_mins(150)),
-                INTERVAL,
+                INTERVAL
             ));
         }
 
@@ -3112,9 +3133,9 @@ mod host_policy_tests {
         fn the_integration_being_off_asks_nothing() {
             assert!(!gh_reprobe_is_due(
                 GhStatus::Unreachable,
-                false,
+                crate::gh::GithubIntegration::Disabled,
                 Some(Duration::from_mins(150)),
-                INTERVAL,
+                INTERVAL
             ));
         }
 
@@ -3122,9 +3143,9 @@ mod host_policy_tests {
         fn a_zero_interval_disables_the_timer() {
             assert!(!gh_reprobe_is_due(
                 GhStatus::Unreachable,
-                true,
+                crate::gh::GithubIntegration::Enabled,
                 Some(Duration::from_mins(150)),
-                Duration::ZERO,
+                Duration::ZERO
             ));
         }
 
@@ -3132,7 +3153,12 @@ mod host_policy_tests {
         fn a_probe_that_has_never_run_is_not_due_here() {
             // The surfaces run the startup probe themselves; answering "due"
             // before it lands would spawn a second one alongside it.
-            assert!(!gh_reprobe_is_due(GhStatus::Unknown, true, None, INTERVAL));
+            assert!(!gh_reprobe_is_due(
+                GhStatus::Unknown,
+                crate::gh::GithubIntegration::Enabled,
+                None,
+                INTERVAL
+            ));
         }
     }
 

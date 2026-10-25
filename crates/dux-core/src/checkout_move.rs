@@ -149,13 +149,17 @@ impl CheckoutMoveGuard {
         for (location, claim) in locations.iter().zip(&claims) {
             // A link is judged at its own path only, both ways: removing it
             // leaves its target, and whatever lives there, alone.
-            let link = crate::engine::is_symlink(&location.path);
+            let shape = if crate::engine::is_symlink(&location.path) {
+                LocationShape::Link
+            } else {
+                LocationShape::Folder
+            };
             // What lives in it (a folder or a link removed whole) ...
-            if let Err((_, reason)) = self.check(&location.path, link).clear_or_say_why(&[claim]) {
+            if let Err((_, reason)) = self.check(&location.path, shape).clear_or_say_why(&[claim]) {
                 return Err(refusal(checkout, location, what, &reason));
             }
             // ... and what it lives in.
-            if let Some(reason) = self.occupant_around(checkout, &location.path, link)? {
+            if let Some(reason) = self.occupant_around(checkout, &location.path, shape)? {
                 return Err(refusal(checkout, location, what, &reason));
             }
         }
@@ -173,8 +177,9 @@ impl CheckoutMoveGuard {
         &self,
         checkout: &Path,
         location: &Path,
-        link: bool,
+        shape: LocationShape,
     ) -> Result<Option<String>> {
+        let link = shape == LocationShape::Link;
         // A link's own LEXICAL path, never followed: what lies around the
         // link, not around what it points at.
         let lexical = crate::worktree_ops::lexical_key(location);
@@ -270,7 +275,8 @@ impl CheckoutMoveGuard {
     /// holds them; the rest (agents and projects in the session database now,
     /// operations holding a path, sessions dux recorded and the working
     /// directories of what runs in them) is asked when it is cleared.
-    fn check(&self, folder: &Path, link: bool) -> crate::destructive::DestructiveCheck {
+    fn check(&self, folder: &Path, shape: LocationShape) -> crate::destructive::DestructiveCheck {
+        let link = shape == LocationShape::Link;
         let facts = crate::engine::OccupancyFacts {
             agents: &self.agents,
             projects: &self.projects,
@@ -466,13 +472,13 @@ fn parse_raw_diff(out: &[u8]) -> IncomingChanges {
 /// are answered; the ones inside them go with them. A folder whose contents
 /// cannot be read is answered as removed, which only makes the check ask.
 fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf> {
-    let ignore_case = cfg!(target_os = "macos");
+    let case = crate::worktree_ops::CaseRule::of_this_platform();
     // Names read from disk are compared with git's paths under the one
     // spelling rule: case folded where the filesystem folds it.
     let deleted: std::collections::HashSet<PathBuf> = changes
         .deleted
         .iter()
-        .map(|path| crate::worktree_ops::case_key_with(path, ignore_case))
+        .map(|path| crate::worktree_ops::case_key_with(path, case))
         .collect();
     let mut candidates: Vec<PathBuf> = Vec::new();
     for path in &changes.deleted {
@@ -496,7 +502,7 @@ fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf
     let mut removed: Vec<PathBuf> = candidates
         .into_iter()
         .filter(|folder| {
-            !written_under(folder) && only_deleted_paths_in(checkout, folder, &deleted, ignore_case)
+            !written_under(folder) && only_deleted_paths_in(checkout, folder, &deleted, case)
         })
         .collect();
     // Outermost only.
@@ -511,6 +517,16 @@ fn folders_left_empty(checkout: &Path, changes: &IncomingChanges) -> Vec<PathBuf
         .collect()
 }
 
+/// How a location in the checkout is judged: a symbolic link at its own path
+/// (never followed), or the folder it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocationShape {
+    /// A symbolic link, judged at its own path.
+    Link,
+    /// A real folder or file.
+    Folder,
+}
+
 /// Whether everything on disk in `folder` (relative to `checkout`), at any
 /// depth, is a path the move deletes. A real folder that is not there, or
 /// cannot be read, counts as all deleted.
@@ -518,10 +534,10 @@ fn only_deleted_paths_in(
     checkout: &Path,
     folder: &Path,
     deleted: &std::collections::HashSet<PathBuf>,
-    ignore_case: bool,
+    case: crate::worktree_ops::CaseRule,
 ) -> bool {
     let is_deleted =
-        |path: &Path| deleted.contains(&crate::worktree_ops::case_key_with(path, ignore_case));
+        |path: &Path| deleted.contains(&crate::worktree_ops::case_key_with(path, case));
     let at = checkout.join(folder);
     let Ok(meta) = std::fs::symlink_metadata(&at) else {
         return true;
@@ -541,7 +557,7 @@ fn only_deleted_paths_in(
             .file_type()
             .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
         let gone = if is_dir {
-            only_deleted_paths_in(checkout, &child, deleted, ignore_case)
+            only_deleted_paths_in(checkout, &child, deleted, case)
         } else {
             is_deleted(&child)
         };
@@ -726,25 +742,49 @@ mod tests {
         std::fs::write(tmp.path().join("Docs/Guide.md"), "g").unwrap();
         let deleted: std::collections::HashSet<PathBuf> = [Path::new("docs/guide.md")]
             .iter()
-            .map(|path| crate::worktree_ops::case_key_with(path, true))
+            .map(|path| {
+                crate::worktree_ops::case_key_with(path, crate::worktree_ops::CaseRule::Folded)
+            })
             .collect();
         assert!(
-            only_deleted_paths_in(tmp.path(), Path::new("Docs"), &deleted, true),
+            only_deleted_paths_in(
+                tmp.path(),
+                Path::new("Docs"),
+                &deleted,
+                crate::worktree_ops::CaseRule::Folded
+            ),
             "a case-folding filesystem: git's docs/guide.md is the Docs/Guide.md on disk"
         );
         let exact: std::collections::HashSet<PathBuf> =
             [PathBuf::from("docs/guide.md")].into_iter().collect();
         assert!(
-            !only_deleted_paths_in(tmp.path(), Path::new("Docs"), &exact, false),
+            !only_deleted_paths_in(
+                tmp.path(),
+                Path::new("Docs"),
+                &exact,
+                crate::worktree_ops::CaseRule::Exact
+            ),
             "a case-sensitive one: they are different files"
         );
         assert_eq!(
-            crate::worktree_ops::case_key_with(Path::new("A/B"), true),
-            crate::worktree_ops::case_key_with(Path::new("a/b"), true)
+            crate::worktree_ops::case_key_with(
+                Path::new("A/B"),
+                crate::worktree_ops::CaseRule::Folded
+            ),
+            crate::worktree_ops::case_key_with(
+                Path::new("a/b"),
+                crate::worktree_ops::CaseRule::Folded
+            )
         );
         assert_ne!(
-            crate::worktree_ops::case_key_with(Path::new("A/B"), false),
-            crate::worktree_ops::case_key_with(Path::new("a/b"), false)
+            crate::worktree_ops::case_key_with(
+                Path::new("A/B"),
+                crate::worktree_ops::CaseRule::Exact
+            ),
+            crate::worktree_ops::case_key_with(
+                Path::new("a/b"),
+                crate::worktree_ops::CaseRule::Exact
+            )
         );
     }
 
