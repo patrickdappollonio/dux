@@ -74,3 +74,6 @@ doctest = false
 name = "journeys"
 path = "tests/journeys/main.rs"
 required-features = ["journeys"]
+
+[lints]
+workspace = true

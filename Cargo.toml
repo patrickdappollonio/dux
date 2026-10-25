@@ -41,6 +41,55 @@ futures-util = "0.3"
 # Bump it whenever axum's does: `cargo tree -p tokio-tungstenite` names both.
 tokio-tungstenite = "0.29"
 
+# BeautifulRust lints, shared by every member crate through `[lints] workspace = true`.
+# Lints marked [lib] fit libraries; they are kept on here deliberately.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"          # each unsafe op needs its own unsafe block
+missing_debug_implementations = "warn"   # every public type implements Debug
+missing_docs = "warn"                    # [lib] document every public item
+unreachable_pub = "warn"                 # pub items that aren't actually exported
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# Groups first, at lower priority so the individual settings below win.
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Panics: return errors, and give every intentional panic a reason.
+unwrap_used = "warn"                     # use ?, or expect("why this cannot fail")
+expect_used = "allow"                    # expect with a reason is the sanctioned form
+panic_in_result_fn = "warn"              # a fn returning Result shouldn't also panic
+missing_panics_doc = "warn"              # [lib] document reachable panics under # Panics
+missing_errors_doc = "warn"              # [lib] document failures under # Errors
+
+# Suppressions must explain themselves and expire when no longer needed.
+allow_attributes = "warn"                # prefer #[expect] over #[allow]
+allow_attributes_without_reason = "warn" # every suppression says why
+
+# Unsafe must be justified.
+undocumented_unsafe_blocks = "warn"      # // SAFETY: comment on every unsafe block
+multiple_unsafe_ops_per_block = "warn"   # one unsafe operation per block
+
+# API shape.
+fn_params_excessive_bools = "warn"       # bool parameters: use an enum or two methods
+struct_excessive_bools = "warn"          # many bool fields: use an enum or bitflags
+clone_on_ref_ptr = "warn"                # write Rc::clone(&x) so cheap clones are visible
+
+# Output and debugging leftovers.
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"                    # [lib] libraries log, they don't print
+print_stderr = "warn"                    # [lib]
+
+# Casts that silently lose information.
+as_conversions = "warn"                  # prefer From / TryFrom
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+# Pedantic lints that are mostly noise in practice.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
 [profile.release]
 opt-level = "z"    # Optimize for size.
 lto = true         # Enable link time optimization.

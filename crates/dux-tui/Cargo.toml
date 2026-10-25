@@ -47,3 +47,6 @@ libc.workspace = true
 # Used only to break the session database under a test, through a second
 # connection, the way a disk error would. The same version dux-core uses.
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+
+[lints]
+workspace = true

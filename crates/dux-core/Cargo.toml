@@ -80,3 +80,6 @@ opaline = { version = "0.4", default-features = false, features = ["builtin-them
 # them rather than only that the drawing did not change. Default features off:
 # the tests hand it greyscale pixels directly, with no image crate.
 rqrr = { version = "0.11", default-features = false }
+
+[lints]
+workspace = true
