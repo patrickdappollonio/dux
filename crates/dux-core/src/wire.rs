@@ -5510,8 +5510,9 @@ impl Engine {
         Ok(Command::UpdateMacros { macros })
     }
 
-    /// The commands that reload or recover the config, run a macro, or change
-    /// the macro list or the global environment.
+    /// The commands that reload or recover the config, reorder the sidebar, point
+    /// the changed-files watch, run a macro, or change the macro list or the
+    /// global environment.
     fn map_config_set_command(command: WireCommand) -> anyhow::Result<WireCommandMapping> {
         Ok(WireCommandMapping::Mapped(match command {
             WireCommand::PersistGlobalEnv { env, version } => {
@@ -5522,6 +5523,23 @@ impl Engine {
             }
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
+            WireCommand::ReorderSessions {
+                project_id,
+                session_ids,
+            } => Command::ReorderSessions {
+                project_id,
+                session_ids,
+            },
+            WireCommand::ReorderAgents { session_ids } => Command::ReorderAgents { session_ids },
+            WireCommand::ReorderProjects { project_ids } => {
+                Command::ReorderProjects { project_ids }
+            }
+            WireCommand::ReorderTerminals { terminal_ids } => {
+                Command::ReorderTerminals { terminal_ids }
+            }
+            WireCommand::WatchChangedFiles { session_id } => {
+                Command::WatchChangedFiles { session_id }
+            }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
             WireCommand::UpdateMacros { entries, version } => {
                 let Command::UpdateMacros { macros } = Self::update_macros_command(entries)? else {
@@ -5662,27 +5680,15 @@ impl Engine {
             | WireCommand::SetMacro { .. }
             | WireCommand::RemoveMacro { .. }
             | WireCommand::SetGlobalEnvVar { .. }
-            | WireCommand::RemoveGlobalEnvVar { .. } => {
+            | WireCommand::RemoveGlobalEnvVar { .. }
+            | WireCommand::ReorderSessions { .. }
+            | WireCommand::ReorderAgents { .. }
+            | WireCommand::ReorderProjects { .. }
+            | WireCommand::ReorderTerminals { .. }
+            | WireCommand::WatchChangedFiles { .. } => {
                 unreachable!(
                     "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/stop-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
-            }
-            WireCommand::ReorderSessions {
-                project_id,
-                session_ids,
-            } => Command::ReorderSessions {
-                project_id,
-                session_ids,
-            },
-            WireCommand::ReorderAgents { session_ids } => Command::ReorderAgents { session_ids },
-            WireCommand::ReorderProjects { project_ids } => {
-                Command::ReorderProjects { project_ids }
-            }
-            WireCommand::ReorderTerminals { terminal_ids } => {
-                Command::ReorderTerminals { terminal_ids }
-            }
-            WireCommand::WatchChangedFiles { session_id } => {
-                Command::WatchChangedFiles { session_id }
             }
         })
     }

@@ -1601,6 +1601,28 @@ impl Engine {
             .collect()
     }
 
+    /// The compose bar mode dux uses, by name.
+    fn compose_bar_name(&self) -> String {
+        crate::config_effective::effective_compose_bar(&self.config.ui.compose_bar)
+            .as_str()
+            .to_string()
+    }
+
+    /// The clipboard passthrough mode dux uses, by name, with the master switch
+    /// resolved in.
+    fn clipboard_passthrough_name(&self) -> String {
+        crate::config_effective::effective_clipboard_passthrough(&self.config.capabilities)
+            .as_str()
+            .to_string()
+    }
+
+    /// Where the pull-request banner sits, by name.
+    fn pr_banner_position_name(&self) -> String {
+        crate::config_effective::effective_pr_banner_position(&self.config.ui.pr_banner_position)
+            .as_str()
+            .to_string()
+    }
+
     /// Every macro, in the config's order.
     fn macro_views(&self) -> Vec<MacroView> {
         self.config
@@ -1642,11 +1664,7 @@ impl Engine {
             // Normalized rather than passed through: `set_settings` and the raw
             // config editor both put a value in memory without going through
             // `load_config`, so this is the last place to catch a typo.
-            compose_bar: crate::config_effective::effective_compose_bar(
-                &self.config.ui.compose_bar,
-            )
-            .as_str()
-            .to_string(),
+            compose_bar: self.compose_bar_name(),
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
             upload_pasted_text_chars: crate::config::normalized_upload_pasted_text_chars(
@@ -1660,16 +1678,8 @@ impl Engine {
             // one answer. Browser notifications are not one of its consequences:
             // `web_notifications` is the only switch over those and is published
             // untouched above.
-            clipboard_passthrough: crate::config_effective::effective_clipboard_passthrough(
-                &self.config.capabilities,
-            )
-            .as_str()
-            .to_string(),
-            pr_banner_position: crate::config_effective::effective_pr_banner_position(
-                &self.config.ui.pr_banner_position,
-            )
-            .as_str()
-            .to_string(),
+            clipboard_passthrough: self.clipboard_passthrough_name(),
+            pr_banner_position: self.pr_banner_position_name(),
             tailscale_mode: self.config.server.tailscale_mode().as_str().to_string(),
             // Always `false` here: `--no-tailscale` is the serving process's own
             // fact, and the bootstrap ROUTE injects it. See the field's doc.
