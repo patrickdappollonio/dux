@@ -620,7 +620,10 @@ fn format_value(raw: &str, path: &[String], value: &serde_json::Value) -> String
 // dux config regenerate
 // ---------------------------------------------------------------------------
 
-#[allow(deprecated)] // blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool
+#[expect(
+    deprecated,
+    reason = "blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool"
+)]
 fn run_regenerate(
     paths: &DuxPaths,
     rewrite: ConfigRewrite,
@@ -698,7 +701,6 @@ fn regenerate_password_note(current: &str) -> Option<&'static str> {
 /// `--yes` commits. Unlike `regenerate`, this never falls back to defaults: an
 /// unparseable config is refused outright, because the whole point of the
 /// command is to be the safe alternative to a defaults-based rewrite.
-#[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists
 fn run_restore_docs(
     paths: &DuxPaths,
     rewrite: ConfigRewrite,

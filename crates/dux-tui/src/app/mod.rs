@@ -24,8 +24,6 @@ use ratatui::prelude::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::clipboard::Clipboard;
-#[allow(deprecated)]
-// importing the deprecated TUI save_config for use in the blessed sync-direct project-sync helpers
 use crate::config::{
     Config, DuxPaths, MacroSurface, ensure_config, provider_config, validate_keys,
 };
@@ -717,7 +715,7 @@ pub(crate) struct App {
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
-    pub(crate) mouse_drag: Option<ResizeDragState>,
+    pub(crate) mouse_drag: Option<DraggedDivider>,
     /// The live drag-to-reorder gesture over a sidebar row (an agent's or a
     /// terminal's), or `None` when no row is being dragged. Armed by a left press
     /// on a reorderable row and retired on release, on a host resize, on focus
@@ -4274,14 +4272,14 @@ pub(crate) enum OverlayMouseLayout {
     },
 }
 
+/// The pane divider a mouse drag is resizing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::enum_variant_names)]
-pub(crate) enum ResizeDragState {
-    LeftDivider,
-    RightDivider,
-    TerminalDivider,
-    StagedDivider,
-    CommitDivider,
+pub(crate) enum DraggedDivider {
+    Left,
+    Right,
+    Terminal,
+    Staged,
+    Commit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

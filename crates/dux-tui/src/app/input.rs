@@ -786,6 +786,16 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     )
 }
 
+/// A filterable list overlay's published geometry: its search field, when it
+/// has one, its list, how many rows the list holds and how far it is scrolled.
+#[derive(Clone, Copy)]
+struct SearchableOverlay {
+    input: Option<Rect>,
+    list: Rect,
+    items: usize,
+    offset: usize,
+}
+
 /// What one mouse press over the embedded terminal grid means, once the OSC 8
 /// link under the pressed cell is known.
 ///
@@ -6878,21 +6888,21 @@ impl App {
         .item_at(rows_per_item, column, row)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn searchable_overlay_target(
-        input: Option<Rect>,
-        list: Rect,
-        items: usize,
-        offset: usize,
+        overlay: SearchableOverlay,
         input_target: PromptMouseTarget,
         item_target: fn(usize) -> PromptMouseTarget,
         column: u16,
         row: u16,
     ) -> Option<PromptMouseTarget> {
-        if input.is_some_and(|rect| contains_point(rect, column, row)) {
+        if overlay
+            .input
+            .is_some_and(|rect| contains_point(rect, column, row))
+        {
             Some(input_target)
         } else {
-            Self::overlay_row_at(list, offset, items, column, row).map(item_target)
+            Self::overlay_row_at(overlay.list, overlay.offset, overlay.items, column, row)
+                .map(item_target)
         }
     }
 
@@ -6956,12 +6966,8 @@ impl App {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn kill_running_target(
-        input: Option<Rect>,
-        list: Rect,
-        items: usize,
-        offset: usize,
+        overlay: SearchableOverlay,
         cancel_button: Rect,
         hovered_button: Rect,
         selected_button: Rect,
@@ -6970,10 +6976,7 @@ impl App {
         row: u16,
     ) -> Option<PromptMouseTarget> {
         if let Some(target) = Self::searchable_overlay_target(
-            input,
-            list,
-            items,
-            offset,
+            overlay,
             PromptMouseTarget::RuntimeKillInput,
             PromptMouseTarget::RuntimeKillItem,
             column,
@@ -7030,10 +7033,12 @@ impl App {
                 offset,
                 ..
             } => Self::searchable_overlay_target(
-                Some(input),
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input: Some(input),
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::CommandInput,
                 PromptMouseTarget::CommandItem,
                 column,
@@ -7046,10 +7051,12 @@ impl App {
                 offset,
                 ..
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::BrowseProjectInput,
                 PromptMouseTarget::BrowseProjectItem,
                 column,
@@ -7101,10 +7108,12 @@ impl App {
                 items,
                 offset,
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::PickProjectInput,
                 PromptMouseTarget::PickProjectItem,
                 column,
@@ -7202,10 +7211,12 @@ impl App {
                 selected_button,
                 visible_button,
             } => Self::kill_running_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 cancel_button,
                 hovered_button,
                 selected_button,
@@ -7315,10 +7326,12 @@ impl App {
                 items,
                 offset,
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::ChangeBaseBranchInput,
                 PromptMouseTarget::ChangeBaseBranchItem,
                 column,
@@ -7682,7 +7695,7 @@ impl App {
         contains_point(self.mouse_layout.center, column, row).then_some(MouseTarget::Center)
     }
 
-    fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<ResizeDragState> {
+    fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<DraggedDivider> {
         let body = self.mouse_layout.body;
         if !contains_point(body, column, row) {
             return None;
@@ -7695,11 +7708,11 @@ impl App {
         let right_left = self.mouse_layout.right.x;
 
         if !self.panes.left_collapsed && (column == left_edge || column == center_left) {
-            return Some(ResizeDragState::LeftDivider);
+            return Some(DraggedDivider::Left);
         }
 
         if !self.panes.right_hidden && (column == center_right || column == right_left) {
-            return Some(ResizeDragState::RightDivider);
+            return Some(DraggedDivider::Right);
         }
 
         // Horizontal divider between Projects and Terminals sections.
@@ -7708,7 +7721,7 @@ impl App {
             let left = self.mouse_layout.left;
             let divider_row = tl.y.saturating_sub(1);
             if row == divider_row && column >= left.x && column < left.x + left.width {
-                return Some(ResizeDragState::TerminalDivider);
+                return Some(DraggedDivider::Terminal);
             }
         }
 
@@ -7732,7 +7745,7 @@ impl App {
                 && column >= right.x
                 && column < right.x + right.width
             {
-                return Some(ResizeDragState::StagedDivider);
+                return Some(DraggedDivider::Staged);
             }
         }
 
@@ -7749,7 +7762,7 @@ impl App {
                 && column >= right.x
                 && column < right.x + right.width
             {
-                return Some(ResizeDragState::CommitDivider);
+                return Some(DraggedDivider::Commit);
             }
         }
 
@@ -11333,18 +11346,18 @@ impl App {
 
         let body_right = body.x + body.width;
         match self.mouse_drag {
-            Some(ResizeDragState::LeftDivider) => {
+            Some(DraggedDivider::Left) => {
                 let columns = column
                     .saturating_sub(body.x)
                     .saturating_add(1)
                     .clamp(1, body.width);
                 self.set_left_width_pct(pct_from_columns(columns, body.width));
             }
-            Some(ResizeDragState::RightDivider) => {
+            Some(DraggedDivider::Right) => {
                 let columns = body_right.saturating_sub(column).clamp(1, body.width);
                 self.set_right_width_pct(pct_from_columns(columns, body.width));
             }
-            Some(ResizeDragState::TerminalDivider) => {
+            Some(DraggedDivider::Terminal) => {
                 let left = self.mouse_layout.left;
                 if left.height > 0 {
                     // Terminal height = distance from mouse row to bottom of left pane.
@@ -11355,7 +11368,7 @@ impl App {
                         dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
-            Some(ResizeDragState::StagedDivider) => {
+            Some(DraggedDivider::Staged) => {
                 let right = self.mouse_layout.right;
                 if right.height > 0 {
                     // Staged height = distance from mouse row to bottom of right pane.
@@ -11366,7 +11379,7 @@ impl App {
                         dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
-            Some(ResizeDragState::CommitDivider) => {
+            Some(DraggedDivider::Commit) => {
                 // The commit divider resizes the split between "Staged Changes"
                 // and "Commit Message".  We compute relative to the staged
                 // sub-area of the right pane.  The sub-area spans from where
@@ -12633,7 +12646,7 @@ mod tests {
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
-    use crate::app::ResizeDragState;
+    use crate::app::DraggedDivider;
     use crate::app::SelectionOrigin;
     use crate::app::input::{
         assemble_selection_text, commit_success_message, configure_focus,
@@ -21445,7 +21458,7 @@ not_a_real_action = ["x"]
 
         assert_eq!(
             app.mouse_drag,
-            Some(ResizeDragState::LeftDivider),
+            Some(DraggedDivider::Left),
             "the divider grab must win"
         );
         assert_eq!(app.center_mouse_forward, None);

@@ -24,7 +24,6 @@ pub(crate) enum ConfigRead {
     Reload,
 }
 
-#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub(crate) fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     ensure_config_with(paths, ConfigRead::Start)
 }
@@ -36,7 +35,10 @@ pub(crate) fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
     ensure_config_with(paths, ConfigRead::Reload)
 }
 
-#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
+#[expect(
+    deprecated,
+    reason = "blessed sync-direct: the boot and first-creation path runs before the queue exists"
+)]
 fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     // Any core-side write that CREATES config.toml (bootstrap project-sync) must
     // emit the commented template, not a bare one.
@@ -2238,7 +2240,10 @@ pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
-#[allow(deprecated)] // internal delegation: body calls deprecated core fns (patch_config_file, write_config_secure)
+#[expect(
+    deprecated,
+    reason = "internal delegation: the body calls the deprecated core patch_config_file and write_config_secure"
+)]
 pub(crate) fn save_config(
     config_path: &Path,
     config: &Config,
@@ -2740,7 +2745,10 @@ fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usiz
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests call the deprecated save_config wrapper directly to verify its behaviour
+#[expect(
+    deprecated,
+    reason = "the tests call the deprecated save_config wrapper directly to verify its behaviour"
+)]
 mod tests {
     use indexmap::IndexMap;
 

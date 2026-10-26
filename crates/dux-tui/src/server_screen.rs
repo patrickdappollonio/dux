@@ -650,7 +650,16 @@ impl ServerStatusScreen {
 
                     // ── Log panel (rounded, themed) ─────────────────────────────
                     measured = draw_log_panel(
-                        frame, chunks[1], theme, bindings, view, scroll, "Log", browsers,
+                        frame,
+                        chunks[1],
+                        theme,
+                        bindings,
+                        view,
+                        scroll,
+                        PanelTitles {
+                            left: "Log",
+                            right: browsers,
+                        },
                     );
 
                     // ── Footer hints (centered) ─────────────────────────────────
@@ -780,9 +789,15 @@ fn browsers_title(browsers: usize) -> String {
     format!(" {} ", dux_core::text::count_of(browsers, "browser"))
 }
 
+/// The two titles on a log panel's top border: its name on the left and a
+/// count on the right.
+struct PanelTitles<'a> {
+    left: &'a str,
+    right: String,
+}
+
 /// Draw the log panel the flip's status screen and the server log viewer share. Returns
 /// the scrolling area's height and whether the startup stuck on top, to size a page by.
-#[allow(clippy::too_many_arguments)]
 fn draw_log_panel(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -790,9 +805,12 @@ fn draw_log_panel(
     bindings: &RuntimeBindings,
     view: &mut LogView,
     scroll: &mut LogScroll,
-    title: &str,
-    right_title: String,
+    titles: PanelTitles<'_>,
 ) -> (usize, bool) {
+    let PanelTitles {
+        left: title,
+        right: right_title,
+    } = titles;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1299,8 +1317,10 @@ impl ServerLogViewer {
             bindings,
             &mut self.view,
             &mut self.scroll,
-            "Server log",
-            format!(" {shown} "),
+            PanelTitles {
+                left: "Server log",
+                right: format!(" {shown} "),
+            },
         );
         frame.render_widget(
             Paragraph::new(footer)

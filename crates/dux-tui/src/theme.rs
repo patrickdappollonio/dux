@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::numeric::f32_to_u8_saturating;
 use std::path::Path;
 
@@ -209,6 +207,7 @@ impl Glyphs {
     }
 
     /// Every glyph in the set, labelled, for tests that must cover them all.
+    #[cfg(test)]
     pub(crate) fn all(&self) -> [(&'static str, &'static str); 12] {
         [
             ("project", self.project),
@@ -260,6 +259,13 @@ pub(crate) struct Theme {
     pub title_normal: Color,
     pub selection_fg: Color,
     pub selection_bg: Color,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a theme token a theme file may set, which no renderer reads"
+        )
+    )]
     pub project_icon: Color,
     pub project_missing_fg: Color,
     /// Foreground for the standalone star and the directory label on line two.
@@ -328,6 +334,14 @@ pub(crate) struct Theme {
     /// set it explicitly to make the card stand off the pane.
     pub pane_card_bg: Color,
     pub overlay_dim_bg: Color,
+    /// Never painted: the embedded-PTY caret is the host terminal's own cursor.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a theme token a theme file may set, which no renderer reads"
+        )
+    )]
     pub prompt_cursor: Color,
     pub provider_label_fg: Color,
     pub branch_fg: Color,
@@ -787,6 +801,7 @@ impl Theme {
     /// The original dux dark palette. Kept for tests, snapshots, and any
     /// future caller that wants the exact pre-Opaline default without
     /// going through the loader. Equivalent to [`Self::fallback`].
+    #[cfg(test)]
     pub(crate) fn default_dark() -> Self {
         Self::fallback()
     }

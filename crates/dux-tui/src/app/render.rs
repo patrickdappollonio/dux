@@ -3018,18 +3018,20 @@ impl App {
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
                     self.glyphs(),
-                    dux_core::row_state::TerminalRowFacts { working, typing },
-                    spinner,
-                    row.display_title.as_deref(),
-                    &row.owner_name,
-                    if row.standalone {
-                        TerminalOwnerKind::Standalone
-                    } else {
-                        TerminalOwnerKind::Owned
+                    TerminalRowContent {
+                        facts: dux_core::row_state::TerminalRowFacts { working, typing },
+                        spinner: spinner,
+                        display_title: row.display_title.as_deref(),
+                        owner_name: &row.owner_name,
+                        owner: if row.standalone {
+                            TerminalOwnerKind::Standalone
+                        } else {
+                            TerminalOwnerKind::Owned
+                        },
+                        elapsed_ms: self.start_time.elapsed().as_millis(),
+                        highlight: term_highlight,
                     },
                     term_text_width,
-                    self.start_time.elapsed().as_millis(),
-                    term_highlight,
                 );
                 // Same three-line row shape as the agents (see `framed_row_item`).
                 framed_row_item(line1, line2)
@@ -13508,6 +13510,26 @@ enum TerminalOwnerKind {
     Owned,
 }
 
+/// What a terminal's sidebar row says, apart from the theme it is painted in
+/// and the width it fits.
+#[derive(Clone, Copy)]
+struct TerminalRowContent<'a> {
+    facts: dux_core::row_state::TerminalRowFacts,
+    spinner: char,
+    /// The resolved display title (already normalized + collision-disambiguated
+    /// by the shared `terminal_title` rule), or `None` when the terminal is idle.
+    display_title: Option<&'a str>,
+    owner_name: &'a str,
+    /// Whether this terminal is standalone (owned by nothing at all), resolved by
+    /// the caller through an exhaustive match on the owner.
+    owner: TerminalOwnerKind,
+    elapsed_ms: u128,
+    /// The live sidebar query and the style to emphasize its hit with, or `None`
+    /// when nothing is being filtered. The owner element is a searched field, so
+    /// what matched is shown as matched.
+    highlight: Option<(&'a str, Style)>,
+}
+
 /// Build a terminal row's three lines (primary label, owner + state word, and a
 /// trailing blank spacer) so a companion-terminal row is structurally identical
 /// to an agent row and the two lists space evenly.
@@ -13527,26 +13549,21 @@ enum TerminalOwnerKind {
 /// star in the standalone identity tone, with the directory label wearing the
 /// tone alongside it. Owned terminals keep the muted return arrow, where it
 /// means "owned by".
-#[allow(clippy::too_many_arguments)]
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
     glyphs: &crate::theme::Glyphs,
-    facts: dux_core::row_state::TerminalRowFacts,
-    spinner: char,
-    // The resolved display title (already normalized + collision-disambiguated by
-    // the shared `terminal_title` rule), or `None` when the terminal is idle.
-    display_title: Option<&str>,
-    owner_name: &str,
-    // Whether this terminal is standalone (owned by nothing at all), resolved by
-    // the caller through an exhaustive match on the owner.
-    owner: TerminalOwnerKind,
+    content: TerminalRowContent<'_>,
     text_width: u16,
-    elapsed_ms: u128,
-    // The live sidebar query and the style to emphasize its hit with, or `None`
-    // when nothing is being filtered. The owner element is a searched field, so
-    // what matched is shown as matched.
-    highlight: Option<(&str, Style)>,
 ) -> (Line<'static>, Line<'static>) {
+    let TerminalRowContent {
+        facts,
+        spinner,
+        display_title,
+        owner_name,
+        owner,
+        elapsed_ms,
+        highlight,
+    } = content;
     // The glyph SHAPE encodes state (typing caret, running spinner, else the
     // steady dot); its color is the neutral identity color, never the live-state
     // color (that lives on the state word below).
@@ -16040,17 +16057,19 @@ mod tests {
                 let (_, line2) = terminal_row_lines(
                     &theme,
                     &crate::theme::Glyphs::PLAIN,
-                    dux_core::row_state::TerminalRowFacts {
-                        working: true,
-                        typing: false,
+                    TerminalRowContent {
+                        facts: dux_core::row_state::TerminalRowFacts {
+                            working: true,
+                            typing: false,
+                        },
+                        spinner: '◠',
+                        display_title: Some("cargo test"),
+                        owner_name: "proj",
+                        owner: TerminalOwnerKind::Owned,
+                        elapsed_ms: elapsed,
+                        highlight: None,
                     },
-                    '◠',
-                    Some("cargo test"),
-                    "proj",
-                    TerminalOwnerKind::Owned,
                     width,
-                    elapsed,
-                    None,
                 );
                 let text: String = line2
                     .spans
@@ -16117,17 +16136,19 @@ mod tests {
         let (idle0, idle1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            dux_core::row_state::TerminalRowFacts {
-                working: false,
-                typing: false,
+            TerminalRowContent {
+                facts: dux_core::row_state::TerminalRowFacts {
+                    working: false,
+                    typing: false,
+                },
+                spinner: '◜',
+                display_title: None,
+                owner_name: "my-branch",
+                owner: TerminalOwnerKind::Owned,
+                elapsed_ms: 0,
+                highlight: None,
             },
-            '◜',
-            None,
-            "my-branch",
-            TerminalOwnerKind::Owned,
             width,
-            0,
-            None,
         );
         assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
         assert!(line_text(&idle0).contains("Terminal"));
@@ -16152,17 +16173,19 @@ mod tests {
         let (working0, working1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            dux_core::row_state::TerminalRowFacts {
-                working: true,
-                typing: false,
+            TerminalRowContent {
+                facts: dux_core::row_state::TerminalRowFacts {
+                    working: true,
+                    typing: false,
+                },
+                spinner: '◠',
+                display_title: Some("cargo test"),
+                owner_name: "proj",
+                owner: TerminalOwnerKind::Owned,
+                elapsed_ms: 0,
+                highlight: None,
             },
-            '◠',
-            Some("cargo test"),
-            "proj",
-            TerminalOwnerKind::Owned,
             width,
-            0,
-            None,
         );
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
@@ -16191,17 +16214,19 @@ mod tests {
         let (typing0, typing1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            dux_core::row_state::TerminalRowFacts {
-                working: true,
-                typing: true,
+            TerminalRowContent {
+                facts: dux_core::row_state::TerminalRowFacts {
+                    working: true,
+                    typing: true,
+                },
+                spinner: '◝',
+                display_title: Some("vim"),
+                owner_name: "proj",
+                owner: TerminalOwnerKind::Owned,
+                elapsed_ms: 0,
+                highlight: None,
             },
-            '◝',
-            Some("vim"),
-            "proj",
-            TerminalOwnerKind::Owned,
             width,
-            0,
-            None,
         );
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
@@ -16219,17 +16244,19 @@ mod tests {
         let (_, line2) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            dux_core::row_state::TerminalRowFacts {
-                working: false,
-                typing: false,
+            TerminalRowContent {
+                facts: dux_core::row_state::TerminalRowFacts {
+                    working: false,
+                    typing: false,
+                },
+                spinner: '◜',
+                display_title: None,
+                owner_name: "~/notes",
+                owner: TerminalOwnerKind::Standalone,
+                elapsed_ms: 0,
+                highlight: None,
             },
-            '◜',
-            None,
-            "~/notes",
-            TerminalOwnerKind::Standalone,
             40,
-            0,
-            None,
         );
         let marker = &line2.spans[0];
         assert_eq!(
@@ -22187,21 +22214,23 @@ mod tests {
             let (_, line2) = terminal_row_lines(
                 &theme,
                 glyphs,
-                dux_core::row_state::TerminalRowFacts {
-                    working: false,
-                    typing: false,
-                },
-                '◜',
-                None,
-                owner,
-                if standalone {
-                    TerminalOwnerKind::Standalone
-                } else {
-                    TerminalOwnerKind::Owned
+                TerminalRowContent {
+                    facts: dux_core::row_state::TerminalRowFacts {
+                        working: false,
+                        typing: false,
+                    },
+                    spinner: '◜',
+                    display_title: None,
+                    owner_name: owner,
+                    owner: if standalone {
+                        TerminalOwnerKind::Standalone
+                    } else {
+                        TerminalOwnerKind::Owned
+                    },
+                    elapsed_ms: 0,
+                    highlight: None,
                 },
                 width,
-                0,
-                None,
             );
             line_text(&line2)
         };
