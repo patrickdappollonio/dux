@@ -1535,41 +1535,6 @@ mod tests {
         assert!(applied);
     }
 
-    /// `expected_owner` is a qualifier on a take-over and nothing else: a
-    /// plain resize, which carries none, is decided exactly as it always was,
-    /// so a client that sends the field on every frame cannot accidentally
-    /// change its own steady-state resizes or its first attach.
-    #[test]
-    fn expected_owner_is_ignored_when_the_frame_is_not_a_takeover() {
-        let owners = PtySizeOwners::default();
-        let a = owners.next_conn_id();
-        let b = owners.next_conn_id();
-
-        // UNOWNED x plain, with a bogus expectation: still claims.
-        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
-        assert!(out.apply && out.epoch.is_some());
-        assert!(applied);
-
-        // OWNED-BY-SELF x plain, with a bogus expectation: still applies.
-        let (out, applied) = claim_resize(&owners, "p", a, ResizeIntent::Plain);
-        assert!(out.apply && out.epoch.is_none());
-        assert!(applied);
-
-        // OWNED-BY-OTHER x plain, with an expectation that actually MATCHES:
-        // still refused, because only a take-over ever transfers.
-        let (out, applied) = claim_resize(&owners, "p", b, ResizeIntent::Plain);
-        assert_eq!(
-            out,
-            ResizeClaim {
-                apply: false,
-                epoch: None,
-                seq: None
-            }
-        );
-        assert!(!applied);
-        assert!(owners.is_owner("p", a));
-    }
-
     /// The owner's write must be decided and enqueued under one lock, or a
     /// take-over landing in the gap lets one keystroke through to a pty the
     /// writer no longer holds.

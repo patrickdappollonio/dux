@@ -677,6 +677,21 @@ struct TabStripItem {
     glyph_tone: Color,
 }
 
+impl TabStripItem {
+    /// The one cue this pill's slot carries: attention beats working, as it
+    /// does on the agent row, because a flagged tab may still be streaming
+    /// the prompt it wants answered.
+    fn cue(&self) -> TabCue {
+        if self.needs_attention {
+            TabCue::NeedsAttention
+        } else if self.working {
+            TabCue::Working
+        } else {
+            TabCue::Quiet
+        }
+    }
+}
+
 /// How an agent row's project tag should be rendered. Decided purely from the
 /// project the session points at, so both the full-width row's inline tag and
 /// the collapsed icon rail agree on when to surface a warning marker.
@@ -4425,14 +4440,7 @@ impl App {
         (blink, spinner_idx): (BlinkPhase, usize),
         label_style: Style,
     ) {
-        let cue = if item.needs_attention {
-            TabCue::NeedsAttention
-        } else if item.working {
-            TabCue::Working
-        } else {
-            TabCue::Quiet
-        };
-        match tab_activity_glyph(cue, blink, spinner_idx) {
+        match tab_activity_glyph(item.cue(), blink, spinner_idx) {
             TabActivityGlyph::Blank => {
                 cell.set_symbol(" ").set_style(label_style);
             }
@@ -11941,6 +11949,23 @@ impl App {
     /// disabled when it would act on nothing. These are four distinct actions,
     /// not picker confirmation controls; three have no keyboard equivalent.
     /// Returns their rects in footer order.
+    /// How a kill-running footer button looks before any press: disabled
+    /// when it has nothing to act on, even with keyboard focus on it, else
+    /// focused or normal.
+    fn kill_running_footer_resting(
+        prompt: &KillRunningPrompt,
+        action: KillRunningFooterAction,
+    ) -> ButtonState {
+        if !Self::kill_running_footer_enabled(prompt, action) {
+            return ButtonState::Disabled;
+        }
+        if matches!(prompt.focus, KillRunningFocus::Footer(current) if current == action) {
+            ButtonState::Focused
+        } else {
+            ButtonState::Normal
+        }
+    }
+
     fn render_kill_running_buttons(
         &self,
         frame: &mut Frame<'_>,
@@ -11973,11 +11998,6 @@ impl App {
                 height: 3,
             };
             button_rects[index] = rect;
-            let enabled = Self::kill_running_footer_enabled(prompt, *action);
-            let focused = matches!(
-                prompt.focus,
-                KillRunningFocus::Footer(current) if current == *action
-            );
             let kind = if matches!(action, KillRunningFooterAction::Cancel) {
                 ButtonKind::Confirm
             } else {
@@ -11992,15 +12012,7 @@ impl App {
             let state = button_state_for(
                 press_target,
                 self.pressed_button,
-                if enabled {
-                    if focused {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    }
-                } else {
-                    ButtonState::Disabled
-                },
+                Self::kill_running_footer_resting(prompt, *action),
             );
             Button::new(action.button_label())
                 .kind(kind)
@@ -19526,37 +19538,74 @@ mod tests {
     #[test]
     fn tab_activity_glyph_follows_the_agent_list_precedence() {
         let spinner = crate::theme::SPINNER_FRAMES[3];
+        let glyph = |working: bool, needs_attention: bool, blink: BlinkPhase| {
+            let item = TabStripItem {
+                id: "tab".to_string(),
+                label: "claude".to_string(),
+                working,
+                needs_attention,
+                glyph_tone: Color::Reset,
+            };
+            tab_activity_glyph(item.cue(), blink, 3)
+        };
 
         assert_eq!(
-            tab_activity_glyph(TabCue::Quiet, BlinkPhase::Lit, 3),
+            glyph(false, false, BlinkPhase::Lit),
             TabActivityGlyph::Blank,
             "an idle tab's slot is blank"
         );
         assert_eq!(
-            tab_activity_glyph(TabCue::Working, BlinkPhase::Lit, 3),
+            glyph(true, false, BlinkPhase::Lit),
             TabActivityGlyph::Working(spinner),
             "a working tab carries the shared spinner frame"
         );
         assert_eq!(
-            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
+            glyph(false, true, BlinkPhase::Lit),
             TabActivityGlyph::Attention,
             "a flagged tab carries the attention dot"
         );
         assert_eq!(
-            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
+            glyph(true, true, BlinkPhase::Lit),
             TabActivityGlyph::Attention,
             "attention beats the working spinner, as it does on the agent row"
         );
         assert_eq!(
-            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
+            glyph(false, true, BlinkPhase::Dark),
             TabActivityGlyph::Blank,
             "the hidden half of the blink is blank"
         );
         assert_eq!(
-            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
+            glyph(true, true, BlinkPhase::Dark),
             TabActivityGlyph::Blank,
             "a flagged AND working tab goes blank in the hidden blink phase; a slot \
              that alternated dot and spinner would read as two cues"
+        );
+    }
+
+    /// A kill-running footer button with nothing to act on rests disabled
+    /// even while keyboard focus is on it; one that can act shows focus.
+    #[test]
+    fn a_kill_running_footer_button_rests_disabled_over_its_focus() {
+        let prompt = |focus| KillRunningPrompt {
+            runtimes: Vec::new(),
+            list: SearchableList::new(),
+            selected_ids: std::collections::HashSet::new(),
+            focus,
+        };
+        let selected = KillRunningFooterAction::Selected;
+        let cancel = KillRunningFooterAction::Cancel;
+        assert_eq!(
+            App::kill_running_footer_resting(&prompt(KillRunningFocus::Footer(selected)), selected),
+            ButtonState::Disabled,
+            "nothing is selected, so focus on the button does not arm it"
+        );
+        assert_eq!(
+            App::kill_running_footer_resting(&prompt(KillRunningFocus::Footer(cancel)), cancel),
+            ButtonState::Focused
+        );
+        assert_eq!(
+            App::kill_running_footer_resting(&prompt(KillRunningFocus::List), cancel),
+            ButtonState::Normal
         );
     }
 

@@ -458,9 +458,9 @@ mod tests {
     }
 
     #[test]
-    fn button_state_for_disabled_overrides_press_and_focus() {
-        // Disabled wins over both press and keyboard focus: a button that
-        // becomes unactivatable mid-drag must not pretend it is armed.
+    fn button_state_for_disabled_overrides_a_press() {
+        // A button that becomes unactivatable mid-drag must not pretend it
+        // is armed.
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::RuntimeKillSelected,
