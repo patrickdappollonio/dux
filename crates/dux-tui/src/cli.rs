@@ -24,30 +24,96 @@ pub(crate) fn asks_for_help(args: &[String]) -> bool {
         .any(|a| a == "-h" || a == "--help")
 }
 
+/// Whether `dux config regenerate` or `restore-docs` writes the file or only
+/// previews what it would write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigRewrite {
+    /// Show the diff and say how to apply it.
+    Preview,
+    /// `--yes`: write the file.
+    Apply,
+}
+
+/// How much `dux config reset` removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetScope {
+    /// The config, logs and remotes only.
+    ConfigOnly,
+    /// `--all`: the agent data too.
+    Everything,
+}
+
+/// What `dux config diff` prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffForm {
+    /// The structural summary that is safe to paste.
+    Summary,
+    /// `--raw`: the whole file.
+    Raw,
+}
+
 pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
     let sub = args.first().map_or("", std::string::String::as_str);
     match sub {
         "reset" => {
             let all = args[1..].iter().any(|a| a == "--all");
             reject_unknown_flags(&args[1..], &["--all"])?;
-            run_reset(paths, all)
+            run_reset(
+                paths,
+                if all {
+                    ResetScope::Everything
+                } else {
+                    ResetScope::ConfigOnly
+                },
+            )
         }
         "diff" => {
             let raw = args[1..].iter().any(|a| a == "--raw");
             reject_unknown_flags(&args[1..], &["--raw"])?;
-            run_diff(paths, raw)
+            run_diff(
+                paths,
+                if raw {
+                    DiffForm::Raw
+                } else {
+                    DiffForm::Summary
+                },
+            )
         }
         "regenerate" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            let show = args[1..].iter().any(|a| a == "--show");
+            let held_back = if args[1..].iter().any(|a| a == "--show") {
+                dux_core::config_keys::HeldBack::Shown
+            } else {
+                dux_core::config_keys::HeldBack::Masked
+            };
             reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
-            run_regenerate(paths, yes, show)
+            run_regenerate(
+                paths,
+                if yes {
+                    ConfigRewrite::Apply
+                } else {
+                    ConfigRewrite::Preview
+                },
+                held_back,
+            )
         }
         "restore-docs" => {
             let yes = args[1..].iter().any(|a| a == "--yes");
-            let show = args[1..].iter().any(|a| a == "--show");
+            let held_back = if args[1..].iter().any(|a| a == "--show") {
+                dux_core::config_keys::HeldBack::Shown
+            } else {
+                dux_core::config_keys::HeldBack::Masked
+            };
             reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
-            run_restore_docs(paths, yes, show)
+            run_restore_docs(
+                paths,
+                if yes {
+                    ConfigRewrite::Apply
+                } else {
+                    ConfigRewrite::Preview
+                },
+                held_back,
+            )
         }
         "path" => {
             println!("{}", paths.config_path.display());
@@ -218,10 +284,10 @@ impl std::fmt::Display for ResetFailed {
 impl std::error::Error for ResetFailed {}
 
 /// The reset itself. Prints what it removed as it goes.
-fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
+fn run_reset(paths: &DuxPaths, scope: ResetScope) -> Result<()> {
     let (log_path, server_log_path) = resolve_reset_log_paths(paths);
 
-    if all {
+    if scope == ResetScope::Everything {
         reset_agent_data(paths)?;
     }
 
@@ -270,7 +336,7 @@ fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
 // dux config diff
 // ---------------------------------------------------------------------------
 
-fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
+fn run_diff(paths: &DuxPaths, form: DiffForm) -> Result<()> {
     if !paths.config_path.exists() {
         println!("no config file found at {}", paths.config_path.display());
         return Ok(());
@@ -289,7 +355,7 @@ fn run_diff(paths: &DuxPaths, raw: bool) -> Result<()> {
     // placed by its line.
     current.source_text = dux_core::config::SourceText::of(&current_raw);
 
-    if raw {
+    if form == DiffForm::Raw {
         run_diff_raw(&current_raw, &current)?;
     } else {
         run_diff_summary(&current)?;
@@ -557,10 +623,14 @@ fn format_value(raw: &str, path: &[String], value: &serde_json::Value) -> String
 // ---------------------------------------------------------------------------
 
 #[allow(deprecated)] // blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool
-fn run_regenerate(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
+fn run_regenerate(
+    paths: &DuxPaths,
+    rewrite: ConfigRewrite,
+    held_back: dux_core::config_keys::HeldBack,
+) -> Result<()> {
     let fresh = config::render_default_config();
 
-    if !yes {
+    if rewrite == ConfigRewrite::Preview {
         if paths.config_path.exists() {
             let current =
                 fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
@@ -568,13 +638,17 @@ fn run_regenerate(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
                 println!("config already matches defaults, so there is nothing to do");
                 return Ok(());
             }
-            print!("{}", regenerate_preview(&current, &fresh, show));
+            print!("{}", regenerate_preview(&current, &fresh, held_back));
             if let Some(note) = regenerate_password_note(&current) {
                 println!("\n{note}");
             }
-            println!("\nRun `dux config regenerate --yes` to overwrite with these defaults.");
+            println!(
+                "\nRun `dux config regenerate --(rewrite == ConfigRewrite::Apply)` to overwrite with these defaults."
+            );
         } else {
-            println!("no config file exists; regenerate --yes will create one at:");
+            println!(
+                "no config file exists; regenerate --(rewrite == ConfigRewrite::Apply) will create one at:"
+            );
             println!("  {}", paths.config_path.display());
         }
         return Ok(());
@@ -631,7 +705,11 @@ fn regenerate_password_note(current: &str) -> Option<&'static str> {
 /// unparseable config is refused outright, because the whole point of the
 /// command is to be the safe alternative to a defaults-based rewrite.
 #[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists
-fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
+fn run_restore_docs(
+    paths: &DuxPaths,
+    rewrite: ConfigRewrite,
+    held_back: dux_core::config_keys::HeldBack,
+) -> Result<()> {
     if !paths.config_path.exists() {
         println!("no config file found at {}", paths.config_path.display());
         println!("dux writes a fully commented config the first time it starts.");
@@ -649,7 +727,7 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
              Your config.toml has NOT been modified.\n\
              Fix the syntax error at {} and run this again. If you would rather \
              start over from defaults and lose your current settings, that is \
-             `dux config regenerate --yes`.",
+             `dux config regenerate --(rewrite == ConfigRewrite::Apply)`.",
             paths.config_path.display()
         )
     })?;
@@ -659,10 +737,12 @@ fn run_restore_docs(paths: &DuxPaths, yes: bool, show: bool) -> Result<()> {
         return Ok(());
     }
 
-    if !yes {
-        print!("{}", restore_docs_preview(&raw, &restored.text, show));
+    if rewrite == ConfigRewrite::Preview {
+        print!("{}", restore_docs_preview(&raw, &restored.text, held_back));
         print_restore_report(&restored);
-        println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
+        println!(
+            "\nRun `dux config restore-docs --(rewrite == ConfigRewrite::Apply)` to apply this (a timestamped backup"
+        );
         println!("of your current config is written first).");
         return Ok(());
     }
@@ -789,21 +869,25 @@ fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
 
 /// The user's file `raw` as a preview may print it: every line through the
 /// one value printer's rules (see `config_keys::shown_file_text`), so a
-/// plaintext password is never shown and, without `show`, nothing below a
+/// plaintext password is never shown and, while `held_back` masks, nothing below a
 /// hidden key or in `[env]` or `[projects]` either.
-fn shown_for_preview(raw: &str, show: bool) -> Result<String> {
-    let held_back = if show {
-        dux_core::config_keys::HeldBack::Shown
-    } else {
-        dux_core::config_keys::HeldBack::Masked
-    };
+fn shown_for_preview(raw: &str, held_back: dux_core::config_keys::HeldBack) -> Result<String> {
     dux_core::config_keys::shown_file_text(raw, held_back, &crate::config::binding_is_understood)
 }
 
 /// The diff of `a` against `b`, each shown as a printer may show it; when
 /// either is not TOML, only why nothing of it is shown.
-fn preview(label_a: &str, label_b: &str, a: &str, b: &str, show: bool) -> String {
-    match (shown_for_preview(a, show), shown_for_preview(b, show)) {
+fn preview(
+    label_a: &str,
+    label_b: &str,
+    a: &str,
+    b: &str,
+    held_back: dux_core::config_keys::HeldBack,
+) -> String {
+    match (
+        shown_for_preview(a, held_back),
+        shown_for_preview(b, held_back),
+    ) {
         (Ok(a), Ok(b)) => unified_diff(label_a, label_b, &a, &b),
         (Err(error), _) | (_, Err(error)) => format!("{error:#}\n"),
     }
@@ -811,14 +895,22 @@ fn preview(label_a: &str, label_b: &str, a: &str, b: &str, show: bool) -> String
 
 /// What `dux config regenerate` previews: the user's file against the
 /// fresh default, each side shown as a printer may show it.
-pub(crate) fn regenerate_preview(current: &str, fresh: &str, show: bool) -> String {
-    preview("current", "default", current, fresh, show)
+pub(crate) fn regenerate_preview(
+    current: &str,
+    fresh: &str,
+    held_back: dux_core::config_keys::HeldBack,
+) -> String {
+    preview("current", "default", current, fresh, held_back)
 }
 
 /// What `dux config restore-docs` previews: the user's file against the
 /// documented one, each side shown as a printer may show it.
-pub(crate) fn restore_docs_preview(raw: &str, restored: &str, show: bool) -> String {
-    preview("current", "restored", raw, restored, show)
+pub(crate) fn restore_docs_preview(
+    raw: &str,
+    restored: &str,
+    held_back: dux_core::config_keys::HeldBack,
+) -> String {
+    preview("current", "restored", raw, restored, held_back)
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,7 +1619,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        run_reset(&paths, true).expect("reset");
+        run_reset(&paths, ResetScope::Everything).expect("reset");
 
         let still_running = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
@@ -1819,7 +1911,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        run_reset(&paths, true).expect("reset");
+        run_reset(&paths, ResetScope::Everything).expect("reset");
 
         assert!(
             job.0.try_wait().expect("try_wait").is_some(),
@@ -1849,7 +1941,8 @@ mod tests {
             .expect("make the body unreadable");
             drop(conn);
 
-            let refusal = run_reset(&harness.paths, true).expect_err("the reset refuses");
+            let refusal =
+                run_reset(&harness.paths, ResetScope::Everything).expect_err("the reset refuses");
 
             let message = format!("{refusal:#}");
             assert!(
@@ -2663,7 +2756,7 @@ mod tests {
         harness.write_log("logs/web-custom.log.notes.tmp");
         let worktree = harness.create_session("agent-1");
 
-        run_reset(&harness.paths, false).expect("reset");
+        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
 
         assert!(!harness.paths.config_path.exists());
         assert!(!harness.paths.root.join("logs/custom.log").exists());
@@ -2717,7 +2810,7 @@ mod tests {
             for name in [kept.to_string(), format!("{kept}.1")] {
                 fs::write(outside.join(name), "not dux's to delete").expect("outside file");
             }
-            run_reset(&harness.paths, false).expect("reset");
+            run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
             for name in [kept.to_string(), format!("{kept}.1")] {
                 assert!(
                     outside.join(&name).exists(),
@@ -2727,7 +2820,7 @@ mod tests {
         }
         fs::write(outside.join("target.log"), "behind the link").expect("link target");
         harness.write_config_with_server_log_path("leaf-link.log");
-        run_reset(&harness.paths, false).expect("reset");
+        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
         assert!(
             fs::symlink_metadata(harness.paths.root.join("leaf-link.log")).is_err(),
             "the link itself is unlinked"
@@ -2763,7 +2856,7 @@ mod tests {
                     .expect("record the welcome screen as seen");
             }
 
-            run_reset(&harness.paths, true).expect("reset");
+            run_reset(&harness.paths, ResetScope::Everything).expect("reset");
 
             assert!(!worktree.exists());
             assert!(!harness.paths.config_path.exists());
@@ -2786,7 +2879,7 @@ mod tests {
         let harness = ResetHarness::new();
         fs::create_dir_all(&harness.paths.root).expect("root");
 
-        run_reset(&harness.paths, false).expect("reset");
+        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
 
         assert!(!harness.paths.root.exists());
     }
@@ -2810,7 +2903,7 @@ mod tests {
         fs::write(locked.join("still-writing.log"), "x").expect("file");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("chmod");
 
-        let result = run_reset(&harness.paths, true);
+        let result = run_reset(&harness.paths, ResetScope::Everything);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod back");
 
         let refusal = result.expect_err("one stuck folder stops the reset");
@@ -2845,7 +2938,8 @@ mod tests {
             .spawn()
             .expect("spawn");
 
-        let refusal = run_reset(&harness.paths, true).expect_err("the reset refuses");
+        let refusal =
+            run_reset(&harness.paths, ResetScope::Everything).expect_err("the reset refuses");
 
         let message = format!("{refusal:#}");
         assert!(message.contains(&stranger.id().to_string()), "{message}");
@@ -2855,7 +2949,7 @@ mod tests {
 
         stranger.kill().expect("kill");
         stranger.wait().expect("reap");
-        run_reset(&harness.paths, true).expect("reset");
+        run_reset(&harness.paths, ResetScope::Everything).expect("reset");
 
         assert!(!harness.paths.root.exists());
     }
