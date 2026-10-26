@@ -125,6 +125,11 @@ enum Whose {
 impl Client {
     /// Send a change as an operation and return its record as the change
     /// answered it: already final when the change finished inside the call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached or refuses the change, naming the operation in the way
+    /// when there is one.
     pub fn change(
         &self,
         method: Method,
@@ -165,6 +170,10 @@ impl Client {
     }
 
     /// The record `id` as it stands, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached, holds no record `id`, or refuses.
     pub fn operation(&self, id: &str) -> Result<OperationRecord, CliError> {
         let reply = self.send(Request::get(operation_path(id, 0)))?;
         match reply.status {
@@ -345,6 +354,10 @@ pub(crate) fn deadline_after(timeout: Duration) -> Instant {
 
 /// A finished record as the command ends on it: its sentence on success, or
 /// the error a failed or partly done change exits with.
+///
+/// # Errors
+///
+/// Fails when the change failed or was partly done, or is still running.
 pub fn outcome(record: &OperationRecord) -> Result<String, CliError> {
     match record.state {
         RecordState::Succeeded => Ok(record.message.clone()),

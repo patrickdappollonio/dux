@@ -32,6 +32,10 @@ pub const NO_SERVER_LOG: &str = "this dux is not writing a server log right now:
 const LOG_ROUTE: &str = "/api/v1/server/log";
 
 /// `dux server connections ls`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses.
 pub fn connections_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
     let connections: Vec<ConnectionView> = client.get_json("/api/v1/server/connections")?;
     let rows = connections
@@ -213,6 +217,10 @@ fn writes_no_log(error: &CliError) -> bool {
 
 /// [`log_tail`], reading the file at `paths` instead when the dux answered
 /// that it writes no log and `paths` is given (the dux is this machine's).
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the file cannot be read.
 pub fn tail_or_file(
     client: &Client,
     paths: Option<&DuxPaths>,
@@ -226,6 +234,10 @@ pub fn tail_or_file(
 
 /// [`log_follow`], following the file at `paths` instead when the dux
 /// answered that it writes no log and `paths` is given.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the file cannot be read.
 pub fn follow_or_file(
     client: &Client,
     paths: Option<&DuxPaths>,
@@ -242,6 +254,10 @@ pub fn follow_or_file(
 
 /// Where the server log is on this machine: `[server] log_path` from `config.toml`, or the
 /// default when there is no config file.
+///
+/// # Errors
+///
+/// Fails when `config.toml` cannot be loaded.
 pub fn log_file(paths: &DuxPaths) -> Result<PathBuf, CliError> {
     let config = crate::config::load_config(paths)
         .map_err(|error| CliError::new(Exit::Failed, error.to_string()))?;
@@ -254,6 +270,10 @@ fn unreadable(error: &LogError) -> CliError {
 
 /// The last `lines` lines of the log file, which may not exist yet, and the
 /// sentence that says the answer was cut short, if it was.
+///
+/// # Errors
+///
+/// Fails when the file exists but cannot be read.
 pub fn file_tail(
     path: &std::path::Path,
     lines: usize,

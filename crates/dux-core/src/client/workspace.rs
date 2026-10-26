@@ -224,6 +224,10 @@ fn yes_or_blank(value: Option<&Value>) -> String {
 // ---------------------------------------------------------------------------
 
 /// `dux projects ls`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses.
 pub fn projects_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
     let agents = agents(client)?;
     let rows = projects(client)?
@@ -265,6 +269,10 @@ pub fn projects_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
 
 /// `dux projects show <p>`. The project's environment is named, never
 /// printed: its values are often secrets.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single project.
 pub fn projects_show(client: &Client, query: &str) -> Result<String, CliError> {
     let projects = projects(client)?;
     let project = find_project(&projects, query)?;
@@ -289,6 +297,10 @@ pub fn projects_show(client: &Client, query: &str) -> Result<String, CliError> {
 }
 
 /// `dux projects worktrees ls <p>`: the worktree manager's own entries.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single project.
 pub fn worktrees_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
     #[derive(Deserialize)]
     struct Entries {
@@ -354,6 +366,10 @@ pub enum AgentColumns {
 }
 
 /// `dux agents ls`, of one project when `project` names one, with `columns`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `project` names no single project.
 pub fn agents_ls(
     client: &Client,
     project: Option<&str>,
@@ -439,6 +455,14 @@ pub fn agents_ls(
 }
 
 /// `dux agents show <a>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+///
+/// # Panics
+///
+/// Never: the fields are built as a JSON object literal.
 pub fn agents_show(client: &Client, query: &str) -> Result<String, CliError> {
     let agent = find_agent(client, query)?;
     let tabs: Vec<String> = agent
@@ -491,6 +515,10 @@ pub fn agents_show(client: &Client, query: &str) -> Result<String, CliError> {
 }
 
 /// `dux agents tabs ls <a>`, in strip order.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
 pub fn tabs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
     let agent = find_agent(client, query)?;
     let rows = agent
@@ -558,6 +586,10 @@ fn owner_words(owner: &Owner, document: &WorkspaceDocument) -> String {
 }
 
 /// `dux terminals ls`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses.
 pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
     let document = WorkspaceDocument::read(client)?;
     let rows = document
@@ -698,6 +730,11 @@ const CREATE_RETRY_PAUSE: Duration = Duration::from_millis(500);
 /// finish, sends once more, and says so on stderr. That waiting and the new create's own
 /// wait share the one `wait`, and no create is started once it has run out. With no wait the
 /// create is refused as any other change is.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached, refuses the change, or the change fails, does only part of
+/// its work, or is still running when `wait` runs out.
 pub fn perform(
     client: &Client,
     planned: &Planned,
@@ -783,6 +820,10 @@ fn report(record: &OperationRecord) -> Result<String, CliError> {
 }
 
 /// `dux projects add <path>`.
+///
+/// # Errors
+///
+/// Fails when `path` cannot be given to the target dux.
 pub fn projects_add(
     client: &Client,
     path: &str,
@@ -805,6 +846,10 @@ pub fn projects_add(
 }
 
 /// `dux projects rm <p>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single project.
 pub fn projects_rm(
     client: &Client,
     query: &str,
@@ -891,6 +936,11 @@ pub enum NewAgent {
 }
 
 /// `dux agents add`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, a project or agent named names no single one,
+/// or a path cannot be given to the target dux.
 pub fn agents_add(
     client: &Client,
     how: NewAgent,
@@ -1342,6 +1392,10 @@ pub fn existing_branch_refusal(error: CliError) -> CliError {
 
 /// `dux agents rm <a>`. `delete_branch` is the dialogs' answer: `None`
 /// leaves it to how the branch came to be.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
 pub fn agents_rm(
     client: &Client,
     query: &str,
@@ -1371,6 +1425,10 @@ pub fn agents_rm(
 }
 
 /// `dux agents stop <a>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
 pub fn agents_stop(
     client: &Client,
     query: &str,
@@ -1387,6 +1445,10 @@ pub fn agents_stop(
 }
 
 /// `dux agents start <a>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
 pub fn agents_start(client: &Client, query: &str) -> Result<Planned, CliError> {
     let agent = find_agent(client, query)?;
     Ok(Planned::new(
@@ -1398,6 +1460,10 @@ pub fn agents_start(client: &Client, query: &str) -> Result<Planned, CliError> {
 }
 
 /// `dux agents tabs add <a>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
 pub fn tabs_add(client: &Client, query: &str, provider: Option<&str>) -> Result<Planned, CliError> {
     let agent = find_agent(client, query)?;
     let what = provider.map_or("a tab".to_string(), |p| format!("a {p} tab"));
@@ -1429,6 +1495,11 @@ fn tab_address(
 }
 
 /// `dux agents tabs rm <a> <tab>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the agent or tab is not named by exactly
+/// one.
 pub fn tabs_rm(
     client: &Client,
     agent: &str,
@@ -1446,6 +1517,11 @@ pub fn tabs_rm(
 }
 
 /// `dux agents tabs start <a> <tab>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the agent or tab is not named by exactly
+/// one.
 pub fn tabs_start(client: &Client, agent: &str, tab: &str) -> Result<Planned, CliError> {
     let (agent, label, path) = tab_address(client, agent, tab)?;
     Ok(Planned::new(
@@ -1457,6 +1533,11 @@ pub fn tabs_start(client: &Client, agent: &str, tab: &str) -> Result<Planned, Cl
 }
 
 /// `dux agents tabs stop <a> <tab>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the agent or tab is not named by exactly
+/// one.
 pub fn tabs_stop(
     client: &Client,
     agent: &str,
@@ -1484,6 +1565,11 @@ pub enum TerminalFor {
 }
 
 /// `dux terminals add`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the owner named names no single agent or
+/// project.
 pub fn terminals_add(client: &Client, owner: TerminalFor) -> Result<Planned, CliError> {
     let (question, path) = match owner {
         TerminalFor::Agent(query) => {
@@ -1510,6 +1596,10 @@ pub fn terminals_add(client: &Client, owner: TerminalFor) -> Result<Planned, Cli
 }
 
 /// `dux terminals rm <t>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single terminal.
 pub fn terminals_rm(
     client: &Client,
     query: &str,
