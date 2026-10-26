@@ -360,7 +360,7 @@ async fn smoke_a_browser_loads_the_web_ui_from_the_network_and_this_machine() {
 }
 
 /// What only dux's terminal UI draws: the agent list's frame title.
-pub const TUI_MARKER: &str = "Agents (";
+pub(crate) const TUI_MARKER: &str = "Agents (";
 
 /// Situation: dux served from the terminal UI, the two ways a TUI serves:
 /// `[server] serve_while_tui = true`, and the `start-web-server` palette
@@ -415,7 +415,7 @@ async fn smoke_both_terminal_ui_serving_modes_serve() {
 }
 
 /// Run `start-web-server` from the terminal UI's command palette.
-pub async fn start_web_server(dux: &Dux) {
+pub(crate) async fn start_web_server(dux: &Dux) {
     dux.wait_for_screen(TUI_MARKER, Duration::from_secs(30))
         .await;
     dux.tmux_keys(&["C-p"]).await;

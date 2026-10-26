@@ -13,7 +13,7 @@ use dux_journeys::{
 use serde_json::json;
 
 /// A protected request with no valid session: 401 `auth_required`.
-pub fn assert_auth_required(response: &Response, what: &str) {
+pub(crate) fn assert_auth_required(response: &Response, what: &str) {
     assert_eq!(
         (response.status, response.error_code().as_deref()),
         (401, Some("auth_required")),
@@ -23,7 +23,7 @@ pub fn assert_auth_required(response: &Response, what: &str) {
 }
 
 /// The session cookie dux set, as `name=value`, and its attributes.
-pub fn session_cookie(response: &Response) -> (String, Vec<String>) {
+pub(crate) fn session_cookie(response: &Response) -> (String, Vec<String>) {
     let cookies = response.set_cookies();
     assert_eq!(
         cookies.len(),
@@ -39,7 +39,7 @@ pub fn session_cookie(response: &Response) -> (String, Vec<String>) {
 /// Under `require = "network"`, `required_here` is true exactly for a client
 /// from the network: assert it, so a journey that means to act as one is
 /// proven to be one (and not, say, a forwarded loopback dux treats as local).
-pub async fn assert_network_class(client: &Client) {
+pub(crate) async fn assert_network_class(client: &Client) {
     let status = client.auth_status().await;
     assert_eq!(
         status["required_here"],

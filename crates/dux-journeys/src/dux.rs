@@ -103,6 +103,7 @@ impl DuxOptions {
     /// Put the stand-in `tailscale` CLI on PATH (answering with [`TAILNET_IP`])
     /// and relay `relay_port` onto dux's Tailscale listener from the peer's own
     /// address ([`TAILNET_PEER_IP`]), so the host can be a tailnet peer through it.
+    #[must_use]
     pub fn with_tailnet(mut self, relay_port: u16) -> Self {
         self.fake_tailscale = true;
         self.relays.push((
@@ -118,12 +119,14 @@ impl DuxOptions {
     /// forward relays the internet onto its port counts loopback as the
     /// network, so a journey that needs this machine to BE this machine asks
     /// for the check.
+    #[must_use]
     pub fn with_tailscale_checks(self) -> Self {
         self.with_env("DUX_NO_TAILSCALE", "0")
     }
 
     /// Relay `port` onto loopback with no forwarding header, the way a raw TCP
     /// forward (a `tailscale serve` TCP forward, a port forwarder) reaches dux.
+    #[must_use]
     pub fn with_loopback_relay(mut self, port: u16) -> Self {
         self.relays.push((port, format!("127.0.0.1:{DUX_PORT}")));
         self
@@ -131,6 +134,7 @@ impl DuxOptions {
 
     /// Publish a container port without relaying it, for a sidecar that shares
     /// this container's network namespace (nginx, Caddy) and listens on it.
+    #[must_use]
     pub fn with_published(mut self, port: u16) -> Self {
         self.published.push(port);
         self
@@ -138,6 +142,7 @@ impl DuxOptions {
 
     /// An environment variable for the container (and so for dux and the
     /// providers it spawns).
+    #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.insert(key.to_string(), value.to_string());
         self
@@ -145,6 +150,7 @@ impl DuxOptions {
 
     /// A shell hook run before dux starts, after the canonical config exists.
     /// Hooks run in the order they were added.
+    #[must_use]
     pub fn with_hook(mut self, script: &str) -> Self {
         let name = format!("{:02}-journey.sh", self.hooks.len() + 10);
         self.hooks.push((name, script.to_string()));
@@ -153,6 +159,7 @@ impl DuxOptions {
 
     /// Set the web password before dux starts, the way a person does:
     /// `dux config set server.auth.password --stdin`.
+    #[must_use]
     pub fn with_password(self, password: &str) -> Self {
         let script = format!(
             "set -e\n{}\n",
@@ -162,6 +169,7 @@ impl DuxOptions {
     }
 
     /// Set one config value before dux starts, through `dux config set`.
+    #[must_use]
     pub fn with_config(self, path: &str, value: &str) -> Self {
         let script = format!(
             "set -e\ndux config set {} {}\n",
@@ -173,12 +181,14 @@ impl DuxOptions {
 
     /// Start dux again whenever it exits, so [`Dux::restart_process`] gives a
     /// new run behind the same ports and state.
+    #[must_use]
     pub fn with_restart_loop(mut self) -> Self {
         self.restart_loop = true;
         self
     }
 
     /// Run the terminal UI in tmux instead of `dux server`.
+    #[must_use]
     pub fn with_tui(mut self) -> Self {
         self.launch = Launch::Tui;
         // The terminal UI greets a first run with screens that would sit in
@@ -195,6 +205,7 @@ impl DuxOptions {
 
     /// Join a journey's own Docker network, so a browser container on it can
     /// reach dux by its address there.
+    #[must_use]
     pub fn with_network(mut self, network: &JourneyNetwork) -> Self {
         self.network = Some(network.name().to_string());
         self
@@ -687,12 +698,14 @@ pub struct Inside<'a> {
 
 impl Inside<'_> {
     /// Send this header on every request from now on.
+    #[must_use]
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
 
     /// Talk to another loopback port inside the container (a sidecar's).
+    #[must_use]
     pub fn on_port(mut self, port: u16) -> Self {
         self.base = format!("http://127.0.0.1:{port}");
         self
