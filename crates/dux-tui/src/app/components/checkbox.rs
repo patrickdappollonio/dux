@@ -10,6 +10,15 @@ use super::name_chip::prose_lines;
 use super::wrap_lines::wrap_styled_lines;
 use crate::theme::Theme;
 
+/// Whether a checkbox is ticked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckMark {
+    /// Ticked.
+    Checked,
+    /// Not ticked.
+    Unchecked,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CheckboxState {
     Normal,
@@ -80,8 +89,8 @@ impl<'a> Checkbox<'a> {
         }
     }
 
-    pub(crate) fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
+    pub(crate) fn checked(mut self, mark: CheckMark) -> Self {
+        self.checked = mark == CheckMark::Checked;
         self
     }
 
@@ -278,7 +287,7 @@ mod tests {
     #[test]
     fn checkbox_wraps_label_with_continuation_indent() {
         let checkbox = Checkbox::new("Also delete the worktree and branch")
-            .checked(false)
+            .checked(CheckMark::Unchecked)
             .state(CheckboxState::Normal);
 
         let layout = checkbox.layout(20, Style::default(), Style::default());
@@ -314,9 +323,11 @@ mod tests {
     #[test]
     fn checkbox_inline_prefix_uses_shared_ascii_marker() {
         let unchecked = Checkbox::new("")
-            .checked(false)
+            .checked(CheckMark::Unchecked)
             .state(CheckboxState::Normal);
-        let checked = Checkbox::new("").checked(true).state(CheckboxState::Normal);
+        let checked = Checkbox::new("")
+            .checked(CheckMark::Checked)
+            .state(CheckboxState::Normal);
 
         let unchecked_spans = unchecked.inline_prefix(Style::default());
         let checked_spans = checked.inline_prefix(Style::default());
@@ -335,11 +346,9 @@ mod tests {
             .text("Also delete the branch ")
             .name("feat/login");
         let label_style = Style::default().fg(Color::Yellow);
-        let layout = Checkbox::with_prose(&prose, &theme).checked(true).layout(
-            24,
-            Style::default(),
-            label_style,
-        );
+        let layout = Checkbox::with_prose(&prose, &theme)
+            .checked(CheckMark::Checked)
+            .layout(24, Style::default(), label_style);
 
         let rows: Vec<String> = layout
             .lines

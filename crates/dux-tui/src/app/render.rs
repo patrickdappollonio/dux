@@ -1,5 +1,6 @@
 use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
+use super::components::CheckMark;
 use super::components::ellipsis::{
     ELLIPSIS, ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width,
     mark_cut_row, min_end_cut_width, min_start_cut_width, pad_to_width, path_tail,
@@ -1420,11 +1421,11 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         label: &str,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
-        self.render_overlay_checkbox_widget(frame, area, Checkbox::new(label), checked, state, hint)
+        self.render_overlay_checkbox_widget(frame, area, Checkbox::new(label), mark, state, hint)
     }
 
     /// A prose dialog's body: a blank row, then `prose` with the one-cell body
@@ -1506,12 +1507,12 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         label: &Prose,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
         let checkbox = Checkbox::with_prose(label, &self.theme);
-        self.render_overlay_checkbox_widget(frame, area, checkbox, checked, state, hint)
+        self.render_overlay_checkbox_widget(frame, area, checkbox, mark, state, hint)
     }
 
     fn render_overlay_checkbox_widget(
@@ -1519,11 +1520,11 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         checkbox: Checkbox<'_>,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
-        let checkbox = checkbox.checked(checked).state(state);
+        let checkbox = checkbox.checked(mark).state(state);
         let marker_style = checkbox.marker_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
@@ -6946,7 +6947,11 @@ impl App {
                 CheckboxState::Normal
             };
             let checkbox = Checkbox::with_prose(&checkbox_label, &self.theme)
-                .checked(prompt.delete_branch)
+                .checked(if prompt.delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
                 .state(state);
             checkbox
                 .layout(
@@ -7042,7 +7047,11 @@ impl App {
                 frame,
                 checkbox_area,
                 &checkbox_label,
-                prompt.delete_branch,
+                if prompt.delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -7915,7 +7924,11 @@ impl App {
             CheckboxState::Normal
         };
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(*recover_old_config)
+            .checked(if *recover_old_config {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(checkbox_state);
         let checkbox_height = checkbox
             .layout(
@@ -7966,7 +7979,11 @@ impl App {
             frame,
             checkbox_area,
             checkbox_label,
-            *recover_old_config,
+            if *recover_old_config {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            },
             checkbox_state,
             None,
         );
@@ -8471,7 +8488,11 @@ impl App {
         };
         let checkbox_height = checkbox_label.as_ref().map_or(0, |label| {
             let checkbox = Checkbox::with_prose(label, &self.theme)
-                .checked(*restart_tabs)
+                .checked(if *restart_tabs {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
                 .state(checkbox_state);
             checkbox
                 .layout(
@@ -8482,7 +8503,11 @@ impl App {
                 .height
         });
         let confirm_label = guarded_confirm_label("Recreate", attached);
-        let restart_tabs = *restart_tabs;
+        let restart_tabs = if *restart_tabs {
+            CheckMark::Checked
+        } else {
+            CheckMark::Unchecked
+        };
         let focus = *focus;
         // The frame keeps a blank row between the checkbox and the buttons, so
         // the checkbox never sits flush against the destructive button.
@@ -9115,7 +9140,11 @@ impl App {
             };
             let label = checkout_default_label(default_branch);
             let checkbox = Checkbox::with_prose(&label, &self.theme)
-                .checked(*checkout_default)
+                .checked(if *checkout_default {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
                 .state(state);
             checkbox
                 .layout(
@@ -9175,7 +9204,11 @@ impl App {
                 frame,
                 checkbox_area,
                 &label,
-                *checkout_default,
+                if *checkout_default {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -9272,7 +9305,11 @@ impl App {
             CheckboxState::Normal
         };
         let checkbox = Checkbox::new("Also rename the git branch")
-            .checked(*rename_branch)
+            .checked(if *rename_branch {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(checkbox_state);
         let dialog_width = 62.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
@@ -9401,7 +9438,11 @@ impl App {
                 frame,
                 checkbox_area,
                 "Also rename the git branch",
-                *rename_branch,
+                if *rename_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -9485,7 +9526,11 @@ impl App {
         let dialog_width = 80.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(*randomize_name)
+            .checked(if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(checkbox_state);
         let checkbox_height = checkbox
             .layout(
@@ -9584,7 +9629,11 @@ impl App {
             frame,
             checkbox_area,
             checkbox_label,
-            *randomize_name,
+            if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            },
             checkbox_state,
             Some(Line::from(Span::styled(
                 format!(
@@ -9796,7 +9845,11 @@ impl App {
                 frame,
                 areas[12],
                 review_label,
-                form.review_copy_agreed,
+                if form.review_copy_agreed {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 if *focus == CloneProjectFocus::ReviewCopyCheckbox {
                     CheckboxState::Focused
                 } else {
@@ -10978,7 +11031,11 @@ impl App {
             .filter_map(|index| prompt.runtimes.get(*index))
             .map(|runtime| {
                 let checkbox = Checkbox::new("")
-                    .checked(prompt.selected_ids.contains(&runtime.id))
+                    .checked(if prompt.selected_ids.contains(&runtime.id) {
+                        CheckMark::Checked
+                    } else {
+                        CheckMark::Unchecked
+                    })
                     .state(CheckboxState::Normal);
                 let label_padded = fit_to_width(&runtime.label, label_col);
                 let kind_color = match runtime.kind {
@@ -11058,7 +11115,13 @@ impl App {
             } else {
                 CheckboxState::Normal
             };
-            let checkbox = checkbox.checked(checked).state(state);
+            let checkbox = checkbox
+                .checked(if checked {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
+                .state(state);
             checkbox
                 .layout(
                     inner_width,
@@ -11164,7 +11227,11 @@ impl App {
                 frame,
                 checkbox_area,
                 DELETE_AGENT_WORKTREE_LABEL,
-                *delete_worktree,
+                if *delete_worktree {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -11187,7 +11254,11 @@ impl App {
                 frame,
                 branch_checkbox_area,
                 &branch_label,
-                *delete_branch,
+                if *delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -11222,7 +11293,11 @@ impl App {
         };
         self.render_dim_overlay(frame);
         let randomize_checkbox = Checkbox::new("Use randomized pet name")
-            .checked(*randomize_name)
+            .checked(if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                 CheckboxState::Focused
             } else {
@@ -11406,7 +11481,11 @@ impl App {
             frame,
             randomize_checkbox_area,
             "Use randomized pet name",
-            *randomize_name,
+            if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            },
             if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                 CheckboxState::Focused
             } else {
@@ -11426,7 +11505,11 @@ impl App {
                 frame,
                 copy_checkbox_area,
                 copy_checkbox_label,
-                *copy_changes,
+                if *copy_changes {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 if *focus == NameNewAgentFocus::CopyChangesCheckbox {
                     CheckboxState::Focused
                 } else {
@@ -11452,7 +11535,11 @@ impl App {
                     frame,
                     review_checkbox_area,
                     review_label,
-                    question.agreed,
+                    if question.agreed {
+                        CheckMark::Checked
+                    } else {
+                        CheckMark::Unchecked
+                    },
                     if *focus == NameNewAgentFocus::ReviewCopyCheckbox {
                         CheckboxState::Focused
                     } else {
@@ -27298,7 +27385,7 @@ mod tests {
     fn render_branch_dialog(
         app: &mut App,
         current_branch: &str,
-        checked: bool,
+        mark: CheckMark,
     ) -> (String, ratatui::style::Color, Rect) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -27313,7 +27400,7 @@ mod tests {
                 default_branch: "main".to_string(),
             },
             focus: ConfirmNonDefaultBranchFocus::Checkbox,
-            checkout_default: checked,
+            checkout_default: (mark == CheckMark::Checked),
         };
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -27342,7 +27429,7 @@ mod tests {
     fn a_ticked_checkout_box_says_worktrees_branch_from_the_default_without_a_warning() {
         let mut app = test_app(default_bindings());
 
-        let (text, fg, _) = render_branch_dialog(&mut app, "feature", true);
+        let (text, fg, _) = render_branch_dialog(&mut app, "feature", CheckMark::Checked);
 
         assert!(
             text.contains("New worktrees will branch from  main ."),
@@ -27355,7 +27442,7 @@ mod tests {
     fn an_unticked_checkout_box_warns_that_worktrees_branch_from_the_current_branch() {
         let mut app = test_app(default_bindings());
 
-        let (text, fg, _) = render_branch_dialog(&mut app, "feature", false);
+        let (text, fg, _) = render_branch_dialog(&mut app, "feature", CheckMark::Unchecked);
 
         assert!(
             text.contains("New worktrees will branch from  feature ."),
@@ -27459,8 +27546,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         let long = "feature/a-branch-name-long-enough-to-wrap-the-worktree-sentence-onto-two-rows";
 
-        let (_, _, ticked) = render_branch_dialog(&mut app, long, true);
-        let (text, _, unticked) = render_branch_dialog(&mut app, long, false);
+        let (_, _, ticked) = render_branch_dialog(&mut app, long, CheckMark::Checked);
+        let (text, _, unticked) = render_branch_dialog(&mut app, long, CheckMark::Unchecked);
 
         assert!(text.contains("New worktrees will branch from"), "{text}");
         assert_eq!(
