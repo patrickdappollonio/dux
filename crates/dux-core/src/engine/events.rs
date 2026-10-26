@@ -8686,18 +8686,6 @@ mod tests {
         assert_eq!(snap[0].tone, "error");
     }
 
-    // Sanity: the unused-import linter won't catch AgentLaunchFailedData
-    // because we reference it via a no-op assertion to prove the test module
-    // compiles against the same shape the dispatcher uses.
-    #[allow(dead_code)]
-    fn _agent_launch_failed_shape_compiles(req: AgentLaunchRequest, msg: String) {
-        let _boxed = Box::new(AgentLaunchFailedData {
-            request: req,
-            message: msg,
-        });
-        let _kind = AgentLaunchKind::StartupAutoReopen;
-    }
-
     // ── process_agent_launch_failed + detach_conflicting_worktree_session ──
 
     fn make_failed_data(
@@ -11020,7 +11008,10 @@ mod tests {
         .unwrap();
         let loaded = crate::config::load_config(&engine.paths).unwrap();
         for (i, p) in loaded.projects.iter().enumerate() {
-            engine.session_store.upsert_project_at(p, i as i64).unwrap();
+            engine
+                .session_store
+                .upsert_project_at(p, i64::try_from(i).expect("project index fits in i64"))
+                .unwrap();
         }
         engine.apply_reloaded_config(loaded).expect("first apply");
         eprintln!(
@@ -11566,7 +11557,8 @@ mod tests {
         let (engine, _tmp) = test_engine();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_body = Arc::clone(&counter);
-        let clean = crate::poller_status::REARM_AFTER_SUCCESSES as usize;
+        let clean = usize::try_from(crate::poller_status::REARM_AFTER_SUCCESSES)
+            .expect("the re-arm count fits in usize");
         engine.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "rearm-loop-test".into(),

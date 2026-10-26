@@ -3492,7 +3492,12 @@ mod recreate_tests {
         for (order, (id, provider)) in extras.iter().enumerate() {
             engine.agent_tabs.insert(
                 TabId::new(*id),
-                crate::engine::test_support::sample_tab(id, "s1", provider, order as i64 + 1),
+                crate::engine::test_support::sample_tab(
+                    id,
+                    "s1",
+                    provider,
+                    i64::try_from(order).expect("tab index fits in i64") + 1,
+                ),
             );
             engine.providers.insert(TabId::new(*id), spawn());
         }

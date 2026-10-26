@@ -2047,7 +2047,8 @@ pub(crate) fn pr_pause_notice(
         .filter(|r| r.remaining < crate::gh::RATE_LIMIT_BACKOFF_FLOOR)
     {
         let secs_until = r.reset_at.map_or(PR_RATE_LIMIT_BACKOFF_SECS, |t| {
-            (t - now).num_seconds().clamp(0, 3600) as u64
+            u64::try_from((t - now).num_seconds().clamp(0, 3600))
+                .expect("clamped to a non-negative number of seconds")
         });
         let when = r
             .reset_at
@@ -5252,7 +5253,10 @@ impl Engine {
     /// so the next cycle queries the pin. Shared by the `AttachPullRequest` wire
     /// command and the `PullRequestResolved` attach handler, so both surfaces
     /// apply the exact same mutation. Returns the user-facing confirmation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one field of the pull request being attached, passed straight from the wire command and the resolver"
+    )]
     pub(crate) fn apply_pr_attach(
         &mut self,
         session_id: &str,
@@ -12347,7 +12351,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         for (i, (id, provider)) in extras.iter().enumerate() {
             let mut tab = extra_tab(id, "s1", provider);
-            tab.sort_order = i as i64 + 1;
+            tab.sort_order = i64::try_from(i).expect("tab index fits in i64") + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }
@@ -12996,7 +13000,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         for (i, (id, provider)) in [("t2", "codex"), ("t3", "claude")].iter().enumerate() {
             let mut tab = extra_tab(id, "s1", provider);
-            tab.sort_order = i as i64 + 1;
+            tab.sort_order = i64::try_from(i).expect("tab index fits in i64") + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }

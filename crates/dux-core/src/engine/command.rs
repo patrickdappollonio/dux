@@ -482,7 +482,6 @@ impl Engine {
     /// Single dispatch point for every engine-affecting operation, whether the
     /// `Command` came from a key event or off the wire. Returns an
     /// `EventReaction` the caller routes through its view-applier.
-    #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // Count every command taken, deferred ones included: the counter's
         // reader only asks whether anything happened this iteration. Counted at
@@ -1977,7 +1976,8 @@ impl Engine {
 
         for (index, id) in terminal_ids.iter().enumerate() {
             if let Some(terminal) = self.companion_terminals.get_mut(id) {
-                terminal.sort_order = index as u64;
+                terminal.sort_order =
+                    u64::try_from(index).expect("a terminal list index fits in u64");
             }
         }
         Ok(())

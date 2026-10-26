@@ -251,7 +251,8 @@ fn removal_waits_for_a_background_job_in_its_own_process_group() {
         writer_script(&fx.pidfile).display()
     );
     let client = spawn_in(&fx.worktree, script);
-    let leader = client.child_process_id().expect("leader pid") as i32;
+    let leader = i32::try_from(client.child_process_id().expect("leader pid"))
+        .expect("a process id fits in i32");
     fx.engine.providers.insert(TabId::new("s1-slot"), client);
     wait_for_writers(&fx.pidfile, 1);
     let writer = writer_pids(&fx.pidfile)[0];

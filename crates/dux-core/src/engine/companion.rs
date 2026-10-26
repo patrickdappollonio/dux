@@ -235,7 +235,8 @@ impl Engine {
                 client,
                 // Reuse the monotonic terminal counter so the default drag order
                 // equals creation order; reorders rewrite this later.
-                sort_order: self.terminal_counter as u64,
+                sort_order: u64::try_from(self.terminal_counter)
+                    .expect("the terminal counter fits in u64"),
                 created_at: chrono::Utc::now(),
             },
         );

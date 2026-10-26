@@ -270,7 +270,8 @@ fn a_project_delete_waits_for_every_agent_process_in_a_shared_worktree() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let pid = client.child_process_id().expect("pid") as i32;
+    let pid =
+        i32::try_from(client.child_process_id().expect("pid")).expect("a process id fits in i32");
     engine.providers.insert(tab, client);
 
     engine

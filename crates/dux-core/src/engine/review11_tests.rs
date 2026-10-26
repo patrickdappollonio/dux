@@ -72,7 +72,10 @@ struct Shell(u32);
 impl Drop for Shell {
     fn drop(&mut self) {
         let _ = rustix::process::kill_process_group(
-            rustix::process::Pid::from_raw(self.0 as i32).unwrap(),
+            rustix::process::Pid::from_raw(
+                i32::try_from(self.0).expect("a process id fits in i32"),
+            )
+            .unwrap(),
             rustix::process::Signal::KILL,
         );
     }
