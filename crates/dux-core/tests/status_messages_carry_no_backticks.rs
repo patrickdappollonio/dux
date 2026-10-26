@@ -160,8 +160,7 @@ fn lex(source: &str) -> (Vec<u8>, Vec<Literal>) {
                 let end = if next == Some(b'\\') {
                     source[i + 2..]
                         .find('\'')
-                        .map(|n| i + 2 + n + 1)
-                        .unwrap_or(bytes.len())
+                        .map_or(bytes.len(), |n| i + 2 + n + 1)
                 } else {
                     let width = source[i + 1..].chars().next().map_or(1, char::len_utf8);
                     if bytes.get(i + 1 + width) == Some(&b'\'') {
@@ -282,8 +281,9 @@ fn test_only_files(files: &[PathBuf]) -> Vec<PathBuf> {
         let source = std::fs::read_to_string(file).expect("read source");
         let lines: Vec<&str> = source.lines().collect();
         let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let parent = file.parent().expect("a source file sits in a directory");
         let dir = if matches!(stem, "mod" | "lib" | "main") {
-            file.parent().unwrap().to_path_buf()
+            parent.to_path_buf()
         } else {
             file.with_extension("")
         };
@@ -307,12 +307,11 @@ fn test_only_files(files: &[PathBuf]) -> Vec<PathBuf> {
                     .strip_prefix("mod ")
                     .and_then(|rest| rest.strip_suffix(';'));
                 if let Some(name) = declared {
-                    match &path_attr {
-                        Some(path) => test_only.push(file.parent().unwrap().join(path)),
-                        None => {
-                            test_only.push(dir.join(format!("{name}.rs")));
-                            test_only.push(dir.join(name));
-                        }
+                    if let Some(path) = &path_attr {
+                        test_only.push(parent.join(path));
+                    } else {
+                        test_only.push(dir.join(format!("{name}.rs")));
+                        test_only.push(dir.join(name));
                     }
                 }
                 break;
