@@ -1568,21 +1568,24 @@ impl Engine {
         })
     }
 
-    /// Project the build-/config-static snapshot served once via
-    /// `GET /api/v1/bootstrap`. Delivered as a one-shot REST read invalidated by
-    /// `config.changed`.
-    pub fn bootstrap(&self) -> BootstrapView {
+    /// Every configured provider's name, sorted.
+    fn available_providers(&self) -> Vec<String> {
         let mut available_providers: Vec<String> =
             self.config.providers.commands.keys().cloned().collect();
         available_providers.sort();
-        // What CONFIG says, and nothing else. A live process never writes here:
-        // what a tab launched with is published on the SPINE, per tab, because
-        // that is what a launch and a termination refresh. Folding launched
-        // entries in here collapsed a per-tab answer onto a per-provider key
-        // (two sibling tabs of one provider could not both be right) AND left
-        // the browser's copy stale for the life of the process.
-        let provider_drop_paste: BTreeMap<String, DropPasteView> = self
-            .config
+        available_providers
+    }
+
+    /// How a drop pastes into each provider, by provider name.
+    ///
+    /// What CONFIG says, and nothing else. A live process never writes here:
+    /// what a tab launched with is published on the SPINE, per tab, because
+    /// that is what a launch and a termination refresh. Folding launched
+    /// entries in here collapsed a per-tab answer onto a per-provider key
+    /// (two sibling tabs of one provider could not both be right) AND left
+    /// the browser's copy stale for the life of the process.
+    fn provider_drop_paste(&self) -> BTreeMap<String, DropPasteView> {
+        self.config
             .providers
             .commands
             .iter()
@@ -1595,17 +1598,27 @@ impl Engine {
                     },
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    /// Every macro, in the config's order.
+    fn macro_views(&self) -> Vec<MacroView> {
+        self.config
+            .macros
+            .entries
+            .iter()
+            .map(|(name, entry)| MacroView::from_entry(name, entry))
+            .collect()
+    }
+
+    /// Project the build-/config-static snapshot served once via
+    /// `GET /api/v1/bootstrap`. Delivered as a one-shot REST read invalidated by
+    /// `config.changed`.
+    pub fn bootstrap(&self) -> BootstrapView {
         BootstrapView {
-            available_providers,
-            provider_drop_paste,
-            macros: self
-                .config
-                .macros
-                .entries
-                .iter()
-                .map(|(name, entry)| MacroView::from_entry(name, entry))
-                .collect(),
+            available_providers: self.available_providers(),
+            provider_drop_paste: self.provider_drop_paste(),
+            macros: self.macro_views(),
             macros_version: crate::wire::macros_version(&self.config.macros),
             welcome_tips: crate::welcome::web_tips(),
             dux_version: crate::display_version().to_string(),

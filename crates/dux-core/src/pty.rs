@@ -1252,21 +1252,7 @@ impl PtyClient {
             })
             .context("failed to open PTY")?;
 
-        let mut cmd = CommandBuilder::new(command);
-        for arg in args {
-            cmd.arg(arg);
-        }
-        cmd.cwd(cwd);
-        apply_terminal_env(&mut cmd);
-        // Apply the resolved terminal identity between the baseline TERM/COLORTERM
-        // and the caller's `[env]`: remove first (a trailing `*` scrubs a whole
-        // prefix family against the real environment), then set, so the user's own
-        // `[env]` overrides below always win.
-        apply_identity_env(&mut cmd, identity);
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-
+        let cmd = pty_command(command, args, cwd, env, identity);
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -1280,24 +1266,8 @@ impl PtyClient {
         // process leaks with no `PtyClient` (and no `providers` entry) to track
         // or terminate it: the tab-create failure cleanup relies on a spawn
         // `Err` meaning "no live process".
-        let reader = match pair
-            .master
-            .try_clone_reader()
-            .context("failed to clone PTY reader")
-        {
-            Ok(reader) => reader,
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(err);
-            }
-        };
-        let pty_writer = match pair
-            .master
-            .take_writer()
-            .context("failed to take PTY writer")
-        {
-            Ok(writer) => writer,
+        let (reader, pty_writer) = match master_reader_and_writer(pair.master.as_ref()) {
+            Ok(ends) => ends,
             Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -3626,6 +3596,50 @@ fn default_palette_rgb(index: usize) -> Option<Rgb> {
         x if x == named_color_index(NamedColor::DimForeground) => Some(rgb(0x80, 0x80, 0x80)),
         _ => None,
     }
+}
+
+/// The command a PTY runs: `command` with `args` in `cwd`, the baseline terminal
+/// variables, the resolved terminal identity, then the caller's `env`.
+fn pty_command(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    identity: &crate::term_identity::TerminalIdentity,
+) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(command);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.cwd(cwd);
+    apply_terminal_env(&mut cmd);
+    // Apply the resolved terminal identity between the baseline TERM/COLORTERM
+    // and the caller's `[env]`: remove first (a trailing `*` scrubs a whole
+    // prefix family against the real environment), then set, so the user's own
+    // `[env]` overrides below always win.
+    apply_identity_env(&mut cmd, identity);
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd
+}
+
+/// The read and write ends of a PTY's master.
+///
+/// # Errors
+///
+/// Fails when either end cannot be had.
+fn master_reader_and_writer(
+    master: &dyn MasterPty,
+) -> Result<(
+    Box<dyn std::io::Read + Send>,
+    Box<dyn std::io::Write + Send>,
+)> {
+    let reader = master
+        .try_clone_reader()
+        .context("failed to clone PTY reader")?;
+    let writer = master.take_writer().context("failed to take PTY writer")?;
+    Ok((reader, writer))
 }
 
 /// The palette index alacritty gives a named color, which is its discriminant.

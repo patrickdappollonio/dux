@@ -4499,40 +4499,15 @@ enum Submodules {
     All,
 }
 
-fn changed_files_with(
-    worktree_path: &Path,
-    submodules: Submodules,
-) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
-    let wt = worktree_path.to_string_lossy();
-
-    let mut command = Command::new("git");
-    command.args([
-        "-C",
-        wt.as_ref(),
-        "status",
-        "--porcelain=v1",
-        "-z",
-        // git's own default: a folder with nothing tracked inside it is ONE
-        // entry, `dir/`, rather than one entry per file. `all` listed a
-        // 30,000-file `node_modules` as 30,000 rows; see `folding`.
-        "--untracked-files=normal",
-    ]);
-    if submodules == Submodules::All {
-        command.arg("--ignore-submodules=none");
-    }
-    let output = command.output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
+/// Sort `git status --porcelain=v1 -z` output into the staged rows, the unstaged
+/// rows (untracked ones included, a whole untracked folder as one row), and the
+/// untracked folders, whose files are counted afterwards.
+fn sort_status_entries(stdout: &[u8]) -> (Vec<ChangedFile>, Vec<ChangedFile>, Vec<String>) {
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
     let mut untracked_folders = Vec::new();
 
-    for entry in parse_status_porcelain_z(&output.stdout) {
+    for entry in parse_status_porcelain_z(stdout) {
         let index_status = entry.index_status;
         let worktree_status = entry.worktree_status;
         let path = entry.path;
@@ -4590,6 +4565,89 @@ fn changed_files_with(
             });
         }
     }
+    (staged, unstaged, untracked_folders)
+}
+
+/// The staged numstat, and each folder staged whole given its files' line sums,
+/// read within the same budget the unstaged side reads under.
+fn staged_stats_with_folder_sums(
+    worktree: &str,
+    staged: &mut [ChangedFile],
+) -> HashMap<String, DiffStat> {
+    let mut staged_budget = UNTRACKED_STATS_MAX_FILES;
+    let mut summed_folders: HashSet<String> = HashSet::new();
+    let mut skipped_folders: Vec<String> = Vec::new();
+    for file in staged.iter().filter(|file| file.is_folder()) {
+        let files = file.file_count();
+        if file.is_expandable() && files <= staged_budget {
+            staged_budget -= files;
+            summed_folders.insert(file.path.clone());
+        } else {
+            skipped_folders.push(file.path.clone());
+        }
+    }
+    let staged_stats = staged_numstat(worktree, &skipped_folders);
+    if !summed_folders.is_empty() {
+        let mut sums: HashMap<&str, (usize, usize)> = HashMap::new();
+        for (path, stat) in &staged_stats {
+            let DiffStat::Text(additions, deletions) = stat else {
+                continue;
+            };
+            if let Some(owner) = path
+                .match_indices('/')
+                .map(|(index, _)| &path[..index])
+                .find(|ancestor| summed_folders.contains(*ancestor))
+            {
+                let sum = sums.entry(owner).or_default();
+                sum.0 += additions;
+                sum.1 += deletions;
+            }
+        }
+        let sums: HashMap<String, (usize, usize)> =
+            sums.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        for file in staged
+            .iter_mut()
+            .filter(|file| summed_folders.contains(&file.path))
+        {
+            if let Some((additions, deletions)) = sums.get(&file.path) {
+                file.additions = *additions;
+                file.deletions = *deletions;
+            }
+        }
+    }
+    staged_stats
+}
+
+fn changed_files_with(
+    worktree_path: &Path,
+    submodules: Submodules,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+    let wt = worktree_path.to_string_lossy();
+
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        wt.as_ref(),
+        "status",
+        "--porcelain=v1",
+        "-z",
+        // git's own default: a folder with nothing tracked inside it is ONE
+        // entry, `dir/`, rather than one entry per file. `all` listed a
+        // 30,000-file `node_modules` as 30,000 rows; see `folding`.
+        "--untracked-files=normal",
+    ]);
+    if submodules == Submodules::All {
+        command.arg("--ignore-submodules=none");
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let (staged, mut unstaged, untracked_folders) = sort_status_entries(&output.stdout);
 
     // What each folded folder holds. A count git could not produce fails the
     // read rather than claiming an empty folder.
@@ -4621,47 +4679,7 @@ fn changed_files_with(
     // is not told to skip, so only the folders whose files fit what is left
     // are read, in listing order, and the rest are skipped and carry no lines
     // (a 30,000-file folder is exactly the read the skip exists to avoid).
-    let mut staged_budget = UNTRACKED_STATS_MAX_FILES;
-    let mut summed_folders: HashSet<String> = HashSet::new();
-    let mut skipped_folders: Vec<String> = Vec::new();
-    for file in staged.iter().filter(|file| file.is_folder()) {
-        let files = file.file_count();
-        if file.is_expandable() && files <= staged_budget {
-            staged_budget -= files;
-            summed_folders.insert(file.path.clone());
-        } else {
-            skipped_folders.push(file.path.clone());
-        }
-    }
-    let staged_stats = staged_numstat(wt.as_ref(), &skipped_folders);
-    if !summed_folders.is_empty() {
-        let mut sums: HashMap<&str, (usize, usize)> = HashMap::new();
-        for (path, stat) in &staged_stats {
-            let DiffStat::Text(additions, deletions) = stat else {
-                continue;
-            };
-            if let Some(owner) = path
-                .match_indices('/')
-                .map(|(index, _)| &path[..index])
-                .find(|ancestor| summed_folders.contains(*ancestor))
-            {
-                let sum = sums.entry(owner).or_default();
-                sum.0 += additions;
-                sum.1 += deletions;
-            }
-        }
-        let sums: HashMap<String, (usize, usize)> =
-            sums.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        for file in staged
-            .iter_mut()
-            .filter(|file| summed_folders.contains(&file.path))
-        {
-            if let Some((additions, deletions)) = sums.get(&file.path) {
-                file.additions = *additions;
-                file.deletions = *deletions;
-            }
-        }
-    }
+    let staged_stats = staged_stats_with_folder_sums(wt.as_ref(), &mut staged);
 
     // git prints `-\t-` for a path the repository excludes from diffs in
     // .gitattributes exactly as it prints it for a real binary, so numstat

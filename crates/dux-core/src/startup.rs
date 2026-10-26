@@ -303,6 +303,136 @@ fn startup_log_path(paths: &DuxPaths, run: &StartupCommandRun) -> PathBuf {
     log_dir.join(format!("{file_stamp}-{safe_branch}.log"))
 }
 
+/// Run the startup command `run` names under the claim `guard` holds, in its own
+/// process session, and wait for it, recording what it left running before it
+/// is reaped. `created` is whether `log_dir` was made.
+fn execute_startup_command(
+    run: &StartupCommandRun,
+    guard: &crate::process_sessions::StartupRunGuard,
+    created: std::io::Result<()>,
+    log_dir: &Path,
+    log_path: &Path,
+) -> Result<CommandOutcome> {
+    created.with_context(|| format!("failed to create {}", log_dir.display()))?;
+    let shell = startup_shell_command(&run.terminal.command);
+    let shell_args = run.terminal.args.clone();
+    // Test builds only: a startup command runs through a stand-in shell,
+    // never the developer's own login shell and its profile.
+    #[cfg(any(test, feature = "test-support"))]
+    crate::test_provider::refuse_unlisted_launch("startup-command shell", &shell)?;
+    let started = Utc::now();
+    let started_instant = Instant::now();
+    let mut command = startup_command(run, &shell, &shell_args, log_path);
+    // Announced before the spawn and kept until the session is
+    // registered, so a removal of the worktree either sees the session or
+    // came after the delete that refuses the spawn here.
+    let worktree = std::path::Path::new(&run.managed.worktree_path);
+    let Some(spawning) = guard.begin_spawn(worktree) else {
+        anyhow::bail!(NOT_STARTED_DELETED);
+    };
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to run startup command through {shell}"))?;
+    let stdout = OutputDrain::start(child.stdout.take());
+    let stderr = OutputDrain::start(child.stderr.take());
+    let process = crate::process_sessions::ProcessSession::started_now(child.id());
+    crate::process_sessions::note_spawned(process);
+    #[cfg(test)]
+    tests_hooks::delay_registration(worktree);
+    // Ended at once, by the registration itself, when the agent was
+    // deleted between the check above and here.
+    let _ended = guard.register_session(process, worktree);
+    drop(spawning);
+    guard.label(process, "an agent's startup command");
+    drop(command);
+    // The command (the session's leader) is waited for WITHOUT being
+    // reaped first. While it is an unreaped zombie its session number
+    // still names this session, so a removal looking now still finds
+    // everything the command left running there by that number. What it
+    // left running is recorded next, the only evidence those processes
+    // are dux's once the number proves nothing; only then is the leader
+    // reaped. Reaping first left a window (measured: a removal fell into
+    // it under load) where the number no longer counted and nothing was
+    // recorded yet, so a job the command left writing in the worktree was
+    // invisible to the removal.
+    wait_for_exit_unreaped(child.id());
+    #[cfg(test)]
+    tests_hooks::delay_after_exit(worktree);
+    guard.record_survivors(process);
+    let status = child.wait();
+    if status.is_ok() {
+        crate::process_sessions::note_reaped(process);
+    }
+    let status =
+        status.with_context(|| format!("failed to run startup command through {shell}"))?;
+    let ended = Utc::now();
+    // What the command wrote before it exited. A job it left running may
+    // still be writing; that is the job's output, not the command's.
+    let stdout = stdout.finish();
+    let stderr = stderr.finish();
+    Ok(CommandOutcome {
+        shell,
+        shell_args,
+        started,
+        ended,
+        duration_ms: started_instant.elapsed().as_millis(),
+        code: status.code(),
+        success: status.success(),
+        stdout: String::from_utf8_lossy(&stdout).to_string(),
+        stderr: String::from_utf8_lossy(&stderr).to_string(),
+    })
+}
+
+/// The startup command `run` names, through `shell` and `shell_args`, set up to
+/// run in the agent's worktree with its environment, its output piped, and a
+/// process session of its own.
+fn startup_command(
+    run: &StartupCommandRun,
+    shell: &str,
+    shell_args: &[String],
+    log_path: &Path,
+) -> Command {
+    let mut command = Command::new(shell);
+    command
+        .args(shell_args)
+        .arg(&run.command)
+        .current_dir(&run.managed.worktree_path);
+    // The user's variables go first so dux's own `DUX_*` always win.
+    for (name, value) in &run.env {
+        command.env(name, value);
+    }
+    command
+        .env("DUX_PROJECT_PATH", &run.project.path)
+        .env("DUX_WORKTREE_PATH", &run.managed.worktree_path)
+        .env("DUX_AGENT_ID", &run.session.id)
+        .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
+        .env("DUX_PROVIDER", run.session.provider.as_str())
+        .env("DUX_STARTUP_COMMAND_LOG", log_path);
+    // Output goes to pipes that dux's own reader threads drain. A job the
+    // command backgrounds without redirecting its output (`npm run dev
+    // &`) inherits them, so they can stay open for as long as that job
+    // lives: dux therefore never waits for them to close. It waits for
+    // the COMMAND (`wait`, not `wait_with_output`), so the command is
+    // reaped the moment it exits and what it left running is recorded at
+    // that moment; what the readers have by then is the log, and from
+    // then on they read and throw away whatever the job writes, so it can
+    // neither block on a full pipe nor fill anything on disk.
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // SAFETY: the hook runs in the forked child before exec and calls only
+    // `setsid`, which is async-signal-safe and touches no Rust state.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            rustix::process::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    command
+}
+
 /// [`run_startup_command`] for a caller that has already claimed the agent's
 /// one run, on its own thread, so a second request cannot slip in between the
 /// claim and the worker starting. The surfaces' reruns claim on the engine
@@ -341,113 +471,7 @@ pub fn run_claimed_startup_command(
     let file_stamp = timestamp.format("%Y%m%dT%H%M%SZ");
     let safe_branch = sanitize_file_component(&run.managed.branch_name);
     let log_path = log_dir.join(format!("{file_stamp}-{safe_branch}.log"));
-    let result = (|| -> Result<CommandOutcome> {
-        created.with_context(|| format!("failed to create {}", log_dir.display()))?;
-        let shell = startup_shell_command(&run.terminal.command);
-        let shell_args = run.terminal.args.clone();
-        // Test builds only: a startup command runs through a stand-in shell,
-        // never the developer's own login shell and its profile.
-        #[cfg(any(test, feature = "test-support"))]
-        crate::test_provider::refuse_unlisted_launch("startup-command shell", &shell)?;
-        let started = Utc::now();
-        let started_instant = Instant::now();
-        let mut command = Command::new(&shell);
-        command
-            .args(&shell_args)
-            .arg(&run.command)
-            .current_dir(&run.managed.worktree_path);
-        // The user's variables go first so dux's own `DUX_*` always win.
-        for (name, value) in &run.env {
-            command.env(name, value);
-        }
-        command
-            .env("DUX_PROJECT_PATH", &run.project.path)
-            .env("DUX_WORKTREE_PATH", &run.managed.worktree_path)
-            .env("DUX_AGENT_ID", &run.session.id)
-            .env("DUX_AGENT_BRANCH", &run.managed.branch_name)
-            .env("DUX_PROVIDER", run.session.provider.as_str())
-            .env("DUX_STARTUP_COMMAND_LOG", &log_path);
-        // Output goes to pipes that dux's own reader threads drain. A job the
-        // command backgrounds without redirecting its output (`npm run dev
-        // &`) inherits them, so they can stay open for as long as that job
-        // lives: dux therefore never waits for them to close. It waits for
-        // the COMMAND (`wait`, not `wait_with_output`), so the command is
-        // reaped the moment it exits and what it left running is recorded at
-        // that moment; what the readers have by then is the log, and from
-        // then on they read and throw away whatever the job writes, so it can
-        // neither block on a full pipe nor fill anything on disk.
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        // SAFETY: the hook runs in the forked child before exec and calls only
-        // `setsid`, which is async-signal-safe and touches no Rust state.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(|| {
-                rustix::process::setsid().map_err(std::io::Error::from)?;
-                Ok(())
-            });
-        }
-        // Announced before the spawn and kept until the session is
-        // registered, so a removal of the worktree either sees the session or
-        // came after the delete that refuses the spawn here.
-        let worktree = std::path::Path::new(&run.managed.worktree_path);
-        let Some(spawning) = guard.begin_spawn(worktree) else {
-            anyhow::bail!(NOT_STARTED_DELETED);
-        };
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("failed to run startup command through {shell}"))?;
-        let stdout = OutputDrain::start(child.stdout.take());
-        let stderr = OutputDrain::start(child.stderr.take());
-        let process = crate::process_sessions::ProcessSession::started_now(child.id());
-        crate::process_sessions::note_spawned(process);
-        #[cfg(test)]
-        tests_hooks::delay_registration(worktree);
-        // Ended at once, by the registration itself, when the agent was
-        // deleted between the check above and here.
-        let _ended = guard.register_session(process, worktree);
-        drop(spawning);
-        guard.label(process, "an agent's startup command");
-        drop(command);
-        // The command (the session's leader) is waited for WITHOUT being
-        // reaped first. While it is an unreaped zombie its session number
-        // still names this session, so a removal looking now still finds
-        // everything the command left running there by that number. What it
-        // left running is recorded next, the only evidence those processes
-        // are dux's once the number proves nothing; only then is the leader
-        // reaped. Reaping first left a window (measured: a removal fell into
-        // it under load) where the number no longer counted and nothing was
-        // recorded yet, so a job the command left writing in the worktree was
-        // invisible to the removal.
-        wait_for_exit_unreaped(child.id());
-        #[cfg(test)]
-        tests_hooks::delay_after_exit(worktree);
-        guard.record_survivors(process);
-        let status = child.wait();
-        if status.is_ok() {
-            crate::process_sessions::note_reaped(process);
-        }
-        let status =
-            status.with_context(|| format!("failed to run startup command through {shell}"))?;
-        let ended = Utc::now();
-        // What the command wrote before it exited. A job it left running may
-        // still be writing; that is the job's output, not the command's.
-        let stdout = stdout.finish();
-        let stderr = stderr.finish();
-        Ok(CommandOutcome {
-            shell,
-            shell_args,
-            started,
-            ended,
-            duration_ms: started_instant.elapsed().as_millis(),
-            code: status.code(),
-            success: status.success(),
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
-        })
-    })();
+    let result = execute_startup_command(&run, &guard, created, &log_dir, &log_path);
 
     if guard.agent_deleted() {
         // Said as it happened: the delete ends the command, but a command

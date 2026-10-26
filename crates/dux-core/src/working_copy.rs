@@ -596,6 +596,24 @@ fn the_tabs(lead: &str, providers: &[String]) -> Prose {
 /// The restart half of the final: what happened to every tab dux restarted, in
 /// words, beside the sentences about the tabs it left alone.
 fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose {
+    let failed = report.failed.iter().map(|(provider, error)| {
+        the_tabs("dux could not start the ", std::slice::from_ref(provider)).text(format!(
+            " again: {}. Start it yourself once that is fixed.",
+            error.trim_end_matches('.')
+        ))
+    });
+    sentences(
+        restarted_sentences(live, report)
+            .into_iter()
+            .flatten()
+            .chain(failed)
+            .chain(unrestarted_sentences(live, report).into_iter().flatten()),
+    )
+}
+
+/// The sentences about the tabs that follow the folder or were restarted, in the
+/// order the final reads them.
+fn restarted_sentences(live: &RunningTabs, report: &TabRestartReport) -> [Option<Prose>; 5] {
     let one = |tabs: &[String]| tabs.len() == 1;
     let follows = (!live.follows.is_empty()).then(|| {
         recreate_running_tab_prose(&RunningTabs {
@@ -619,12 +637,6 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
                  its conversation back up."
         })
     });
-    let not_restarted = (!report.not_restarted.is_empty()).then(|| {
-        the_tabs("dux did not restart the ", &report.not_restarted).text(
-            ", because the tab or its agent changed while the old process shut down; start \
-             it yourself if you still want it running.",
-        )
-    });
     let fell_back = (!report.fell_back.is_empty()).then(|| {
         the_tabs("The ", &report.fell_back).text(if one(&report.fell_back) {
             " could not pick its conversation back up, so dux started it with a fresh \
@@ -641,18 +653,25 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
             " started again but exited right away; their tabs show what they said."
         })
     });
+    [follows, continued, fresh, fell_back, ended]
+}
+
+/// The sentences about the tabs dux did not restart, and how the restart went, in
+/// the order the final reads them.
+fn unrestarted_sentences(live: &RunningTabs, report: &TabRestartReport) -> [Option<Prose>; 6] {
+    let one = |tabs: &[String]| tabs.len() == 1;
+    let not_restarted = (!report.not_restarted.is_empty()).then(|| {
+        the_tabs("dux did not restart the ", &report.not_restarted).text(
+            ", because the tab or its agent changed while the old process shut down; start \
+             it yourself if you still want it running.",
+        )
+    });
     let stopped = (!report.stopped.is_empty()).then(|| {
         the_tabs("dux did not restart the ", &report.stopped).text(if one(&report.stopped) {
             ", because it was stopped while its old process shut down."
         } else {
             ", because they were stopped while their old processes shut down."
         })
-    });
-    let failed = report.failed.iter().map(|(provider, error)| {
-        the_tabs("dux could not start the ", std::slice::from_ref(provider)).text(format!(
-            " again: {}. Start it yourself once that is fixed.",
-            error.trim_end_matches('.')
-        ))
     });
     let came_up_later = (!report.came_up_later.is_empty()).then(|| {
         let one = one(&report.came_up_later);
@@ -684,24 +703,14 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
     });
     let left_running =
         (!live.left_running.is_empty()).then(|| left_running_prose(&live.left_running));
-    sentences(
-        [follows, continued, fresh, fell_back, ended]
-            .into_iter()
-            .flatten()
-            .chain(failed)
-            .chain(
-                [
-                    stopped,
-                    not_restarted,
-                    exited,
-                    came_up_later,
-                    forced,
-                    left_running,
-                ]
-                .into_iter()
-                .flatten(),
-            ),
-    )
+    [
+        stopped,
+        not_restarted,
+        exited,
+        came_up_later,
+        forced,
+        left_running,
+    ]
 }
 
 /// The success sentence, naming the path and what actually happened to the

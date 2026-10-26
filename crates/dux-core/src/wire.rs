@@ -30,7 +30,7 @@ pub mod status_keys {
 }
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -1978,6 +1978,159 @@ fn validate_settings_patch(
     Ok(patch)
 }
 
+/// The final a web default-branch checkout of `project_name` resolves to, for each
+/// way the two-worker chain can end.
+fn checkout_default_branch_final(
+    project_name: &str,
+    o: &crate::engine::WebCheckoutOutcome,
+) -> crate::engine::Final {
+    use crate::engine::{Final, WebCheckoutOutcome};
+    match o {
+        // STICKY on a failed save: the base did not move, and
+        // the fix (a full disk, a locked database) is outside the
+        // toast, followed by running the checkout again.
+        WebCheckoutOutcome::Ok {
+            target_branch,
+            base,
+        } => match base.save_failure_message(project_name, target_branch) {
+            Some(message) => Final::error(message).sticky(),
+            None => Final::info(crate::engine::checkout_default_branch_message(
+                project_name,
+                target_branch,
+                base,
+            )),
+        },
+        // STICKY: the checkout stopped part-way and the repository
+        // is left on whatever branch it landed on. The message says
+        // outright that the fix is in the user's terminal, which is
+        // as far outside the toast as recovery gets.
+        WebCheckoutOutcome::Failed {
+            target_branch,
+            repo_path,
+        } => Final::error(crate::status_text![
+            "Couldn't check out ",
+            q(target_branch),
+            " in ",
+            n(repo_path),
+            ". Resolve in your terminal and retry."
+        ])
+        .sticky(),
+        // STICKY on a failed save: the base did not move, and
+        // the fix (a full disk, a locked database) is outside the
+        // toast, followed by running the checkout again.
+        WebCheckoutOutcome::AlreadyLeading {
+            current_branch,
+            base,
+        } => match base.save_failure_message(project_name, current_branch) {
+            Some(message) => Final::error(message).sticky(),
+            None => Final::info(crate::engine::already_on_default_branch_message(
+                project_name,
+                current_branch,
+                base,
+            )),
+        },
+        // STICKY: same shape, same instruction. dux cannot proceed
+        // and is asking the user to go and settle the repository's
+        // default branch by hand before retrying.
+        WebCheckoutOutcome::Heuristic { current_branch } => Final::error(crate::status_text![
+            "Can't determine the default branch for project ",
+            q(project_name),
+            " while it is on ",
+            q(current_branch),
+            ". Resolve the default branch in your terminal and retry."
+        ])
+        .sticky(),
+        WebCheckoutOutcome::InspectFailed { error } => Final::error(crate::status_text![
+            "Couldn't inspect the default branch for project ",
+            q(project_name),
+            format!(": {}", error)
+        ]),
+    }
+}
+
+/// The final a web check-out-and-add resolves to, for each way it can end.
+fn add_project_final(o: &crate::engine::WebAddProjectOutcome) -> crate::engine::Final {
+    use crate::engine::{Final, WebAddProjectOutcome};
+    match o {
+        WebAddProjectOutcome::Added { status_message } => Final::info(status_message.clone()),
+        // STICKY: the project was added but the branch switch it
+        // was supposed to make did not happen, so the checkout is
+        // not where the user asked for it and the message sends
+        // them to their terminal to finish the job.
+        WebAddProjectOutcome::SwitchFailed {
+            target_branch,
+            repo_path,
+        } => Final::error(crate::status_text![
+            "Couldn't check out ",
+            q(target_branch),
+            " in ",
+            n(repo_path),
+            ". Resolve in your terminal and retry."
+        ])
+        .sticky(),
+        WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
+    }
+}
+
+/// The default branch a check-out-and-add of the repository at `validated` switches to,
+/// with HEAD on `branch` (`None` when detached).
+///
+/// # Errors
+///
+/// Fails when no default branch is known for certain: a heuristic guess on a branch, or a
+/// detached HEAD with no `origin/HEAD`.
+fn checkout_default_target(validated: &Path, branch: Option<&str>) -> anyhow::Result<String> {
+    Ok(match branch {
+        // On a normal HEAD: require a Known default (Heuristic is rejected).
+        Some(current) => match crate::git::branch_warning_kind(validated, current) {
+            Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
+            _ => anyhow::bail!(
+                "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
+                validated.display()
+            ),
+        },
+        // On a detached HEAD: try origin/HEAD directly before giving up.
+        None => match crate::git::remote_default_branch(validated) {
+            Some(default) => default,
+            None => anyhow::bail!(
+                "HEAD is detached and no remote default branch (origin/HEAD) is \
+                     configured; check out a branch first."
+            ),
+        },
+    })
+}
+
+/// The final a web delete resolves to, for each way its worktree removal can end.
+fn delete_final(o: &crate::engine::WebDeleteOutcome) -> crate::engine::Final {
+    use crate::engine::{Final, WebDeleteOutcome};
+    match o {
+        // STICKY: a branch git refused to delete is
+        // still on disk and only the user can clear
+        // it, and the worktree that named it is gone,
+        // so a toast that timed out would take the
+        // last mention of it with it.
+        WebDeleteOutcome::Succeeded {
+            message,
+            refused: true,
+        } => Final::warning(message.clone()).sticky(),
+        WebDeleteOutcome::Succeeded { message, .. } => Final::info(message.clone()),
+        WebDeleteOutcome::SucceededGone => Final::info("Agent and worktree removed."),
+        // STICKY: the agent row is already gone from
+        // the UI but its worktree is still on disk, so
+        // the user is left with an orphaned directory
+        // only `git worktree remove` will clear. The
+        // sentence is authored at the call site, which
+        // is the side that still holds the snapshot.
+        WebDeleteOutcome::Failed { message } => Final::error(message.clone()).sticky(),
+        // STICKY: same half-done delete from the other
+        // side, the worktree went but the records did
+        // not, so the agent can come back on restart.
+        WebDeleteOutcome::CleanupFailed { message } => {
+            Final::error(format!("Session cleanup failed: {message}")).sticky()
+        }
+    }
+}
+
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     ///
@@ -3484,72 +3637,7 @@ impl Engine {
         let project_name = project.name.clone();
         let op = crate::engine::status_op(busy).resolve_in_handler(
             move |o: &crate::engine::WebCheckoutOutcome| {
-                use crate::engine::{Final, WebCheckoutOutcome};
-                match o {
-                    // STICKY on a failed save: the base did not move, and
-                    // the fix (a full disk, a locked database) is outside the
-                    // toast, followed by running the checkout again.
-                    WebCheckoutOutcome::Ok {
-                        target_branch,
-                        base,
-                    } => match base.save_failure_message(&project_name, target_branch) {
-                        Some(message) => Final::error(message).sticky(),
-                        None => Final::info(crate::engine::checkout_default_branch_message(
-                            &project_name,
-                            target_branch,
-                            base,
-                        )),
-                    },
-                    // STICKY: the checkout stopped part-way and the repository
-                    // is left on whatever branch it landed on. The message says
-                    // outright that the fix is in the user's terminal, which is
-                    // as far outside the toast as recovery gets.
-                    WebCheckoutOutcome::Failed {
-                        target_branch,
-                        repo_path,
-                    } => Final::error(crate::status_text![
-                        "Couldn't check out ",
-                        q(target_branch),
-                        " in ",
-                        n(repo_path),
-                        ". Resolve in your terminal and retry."
-                    ])
-                    .sticky(),
-                    // STICKY on a failed save: the base did not move, and
-                    // the fix (a full disk, a locked database) is outside the
-                    // toast, followed by running the checkout again.
-                    WebCheckoutOutcome::AlreadyLeading {
-                        current_branch,
-                        base,
-                    } => match base.save_failure_message(&project_name, current_branch) {
-                        Some(message) => Final::error(message).sticky(),
-                        None => Final::info(crate::engine::already_on_default_branch_message(
-                            &project_name,
-                            current_branch,
-                            base,
-                        )),
-                    },
-                    // STICKY: same shape, same instruction. dux cannot proceed
-                    // and is asking the user to go and settle the repository's
-                    // default branch by hand before retrying.
-                    WebCheckoutOutcome::Heuristic { current_branch } => {
-                        Final::error(crate::status_text![
-                            "Can't determine the default branch for project ",
-                            q(project_name),
-                            " while it is on ",
-                            q(current_branch),
-                            ". Resolve the default branch in your terminal and retry."
-                        ])
-                        .sticky()
-                    }
-                    WebCheckoutOutcome::InspectFailed { error } => {
-                        Final::error(crate::status_text![
-                            "Couldn't inspect the default branch for project ",
-                            q(project_name),
-                            format!(": {}", error)
-                        ])
-                    }
-                }
+                checkout_default_branch_final(&project_name, o)
             },
         );
         let op = op.with_scope(self.current_origin.clone());
@@ -3615,24 +3703,7 @@ impl Engine {
             );
         }
         let branch = crate::git::current_branch_opt(&validated)?;
-        let default_branch = match branch.as_deref() {
-            // On a normal HEAD: require a Known default (Heuristic is rejected).
-            Some(current) => match crate::git::branch_warning_kind(&validated, current) {
-                Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
-                _ => anyhow::bail!(
-                    "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
-                    validated.display()
-                ),
-            },
-            // On a detached HEAD: try origin/HEAD directly before giving up.
-            None => match crate::git::remote_default_branch(&validated) {
-                Some(default) => default,
-                None => anyhow::bail!(
-                    "HEAD is detached and no remote default branch (origin/HEAD) is \
-                         configured; check out a branch first."
-                ),
-            },
-        };
+        let default_branch = checkout_default_target(&validated, branch.as_deref())?;
         let leading_branch = crate::add_project_plan::project_base_at_add(
             branch.as_deref(),
             Some(&default_branch),
@@ -3659,30 +3730,7 @@ impl Engine {
         // message) and the switch FAILURE in `process_worker_event`; both share
         // this op's opaque id so the busy is replaced, not stranded.
         let op = crate::engine::status_op(busy).resolve_in_handler(
-            move |o: &crate::engine::WebAddProjectOutcome| {
-                use crate::engine::{Final, WebAddProjectOutcome};
-                match o {
-                    WebAddProjectOutcome::Added { status_message } => {
-                        Final::info(status_message.clone())
-                    }
-                    // STICKY: the project was added but the branch switch it
-                    // was supposed to make did not happen, so the checkout is
-                    // not where the user asked for it and the message sends
-                    // them to their terminal to finish the job.
-                    WebAddProjectOutcome::SwitchFailed {
-                        target_branch,
-                        repo_path,
-                    } => Final::error(crate::status_text![
-                        "Couldn't check out ",
-                        q(target_branch),
-                        " in ",
-                        n(repo_path),
-                        ". Resolve in your terminal and retry."
-                    ])
-                    .sticky(),
-                    WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
-                }
-            },
+            move |o: &crate::engine::WebAddProjectOutcome| add_project_final(o),
         );
         let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
@@ -4054,6 +4102,43 @@ impl Engine {
         Ok(pending)
     }
 
+    /// The refusal of a pull request lookup whose head branch is not a usable agent
+    /// name, with the lookup's spinner cleared and its record finished.
+    fn refuse_unusable_head_branch(
+        &mut self,
+        pr: &crate::worker::ResolvedPullRequest,
+        status_op_id: Option<&str>,
+    ) -> WebFollowupStatuses {
+        let mut clear_keys = Vec::new();
+        if let Some(id) = status_op_id
+            && let Some(op) = self.pending_web_pr_lookup_ops.remove(id)
+        {
+            let resolved = op.resolve(&crate::engine::WebPrLookupOutcome::HandedOff);
+            if let EventReaction::ClearStatus(key) = resolved.into_reaction() {
+                clear_keys.push(key);
+            }
+        }
+        let refusal = WireStatus::new(
+            "error",
+            crate::status_text![
+                "PR ",
+                n(format!("#{}", pr.number)),
+                " has head branch ",
+                q(pr.head_ref_name),
+                ", which is not a usable agent \
+                 name. Create the agent again and type a name for it. ",
+                crate::git::AGENT_NAME_RULE
+            ],
+        );
+        if let Some(lookup) = status_op_id {
+            self.finish_pr_lookup_operation(lookup, Some(&refusal));
+        }
+        WebFollowupStatuses {
+            statuses: vec![refusal],
+            clear_keys,
+        }
+    }
+
     /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
     /// When `gh::run_pull_request_lookup_job` resolves a PR,
     /// `process_worker_event` produces `OpenNewAgentPromptForPr`, for which the
@@ -4084,35 +4169,7 @@ impl Engine {
                         Some(pr.head_ref_name.clone())
                     }
                     None => {
-                        let mut clear_keys = Vec::new();
-                        if let Some(id) = status_op_id
-                            && let Some(op) = self.pending_web_pr_lookup_ops.remove(id)
-                        {
-                            let resolved =
-                                op.resolve(&crate::engine::WebPrLookupOutcome::HandedOff);
-                            if let EventReaction::ClearStatus(key) = resolved.into_reaction() {
-                                clear_keys.push(key);
-                            }
-                        }
-                        let refusal = WireStatus::new(
-                            "error",
-                            crate::status_text![
-                                "PR ",
-                                n(format!("#{}", pr.number)),
-                                " has head branch ",
-                                q(pr.head_ref_name),
-                                ", which is not a usable agent \
-                                 name. Create the agent again and type a name for it. ",
-                                crate::git::AGENT_NAME_RULE
-                            ],
-                        );
-                        if let Some(lookup) = status_op_id {
-                            self.finish_pr_lookup_operation(lookup, Some(&refusal));
-                        }
-                        return WebFollowupStatuses {
-                            statuses: vec![refusal],
-                            clear_keys,
-                        };
+                        return self.refuse_unusable_head_branch(pr, status_op_id.as_deref());
                     }
                 };
                 let resolved_name = custom_name.clone().unwrap_or_default();
@@ -4509,6 +4566,50 @@ impl Engine {
         }
     }
 
+    /// Start a delete whose worktree removal runs on a worker: the busy keyed to its
+    /// final, the agent's facts kept for the report, and the session vanished now.
+    fn start_async_delete(
+        &mut self,
+        session_id: &str,
+        busy_message: &crate::status_text::StatusText,
+    ) -> Vec<WireStatus> {
+        // Mint a keyed HandlerStatusOp whose opaque id correlates
+        // this busy to the final resolved when the git-removal
+        // worker reports back, and stash it keyed by session id.
+        // The resolver picks the tone for every terminal
+        // `WebDeleteOutcome`; the words come from the core formatter.
+        let op = crate::engine::status_op(busy_message.clone())
+            .resolve_in_handler(|o: &crate::engine::WebDeleteOutcome| delete_final(o));
+        let op = op.with_scope(self.current_origin.clone());
+        let pending = WireStatus::from_update(&self.begin_status_op(&op));
+        self.pending_delete_ops_web
+            .insert(session_id.to_string(), op);
+        // Snapshot the agent BEFORE it is vanished below: the
+        // completion authors the report from these facts, and by
+        // then there is no record left to read. The project is
+        // resolved here for the same reason.
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+            let project_name = session
+                .project_id()
+                .and_then(|id| self.projects.iter().find(|p| p.id == id))
+                .map(|p| p.name.clone());
+            self.pending_delete_reports_web.insert(
+                session_id.to_string(),
+                DeleteReportFacts::from_session(session, project_name),
+            );
+        }
+        // Vanish the session now: its PTY and terminals are
+        // already SIGTERMed and held for a background reap.
+        //
+        // The engine method, not `Command::FinishDeleteSession`,
+        // because that command carries a `WorktreeRemoval`
+        // describing what happened to the branches and nothing
+        // has happened to them yet; the real report arrives with
+        // the deferred removal, which authors the final message.
+        let _ = self.finish_delete_session(session_id);
+        vec![pending]
+    }
+
     /// Drive a delete-related reaction to completion, returning user-facing
     /// statuses. Used by `apply_wire` (synchronous Begin/Inline) and by the web
     /// engine actor's worker-event drain (async worktree-removal completion), so
@@ -4534,79 +4635,7 @@ impl Engine {
                         vec![WireStatus::new("error", message.clone())]
                     }
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                        // Mint a keyed HandlerStatusOp whose opaque id correlates
-                        // this busy to the final resolved when the git-removal
-                        // worker reports back, and stash it keyed by session id.
-                        // The resolver picks the tone for every terminal
-                        // `WebDeleteOutcome`; the words come from the core formatter.
-                        let op = crate::engine::status_op(busy_message.clone()).resolve_in_handler(
-                            |o: &crate::engine::WebDeleteOutcome| {
-                                use crate::engine::{Final, WebDeleteOutcome};
-                                match o {
-                                    // STICKY: a branch git refused to delete is
-                                    // still on disk and only the user can clear
-                                    // it, and the worktree that named it is gone,
-                                    // so a toast that timed out would take the
-                                    // last mention of it with it.
-                                    WebDeleteOutcome::Succeeded {
-                                        message,
-                                        refused: true,
-                                    } => Final::warning(message.clone()).sticky(),
-                                    WebDeleteOutcome::Succeeded { message, .. } => {
-                                        Final::info(message.clone())
-                                    }
-                                    WebDeleteOutcome::SucceededGone => {
-                                        Final::info("Agent and worktree removed.")
-                                    }
-                                    // STICKY: the agent row is already gone from
-                                    // the UI but its worktree is still on disk, so
-                                    // the user is left with an orphaned directory
-                                    // only `git worktree remove` will clear. The
-                                    // sentence is authored at the call site, which
-                                    // is the side that still holds the snapshot.
-                                    WebDeleteOutcome::Failed { message } => {
-                                        Final::error(message.clone()).sticky()
-                                    }
-                                    // STICKY: same half-done delete from the other
-                                    // side, the worktree went but the records did
-                                    // not, so the agent can come back on restart.
-                                    WebDeleteOutcome::CleanupFailed { message } => {
-                                        Final::error(format!("Session cleanup failed: {message}"))
-                                            .sticky()
-                                    }
-                                }
-                            },
-                        );
-                        let op = op.with_scope(self.current_origin.clone());
-                        let pending = WireStatus::from_update(&self.begin_status_op(&op));
-                        self.pending_delete_ops_web
-                            .insert(view.session_id.clone(), op);
-                        // Snapshot the agent BEFORE it is vanished below: the
-                        // completion authors the report from these facts, and by
-                        // then there is no record left to read. The project is
-                        // resolved here for the same reason.
-                        if let Some(session) =
-                            self.sessions.iter().find(|s| s.id == view.session_id)
-                        {
-                            let project_name = session
-                                .project_id()
-                                .and_then(|id| self.projects.iter().find(|p| p.id == id))
-                                .map(|p| p.name.clone());
-                            self.pending_delete_reports_web.insert(
-                                view.session_id.clone(),
-                                DeleteReportFacts::from_session(session, project_name),
-                            );
-                        }
-                        // Vanish the session now: its PTY and terminals are
-                        // already SIGTERMed and held for a background reap.
-                        //
-                        // The engine method, not `Command::FinishDeleteSession`,
-                        // because that command carries a `WorktreeRemoval`
-                        // describing what happened to the branches and nothing
-                        // has happened to them yet; the real report arrives with
-                        // the deferred removal, which authors the final message.
-                        let _ = self.finish_delete_session(&view.session_id);
-                        vec![pending]
+                        self.start_async_delete(&view.session_id, busy_message)
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
                         let removal = removal.clone();
@@ -5077,37 +5106,97 @@ impl Engine {
         Ok(WireCommandMapping::Mapped(mapped))
     }
 
+    /// A pull of the project's source checkout, refused when the project is unknown or its path is gone.
+    fn pull_project_command(&self, project_id: &str) -> anyhow::Result<Command> {
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+        if project.path_missing {
+            anyhow::bail!("Cannot refresh: path not found for \"{}\"", project.name);
+        }
+        Ok(Command::Pull {
+            repo_path: PathBuf::from(&project.path),
+            target: PullTarget::Project {
+                project_id: project.id,
+                project_name: project.name.clone(),
+                leading_branch: project.leading_branch.clone(),
+            },
+            busy_message: crate::status_text![
+                "Refreshing project ",
+                q(project.name),
+                " from remote\u{2026}"
+            ],
+            already_running_message: crate::status_text![
+                "Project refresh already in progress for ",
+                q(project.name),
+                ". Wait for the current pull to finish."
+            ],
+        })
+    }
+
+    /// Registering the repository at `path` as a project, refused when the path is not a usable
+    /// repository or has no commits yet.
+    fn add_project_command(&self, path: &str, name: &str) -> anyhow::Result<Command> {
+        let validated = self
+            .validate_project_add_path(path)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
+            anyhow::bail!(
+                "\"{}\" has no commits yet, so it can't back a worktree. Create an initial commit first (the app offers to do this for you when adding the project).",
+                validated.display()
+            );
+        }
+        let branch = crate::git::current_branch_opt(&validated)?;
+        // A plain add is the dialog's unticked box: the folder stays
+        // where it is and new worktrees branch from it.
+        let leading_branch = crate::project_browser::project_base_for_add(
+            &validated,
+            branch.as_deref(),
+            crate::add_project_plan::DefaultCheckout::StayOnCurrent,
+        )
+        .into_branch();
+        let path_str = validated.to_string_lossy().to_string();
+        let display_name = if name.trim().is_empty() {
+            validated
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            name.trim().to_string()
+        };
+        let project = Project {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: display_name.clone(),
+            path: path_str,
+            explicit_default_provider: None,
+            default_provider: self.config.default_provider(),
+            leading_branch: Some(leading_branch),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+            current_branch: branch.unwrap_or_default(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: Some(chrono::Utc::now()),
+        };
+        let status_message =
+            crate::status_text!["Added project ", q(display_name), " to the workspace."];
+        Ok(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Add {
+                project,
+                status_message,
+            }),
+            status_op_id: None,
+        })
+    }
+
     fn map_project_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
         let mapped = match command {
-            WireCommand::PullProject { project_id } => {
-                let project = self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
-                if project.path_missing {
-                    anyhow::bail!("Cannot refresh: path not found for \"{}\"", project.name);
-                }
-                Command::Pull {
-                    repo_path: PathBuf::from(&project.path),
-                    target: PullTarget::Project {
-                        project_id: project.id,
-                        project_name: project.name.clone(),
-                        leading_branch: project.leading_branch.clone(),
-                    },
-                    busy_message: crate::status_text![
-                        "Refreshing project ",
-                        q(project.name),
-                        " from remote\u{2026}"
-                    ],
-                    already_running_message: crate::status_text![
-                        "Project refresh already in progress for ",
-                        q(project.name),
-                        ". Wait for the current pull to finish."
-                    ],
-                }
-            }
+            WireCommand::PullProject { project_id } => self.pull_project_command(&project_id)?,
             WireCommand::ToggleAgentAutoReopen {
                 session_id,
                 enabled,
@@ -5178,60 +5267,7 @@ impl Engine {
                     status_op_id: None,
                 }
             }
-            WireCommand::AddProject { path, name } => {
-                let validated = self
-                    .validate_project_add_path(&path)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
-                    anyhow::bail!(
-                        "\"{}\" has no commits yet, so it can't back a worktree. Create an initial commit first (the app offers to do this for you when adding the project).",
-                        validated.display()
-                    );
-                }
-                let branch = crate::git::current_branch_opt(&validated)?;
-                // A plain add is the dialog's unticked box: the folder stays
-                // where it is and new worktrees branch from it.
-                let leading_branch = crate::project_browser::project_base_for_add(
-                    &validated,
-                    branch.as_deref(),
-                    crate::add_project_plan::DefaultCheckout::StayOnCurrent,
-                )
-                .into_branch();
-                let path_str = validated.to_string_lossy().to_string();
-                let display_name = if name.trim().is_empty() {
-                    validated
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project")
-                        .to_string()
-                } else {
-                    name.trim().to_string()
-                };
-                let project = Project {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: display_name.clone(),
-                    path: path_str,
-                    explicit_default_provider: None,
-                    default_provider: self.config.default_provider(),
-                    leading_branch: Some(leading_branch),
-                    auto_reopen_agents: None,
-                    startup_command: None,
-                    env: std::collections::BTreeMap::new(),
-                    current_branch: branch.unwrap_or_default(),
-                    branch_status: ProjectBranchStatus::Unknown,
-                    path_missing: false,
-                    created_at: Some(chrono::Utc::now()),
-                };
-                let status_message =
-                    crate::status_text!["Added project ", q(display_name), " to the workspace."];
-                Command::PersistProject {
-                    action: Box::new(ProjectPersistenceAction::Add {
-                        project,
-                        status_message,
-                    }),
-                    status_op_id: None,
-                }
-            }
+            WireCommand::AddProject { path, name } => self.add_project_command(&path, &name)?,
             WireCommand::RemoveProject { project_id } => Command::RemoveProject {
                 project_name: self
                     .projects
@@ -5474,6 +5510,65 @@ impl Engine {
         Ok(Command::UpdateMacros { macros })
     }
 
+    /// The commands that reload or recover the config, run a macro, or change
+    /// the macro list or the global environment.
+    fn map_config_set_command(command: WireCommand) -> anyhow::Result<WireCommandMapping> {
+        Ok(WireCommandMapping::Mapped(match command {
+            WireCommand::PersistGlobalEnv { env, version } => {
+                Command::ChangeConfigSet(ConfigSetChange::ReplaceEnv {
+                    env,
+                    read_at: version,
+                })
+            }
+            WireCommand::ReloadConfig {} => Command::ReloadConfig,
+            WireCommand::RecoverConfig {} => Command::RecoverConfig,
+            WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
+            WireCommand::UpdateMacros { entries, version } => {
+                let Command::UpdateMacros { macros } = Self::update_macros_command(entries)? else {
+                    unreachable!("update_macros_command builds an UpdateMacros")
+                };
+                Command::ChangeConfigSet(ConfigSetChange::ReplaceMacros {
+                    macros,
+                    read_at: version,
+                })
+            }
+            // The request is checked here; its effect on the set is decided when
+            // it runs, against the config then (a reload may have deferred it).
+            WireCommand::SetMacro {
+                name,
+                text,
+                surface,
+            } => {
+                let Command::UpdateMacros { macros } =
+                    Self::update_macros_command(vec![WireMacroEntry {
+                        name,
+                        text,
+                        surface,
+                    }])?
+                else {
+                    unreachable!("update_macros_command builds an UpdateMacros")
+                };
+                let (name, entry) = macros
+                    .entries
+                    .into_iter()
+                    .next()
+                    .expect("one entry in, one entry out");
+                Command::ChangeConfigSet(ConfigSetChange::SetMacro { name, entry })
+            }
+            WireCommand::RemoveMacro { name } => {
+                Command::ChangeConfigSet(ConfigSetChange::RemoveMacro { name })
+            }
+            WireCommand::SetGlobalEnvVar { name, value } => {
+                crate::config::check_global_env_var(&name, &value)?;
+                Command::ChangeConfigSet(ConfigSetChange::SetEnvVar { name, value })
+            }
+            WireCommand::RemoveGlobalEnvVar { name } => {
+                Command::ChangeConfigSet(ConfigSetChange::RemoveEnvVar { name })
+            }
+            other => return Ok(WireCommandMapping::Unhandled(other)),
+        }))
+    }
+
     fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
         let command = match self.map_changes_command(command)? {
             WireCommandMapping::Mapped(command) => return Ok(command),
@@ -5484,6 +5579,10 @@ impl Engine {
             WireCommandMapping::Unhandled(command) => command,
         };
         let command = match self.map_agent_command(command)? {
+            WireCommandMapping::Mapped(command) => return Ok(command),
+            WireCommandMapping::Unhandled(command) => command,
+        };
+        let command = match Self::map_config_set_command(command)? {
             WireCommandMapping::Mapped(command) => return Ok(command),
             WireCommandMapping::Unhandled(command) => command,
         };
@@ -5498,14 +5597,6 @@ impl Engine {
                 delete_worktree,
                 delete_branch,
             },
-            WireCommand::PersistGlobalEnv { env, version } => {
-                Command::ChangeConfigSet(ConfigSetChange::ReplaceEnv {
-                    env,
-                    read_at: version,
-                })
-            }
-            WireCommand::ReloadConfig {} => Command::ReloadConfig,
-            WireCommand::RecoverConfig {} => Command::RecoverConfig,
             // Rename, Reconnect, CheckoutProjectDefaultBranch and
             // ChangeAgentProvider are NOT reconstructible into a single
             // `Command`: each needs `&mut self`. `apply_wire` intercepts them
@@ -5562,7 +5653,16 @@ impl Engine {
             | WireCommand::CloseAgentTab { .. }
             | WireCommand::StopAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. }
-            | WireCommand::SetLastFocusedTab { .. } => {
+            | WireCommand::SetLastFocusedTab { .. }
+            | WireCommand::PersistGlobalEnv { .. }
+            | WireCommand::ReloadConfig {}
+            | WireCommand::RecoverConfig {}
+            | WireCommand::RunMacro { .. }
+            | WireCommand::UpdateMacros { .. }
+            | WireCommand::SetMacro { .. }
+            | WireCommand::RemoveMacro { .. }
+            | WireCommand::SetGlobalEnvVar { .. }
+            | WireCommand::RemoveGlobalEnvVar { .. } => {
                 unreachable!(
                     "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/stop-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
@@ -5580,49 +5680,6 @@ impl Engine {
             }
             WireCommand::ReorderTerminals { terminal_ids } => {
                 Command::ReorderTerminals { terminal_ids }
-            }
-            WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
-            WireCommand::UpdateMacros { entries, version } => {
-                let Command::UpdateMacros { macros } = Self::update_macros_command(entries)? else {
-                    unreachable!("update_macros_command builds an UpdateMacros")
-                };
-                Command::ChangeConfigSet(ConfigSetChange::ReplaceMacros {
-                    macros,
-                    read_at: version,
-                })
-            }
-            // The request is checked here; its effect on the set is decided when
-            // it runs, against the config then (a reload may have deferred it).
-            WireCommand::SetMacro {
-                name,
-                text,
-                surface,
-            } => {
-                let Command::UpdateMacros { macros } =
-                    Self::update_macros_command(vec![WireMacroEntry {
-                        name,
-                        text,
-                        surface,
-                    }])?
-                else {
-                    unreachable!("update_macros_command builds an UpdateMacros")
-                };
-                let (name, entry) = macros
-                    .entries
-                    .into_iter()
-                    .next()
-                    .expect("one entry in, one entry out");
-                Command::ChangeConfigSet(ConfigSetChange::SetMacro { name, entry })
-            }
-            WireCommand::RemoveMacro { name } => {
-                Command::ChangeConfigSet(ConfigSetChange::RemoveMacro { name })
-            }
-            WireCommand::SetGlobalEnvVar { name, value } => {
-                crate::config::check_global_env_var(&name, &value)?;
-                Command::ChangeConfigSet(ConfigSetChange::SetEnvVar { name, value })
-            }
-            WireCommand::RemoveGlobalEnvVar { name } => {
-                Command::ChangeConfigSet(ConfigSetChange::RemoveEnvVar { name })
             }
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }

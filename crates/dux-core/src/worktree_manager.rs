@@ -346,6 +346,53 @@ fn remove_managed_worktree_once(
     }
 }
 
+/// What git's listing of `project`'s worktrees makes of `requested`.
+fn classify_requested_removal(
+    project: &Project,
+    paths: &DuxPaths,
+    requested: &Path,
+) -> Result<RemovalResolution, String> {
+    git::list_worktrees(Path::new(&project.path))
+        .map_err(|e| format!("{e:#}"))
+        .map(|worktrees| {
+            resolve_removal(
+                crate::project_browser::classify_project_worktrees(project, paths, &[], worktrees),
+                requested,
+            )
+        })
+}
+
+/// The answer a removal gives at once for a classification it cannot act on, or
+/// `None` when the worktree is removable.
+fn removal_refusal(
+    classified: Result<RemovalResolution, String>,
+) -> Option<Result<RemovalOutcome, String>> {
+    match classified {
+        Ok(RemovalResolution::Removable { .. }) => None,
+        Ok(RemovalResolution::NotManaged) => Some(Ok(RemovalOutcome::NotManaged)),
+        Ok(RemovalResolution::Attached) => Some(Ok(RemovalOutcome::Attached)),
+        Err(message) => Some(Err(message)),
+    }
+}
+
+/// End what dux started in the folder `requested` and left behind (a closed
+/// terminal's job, a deleted agent's server), refusing when a standalone agent's
+/// processes run there, since those are never ended.
+fn end_processes_left_in(
+    registry: &crate::process_sessions::AgentProcessRegistry,
+    processes: &crate::engine::RemovalProcesses,
+    requested: &str,
+) -> Result<(), String> {
+    // A standalone agent's processes are never ended; while any run here
+    // the folder is kept, before anything else is ended.
+    if let Some(message) = crate::engine::standalone_processes_keep(registry, requested)
+        .or_else(|| crate::engine::cwd_keeps(registry, requested, processes))
+    {
+        return Err(message);
+    }
+    crate::engine::end_agent_processes_before_removal(processes, registry, requested)
+}
+
 /// A removal the engine admitted: decided against the LIVE sessions and the
 /// registry at the moment of the request, and already announced, so nothing new
 /// starts in the folder from here on. [`Self::run`] does the slow part on a
@@ -397,27 +444,9 @@ impl AdmittedRemoval {
         // worktree dux manages for this project (the project checkout, a home
         // folder, `/`) is refused here, before anything is waited for or
         // ended, and the claim is withdrawn by finishing it.
-        let classified = git::list_worktrees(Path::new(&project.path))
-            .map_err(|e| format!("{e:#}"))
-            .map(|worktrees| {
-                // Only which worktrees are dux's: who occupies one is never
-                // decided by matching paths, but by the occupancy rule below.
-                resolve_removal(
-                    crate::project_browser::classify_project_worktrees(
-                        &project,
-                        &paths,
-                        &[],
-                        worktrees,
-                    ),
-                    &requested,
-                )
-            });
-        let refusal = |classified: Result<RemovalResolution, String>| match classified {
-            Ok(RemovalResolution::Removable { .. }) => None,
-            Ok(RemovalResolution::NotManaged) => Some(Ok(RemovalOutcome::NotManaged)),
-            Ok(RemovalResolution::Attached) => Some(Ok(RemovalOutcome::Attached)),
-            Err(message) => Some(Err(message)),
-        };
+        // Only which worktrees are dux's: who occupies one is never decided by
+        // matching paths, but by the occupancy rule below.
+        let classified = classify_requested_removal(&project, &paths, &requested);
         // Refused before anything is claimed: a path that is not a listed
         // worktree root of this project (a folder inside one, the checkout,
         // a home folder) never reads "being removed", not even briefly.
@@ -428,7 +457,7 @@ impl AdmittedRemoval {
             Ok(RemovalResolution::Removable { path, .. }) => path.clone(),
             _ => requested.clone(),
         };
-        if let Some(refused) = refusal(classified) {
+        if let Some(refused) = removal_refusal(classified) {
             return refused;
         }
         let lease = match ops.announce_removal(&worktree) {
@@ -441,26 +470,16 @@ impl AdmittedRemoval {
         // has them NOW, an agent still being created there included. An
         // agent created or attached, or a project added, after admission has
         // its row written before it lets go of the folder.
-        let reclassified = git::list_worktrees(Path::new(&project.path))
-            .map_err(|e| format!("{e:#}"))
-            .map(|worktrees| {
-                resolve_removal(
-                    crate::project_browser::classify_project_worktrees(
-                        &project,
-                        &paths,
-                        &[],
-                        worktrees,
-                    ),
-                    &requested,
-                )
+        let reclassified = classify_requested_removal(&project, &paths, &requested);
+        let refused =
+            removal_refusal(reclassified).or_else(|| {
+                match crate::engine::stored_occupant(&paths.sessions_db_path, &ops, &worktree, None)
+                {
+                    Ok(None) => None,
+                    Ok(Some(occupant)) => Some(Ok(occupant.manager_outcome())),
+                    Err(message) => Some(Err(message)),
+                }
             });
-        let refused = refusal(reclassified).or_else(|| {
-            match crate::engine::stored_occupant(&paths.sessions_db_path, &ops, &worktree, None) {
-                Ok(None) => None,
-                Ok(Some(occupant)) => Some(Ok(occupant.manager_outcome())),
-                Err(message) => Some(Err(message)),
-            }
-        });
         if let Some(refused) = refused {
             // Dropping the lease unfinished withdraws the claim.
             drop(lease);
@@ -480,19 +499,7 @@ impl AdmittedRemoval {
         // folder is looked at once more under the claim, the same as an agent
         // delete's removal does.
         let requested_text = worktree.to_string_lossy().into_owned();
-        // A standalone agent's processes are never ended; while any run here
-        // the folder is kept, before anything else is ended.
-        if let Some(message) = crate::engine::standalone_processes_keep(&registry, &requested_text)
-            .or_else(|| crate::engine::cwd_keeps(&registry, &requested_text, &processes))
-        {
-            lease.finish(Err(message.clone()));
-            return Err(message);
-        }
-        if let Err(message) = crate::engine::end_agent_processes_before_removal(
-            &processes,
-            &registry,
-            &requested_text,
-        ) {
+        if let Err(message) = end_processes_left_in(&registry, &processes, &requested_text) {
             lease.finish(Err(message.clone()));
             return Err(message);
         }
