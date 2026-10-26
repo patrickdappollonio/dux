@@ -84,10 +84,10 @@ use dux_core::tailscale::TailscaleUnavailable;
 use crate::console::Console;
 use crate::engine_actor::LoopControl;
 use crate::serve_legs::{
-    LegCommand, LegStatus, LegStep, ModeStep, NoTailscaleFlag, ServeShutdown, StartupLeg,
-    TailscaleModeControl, WATCH_PERIOD, Watch, WatchEvent, admitted_own_name, desired_leg,
-    identity_news, plan_leg_step, plan_mode_change, serve_hint, tailnet_urls,
-    wait_for_leg_shutdown, waiting_note, watch_tailscale,
+    FirstLook, LegCommand, LegStatus, LegStep, ModeStep, NoTailscaleFlag, ServeShutdown,
+    StartupLeg, TailscaleModeControl, WATCH_PERIOD, Watch, WatchEvent, WatchScope,
+    admitted_own_name, desired_leg, identity_news, plan_leg_step, plan_mode_change, serve_hint,
+    tailnet_urls, wait_for_leg_shutdown, waiting_note, watch_tailscale,
 };
 use crate::server::RouterParams;
 use dux_core::serve_log::{Banner, ListenerRow, StartupNotes};
@@ -221,6 +221,15 @@ struct BoundListener {
     listener: tokio::net::TcpListener,
 }
 
+/// Whether a serving leg's death ends the whole serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegNeed {
+    /// It does: there is nothing to serve without it.
+    Required,
+    /// It does not: dux says so and keeps serving its other legs.
+    BestEffort,
+}
+
 /// Bind every [`PlanAddr`], honoring its required/best-effort tag.
 ///
 /// - REQUIRED (the configured `host:port` or an explicit `--bind`): a bind
@@ -344,13 +353,22 @@ fn plain_http_banner(
     }
 }
 
+/// Whether a Tailscale address was found before binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TailscaleDetection {
+    /// One was.
+    Found,
+    /// None was.
+    NotFound,
+}
+
 /// The startup banner every serving mode prints, built from the legs that bound
 /// (each an `(addr, required)` pair). The one recipe `dux server` and the flip
 /// share, so the two print the same rows for the same situation: the bind
 /// warnings, the `auto` mode's waiting note, the reachability note and the
 /// missing-web-UI warning all come from here.
 ///
-/// `tailscale_detected` is whether a Tailscale address was found before binding,
+/// `detection` is whether a Tailscale address was found before binding,
 /// which is what tells "the address would not bind" from "there is no address
 /// yet" when no Tailscale leg is in `bound`.
 pub(crate) fn serve_banner(
@@ -358,7 +376,7 @@ pub(crate) fn serve_banner(
     bound: &[(SocketAddr, bool)],
     bind_warnings: &[String],
     tailscale: TailscaleMode,
-    tailscale_detected: bool,
+    detection: TailscaleDetection,
     auth: &dux_core::config::ServerAuthConfig,
 ) -> Banner {
     let bound_plan_addrs: Vec<PlanAddr> = bound
@@ -374,10 +392,10 @@ pub(crate) fn serve_banner(
     let leg_bound = bound
         .iter()
         .any(|(addr, required)| !required && !addr.ip().is_loopback());
-    let startup_leg = match (tailscale_detected, leg_bound) {
+    let startup_leg = match (detection, leg_bound) {
         (_, true) => StartupLeg::Bound,
-        (true, false) => StartupLeg::BindFailed,
-        (false, false) => StartupLeg::Undetected,
+        (TailscaleDetection::Found, false) => StartupLeg::BindFailed,
+        (TailscaleDetection::NotFound, false) => StartupLeg::Undetected,
     };
     let note = safety_note(&bound_plan_addrs, tailscale, auth);
     let mut warnings = bind_warnings.to_vec();
@@ -625,7 +643,11 @@ fn run_plain_http(
                 &banner_legs,
                 &bind_warnings,
                 tailscale,
-                addrs.iter().any(|p| !p.is_required()),
+                if addrs.iter().any(|p| !p.is_required()) {
+                    TailscaleDetection::Found
+                } else {
+                    TailscaleDetection::NotFound
+                },
                 &router_config.server.auth,
             ));
 
@@ -743,7 +765,11 @@ fn run_plain_http(
                     app.clone(),
                     listener,
                     addr,
-                    required,
+                    if required {
+                        LegNeed::Required
+                    } else {
+                        LegNeed::BestEffort
+                    },
                     &shutdown,
                     console.clone(),
                     leg_status.clone(),
@@ -972,7 +998,7 @@ fn spawn_leg(
     app: Router,
     listener: tokio::net::TcpListener,
     addr: SocketAddr,
-    required: bool,
+    need: LegNeed,
     shutdown: &ServeShutdown,
     console: Console,
     status: LegStatus,
@@ -996,9 +1022,9 @@ fn spawn_leg(
         )
         .with_graceful_shutdown(wait_for_leg_shutdown(parent_lane, leg_lane))
         .await;
-        match (&result, required) {
+        match (&result, need) {
             (Ok(()), _) => shutdown.forget_leg(addr),
-            (Err(err), true) => {
+            (Err(err), LegNeed::Required) => {
                 // The accept loop died while serving (graceful shutdown returns
                 // Ok). Record the first error and trip the parent so the OTHER
                 // listeners wind down too: never let the server limp on with one
@@ -1008,7 +1034,7 @@ fn spawn_leg(
                 ));
                 shutdown.record_failure(anyhow::anyhow!("web server listener failed: {err}"));
             }
-            (Err(err), false) => {
+            (Err(err), LegNeed::BestEffort) => {
                 let err = anyhow::anyhow!("{err}");
                 let warning = shutdown.record_best_effort_failure(addr, &err);
                 console.bind_degraded(&format!(
@@ -1237,7 +1263,7 @@ impl TailscaleLoop {
         // Funnel is on with no password, reading both live.
         let admitted: Vec<String> = identity
             .as_ref()
-            .and_then(|identity| admitted_own_name(identity, true))
+            .and_then(|identity| admitted_own_name(identity, crate::serve_legs::Password::Set))
             .into_iter()
             .collect();
         self.exposure
@@ -1283,7 +1309,11 @@ impl TailscaleLoop {
             console,
             status,
         );
-        for (tone, message) in identity_news(previous.as_ref(), &identity, (self.password_set)()) {
+        for (tone, message) in identity_news(
+            previous.as_ref(),
+            &identity,
+            crate::serve_legs::Password::now(&self.password_set),
+        ) {
             say(tone, &message, console, status);
         }
         self.say_serve_hint_once(console);
@@ -1324,7 +1354,9 @@ impl TailscaleLoop {
         {
             say(
                 dux_core::statusline::StatusTone::Warning,
-                &crate::serve_legs::container_warning((self.password_set)()),
+                &crate::serve_legs::container_warning(crate::serve_legs::Password::now(
+                    &self.password_set,
+                )),
                 console,
                 status,
             );
@@ -1354,9 +1386,12 @@ impl TailscaleLoop {
         status: &LegStatus,
     ) {
         let before = self.exposure.set_funnel(next);
-        if let Some((tone, message)) =
-            crate::serve_legs::funnel_state_news(before, next, because, (self.password_set)())
-        {
+        if let Some((tone, message)) = crate::serve_legs::funnel_state_news(
+            before,
+            next,
+            because,
+            crate::serve_legs::Password::now(&self.password_set),
+        ) {
             say(tone, &message, console, status);
         }
     }
@@ -1413,8 +1448,8 @@ impl TailscaleLoop {
         let urls = tailnet_urls(
             &legs,
             identity.as_ref(),
-            self.host_literals.load(Ordering::SeqCst),
-            (self.password_set)(),
+            host_guard::TailscaleLiteralRule::of_cell(&self.host_literals),
+            crate::serve_legs::Password::now(&self.password_set),
         );
         let listed: Vec<String> = legs
             .iter()
@@ -1485,10 +1520,10 @@ impl TailscaleLoop {
     pub(crate) fn start_watcher_if_wanted(&mut self) {
         match self.mode {
             TailscaleMode::Auto => {
-                self.start_watcher(false, true);
+                self.start_watcher(FirstLook::AfterPeriod, WatchScope::AddressAndName);
             }
             TailscaleMode::Yes => {
-                self.start_watcher(false, false);
+                self.start_watcher(FirstLook::AfterPeriod, WatchScope::NameOnly);
             }
             TailscaleMode::No => {}
         }
@@ -1516,8 +1551,9 @@ impl TailscaleLoop {
     /// the probe is a bounded but blocking call, and a wedged `tailscaled` (a
     /// suspend and resume, which is the exact scenario the watcher serves) must
     /// not be able to occupy a tokio worker.
-    fn start_watcher(&mut self, probe_now: bool, addresses: bool) -> bool {
+    fn start_watcher(&mut self, first: FirstLook, scope: WatchScope) -> bool {
         self.stop_watcher();
+        let addresses = scope == WatchScope::AddressAndName;
         // Without a primary there is no port to hang the Tailscale leg on, but
         // the Funnel check still has to run, so such a serve watches the name
         // alone. The address it is handed is never bound.
@@ -1554,7 +1590,7 @@ impl TailscaleLoop {
                 watch_tailscale(&Watch {
                     primary,
                     period,
-                    probe_first: probe_now,
+                    probe_first: first == FirstLook::Immediately,
                     addresses,
                     detect: &*detect,
                     identify: &*identify,
@@ -1923,7 +1959,12 @@ async fn apply_mode_request(
                 // The primary is there, so the only failure left is a thread
                 // that would not start, which the log names; either way the
                 // answer the caller needs is that nothing is watching.
-                if !ts.start_watcher(probe_now, true) {
+                let first = if probe_now {
+                    FirstLook::Immediately
+                } else {
+                    FirstLook::AfterPeriod
+                };
+                if !ts.start_watcher(first, WatchScope::AddressAndName) {
                     let _ = reply.send(TailscaleModeOutcome::NoPrimary);
                     return;
                 }
@@ -2001,7 +2042,7 @@ async fn finish_detection(
     // name it keeps watching, so a Funnel switched on later is noticed. The
     // watcher's first look waits a period, because this look just happened.
     if matches!(ts.mode, TailscaleMode::Yes) {
-        ts.start_watcher(false, false);
+        ts.start_watcher(FirstLook::AfterPeriod, WatchScope::NameOnly);
     }
     let already = ts.bound_addr();
     if detected.is_err() {
@@ -2104,7 +2145,7 @@ async fn apply_leg_command(
                     app.clone(),
                     listener,
                     addr,
-                    false,
+                    LegNeed::BestEffort,
                     shutdown,
                     console.clone(),
                     status.clone(),
@@ -2542,7 +2583,11 @@ impl ServeCore {
                     app.clone(),
                     tokio_listener,
                     addr,
-                    required,
+                    if required {
+                        LegNeed::Required
+                    } else {
+                        LegNeed::BestEffort
+                    },
                     &shutdown,
                     console.clone(),
                     leg_status.clone(),
@@ -2845,7 +2890,11 @@ pub fn serve_with_engine(
         &legs,
         &startup.bind_warnings,
         engine.config.server.tailscale_mode(),
-        startup.tailscale_detected,
+        if startup.tailscale_detected {
+            TailscaleDetection::Found
+        } else {
+            TailscaleDetection::NotFound
+        },
         &engine.config.server.auth,
     ));
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
@@ -3367,7 +3416,8 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_serve_task_trips_the_lane_while_a_clean_end_does_not() {
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let _leg = shutdown.register_leg(ts);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = None;
@@ -3388,7 +3438,8 @@ mod tests {
     #[tokio::test]
     async fn a_leg_task_that_ends_clears_a_cell_the_registry_no_longer_backs() {
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = Some(ts);
         super::finish_leg_task(Ok(()), &shutdown, &cell, &mut streak);
@@ -3406,7 +3457,8 @@ mod tests {
         // blanked, or every reaped sibling task would have the watcher rebind a
         // healthy listener.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let _leg = shutdown.register_leg(ts);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = Some(ts);
@@ -3441,7 +3493,8 @@ mod tests {
         );
 
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let _leg = shutdown.register_leg(ts);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
         let mut streak = None;
@@ -3505,7 +3558,8 @@ mod tests {
         // A real loopback address, so the bind half of the flap genuinely binds
         // and the unbind half genuinely stops a registered leg.
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut streak = None;
         let mut tasks = tokio::task::JoinSet::new();
@@ -3586,7 +3640,8 @@ mod tests {
         // suppression exists for.
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
         let addr = occupied.local_addr().expect("the occupied address");
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut streak = None;
         let mut tasks = tokio::task::JoinSet::new();
@@ -3636,7 +3691,8 @@ mod tests {
         // and its bind failure must be said out loud rather than swallowed by a
         // streak that predates the flap.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let _leg = shutdown.register_leg(ts);
         let console = crate::console::Console::capture(dux_core::activity::ActivityRing::default());
         let cell = std::sync::Arc::new(std::sync::Mutex::new(Some(ts)));
@@ -3671,7 +3727,8 @@ mod tests {
         // death that leaves the cell naming the dead address makes every period
         // plan Nothing and the leg stays down until the interface itself flaps.
         let ts: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(true);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Watched);
         let leg_lane = shutdown.register_leg(ts);
         let console = crate::console::Console::capture(dux_core::activity::ActivityRing::default());
 
@@ -3915,7 +3972,7 @@ mod tests {
             &[(addr("127.0.0.1:3890"), true)],
             &[bind_warning],
             TailscaleMode::Auto,
-            true,
+            crate::TailscaleDetection::Found,
             &dux_core::config::ServerAuthConfig::default(),
         ));
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
@@ -3986,7 +4043,7 @@ mod tests {
             &[(addr("127.0.0.1:3890"), true)],
             &[],
             TailscaleMode::Auto,
-            false,
+            crate::TailscaleDetection::NotFound,
             &dux_core::config::ServerAuthConfig::default(),
         );
         assert!(
@@ -4014,7 +4071,7 @@ mod tests {
             ],
             &[],
             TailscaleMode::Yes,
-            true,
+            crate::TailscaleDetection::Found,
             &dux_core::config::ServerAuthConfig::default(),
         );
         let labels: Vec<&str> = banner.listeners.iter().map(|l| l.label.as_str()).collect();
@@ -4536,12 +4593,12 @@ mod tests {
 
     // ── safety_note ───────────────────────────────────────────────────────────
 
-    fn plan_addr(s: &str, required: bool) -> PlanAddr {
-        if required {
-            PlanAddr::required(s.parse().unwrap())
-        } else {
-            PlanAddr::best_effort(s.parse().unwrap())
-        }
+    fn required_addr(s: &str) -> PlanAddr {
+        PlanAddr::required(s.parse().unwrap())
+    }
+
+    fn best_effort_addr(s: &str) -> PlanAddr {
+        PlanAddr::best_effort(s.parse().unwrap())
     }
 
     fn no_password() -> dux_core::config::ServerAuthConfig {
@@ -4563,8 +4620,8 @@ mod tests {
     fn safety_notes_say_who_is_asked_for_the_password_once_one_is_set() {
         use dux_core::config::AuthRequire;
         let tailnet = vec![
-            plan_addr("127.0.0.1:8080", true),
-            plan_addr("100.64.0.5:8080", false),
+            required_addr("127.0.0.1:8080"),
+            best_effort_addr("100.64.0.5:8080"),
         ];
         let open = safety_note(&tailnet, TailscaleMode::Yes, &no_password()).unwrap();
         assert!(open.contains("no password set"), "{open}");
@@ -4588,7 +4645,7 @@ mod tests {
         .unwrap();
         assert!(asked.contains("must sign in"), "{asked}");
 
-        let public = vec![plan_addr("0.0.0.0:8080", true)];
+        let public = vec![required_addr("0.0.0.0:8080")];
         let guarded = safety_note(
             &public,
             TailscaleMode::Auto,
@@ -4602,7 +4659,7 @@ mod tests {
 
     #[test]
     fn safety_note_loopback_only_is_none_when_tailscale_is_off() {
-        let addrs = vec![plan_addr("127.0.0.1:8080", true)];
+        let addrs = vec![required_addr("127.0.0.1:8080")];
         assert_eq!(safety_note(&addrs, TailscaleMode::No, &no_password()), None);
         // `yes` looked once and found nothing, so this run stays loopback-only and
         // there is genuinely nothing to warn about either.
@@ -4618,7 +4675,7 @@ mod tests {
         // that is watching the interface will be reachable on the tailnet the
         // moment the laptop reconnects, and saying nothing is the wrong half of
         // the truth.
-        let addrs = vec![plan_addr("127.0.0.1:8080", true)];
+        let addrs = vec![required_addr("127.0.0.1:8080")];
         let note = safety_note(&addrs, TailscaleMode::Auto, &no_password())
             .expect("a watching serve must still warn about the tailnet");
         assert!(note.contains("tailnet"), "must mention tailnet: {note}");
@@ -4631,8 +4688,8 @@ mod tests {
     #[test]
     fn safety_note_loopback_plus_tailscale_mentions_tailnet() {
         let addrs = vec![
-            plan_addr("127.0.0.1:8080", true),
-            plan_addr("100.64.0.5:8080", false),
+            required_addr("127.0.0.1:8080"),
+            best_effort_addr("100.64.0.5:8080"),
         ];
         let note = safety_note(&addrs, TailscaleMode::Yes, &no_password())
             .expect("must have a note for tailscale leg");
@@ -4649,7 +4706,7 @@ mod tests {
 
     #[test]
     fn safety_note_wildcard_primary_with_no_password_says_so() {
-        let addrs = vec![plan_addr("0.0.0.0:8080", true)];
+        let addrs = vec![required_addr("0.0.0.0:8080")];
         let note = safety_note(&addrs, TailscaleMode::Auto, &no_password())
             .expect("must warn for 0.0.0.0");
         assert!(
@@ -4663,8 +4720,8 @@ mod tests {
         // Overlap case: non-loopback required primary AND a Tailscale best-effort leg.
         // LAN warning wins (severity), and appends the Tailscale parenthetical.
         let addrs = vec![
-            plan_addr("192.168.1.5:8080", true),
-            plan_addr("100.64.0.5:8080", false),
+            required_addr("192.168.1.5:8080"),
+            best_effort_addr("100.64.0.5:8080"),
         ];
         let note = safety_note(&addrs, TailscaleMode::Auto, &no_password())
             .expect("must warn for LAN primary");

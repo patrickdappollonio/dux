@@ -274,6 +274,15 @@ pub enum TailscaleLiteralRule {
 }
 
 impl TailscaleLiteralRule {
+    /// The rule a serve's live literals cell holds right now.
+    pub(crate) fn of_cell(cell: &std::sync::atomic::AtomicBool) -> Self {
+        if cell.load(std::sync::atomic::Ordering::SeqCst) {
+            Self::Admit
+        } else {
+            Self::Refuse
+        }
+    }
+
     /// The rule `mode` asks for.
     pub fn for_mode(mode: dux_core::config::TailscaleMode) -> Self {
         if mode.wants_tailscale() {

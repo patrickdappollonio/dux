@@ -105,7 +105,11 @@ impl BackgroundServer {
             &legs,
             &startup.bind_warnings,
             engine.config.server.tailscale_mode(),
-            startup.tailscale_detected,
+            if startup.tailscale_detected {
+                crate::TailscaleDetection::Found
+            } else {
+                crate::TailscaleDetection::NotFound
+            },
             &engine.config.server.auth,
         ));
 
@@ -1025,7 +1029,8 @@ mod tests {
     /// `None`, an empty registry answers an empty list.
     #[test]
     fn a_poisoned_leg_registry_answers_that_it_could_not_read() {
-        let shutdown = crate::serve_legs::ServeShutdown::for_watched(false);
+        let shutdown =
+            crate::serve_legs::ServeShutdown::for_watched(crate::serve_legs::LegWatch::Unwatched);
         assert_eq!(
             shutdown.leg_addrs(),
             Some(Vec::new()),
