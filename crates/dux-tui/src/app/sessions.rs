@@ -1,6 +1,41 @@
-use super::*;
+use super::text_input::TextInput;
+use super::{
+    App, BrowsePurpose, CenterMode, ChangeAgentProviderMode, ChangeAgentProviderOption,
+    ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
+    ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
+    CloneDraft, CloneProjectFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt,
+    ConfirmNonDefaultBranchFocus, DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, FocusPane,
+    FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus, KillRunningPrompt,
+    KillableRuntime, KillableRuntimeKind, LaunchView, LeftItem, NameNewAgentFocus, PendingDiff,
+    PersistFinalOutcome, PickProjectWorktreePrompt, PrLookupFinalOutcome, ProjectAction,
+    ProjectActionsPrompt, ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent,
+    PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus, ReviewCopyQuestion,
+    RuntimeTargetId, SLOW_DIFF_READ, SearchableList, StartupCommandLogPrompt, StartupLogViewer,
+    TuiCheckoutInspectOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, UnpushedCountAnswer,
+    WorktreesFinalOutcome, diff_read_busy, kill_running_matches, pick_project_matches,
+    preflight_server_listeners,
+};
+use crate::config::provider_config;
 use crate::editor;
+use crate::keybindings::Action;
+use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind, SessionSurface};
+use crate::statusline::StatusTone;
+use crate::{git, logger};
+use anyhow::Result;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
+use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
+use dux_core::model::TerminalOwner;
+use dux_core::project_browser::leading_branch_for_project;
+use dux_core::worker::{
+    AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, CreateAgentBranchInspection,
+    CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget, WorkerEvent,
+};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Instant;
+use uuid::Uuid;
 
 /// Where a clone of `address` goes by default: the repository's folder name
 /// inside `start_folder`, or the start folder itself (with its trailing
@@ -5010,15 +5045,26 @@ pub(super) fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::redraw::RedrawGate;
+    use crate::app::{
+        ConfirmAnswer, InactiveTailState, LeftRowsState, MouseLayoutState, OneShotNotes,
+        OverlayMouseLayout, OverlayMouseLayoutState, PaletteOpenedOver, PaneFlags, RawPaste,
+        RightSection, ServingFlags, ViewPrefs, WelcomeLogo, default_url_opener,
+    };
+    use crate::clipboard::Clipboard;
     use crate::config::DuxPaths;
     use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
     use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::config_sync::portable_project_path;
     use dux_core::engine::{ProjectPersistenceOutcome, ProjectPersistenceView};
+    use dux_core::model::CompanionTerminal;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn test_bindings() -> RuntimeBindings {

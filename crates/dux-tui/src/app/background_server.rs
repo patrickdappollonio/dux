@@ -11,7 +11,18 @@
 
 use dux_core::engine::EventReaction;
 
-use super::*;
+use super::{
+    App, BackgroundServerOutcome, FocusPane, FullscreenOverlay, InputTarget,
+    PendingBackgroundServerStart, PromptState, SetTailscaleModeOption, SetTailscaleModePrompt,
+    preflight_server_listeners,
+};
+use crate::keybindings::Action;
+use crate::model::SessionSurface;
+use crate::statusline::StatusTone;
+use anyhow::Result;
+use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+use dux_core::worker::WorkerEvent;
+use std::time::Instant;
 
 /// Whether `[server] serve_while_tui` asks for the background server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1097,6 +1108,9 @@ pub(crate) mod tests {
 
     use super::super::test_support::{default_bindings, test_app};
     use super::*;
+    use dux_core::engine::Engine;
+    use dux_core::ids::{TabId, TabIdRef};
+    use std::time::Duration;
 
     /// What a [`FakeCompanion`] saw and what it was told to do, shared with the
     /// test because the App owns the companion behind a trait object.

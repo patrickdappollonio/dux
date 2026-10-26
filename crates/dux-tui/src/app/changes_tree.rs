@@ -12,9 +12,22 @@
 //! re-listed quietly whenever the pane's own read says a folder's file count
 //! moved, or dropped when the folder is no longer a row at all.
 
-use super::*;
+use super::{
+    App, FolderListing, FolderOp, FolderOpDone, ListingStatus, PendingFolderListing,
+    PendingFolderOp, RightSection,
+};
+use crate::git;
+use crate::keybindings::Action;
+use crate::model::ChangedFile;
+use crate::statusline::StatusTone;
+use anyhow::Result;
 use dux_core::git::ChangesSide;
 use dux_core::model::{ChangedFileKind, folder_count_label, total_file_count};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Instant;
 
 /// One row of the changes pane, flattened from the listing and its expanded
 /// folders.
@@ -1025,7 +1038,11 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, run_git, test_app};
+    use crate::app::{CenterMode, ConfirmAnswer, ConfirmFocus, FocusPane, PromptState};
+    use crate::keybindings::HintContext;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
+    use std::time::Duration;
 
     fn folder(path: &str, status: &str, file_count: usize) -> ChangedFile {
         ChangedFile {

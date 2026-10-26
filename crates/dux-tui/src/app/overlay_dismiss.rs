@@ -19,7 +19,10 @@
 //! not with a close, since a swallowed click teaches the user nothing.
 
 use super::input::contains_point;
-use super::*;
+use super::{App, ConfirmAnswer, PromptState, RefusalBlink};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use std::time::Instant;
 
 /// What an outside click should do to the prompt that is currently open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,11 +431,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::first_load::FirstLoadPrompt;
     use crate::app::render::centered_rect_exact;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::text_input::TextInput;
+    use crate::app::{
+        AgentInfoPrompt, AgentInfoTone, CenterMode, ConfigReloadFailedFocus, ConfigureFieldFocus,
+        ConfirmFocus, ConfirmKillRunningPrompt, FullscreenOverlay, KillRunningAction,
+        KillRunningFocus, KillRunningPrompt, NameNewAgentFocus, OverlayMouseLayout,
+        PendingMacroDelete, RenameSessionFocus, SearchableList, StartupCommandLogFocus,
+        StartupCommandLogPrompt,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::worker::CreateAgentRequest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     const TERM: (u16, u16) = (120, 40);
 

@@ -10,11 +10,19 @@
 //! request, the form says so up front and holds the button until it is ticked.
 
 use super::components::{FocusStep, next_focus};
-use super::*;
+use super::text_input::TextInput;
+use super::{
+    App, CloneDraft, CloneProjectFocus, FullscreenOverlay, InputTarget, ProjectChooserIntent,
+    PromptState,
+};
 use crate::git::{agent_name_char_map, is_valid_agent_name};
+use crate::keybindings::Action;
+use crate::statusline::StatusTone;
+use anyhow::Result;
 use dux_core::clone_project::{
     FolderReviewCopyQuery, PrDestination, UpfrontReviewCopy, check_pr_destination,
 };
+use dux_core::engine::Command;
 use dux_core::engine::EventReaction;
 use dux_core::pr_reference::{
     PullRequestCloneFacts, PullRequestCloneTarget, pr_add_existing_offer_prose,
@@ -22,6 +30,10 @@ use dux_core::pr_reference::{
 };
 use dux_core::prose::{Prose, ProseSegment};
 use dux_core::status_text::{ReviewCopyAsk, ReviewCopyOutlook};
+use dux_core::worker::CreateAgentRequest;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// What the folder the form would clone into holds.
 #[derive(Clone, Debug, PartialEq, Eq)]

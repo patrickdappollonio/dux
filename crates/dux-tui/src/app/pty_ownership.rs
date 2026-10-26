@@ -73,7 +73,9 @@
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
-use super::*;
+use super::App;
+use crate::pty::PtyClient;
+use dux_core::ids::TabIdRef;
 
 /// Who is driving a pty, from this surface's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,9 +625,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::background_server::BackgroundServerStart;
     use crate::app::background_server::tests::{FakeCompanion, Recorded};
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{CenterMode, FocusPane, FullscreenOverlay, InputTarget, PromptState};
+    use crate::keybindings::Action;
+    use crate::model::SessionSurface;
+    use crate::statusline::StatusTone;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use dux_core::engine::{AgentLaunchReadyOutcome, AgentLaunchReadyView};
+    use dux_core::ids::TabId;
 
     /// An app with a serving companion, plus the registry seat the companion
     /// handed it and the record of what it published.

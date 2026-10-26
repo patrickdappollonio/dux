@@ -8,7 +8,35 @@ use dux_core::engine::{
     PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval, closed_tab_exit_notice,
 };
 
-use super::*;
+use super::background_server::CompanionRouting;
+use super::text_input::TextInput;
+use super::{
+    App, CenterMode, ChangedFilesAnswer, CpuWindow, DeleteReport, DrainedEventMetadata, FocusPane,
+    FullscreenOverlay, InputTarget, LaunchView, LeftItem, LeftSection, PersistFinalOutcome,
+    PrLookupFinalOutcome, PrReferenceResolutionAnswer, PromptState, PruneViewContext,
+    StartupCommandLogFocus, StartupCommandLogPrompt, TuiCheckoutInspectOutcome,
+    TuiConfigReloadOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
+    build_visual_rows, removable_worktree_indices, selectable_project_worktree_indices,
+};
+use crate::config::Config;
+use crate::keybindings::Action;
+use crate::model::{Project, ProviderKind, SessionSurface};
+use crate::statusline::StatusTone;
+use crate::theme::FocusState;
+use crate::{git, logger};
+use anyhow::Result;
+use dux_core::engine::Engine;
+use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
+use dux_core::model::{TerminalOwner, TerminalOwnerRef};
+use dux_core::project_browser::leading_branch_for_project;
+use dux_core::worker::{
+    AgentLaunchKind, BrowserEntry, CreateAgentBranchInspection, CreateAgentRequest,
+    NonDefaultBranchAction, ProjectPersistenceAction, ProjectWorktreeEntry, ResourceStats,
+    WorkerEvent,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 impl PruneViewContext {
     fn capture(app: &App) -> Self {
@@ -2380,6 +2408,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::app::{BrowsePurpose, TermGridPos, TerminalSelection};
+    use crate::config::DuxPaths;
+    use crate::model::{AgentSession, ProjectBranchStatus, SessionStatus};
+    use dux_core::worker::AgentLaunchRequest;
 
     /// An agent detaching is a fact about the workspace: a browser has always
     /// been told, and this surface used to speak only for the selected agent.

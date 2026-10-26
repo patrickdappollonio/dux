@@ -22,14 +22,52 @@ use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
 };
+use super::pr_clone::{PrFolder, PrReviewQuestion};
 use super::pty_ownership::PtyTakeoverCard;
-use super::*;
+use super::text_input::TextInput;
+use super::{
+    AgentInfoTone, AgentRowCues, AgentTerminalContext, App, BranchHolder, BrowseProjectsFooterKeys,
+    BrowsePurpose, CenterMode, ChangeAgentProviderMode, CloneProjectFocus, ConfigReloadFailedFocus,
+    ConfigureFieldFocus, ConfirmFocus, ConfirmNonDefaultBranchFocus, CpuWindow, DeleteAgentFocus,
+    DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache, FieldEngagement, FocusPane,
+    FullscreenOverlay, InputTarget, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
+    KillableRuntimeKind, LeftItem, LeftSection, Listing, MacroEditFocus, MacroEditState,
+    ManageWorktreeVisualRow, NameNewAgentFocus, OverlayCheckbox, OverlayCheckboxId,
+    OverlayMouseLayout, ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent,
+    ProjectWorktreeVisualRow, PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus,
+    RenameSessionFocus, RightSection, RowDragList, RuntimeTargetId, SelectionOrigin,
+    SidebarListGeometry, StartupCommandLogFocus, TerminalSidebarRow, VisualRow, WorkingCopy,
+    build_visual_rows, first_load, manage_worktree_visual_rows, pick_project_matches,
+    project_worktree_visual_rows,
+};
+use crate::config::MacroSurface;
+use crate::git;
+use crate::keybindings::{Action, HintContext};
+use crate::model::{AgentSession, ChangedFile, CompanionTerminalStatus, Project, SessionSurface};
+use crate::statusline::StatusTone;
 use crate::theme::FocusState;
+use crate::theme::Theme;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
+use dux_core::agent_tabs::{branch_drifted, tab_labels};
+use dux_core::ids::{SessionIdRef, TabIdRef};
+use dux_core::model::CompanionTerminal;
 use dux_core::prose::Prose;
 use dux_core::text::{count_of, count_of_with};
+use dux_core::worker::{BranchWarningKind, CreateAgentRequest, ResourceKind, ResourceStats};
+use ratatui::Frame;
 use ratatui::buffer::{CellDiffOption, CellWidth};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::prelude::{Color, Modifier, Style};
+use ratatui::symbols::border;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
+};
+use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// The empty state of the three provider pickers. Unreachable while the config
 /// defines a provider, which it always does, but a list is never a silent blank.
@@ -14416,6 +14454,15 @@ mod tests {
         Short,
     }
     use super::*;
+    use crate::app::{
+        AgentInfoPrompt, ConfirmDeleteWorktreePrompt, ManageWorktreesPrompt, ReviewCopyQuestion,
+        SearchableList, StartupCommandLogPrompt, StartupLogViewer,
+    };
+    use crate::keybindings::{RuntimeBindings, text_field_owns_key};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::ids::TabId;
+    use dux_core::worker::ProcessInfo;
+    use std::time::Duration;
 
     use crate::app::test_support::{
         agent_provider_prompt, default_bindings, default_provider_prompt, enter_scroll_mode,
@@ -26200,7 +26247,7 @@ mod tests {
             matches!(
                 app.prompt,
                 PromptState::PickProject {
-                    list: super::SearchableList {
+                    list: SearchableList {
                         searching: true,
                         ..
                     },
@@ -26344,8 +26391,8 @@ mod tests {
             branch_removal: dux_core::worktree_manager::BranchRemoval,
         ) -> PromptState {
             let project = app.engine.projects[0].clone();
-            PromptState::ConfirmDeleteWorktree(Box::new(super::ConfirmDeleteWorktreePrompt {
-                previous: super::ManageWorktreesPrompt {
+            PromptState::ConfirmDeleteWorktree(Box::new(ConfirmDeleteWorktreePrompt {
+                previous: ManageWorktreesPrompt {
                     return_to: None,
                     project: project.clone(),
                     entries: Vec::new(),

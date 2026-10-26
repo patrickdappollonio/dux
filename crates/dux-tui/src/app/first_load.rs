@@ -22,7 +22,20 @@
 //! border color: accenting it too would make it the same hue as the duck and
 //! flatten the composition.
 
-use super::*;
+use super::{App, PromptState};
+use crate::logger;
+use crate::theme::Theme;
+use anyhow::Result;
+use dux_core::worker::WorkerEvent;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::prelude::{Color, Modifier, Style};
+use ratatui::symbols::border;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
+use std::thread;
 
 use crate::app::components::{Hint, modal_hint_line, render_scroll_view};
 use crate::app::render::centered_rect_exact;
@@ -1108,10 +1121,17 @@ mod tests {
     use super::*;
     use crate::app::components::scroll_marker_rect;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::text_input::TextInput;
+    use crate::app::{OverlayMouseLayout, first_load};
+    use crate::keybindings::Action;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use dux_core::first_load::{FirstLoad, FirstLoadPlan, NotesOutcome};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
 
     fn sample_notes() -> ReleaseNotes {
         ReleaseNotes {

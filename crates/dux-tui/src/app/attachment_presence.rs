@@ -8,11 +8,17 @@
 //! confirmation names anyone else attached to one
 //! ([`Engine::attached_elsewhere`](dux_core::engine::Engine::attached_elsewhere)).
 
-use super::*;
+use super::{
+    App, ConfirmFocus, DeleteAgentFocus, PromptState, RecreateWorkingCopyFocus, RuntimeTargetId,
+};
+use crate::model::SessionSurface;
+use anyhow::Result;
 use dux_core::attachments::{
     Blocker, ConnectionFacts, Surface, TERMINAL_UI_CONNECTION, Target, TargetKind,
 };
 use dux_core::engine::Attached;
+use dux_core::ids::SessionIdRef;
+use dux_core::model::TerminalOwner;
 
 impl App {
     /// The pane being drawn right now streams this surface's selected
@@ -284,7 +290,12 @@ impl PromptState {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem, LeftSection};
+    use crate::model::AgentSession;
+    use crate::pty::PtyClient;
     use dux_core::attachments::Policy;
+    use dux_core::ids::TabId;
+    use dux_core::worker::WorkerEvent;
 
     fn render(app: &mut App) {
         let mut terminal =

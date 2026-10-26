@@ -15,15 +15,9 @@ use crossterm::event::{
     MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::prelude::{Color, Modifier, Style};
-use ratatui::symbols::border;
+use ratatui::layout::Rect;
+use ratatui::prelude::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
-};
-use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 #[allow(deprecated)]
@@ -35,16 +29,13 @@ use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
-    Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
-    text_field_owns_key,
+    Action, BindingScope, InteractiveBytePatterns, RuntimeBindings, text_field_owns_key,
 };
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
-    SessionSurface,
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionSurface,
 };
-use crate::theme::FocusState;
 use components::FocusStep;
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
@@ -70,13 +61,13 @@ pub(crate) use dux_core::model::{TerminalOwner, TerminalOwnerRef};
 use text_input::TextInput;
 
 pub(crate) use dux_core::worker::{
-    AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
-    CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceKind, ResourceStats,
-    WorkerEvent,
+    AgentLaunchKind, BranchWarningKind, BrowserEntry, CreateAgentRequest, NonDefaultBranchAction,
+    ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
 };
 #[cfg(test)]
-pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
+pub(crate) use dux_core::worker::{
+    AgentLaunchReadyData, CreateAgentBranchInspection, ProcessInfo, ResourceKind,
+};
 
 /// Status key shared by every hint that describes what the interface is doing
 /// right now (a chrome toggle's new state, the palette opening, a redraw). One
@@ -3382,8 +3373,6 @@ pub(crate) enum CpuWindow {
     Full,
 }
 
-pub(crate) use dux_core::project_browser::leading_branch_for_project;
-
 #[derive(Clone, Debug)]
 pub(crate) enum VisualRow {
     /// Index into the `ResourceStats` rows vec.
@@ -4548,7 +4537,7 @@ pub(crate) fn build_left_items(
 
 mod attachment_presence;
 mod background_server;
-pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
+pub(crate) use background_server::BackgroundServerStart;
 // `pub(crate)` for its width helpers alone: the diff wrapper has to measure a
 // CJK glyph exactly as the pane's own wrapper does, and two functions that
 // disagree about that produce rows too wide for the box they were measured for.
@@ -4560,9 +4549,9 @@ mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
 mod pr_clone;
-pub(crate) use pr_clone::{
-    PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PrFolder, PrReviewQuestion, PullRequestClone,
-};
+pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequestClone};
+#[cfg(test)]
+pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
 mod project_actions;
 mod pty_ownership;
 mod redraw;
@@ -8297,10 +8286,6 @@ impl App {
         }
     }
 }
-
-// Disambiguated tab labels are the core-owned `dux_core::agent_tabs::tab_labels`
-// (cross-language twin of the web's `tabLabels`, pinned by shared vectors).
-pub(crate) use dux_core::agent_tabs::tab_labels;
 
 pub(crate) use dux_core::project_browser::load_projects;
 

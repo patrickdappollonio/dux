@@ -17,9 +17,24 @@
 use std::sync::mpsc::TryRecvError;
 
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, modal_key_step};
-use super::*;
+use super::{
+    App, BranchHolder, BranchListingAnswer, BranchListingOutcome, ChangeBaseBranchPrompt,
+    ClickCount, ConfirmAnswer, ConfirmChangeBaseBranchPrompt, ConfirmFocus, FullscreenOverlay,
+    InputTarget, PendingBranchListing, ProjectAction, ProjectActionRow, ProjectActionsPrompt,
+    ProjectActionsTarget, ProjectChooserIntent, ProjectInfoPrompt, ProjectInfoRow, PromptState,
+    SearchableList, pick_project_matches,
+};
+use crate::keybindings::Action;
 use crate::keybindings::BindingScope;
+use crate::model::Project;
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
 use dux_core::git::BranchChoice;
+use dux_core::model::TerminalOwner;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 /// Name who holds each held branch: the agent whose folder is the holder, when
 /// one is, compared on canonical paths so a symlinked spelling still matches.
@@ -918,6 +933,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{Listing, OverlayMouseLayout};
+    use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

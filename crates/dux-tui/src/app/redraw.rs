@@ -8,8 +8,10 @@
 //! last frame: a mutation marked dirty, an animation frame that advanced, the
 //! status line, or the once-a-second backstop.
 
-use super::*;
+use super::{App, CenterMode, FullscreenOverlay, PromptState, attention_blink_phase};
 use crate::app::pty_ownership::PtyTakeoverCard;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// A full redraw at least this often whatever the gate thinks, so a mutation
 /// point that forgot to mark dirty costs a one-second lag, not a stuck screen.
@@ -279,6 +281,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::text_input::TextInput;
+    use crate::model::SessionSurface;
+    use crossterm::event::Event;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
