@@ -61,11 +61,11 @@ fn cut_card_lines(
     lines: &[Line<'static>],
     rows: u16,
     width: u16,
-    truncated: bool,
+    truncation: Truncation,
 ) -> Vec<Line<'static>> {
     let rows = rows as usize;
     let mut cut: Vec<Line<'static>> = lines.iter().take(rows).cloned().collect();
-    if !truncated || lines.len() <= rows {
+    if truncation == Truncation::Whole || lines.len() <= rows {
         return cut;
     }
     if let Some(last) = cut.last_mut() {
@@ -265,10 +265,10 @@ pub(crate) enum AgentRowOwnerTag {
 pub(crate) fn agent_row_owner_tag(
     session: &AgentSession,
     project: Option<&Project>,
-    working_copy_missing: bool,
+    working_copy: WorkingCopy,
 ) -> AgentRowOwnerTag {
     match &session.workspace {
-        dux_core::model::AgentWorkspace::Managed(_) if working_copy_missing => {
+        dux_core::model::AgentWorkspace::Managed(_) if (working_copy == WorkingCopy::Missing) => {
             AgentRowOwnerTag::WorkingCopyMissing
         }
         dux_core::model::AgentWorkspace::Managed(_) => AgentRowOwnerTag::Project(
@@ -1051,7 +1051,14 @@ pub(super) fn delete_agent_branch_warning_prose(
             _ => " existed before the agent.",
         });
     }
-    if let Some(sentence) = unpushed_commits_sentence(unpushed, drifted) {
+    if let Some(sentence) = unpushed_commits_sentence(
+        unpushed,
+        if drifted {
+            BranchSpread::Drifted
+        } else {
+            BranchSpread::Single
+        },
+    ) {
         text.push_text(sentence);
     }
     Some(text)
@@ -1066,7 +1073,7 @@ pub(super) fn delete_agent_branch_warning_prose(
 /// anywhere, so the sentence says what is true instead.
 fn unpushed_commits_sentence(
     unpushed: Option<dux_core::git::UnpushedCommits>,
-    drifted: bool,
+    spread: BranchSpread,
 ) -> Option<String> {
     let answer = unpushed?;
     let count = answer.count;
@@ -1075,13 +1082,13 @@ fn unpushed_commits_sentence(
     }
     if answer.has_remote_refs {
         let plural = if count == 1 { "commit" } else { "commits" };
-        return Some(if drifted {
+        return Some(if spread == BranchSpread::Drifted {
             format!(" They have {count} {plural} not pushed anywhere between them.")
         } else {
             format!(" It has {count} {plural} not pushed anywhere.")
         });
     }
-    let (subject, possessive) = if drifted {
+    let (subject, possessive) = if spread == BranchSpread::Drifted {
         ("them", "their")
     } else {
         ("it", "its")
@@ -1398,6 +1405,132 @@ enum CardCover {
     Covered,
     /// It does not.
     Clear,
+}
+
+/// Whether a card's text was cut to fit, which marks its last row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Truncation {
+    /// It was cut.
+    Cut,
+    /// It fits.
+    Whole,
+}
+
+/// Whether an agent's working copy is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingCopy {
+    /// Its directory is gone.
+    Missing,
+    /// It is there.
+    Present,
+}
+
+/// How many branches a delete warning about unpushed commits covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchSpread {
+    /// Two: the agent drifted off the branch it was born on.
+    Drifted,
+    /// One.
+    Single,
+}
+
+/// Whether the sidebar has a Terminals section under the agents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalsSection {
+    /// It does, so the sidebar splits.
+    Shown,
+    /// It does not.
+    Hidden,
+}
+
+/// Whether the agent list starts with active agents, which earns a top margin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveSection {
+    /// It does.
+    Present,
+    /// Only the inactive tail is listed.
+    Absent,
+}
+
+/// Whether the agent list shows its filter row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterRow {
+    /// A filter is open.
+    Shown,
+    /// No filter is open.
+    Hidden,
+}
+
+/// Whether a modal will dim the sidebar body this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyDim {
+    /// It will, so the cursor rows are not painted.
+    Dimmed,
+    /// It will not.
+    Lit,
+}
+
+/// Whether a file list draws its hint row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HintRow {
+    /// It does.
+    Shown,
+    /// It does not.
+    Hidden,
+}
+
+/// Whether a multiline field is engaged for typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldEngagement {
+    /// Every key goes to the text.
+    Engaged,
+    /// The modal owns the keys.
+    Unengaged,
+}
+
+/// Whether a picker list is filtering by a typed search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListSearch {
+    /// A search is being typed.
+    Searching,
+    /// No search is open.
+    Browsing,
+}
+
+/// Whether an agent row's delete is still running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowDeletion {
+    /// It is.
+    Deleting,
+    /// It is not.
+    Settled,
+}
+
+/// Whether a picker row is the current choice, which a check marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurrentMark {
+    /// It is the current choice.
+    Current,
+    /// It is not.
+    Other,
+}
+
+/// Whether the tab being closed is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabLiveness {
+    /// Its process is running.
+    Live,
+    /// It is not running.
+    Dormant,
+}
+
+/// What closing a tab does to its agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseTabEffect {
+    /// It was the last live tab, so the agent detaches.
+    Detaches,
+    /// Only the tab goes.
+    DeletesTab,
 }
 
 impl App {
@@ -1943,7 +2076,11 @@ impl App {
         match agent_row_owner_tag(
             session,
             project,
-            self.engine.working_copy_missing(&session.id),
+            if self.engine.working_copy_missing(&session.id) {
+                WorkingCopy::Missing
+            } else {
+                WorkingCopy::Present
+            },
         ) {
             AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
                 MetaMarker::name(Span::styled(
@@ -2000,8 +2137,13 @@ impl App {
     /// takes that branch first. A working row that reached this would be a bug,
     /// so it falls to the muted tone with the other quiet words rather than
     /// carrying a second, un-pulsing definition of the working shade.
-    fn agent_row_state_color(&self, word: &str, deleting: bool, steady_color: Color) -> Color {
-        if deleting {
+    fn agent_row_state_color(
+        &self,
+        word: &str,
+        deletion: RowDeletion,
+        steady_color: Color,
+    ) -> Color {
+        if deletion == RowDeletion::Deleting {
             return self.theme.session_deleting;
         }
         match word {
@@ -2116,7 +2258,15 @@ impl App {
         } else {
             (
                 word.to_string(),
-                self.agent_row_state_color(word, deleting, steady_color),
+                self.agent_row_state_color(
+                    word,
+                    if deleting {
+                        RowDeletion::Deleting
+                    } else {
+                        RowDeletion::Settled
+                    },
+                    steady_color,
+                ),
             )
         };
         // Show the branch only when it differs from the displayed name (i.e. a
@@ -2432,7 +2582,11 @@ impl App {
                         agent_row_owner_tag(
                             session,
                             found,
-                            self.engine.working_copy_missing(&session.id)
+                            if self.engine.working_copy_missing(&session.id) {
+                                WorkingCopy::Missing
+                            } else {
+                                WorkingCopy::Present
+                            }
                         ),
                         AgentRowOwnerTag::Project(
                             ProjectTagKind::PathMissing | ProjectTagKind::Orphan,
@@ -2469,8 +2623,8 @@ impl App {
             left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
     }
 
-    fn left_sidebar_areas(&self, area: Rect, has_terminals: bool) -> (Rect, Option<Rect>) {
-        if !has_terminals {
+    fn left_sidebar_areas(&self, area: Rect, terminals: TerminalsSection) -> (Rect, Option<Rect>) {
+        if terminals == TerminalsSection::Hidden {
             return (area, None);
         }
         let terminals_pct =
@@ -2539,7 +2693,7 @@ impl App {
     fn agent_sidebar_items(
         &self,
         left_items: &[LeftItem],
-        has_active: bool,
+        active: ActiveSection,
         row_text_width: u16,
     ) -> (Vec<ListItem<'static>>, Vec<u16>) {
         let items = left_items
@@ -2555,7 +2709,7 @@ impl App {
                         format!("{icon} Inactive ({})", self.visible_inactive_count()),
                         Style::default().fg(self.theme.provider_label_fg),
                     ));
-                    if has_active {
+                    if active == ActiveSection::Present {
                         ListItem::new(vec![Line::from(""), label, Line::from("")])
                     } else {
                         ListItem::new(vec![label, Line::from("")])
@@ -2571,7 +2725,7 @@ impl App {
             .iter()
             .map(|item| match item {
                 LeftItem::Session(_) => 3,
-                LeftItem::InactiveToggle if has_active => 3,
+                LeftItem::InactiveToggle if (active == ActiveSection::Present) => 3,
                 LeftItem::InactiveToggle => 2,
             })
             .collect();
@@ -2580,10 +2734,10 @@ impl App {
 
     fn agent_sidebar_geometry(
         inner: Rect,
-        show_filter: bool,
-        has_active: bool,
+        filter: FilterRow,
+        active: ActiveSection,
     ) -> SidebarListGeometry {
-        let (search_area, list_inner) = if show_filter && inner.height >= 3 {
+        let (search_area, list_inner) = if filter == FilterRow::Shown && inner.height >= 3 {
             let [search, list] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(2), Constraint::Min(1)])
@@ -2592,7 +2746,7 @@ impl App {
         } else {
             (None, inner)
         };
-        let top_margin = u16::from(has_active && list_inner.height >= 4);
+        let top_margin = u16::from(active == ActiveSection::Present && list_inner.height >= 4);
         let content = Rect {
             y: list_inner.y + top_margin,
             height: list_inner.height - top_margin,
@@ -2635,7 +2789,11 @@ impl App {
         // leads with a Session iff any agent is active. The toggle only earns a
         // leading spacer row (separating it from the active agents) when there is
         // something above it; with only inactive agents it sits flush at the top.
-        let has_active = matches!(left_items.first(), Some(LeftItem::Session(_)));
+        let has_active = if matches!(left_items.first(), Some(LeftItem::Session(_))) {
+            ActiveSection::Present
+        } else {
+            ActiveSection::Absent
+        };
         // Build the block up front so the row builder knows the text width left
         // after both gutters are reserved, and can ellipsize overflowing lines.
         let block = self.themed_block(&title, projects_focused);
@@ -2643,7 +2801,15 @@ impl App {
         let row_text_width = inner.width.saturating_sub(LEFT_PANE_GUTTER * 2);
         let (items, item_heights) =
             self.agent_sidebar_items(left_items, has_active, row_text_width);
-        let geometry = Self::agent_sidebar_geometry(inner, self.agent_filter.is_some(), has_active);
+        let geometry = Self::agent_sidebar_geometry(
+            inner,
+            if self.agent_filter.is_some() {
+                FilterRow::Shown
+            } else {
+                FilterRow::Hidden
+            },
+            has_active,
+        );
         self.mouse_layout.left_list = geometry.content;
         block.render(projects_area, frame.buffer_mut());
         if let Some(search_area) = geometry.search_area {
@@ -2727,7 +2893,7 @@ impl App {
         focused: FocusState,
         terminal_render_data: &[TerminalSidebarRow],
         total_terminal_count: usize,
-        body_will_dim: bool,
+        body: BodyDim,
     ) {
         let terminals_focused =
             if focused == FocusState::Focused && self.left_section == LeftSection::Terminals {
@@ -2827,7 +2993,7 @@ impl App {
             left_row_to_item(term_state.offset(), &term_heights, term_content.height);
         // Hand-paint the framed selection into the content surface, reusing the
         // same `body_will_dim` gate the agent path computed above.
-        if self.left_section == LeftSection::Terminals && !body_will_dim {
+        if self.left_section == LeftSection::Terminals && body == BodyDim::Lit {
             self.paint_framed_row_selection(
                 frame.buffer_mut(),
                 term_content,
@@ -2838,7 +3004,7 @@ impl App {
         }
         // The terminals reorder by drag exactly as the agents do, so they get
         // the same insertion rule and the same muted moving row.
-        if !body_will_dim {
+        if body == BodyDim::Lit {
             self.paint_row_drag_marker(
                 frame.buffer_mut(),
                 RowDragList::Terminals,
@@ -2865,7 +3031,11 @@ impl App {
         // exactly as the agent list above is. Every index below (the rows, the
         // selection, the mouse map) is an index into this list.
         let terminal_items = self.terminal_items();
-        let has_terminals = !terminal_items.is_empty();
+        let has_terminals = if terminal_items.is_empty() {
+            TerminalsSection::Hidden
+        } else {
+            TerminalsSection::Shown
+        };
         // Titles disambiguate against the unfiltered list, and the pane total
         // remains stable while a search changes visible rows.
         let all_terminals = self.sorted_terminal_items();
@@ -2874,7 +3044,11 @@ impl App {
         let (projects_area, terminals_area) = self.left_sidebar_areas(area, has_terminals);
         let terminal_render_data = self.terminal_sidebar_rows(&terminal_items, &all_terminals);
 
-        let body_will_dim = self.render_agent_sidebar_section(frame, projects_area, focused);
+        let body_will_dim = if self.render_agent_sidebar_section(frame, projects_area, focused) {
+            BodyDim::Dimmed
+        } else {
+            BodyDim::Lit
+        };
 
         // Hand-paint the selection in the inset body so terminal and agent rows
         // share identical framing, spacing, and selection geometry.
@@ -3259,7 +3433,11 @@ impl App {
                         &wrapped[index],
                         placed.area.height,
                         placed.area.width,
-                        placed.truncated,
+                        if placed.truncated {
+                            Truncation::Cut
+                        } else {
+                            Truncation::Whole
+                        },
                     ))
                     .alignment(*align)
                     .render(placed.area, frame.buffer_mut());
@@ -3280,7 +3458,11 @@ impl App {
                             &wrapped[index],
                             placed.area.height,
                             placed.area.width,
-                            placed.truncated,
+                            if placed.truncated {
+                                Truncation::Cut
+                            } else {
+                                Truncation::Whole
+                            },
                         ),
                         Style::default(),
                     );
@@ -4840,13 +5022,23 @@ impl App {
                     Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
-            let list_rect =
-                self.render_file_list(frame, chunks[0], "Changes", RightSection::Unstaged, true);
+            let list_rect = self.render_file_list(
+                frame,
+                chunks[0],
+                "Changes",
+                RightSection::Unstaged,
+                HintRow::Shown,
+            );
             self.mouse_layout.unstaged_list = Some(list_rect);
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
-            let list_rect =
-                self.render_file_list(frame, area, "Changes", RightSection::Unstaged, true);
+            let list_rect = self.render_file_list(
+                frame,
+                area,
+                "Changes",
+                RightSection::Unstaged,
+                HintRow::Shown,
+            );
             self.mouse_layout.unstaged_list = Some(list_rect);
         }
     }
@@ -4876,7 +5068,7 @@ impl App {
             files_area,
             "Staged Changes",
             RightSection::Staged,
-            false,
+            HintRow::Hidden,
         );
         self.mouse_layout.staged_list = Some(list_rect);
 
@@ -4964,7 +5156,7 @@ impl App {
         area: Rect,
         title_prefix: &str,
         section: RightSection,
-        show_hint: bool,
+        hint: HintRow,
     ) -> Rect {
         let files = match section {
             RightSection::Staged => &self.engine.staged_files,
@@ -5010,15 +5202,16 @@ impl App {
         };
 
         // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
-        let (list_area, hint_area) = if show_hint && pane_focused && list_inner.height >= 4 {
-            let [la, ha] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(2)])
-                .areas(list_inner);
-            (la, Some(ha))
-        } else {
-            (list_inner, None)
-        };
+        let (list_area, hint_area) =
+            if hint == HintRow::Shown && pane_focused && list_inner.height >= 4 {
+                let [la, ha] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(2)])
+                    .areas(list_inner);
+                (la, Some(ha))
+            } else {
+                (list_inner, None)
+            };
 
         if let Some(search_area) = search_area {
             let query = format!("/ {}", self.files_search.text);
@@ -6034,7 +6227,15 @@ impl App {
                     dux_core::config::TailscaleMode::No => "never bind it and stop looking",
                 };
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -6448,7 +6649,11 @@ impl App {
                 // Only a Retarget can be a no-op: a NewTab always
                 // creates something, whatever provider it names.
                 let is_no_op =
-                    prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current;
+                    if prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current {
+                        CurrentMark::Current
+                    } else {
+                        CurrentMark::Other
+                    };
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
                     active_provider_marker_span(is_no_op, &self.theme, self.glyphs()),
@@ -6534,7 +6739,15 @@ impl App {
                 };
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -6650,7 +6863,15 @@ impl App {
                 };
                 let name = pad_to_width(&name, provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -7241,8 +7462,15 @@ impl App {
         // Which entries survive the `/` filter (indices into `entries`).
         let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
 
-        let bottom_line =
-            self.project_chooser_hint_line(list.searching, *intent, area.width.saturating_sub(2));
+        let bottom_line = self.project_chooser_hint_line(
+            if list.searching {
+                ListSearch::Searching
+            } else {
+                ListSearch::Browsing
+            },
+            *intent,
+            area.width.saturating_sub(2),
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -7680,7 +7908,15 @@ impl App {
                     (None, dux_core::git::BranchLocation::Local) => Vec::new(),
                 };
                 let mut spans = vec![
-                    active_provider_marker_span(is_base, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if is_base {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         pad_to_width(&ellipsize_middle(&branch.name, name_col), name_col),
                         name_style,
@@ -8262,10 +8498,18 @@ impl App {
             .into_iter()
             .filter(|id| self.engine.providers.contains_key(id.as_ref_id()))
             .count();
-        let will_detach = close_tab_detaches(
-            self.engine.providers.contains_key(TabIdRef::new(tab_id)),
+        let will_detach = if close_tab_detaches(
+            if self.engine.providers.contains_key(TabIdRef::new(tab_id)) {
+                TabLiveness::Live
+            } else {
+                TabLiveness::Dormant
+            },
             live_tabs,
-        );
+        ) {
+            CloseTabEffect::Detaches
+        } else {
+            CloseTabEffect::DeletesTab
+        };
         let agent_name = self
             .engine
             .sessions
@@ -12051,7 +12295,14 @@ impl App {
             self.render_macro_editor_buttons(frame, buttons_area, focus);
 
         // ── Hints. Every key is resolved through the bindings. ────────────
-        let hints = self.macro_editor_hints(focus, engaged);
+        let hints = self.macro_editor_hints(
+            focus,
+            if engaged {
+                FieldEngagement::Engaged
+            } else {
+                FieldEngagement::Unengaged
+            },
+        );
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
 
@@ -12151,8 +12402,8 @@ impl App {
         (cancel_button, save_button)
     }
 
-    fn macro_editor_hints(&self, focus: MacroEditFocus, engaged: bool) -> Vec<Hint> {
-        if focus == MacroEditFocus::Text && engaged {
+    fn macro_editor_hints(&self, focus: MacroEditFocus, engagement: FieldEngagement) -> Vec<Hint> {
+        if focus == MacroEditFocus::Text && engagement == FieldEngagement::Engaged {
             return vec![
                 Hint::key(
                     self.bindings.labels_for(Action::ExitCommitInput),
@@ -12272,13 +12523,13 @@ impl App {
     /// gate in `super::input`.
     fn project_chooser_hint_line(
         &self,
-        searching: bool,
+        search: ListSearch,
         intent: ProjectChooserIntent,
         width: u16,
     ) -> Line<'static> {
         let standalone = if intent != ProjectChooserIntent::NewAgent {
             Hint::maybe_key(None::<String>, "standalone")
-        } else if searching {
+        } else if search == ListSearch::Searching {
             Hint::maybe_key(
                 self.bindings
                     .label_for_text_field_dialog(Action::NewStandaloneAgent),
@@ -12292,7 +12543,7 @@ impl App {
         };
         let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let hints = if searching {
+        let hints = if search == ListSearch::Searching {
             vec![confirm, Hint::key(close_key, "clear").pinned(), standalone]
         } else {
             vec![
@@ -13626,11 +13877,11 @@ impl App {
 /// set for itself. A glyph in the string survives. The blanks are measured in
 /// display columns, so either icon set lines the names up.
 fn active_provider_marker_span(
-    is_active: bool,
+    mark: CurrentMark,
     theme: &Theme,
     glyphs: &crate::theme::Glyphs,
 ) -> Span<'static> {
-    let marker = if is_active {
+    let marker = if mark == CurrentMark::Current {
         format!(" {} ", glyphs.check)
     } else {
         " ".repeat(display_width(glyphs.check) + 2)
@@ -14082,8 +14333,8 @@ fn status_footer_lines(status_text: &str, width: u16, countdown_columns: usize) 
 /// `ConfirmCloseTabDialog.tsx`, deliberately, so the two surfaces promise the
 /// same thing; `live_tabs` counts every live tab of the agent, the one being
 /// closed included.
-fn close_tab_detaches(closing_tab_is_live: bool, live_tabs: usize) -> bool {
-    if closing_tab_is_live {
+fn close_tab_detaches(closing: TabLiveness, live_tabs: usize) -> bool {
+    if closing == TabLiveness::Live {
         live_tabs <= 1
     } else {
         live_tabs == 0
@@ -14097,13 +14348,13 @@ fn close_tab_detaches(closing_tab_is_live: bool, live_tabs: usize) -> bool {
 /// and `successor` then names the tab taking its place). Mirrors the web's
 /// `ConfirmCloseTabDialog.tsx` so the two surfaces promise the same thing.
 #[cfg(test)]
-fn confirm_close_tab_tail(will_detach: bool, successor: Option<&str>) -> String {
-    confirm_close_tab_tail_prose(will_detach, successor).plain()
+fn confirm_close_tab_tail(effect: CloseTabEffect, successor: Option<&str>) -> String {
+    confirm_close_tab_tail_prose(effect, successor).plain()
 }
 
 /// What closing the tab costs, with the successor tab marked as a name.
-fn confirm_close_tab_tail_prose(will_detach: bool, successor: Option<&str>) -> Prose {
-    let mut tail = Prose::new().text(if will_detach {
+fn confirm_close_tab_tail_prose(effect: CloseTabEffect, successor: Option<&str>) -> Prose {
+    let mut tail = Prose::new().text(if effect == CloseTabEffect::Detaches {
         " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
     } else {
         " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation."
@@ -14253,7 +14504,7 @@ mod tests {
         let app = test_app(default_bindings());
 
         let idle = line_text(&app.project_chooser_hint_line(
-            false,
+            ListSearch::Browsing,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14263,7 +14514,7 @@ mod tests {
         );
 
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14280,7 +14531,11 @@ mod tests {
         let app = test_app(default_bindings());
         for searching in [false, true] {
             let line = line_text(&app.project_chooser_hint_line(
-                searching,
+                if searching {
+                    ListSearch::Searching
+                } else {
+                    ListSearch::Browsing
+                },
                 crate::app::ProjectChooserIntent::NewAgent,
                 200,
             ));
@@ -14315,7 +14570,7 @@ mod tests {
             crokey::key!(ctrl - x),
         ]));
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14326,7 +14581,7 @@ mod tests {
 
         let letters_only = test_app(bindings_with_standalone_keys(vec![crokey::key!(s)]));
         let searching = line_text(&letters_only.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14349,7 +14604,7 @@ mod tests {
         let app = test_app(default_bindings());
 
         let idle = line_text(&app.project_chooser_hint_line(
-            false,
+            ListSearch::Browsing,
             crate::app::ProjectChooserIntent::Manage,
             200,
         ));
@@ -14359,7 +14614,7 @@ mod tests {
         );
 
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::Manage,
             200,
         ));
@@ -14380,7 +14635,15 @@ mod tests {
             crate::app::ProjectChooserIntent::ProjectTerminal,
         ] {
             for searching in [false, true] {
-                let line = line_text(&app.project_chooser_hint_line(searching, intent, 200));
+                let line = line_text(&app.project_chooser_hint_line(
+                    if searching {
+                        ListSearch::Searching
+                    } else {
+                        ListSearch::Browsing
+                    },
+                    intent,
+                    200,
+                ));
                 assert!(
                     !line.contains("standalone"),
                     "{intent:?} (searching={searching}) must not name it, got {line:?}"
@@ -15272,7 +15535,11 @@ mod tests {
             agent_row_owner_tag(
                 &session,
                 project.as_ref(),
-                app.engine.working_copy_missing(&session.id)
+                if app.engine.working_copy_missing(&session.id) {
+                    WorkingCopy::Missing
+                } else {
+                    WorkingCopy::Present
+                }
             ),
             AgentRowOwnerTag::WorkingCopyMissing
         );
@@ -15331,7 +15598,7 @@ mod tests {
     #[test]
     fn a_standalone_agents_row_names_its_folder_instead_of_a_project() {
         let session = standalone_row_session("/home/someone/notes");
-        let tag = agent_row_owner_tag(&session, None, false);
+        let tag = agent_row_owner_tag(&session, None, WorkingCopy::Present);
         match tag {
             AgentRowOwnerTag::Folder { label } => {
                 assert!(label.contains("notes"), "got {label:?}");
@@ -17019,7 +17286,7 @@ mod tests {
     /// than promising a resume.
     #[test]
     fn confirm_close_tab_tail_is_destructive_for_extra_tab_with_siblings() {
-        let tail = confirm_close_tab_tail(false, None);
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, None);
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
         assert!(tail.contains("always starts fresh"), "tail: {tail}");
         assert!(tail.contains("history command"), "tail: {tail}");
@@ -17030,7 +17297,7 @@ mod tests {
     /// non-destructive-but-detaching copy.
     #[test]
     fn confirm_close_tab_tail_last_live_tab_detaches() {
-        assert!(confirm_close_tab_tail(true, None).contains("last live tab"));
+        assert!(confirm_close_tab_tail(CloseTabEffect::Detaches, None).contains("last live tab"));
     }
 
     /// Closing the tab in the session slot hands the slot on, so the tail names
@@ -17039,14 +17306,14 @@ mod tests {
     /// detaches, because the close took its last live process).
     #[test]
     fn confirm_close_tab_tail_names_the_tab_taking_the_slot() {
-        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, Some("Codex"));
         assert!(
             tail.contains("The next tab, Codex, takes its place as the agent's first tab."),
             "tail: {tail}"
         );
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
 
-        let both = confirm_close_tab_tail(true, Some("Codex"));
+        let both = confirm_close_tab_tail(CloseTabEffect::Detaches, Some("Codex"));
         assert!(both.contains("last live tab"), "tail: {both}");
         assert!(both.contains("takes its place"), "tail: {both}");
     }
@@ -17090,7 +17357,7 @@ mod tests {
 
         // The tail's last words, taken from the same pure copy the modal
         // renders, so a wording change cannot silently defeat the check.
-        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, Some("Codex"));
         let last_words = tail.rsplit(' ').take(3).collect::<Vec<_>>();
         for word in last_words {
             assert!(
@@ -17110,10 +17377,10 @@ mod tests {
     /// tab beside a live sibling changes nothing about the agent.
     #[test]
     fn close_tab_detaches_only_when_the_last_live_tab_goes() {
-        assert!(close_tab_detaches(true, 1));
-        assert!(!close_tab_detaches(true, 2));
-        assert!(close_tab_detaches(false, 0));
-        assert!(!close_tab_detaches(false, 1));
+        assert!(close_tab_detaches(TabLiveness::Live, 1));
+        assert!(!close_tab_detaches(TabLiveness::Live, 2));
+        assert!(close_tab_detaches(TabLiveness::Dormant, 0));
+        assert!(!close_tab_detaches(TabLiveness::Dormant, 1));
     }
 
     /// Render-level regression for the drift crumb gate: when the agent's
@@ -26366,9 +26633,12 @@ mod tests {
 
     #[test]
     fn the_unpushed_sentence_says_nothing_without_a_counted_commit() {
-        assert_eq!(super::unpushed_commits_sentence(None, false), None);
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(0), false),
+            super::unpushed_commits_sentence(None, BranchSpread::Single),
+            None
+        );
+        assert_eq!(
+            super::unpushed_commits_sentence(pushed_nowhere(0), BranchSpread::Single),
             None
         );
     }
@@ -26376,11 +26646,11 @@ mod tests {
     #[test]
     fn the_unpushed_sentence_counts_and_pluralizes_per_branch_count() {
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(1), false).unwrap(),
+            super::unpushed_commits_sentence(pushed_nowhere(1), BranchSpread::Single).unwrap(),
             " It has 1 commit not pushed anywhere."
         );
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(3), true).unwrap(),
+            super::unpushed_commits_sentence(pushed_nowhere(3), BranchSpread::Drifted).unwrap(),
             " They have 3 commits not pushed anywhere between them."
         );
     }
@@ -26394,11 +26664,11 @@ mod tests {
             })
         };
         assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(1), false).unwrap(),
+            super::unpushed_commits_sentence(never_pushed(1), BranchSpread::Single).unwrap(),
             " Nothing on it has been pushed anywhere: its one commit exists only on this machine."
         );
         assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(4), true).unwrap(),
+            super::unpushed_commits_sentence(never_pushed(4), BranchSpread::Drifted).unwrap(),
             " Nothing on them has been pushed anywhere: all 4 of their commits exist only on this machine."
         );
     }
