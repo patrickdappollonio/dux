@@ -31,6 +31,7 @@ use dux_core::clone_project::Clones;
 use dux_core::engine::BranchSyncWait;
 use dux_core::engine::GhProbeState;
 use dux_core::engine::PrSyncControl;
+use dux_core::engine::ReloadOrigin;
 use dux_core::engine::RemovalCoordination;
 use dux_core::operations::Operations;
 use dux_core::process_sessions::AgentProcessRegistry;
@@ -189,11 +190,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
-        #[expect(
-            clippy::default_trait_access,
-            reason = "dux-core does not export the type's name, only its Default"
-        )]
-        reload_origin: Default::default(),
+        reload_origin: ReloadOrigin::default(),
         providers: std::collections::HashMap::new(),
         running_provider_pins: std::collections::HashMap::new(),
         launched_drop_paste: HashMap::default(),

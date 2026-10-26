@@ -25,7 +25,7 @@ mod rename;
 mod resume_fallback;
 mod spawn_worker;
 pub use clone::CloneAskedBy;
-pub use reload_origin::ReloadSlot;
+pub use reload_origin::{ReloadOrigin, ReloadSlot};
 #[cfg(any(test, feature = "test-support"))]
 pub use spawn_worker::fail_next_worker_spawn;
 pub mod status_op;
@@ -401,7 +401,7 @@ pub struct Engine {
     pub reload_guard: Option<QuiesceGuard>,
     /// Who asked for the reloads running and deferred, so one dux asked for
     /// after its own write is not announced.
-    pub reload_origin: reload_origin::ReloadOrigin,
+    pub reload_origin: ReloadOrigin,
     /// Each live agent tab's provider terminal, by tab id.
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,

@@ -12,7 +12,9 @@ use anyhow::Result;
 
 use dux_core::config::{Config, DuxPaths};
 use dux_core::config_queue::ConfigWriteQueue;
-use dux_core::engine::{ConfigSurface, Engine, InFlightSet, ReloadCompletionGuard};
+use dux_core::engine::{
+    ConfigSurface, Engine, InFlightSet, ReloadCompletionGuard, ReloadOrigin, RemovalCoordination,
+};
 use dux_core::ids::TabId;
 use dux_core::lockfile::SingleInstanceLock;
 use dux_core::model::GhStatus;
@@ -210,11 +212,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the field's type lives in a private dux-core module, so this crate cannot name it"
-        )]
-        reload_origin: Default::default(),
+        reload_origin: ReloadOrigin::default(),
         pending_web_checkout_ops: HashMap::new(),
         pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
@@ -235,11 +233,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         deferred_operations: Vec::new(),
         deferred_policies: Vec::new(),
         created_session_by_op: HashMap::new(),
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the field's type lives in a private dux-core module, so this crate cannot name it"
-        )]
-        removal_coordination: Default::default(),
+        removal_coordination: RemovalCoordination::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         launched_drop_paste: HashMap::new(),

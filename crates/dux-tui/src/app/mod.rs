@@ -58,7 +58,9 @@ use crate::theme::Theme;
 use dux_core::attachments::Attachments;
 use dux_core::changes_status::ChangedFilesFailures;
 use dux_core::clone_project::Clones;
-use dux_core::engine::{BranchSyncWait, GhProbeState, PrSyncControl, RemovalCoordination};
+use dux_core::engine::{
+    BranchSyncWait, GhProbeState, PrSyncControl, ReloadOrigin, RemovalCoordination,
+};
 use dux_core::engine::{Command, Engine};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 pub(crate) use dux_core::model::CompanionTerminal;
@@ -4736,11 +4738,7 @@ impl App {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
-            #[expect(
-                clippy::default_trait_access,
-                reason = "dux-core does not export the type's name, only its Default"
-            )]
-            reload_origin: Default::default(),
+            reload_origin: ReloadOrigin::default(),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             launched_drop_paste: HashMap::default(),
