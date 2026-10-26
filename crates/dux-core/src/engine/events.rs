@@ -1746,221 +1746,7 @@ impl Engine {
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
-            self.clear_in_flight(&InFlightKey::CreateAgent);
-            // The create keeps its folder held until this function returns,
-            // after the agent's row is written below: a removal re-checking
-            // the folder finds the hold or the row, never neither.
-            let _create_hold = self.note_create_finished_holding(&status_op_id);
-            // The defence behind the project deletion's wait: a create that
-            // outlasted it lands for a project that no longer exists. Nothing is
-            // committed; the process is stopped and what this launch made is
-            // taken back.
-            if let Some(project_id) = session.project_id()
-                && !self.projects.iter().any(|project| project.id == project_id)
-            {
-                let AgentLaunchKind::Create {
-                    repo_path,
-                    owns_worktree,
-                    ..
-                } = &request.kind
-                else {
-                    unreachable!("matched AgentLaunchKind::Create above")
-                };
-                let message = self.stop_create_for_deleted_project(
-                    &session,
-                    &tab_id,
-                    client,
-                    repo_path,
-                    if *owns_worktree {
-                        crate::agent_job::WorktreeOwnership::CreatedByThisJob
-                    } else {
-                        crate::agent_job::WorktreeOwnership::Preexisting
-                    },
-                );
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::Failed {
-                        message: message.clone(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                return (
-                    AgentLaunchReadyOutcome {
-                        session,
-                        tab_id: tab_id.as_str().to_string(),
-                        pty_size,
-                        detached_session_id: None,
-                        wants_fullscreen,
-                        status_quiet,
-                        view: AgentLaunchReadyView::CreatePersistFailed {
-                            error: message.to_string(),
-                        },
-                    },
-                    create_final,
-                );
-            }
-            // A brand-new agent's session row, its first tab's row and the
-            // pointer between them land in one transaction: a session whose slot
-            // tab is missing has a PTY address nothing resolves.
-            if let Err(err) = self.session_store.create_session(&session) {
-                logger::error(&format!(
-                    "session store upsert failed for {}: {err}",
-                    session.id,
-                ));
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::PersistFailed {
-                        error: err.to_string(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                return (
-                    AgentLaunchReadyOutcome {
-                        session,
-                        tab_id: tab_id.as_str().to_string(),
-                        pty_size,
-                        detached_session_id: None,
-                        wants_fullscreen,
-                        status_quiet,
-                        view: AgentLaunchReadyView::CreatePersistFailed {
-                            error: err.to_string(),
-                        },
-                    },
-                    create_final,
-                );
-            }
-            // The insert decides FIRST, and everything that speaks for the
-            // just-launched process is gated on it having actually joined the
-            // tab. See the non-create path below for the whole ordering rule; a
-            // create's tab is brand new, so its client is never the latecomer,
-            // and the two paths are written the same way so neither can be read
-            // as the exception.
-            let inserted = self.insert_launched_provider(&tab_id, client);
-            let detached = inserted
-                .kept()
-                .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
-                .flatten();
-            if inserted.kept() {
-                self.record_launched_drop_paste(
-                    &tab_id,
-                    &request.provider,
-                    &request.provider_config,
-                );
-            }
-            self.sessions.insert(0, session.clone());
-            // Correlate this create op with the session it just produced so a REST
-            // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
-            // resolves its exact session without a racy set-difference scan.
-            self.record_created_session(status_op_id.clone(), session.id.clone());
-            self.mark_session_provider_started(&session.id, &session.provider);
-            // A brand-new STANDALONE agent's folder is classified now, so its
-            // changes panel, its mutation gate and its upload seed all know the
-            // truth from the first frame instead of starting at "not looked
-            // yet" (which fails closed). A no-op for every other kind.
-            self.spawn_folder_repo_probe(&session.id);
-            if inserted.kept() && request.resume {
-                self.note_resume_launch(&tab_id);
-            }
-            self.update_branch_sync_sessions();
-            // The new agent joins the pull-request plan now. Nothing else is
-            // owed a rebuild by a create (its status is born Active, so the
-            // launch's status-change rebuild never fires for it), and an agent
-            // can push, open and merge a pull request long before an unrelated
-            // rebuild would have enrolled it.
-            self.update_pr_sync_sessions();
-
-            // Extract Create-kind payload for the view outcome.
-            let AgentLaunchKind::Create {
-                mut status_message,
-                mut status_warns,
-                mut status_notes,
-                pull_request_pin,
-                startup_result,
-                ..
-            } = request.kind
-            else {
-                unreachable!("matched AgentLaunchKind::Create above")
-            };
-            // A fresh copy of a pull request is pinned to it now that its row
-            // exists, exactly as a manual attach would pin it, and only here,
-            // where the pin is actually made, does the final say it is linked.
-            // The agent is committed either way: a pin that cannot be written
-            // is logged and told in the create's own final, which becomes a
-            // warning, and the user can still attach the pull request by hand.
-            if let Some(pin) = pull_request_pin {
-                let pr = format!("#{}", pin.number);
-                let told = match self.apply_pr_attach(
-                    &session.id,
-                    &pin.host,
-                    &pin.owner_repo,
-                    pin.number,
-                    &pin.title,
-                    &pin.state,
-                    "",
-                ) {
-                    Ok(_) => crate::status_text!["It is linked to PR ", n(pr), "."],
-                    Err(err) => {
-                        logger::error(&format!(
-                            "could not pin agent {} to PR #{} of {}: {err:#}",
-                            session.id, pin.number, pin.owner_repo
-                        ));
-                        status_warns = true;
-                        let reason = format!("{err:#}");
-                        crate::status_text![
-                            "dux could not link it to PR ",
-                            n(pr),
-                            format!(
-                                ": {}. Attach the pull request to the agent by hand.",
-                                reason.trim_end_matches('.')
-                            )
-                        ]
-                    }
-                };
-                status_message = crate::status_text![status_message, " ", told.clone()];
-                status_notes = Some(Box::new(match status_notes {
-                    Some(notes) => crate::status_text![*notes, " ", told],
-                    None => told,
-                }));
-            } else {
-                // An agent created on a branch that already existed may already
-                // have a pull request, so it is asked about once now rather
-                // than at the next poll. A pinned copy was resolved moments
-                // ago and needs no second look.
-                self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
-            }
-            let startup_result_error = startup_result.and_then(|r| r.status.err());
-
-            // Resolve the shared create op engine-side so both surfaces replace the
-            // create busy with the SAME final (success line or startup-failure).
-            let create_outcome = match &startup_result_error {
-                Some(error) => CreateLaunchOutcome::StartupFailed {
-                    branch_name: session.display_label(),
-                    error: error.clone(),
-                    notes: status_notes.map(|notes| *notes),
-                },
-                None => CreateLaunchOutcome::Committed {
-                    status_message: status_message.clone(),
-                    quiet_on: status_quiet,
-                    warns: status_warns,
-                },
-            };
-            let create_final = self.resolve_create_op(&status_op_id, &create_outcome);
-
-            return (
-                AgentLaunchReadyOutcome {
-                    session,
-                    tab_id: tab_id.as_str().to_string(),
-                    pty_size,
-                    detached_session_id: detached.map(|d| d.id),
-                    wants_fullscreen,
-                    status_quiet,
-                    view: AgentLaunchReadyView::CreateCommitted {
-                        status_message,
-                        startup_result_error,
-                    },
-                },
-                create_final,
-            );
+            return self.process_create_launch_ready(request, client, &status_op_id);
         }
 
         // Non-Create branches share the "drop on missing session" guard.
@@ -2087,6 +1873,280 @@ impl Engine {
                 view,
             },
             None,
+        )
+    }
+
+    /// The create half of [`Self::process_agent_launch_ready`]: commit the new
+    /// agent's rows, take over its tab and resolve the create op, or take
+    /// back what the launch made when its project is gone or its rows cannot
+    /// be written. The create keeps its folder held until this returns.
+    fn process_create_launch_ready(
+        &mut self,
+        request: crate::worker::AgentLaunchRequest,
+        client: crate::pty::PtyClient,
+        status_op_id: &str,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        let pty_size = request.pty_size;
+        let tab_id = request.tab_id.clone();
+        let wants_fullscreen = request.wants_fullscreen;
+        let status_quiet = request.status_quiet;
+        self.clear_in_flight(&InFlightKey::CreateAgent);
+        // The create keeps its folder held until this function returns,
+        // after the agent's row is written below: a removal re-checking
+        // the folder finds the hold or the row, never neither.
+        let _create_hold = self.note_create_finished_holding(status_op_id);
+        // The defence behind the project deletion's wait: a create that
+        // outlasted it lands for a project that no longer exists. Nothing is
+        // committed; the process is stopped and what this launch made is
+        // taken back.
+        if let Some(project_id) = session.project_id()
+            && !self.projects.iter().any(|project| project.id == project_id)
+        {
+            return self.take_back_create_for_gone_project(&request, client, status_op_id);
+        }
+        // A brand-new agent's session row, its first tab's row and the
+        // pointer between them land in one transaction: a session whose slot
+        // tab is missing has a PTY address nothing resolves.
+        if let Err(err) = self.session_store.create_session(&session) {
+            return self.create_persist_failed(&request, status_op_id, &err);
+        }
+        // The insert decides FIRST, and everything that speaks for the
+        // just-launched process is gated on it having actually joined the
+        // tab. See the non-create path below for the whole ordering rule; a
+        // create's tab is brand new, so its client is never the latecomer,
+        // and the two paths are written the same way so neither can be read
+        // as the exception.
+        let inserted = self.insert_launched_provider(&tab_id, client);
+        let detached = inserted
+            .kept()
+            .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
+            .flatten();
+        if inserted.kept() {
+            self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
+        }
+        self.sessions.insert(0, session.clone());
+        // Correlate this create op with the session it just produced so a REST
+        // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
+        // resolves its exact session without a racy set-difference scan.
+        self.record_created_session(status_op_id.to_string(), session.id.clone());
+        self.mark_session_provider_started(&session.id, &session.provider);
+        // A brand-new STANDALONE agent's folder is classified now, so its
+        // changes panel, its mutation gate and its upload seed all know the
+        // truth from the first frame instead of starting at "not looked
+        // yet" (which fails closed). A no-op for every other kind.
+        self.spawn_folder_repo_probe(&session.id);
+        if inserted.kept() && request.resume {
+            self.note_resume_launch(&tab_id);
+        }
+        self.update_branch_sync_sessions();
+        // The new agent joins the pull-request plan now. Nothing else is
+        // owed a rebuild by a create (its status is born Active, so the
+        // launch's status-change rebuild never fires for it), and an agent
+        // can push, open and merge a pull request long before an unrelated
+        // rebuild would have enrolled it.
+        self.update_pr_sync_sessions();
+
+        // Extract Create-kind payload for the view outcome.
+        let AgentLaunchKind::Create {
+            mut status_message,
+            mut status_warns,
+            mut status_notes,
+            pull_request_pin,
+            startup_result,
+            ..
+        } = request.kind
+        else {
+            unreachable!("matched AgentLaunchKind::Create above")
+        };
+        // A fresh copy of a pull request is pinned to it now that its row
+        // exists, exactly as a manual attach would pin it, and only here,
+        // where the pin is actually made, does the final say it is linked.
+        // The agent is committed either way: a pin that cannot be written
+        // is logged and told in the create's own final, which becomes a
+        // warning, and the user can still attach the pull request by hand.
+        if let Some(pin) = pull_request_pin {
+            let told = match self.link_created_pull_request(&session.id, &pin) {
+                Ok(told) => told,
+                Err(told) => {
+                    status_warns = true;
+                    told
+                }
+            };
+            status_message = crate::status_text![status_message, " ", told.clone()];
+            status_notes = Some(Box::new(match status_notes {
+                Some(notes) => crate::status_text![*notes, " ", told],
+                None => told,
+            }));
+        } else {
+            // An agent created on a branch that already existed may already
+            // have a pull request, so it is asked about once now rather
+            // than at the next poll. A pinned copy was resolved moments
+            // ago and needs no second look.
+            self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
+        }
+        let startup_result_error = startup_result.and_then(|r| r.status.err());
+
+        // Resolve the shared create op engine-side so both surfaces replace the
+        // create busy with the SAME final (success line or startup-failure).
+        let create_outcome = match &startup_result_error {
+            Some(error) => CreateLaunchOutcome::StartupFailed {
+                branch_name: session.display_label(),
+                error: error.clone(),
+                notes: status_notes.map(|notes| *notes),
+            },
+            None => CreateLaunchOutcome::Committed {
+                status_message: status_message.clone(),
+                quiet_on: status_quiet,
+                warns: status_warns,
+            },
+        };
+        let create_final = self.resolve_create_op(status_op_id, &create_outcome);
+
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: tab_id.as_str().to_string(),
+                pty_size,
+                detached_session_id: detached.map(|d| d.id),
+                wants_fullscreen,
+                status_quiet,
+                view: AgentLaunchReadyView::CreateCommitted {
+                    status_message,
+                    startup_result_error,
+                },
+            },
+            create_final,
+        )
+    }
+
+    /// Pin a fresh copy of a pull request to it now that the agent's row
+    /// exists, exactly as a manual attach would. Answers the sentence the
+    /// create's final adds: `Ok` when linked, `Err` (logged, and the final
+    /// becomes a warning) when the pin could not be written, in which case the
+    /// user can still attach the pull request by hand.
+    fn link_created_pull_request(
+        &mut self,
+        session_id: &str,
+        pin: &crate::worker::PullRequestPin,
+    ) -> Result<StatusText, StatusText> {
+        let pr = format!("#{}", pin.number);
+        match self.apply_pr_attach(
+            session_id,
+            &pin.host,
+            &pin.owner_repo,
+            pin.number,
+            &pin.title,
+            &pin.state,
+            "",
+        ) {
+            Ok(_) => Ok(crate::status_text!["It is linked to PR ", n(pr), "."]),
+            Err(err) => {
+                logger::error(&format!(
+                    "could not pin agent {} to PR #{} of {}: {err:#}",
+                    session_id, pin.number, pin.owner_repo
+                ));
+                let reason = format!("{err:#}");
+                Err(crate::status_text![
+                    "dux could not link it to PR ",
+                    n(pr),
+                    format!(
+                        ": {}. Attach the pull request to the agent by hand.",
+                        reason.trim_end_matches('.')
+                    )
+                ])
+            }
+        }
+    }
+
+    /// A create whose session rows could not be written: the op fails with the
+    /// store's error, which the view reports too.
+    fn create_persist_failed(
+        &mut self,
+        request: &crate::worker::AgentLaunchRequest,
+        status_op_id: &str,
+        err: &anyhow::Error,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        logger::error(&format!(
+            "session store upsert failed for {}: {err}",
+            session.id,
+        ));
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::PersistFailed {
+                error: err.to_string(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: request.tab_id.as_str().to_string(),
+                pty_size: request.pty_size,
+                detached_session_id: None,
+                wants_fullscreen: request.wants_fullscreen,
+                status_quiet: request.status_quiet,
+                view: AgentLaunchReadyView::CreatePersistFailed {
+                    error: err.to_string(),
+                },
+            },
+            create_final,
+        )
+    }
+
+    /// A create that outlasted its project's deletion: nothing is committed,
+    /// the process is stopped and what this launch made is taken back.
+    fn take_back_create_for_gone_project(
+        &mut self,
+        request: &crate::worker::AgentLaunchRequest,
+        client: crate::pty::PtyClient,
+        status_op_id: &str,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        let tab_id = &request.tab_id;
+        let pty_size = request.pty_size;
+        let wants_fullscreen = request.wants_fullscreen;
+        let status_quiet = request.status_quiet;
+        let AgentLaunchKind::Create {
+            repo_path,
+            owns_worktree,
+            ..
+        } = &request.kind
+        else {
+            unreachable!("matched AgentLaunchKind::Create above")
+        };
+        let message = self.stop_create_for_deleted_project(
+            &session,
+            tab_id,
+            client,
+            repo_path,
+            if *owns_worktree {
+                crate::agent_job::WorktreeOwnership::CreatedByThisJob
+            } else {
+                crate::agent_job::WorktreeOwnership::Preexisting
+            },
+        );
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::Failed {
+                message: message.clone(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: tab_id.as_str().to_string(),
+                pty_size,
+                detached_session_id: None,
+                wants_fullscreen,
+                status_quiet,
+                view: AgentLaunchReadyView::CreatePersistFailed {
+                    error: message.to_string(),
+                },
+            },
+            create_final,
         )
     }
 
