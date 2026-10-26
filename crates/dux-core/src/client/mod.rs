@@ -84,3 +84,17 @@ impl std::error::Error for CliError {}
 /// The version of the API this client speaks, compared with what
 /// `GET /api/v1/build` reports.
 pub const API_VERSION: u64 = 1;
+
+/// What a failure to print a command's result to stdout means for how the
+/// command ends. A reader that went away (`| head`) is no failure: `None`, and
+/// the command ends quietly with its own code. Any other failure is said and
+/// ends the command as failed.
+pub fn print_failure(error: &std::io::Error) -> Option<CliError> {
+    if error.kind() == std::io::ErrorKind::BrokenPipe {
+        return None;
+    }
+    Some(CliError::new(
+        Exit::Failed,
+        format!("could not print the result: {error}"),
+    ))
+}

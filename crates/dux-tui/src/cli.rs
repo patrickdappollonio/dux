@@ -54,7 +54,68 @@ enum DiffForm {
     Raw,
 }
 
+/// Standard output, or any writer, carrying a config command's result. A
+/// write it cannot make fails with a [`PrintFailed`] inside, so
+/// [`finish_config`] can tell a result that could not be printed from a
+/// command that failed.
+pub(crate) struct ResultOut<W>(pub(crate) W);
+
+impl<W: std::io::Write> std::io::Write for ResultOut<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf).map_err(PrintFailed::wrap)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush().map_err(PrintFailed::wrap)
+    }
+}
+
+/// The marker inside a write error [`ResultOut`] returns: the result could not
+/// be printed.
+#[derive(Debug)]
+struct PrintFailed(std::io::Error);
+
+impl PrintFailed {
+    /// `error`, of the same kind, marked as a failure to print the result.
+    fn wrap(error: std::io::Error) -> std::io::Error {
+        std::io::Error::new(error.kind(), Self(error))
+    }
+}
+
+impl std::fmt::Display for PrintFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for PrintFailed {}
+
+/// How a config command ends, the way every other command does: a result that
+/// could not be printed because its reader went away (`| head`) ends it
+/// quietly with its own code, any other failure to print it is said and ends
+/// it as failed, and every other error is the command's own.
+pub(crate) fn finish_config(result: Result<()>) -> Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    let printed = error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .find(|io| {
+            io.get_ref()
+                .is_some_and(<dyn std::error::Error + Send + Sync>::is::<PrintFailed>)
+        });
+    match printed {
+        Some(io) => match dux_core::client::print_failure(io) {
+            None => Ok(()),
+            Some(failed) => Err(failed.into()),
+        },
+        None => Err(error),
+    }
+}
+
 pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
+    let mut out = ResultOut(std::io::stdout());
     let sub = args.first().map_or("", std::string::String::as_str);
     match sub {
         "reset" => {
@@ -80,7 +141,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                 } else {
                     DiffForm::Summary
                 },
-                &mut std::io::stdout(),
+                &mut out,
             )
         }
         "regenerate" => {
@@ -99,7 +160,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                     ConfigRewrite::Preview
                 },
                 held_back,
-                &mut std::io::stdout(),
+                &mut out,
             )
         }
         "restore-docs" => {
@@ -118,26 +179,21 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                     ConfigRewrite::Preview
                 },
                 held_back,
-                &mut std::io::stdout(),
+                &mut out,
             )
         }
         "path" => {
-            writeln!(std::io::stdout(), "{}", paths.config_path.display())?;
+            writeln!(out, "{}", paths.config_path.display())?;
             Ok(())
         }
-        "get" => crate::config_cli::run_get(
-            &args[1..],
-            paths,
-            &mut std::io::stdout(),
-            &mut std::io::stderr(),
-        ),
+        "get" => crate::config_cli::run_get(&args[1..], paths, &mut out, &mut std::io::stderr()),
         "set" => crate::config_cli::run_set(
             &args[1..],
             paths,
             &mut crate::config_cli::TerminalSecrets,
-            &mut std::io::stdout(),
+            &mut out,
         ),
-        "" | "--help" | "-h" => print_config_help(&mut std::io::stdout()),
+        "" | "--help" | "-h" => print_config_help(&mut out),
         other => bail!("unknown config subcommand: {other}\nRun `dux config --help` for usage."),
     }
 }
@@ -1598,6 +1654,40 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// A writer that refuses every write with its kind.
+    struct Refusing(std::io::ErrorKind);
+
+    impl std::io::Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "refused"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_config_result_whose_reader_went_away_ends_quietly_and_any_other_print_failure_is_said() {
+        let gone = print_config_help(&mut ResultOut(Refusing(std::io::ErrorKind::BrokenPipe)));
+        assert!(finish_config(gone).is_ok());
+
+        let full = print_config_help(&mut ResultOut(Refusing(std::io::ErrorKind::StorageFull)));
+        let failed = finish_config(full)
+            .unwrap_err()
+            .downcast::<dux_core::client::CliError>()
+            .unwrap();
+        assert_eq!(
+            failed,
+            dux_core::client::CliError::new(
+                dux_core::client::Exit::Failed,
+                "could not print the result: refused"
+            )
+        );
+
+        let own = finish_config(Err(anyhow!("unknown flag: --nope"))).unwrap_err();
+        assert_eq!(own.to_string(), "unknown flag: --nope");
+    }
 
     #[test]
     fn a_help_flag_asks_for_help_until_a_literal_double_dash() {

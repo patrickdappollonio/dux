@@ -92,6 +92,11 @@ impl std::fmt::Debug for TuiExit {
 /// When the config folder cannot be located or locked, or when the
 /// subcommand refuses or fails; the error carries the message it prints.
 pub fn run_config(config_args: &[String]) -> Result<()> {
+    cli::finish_config(run_config_command(config_args))
+}
+
+/// [`run_config`] before a result it could not print is told apart.
+fn run_config_command(config_args: &[String]) -> Result<()> {
     let paths = config::DuxPaths::discover()?;
     // Help anywhere in a config command (before a literal `--`) prints the
     // config help, before any lock is taken.
@@ -105,7 +110,7 @@ pub fn run_config(config_args: &[String]) -> Result<()> {
         // went on would look again without the lock.
         ConfigLock::NothingToReset => {
             writeln!(
-                std::io::stdout(),
+                cli::ResultOut(std::io::stdout()),
                 "nothing to reset: {} does not exist",
                 paths.root.display()
             )?;

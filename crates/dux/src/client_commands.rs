@@ -132,11 +132,13 @@ fn write_outcome(
     match result {
         Ok((text, code)) => match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
             Ok(()) => code,
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => code,
-            Err(error) => {
-                note(err, &format!("could not print the result: {error}"));
-                Exit::Failed.code()
-            }
+            Err(error) => match dux_core::client::print_failure(&error) {
+                None => code,
+                Some(failed) => {
+                    note(err, &failed.message);
+                    failed.exit.code()
+                }
+            },
         },
         Err(error) => {
             note(err, &error.message);
