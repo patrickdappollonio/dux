@@ -42,6 +42,7 @@ pub enum Final {
     /// `sticky` marks the rare outcome that must wait for the user rather than
     /// retiring on a timer; see [`Final::sticky`].
     Message {
+        /// How the sentence reads.
         tone: StatusTone,
         /// The plain sentence the terminal UI prints.
         text: String,
@@ -50,6 +51,8 @@ pub enum Final {
         segments: Option<Vec<ProseSegment>>,
         /// The question the sentence puts to the user, when it is one.
         ask: Option<StatusAsk>,
+        /// Whether the message waits for the user instead of retiring on a
+        /// timer.
         sticky: bool,
         /// Which surfaces withhold this outcome. A quieted keyed final still
         /// retires its spinner; only the sentence is withheld.
@@ -61,6 +64,7 @@ pub enum Final {
 }
 
 impl Final {
+    /// An info-toned final saying `text`.
     pub fn info(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -74,6 +78,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A warning-toned final saying `text`.
     pub fn warning(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -87,6 +92,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// An error-toned final saying `text`.
     pub fn error(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -100,6 +106,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A final that retires the busy with no message.
     pub fn clear() -> Self {
         Final::Clear
     }
@@ -160,7 +167,8 @@ impl Final {
 /// the worker channel without closures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFinal {
-    pub key: String,
+    pub(crate) key: String,
+    /// What the op ends on.
     pub outcome: Final,
     /// Delivery audience captured at dispatch time, while
     /// `Engine::current_origin` is still set, and copied onto the emitted
@@ -171,6 +179,7 @@ pub struct ResolvedFinal {
 }
 
 impl ResolvedFinal {
+    /// The final `outcome` for the op keyed `key`, to every surface.
     pub fn new(key: impl Into<String>, outcome: Final) -> Self {
         Self {
             key: key.into(),
@@ -234,12 +243,16 @@ pub fn status_op(pending: impl Into<StatusText>) -> NeedsSuccess {
     }
 }
 
+/// A status op with its busy text and key, before its success final is
+/// declared.
+#[derive(Debug)]
 pub struct NeedsSuccess {
     key: String,
     pending: StatusText,
 }
 
 impl NeedsSuccess {
+    /// Declare the final the op ends on when it succeeds.
     pub fn on_success<T, F>(self, f: F) -> NeedsFailure<T>
     where
         F: FnOnce(&T) -> Final + Send + 'static,
@@ -286,7 +299,18 @@ pub struct HandlerStatusOp<O> {
     scope: StatusScope,
 }
 
+impl<O> std::fmt::Debug for HandlerStatusOp<O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandlerStatusOp")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<O> HandlerStatusOp<O> {
+    /// The op's key, which its busy and final share.
     pub fn id(&self) -> &str {
         &self.key
     }
@@ -380,7 +404,9 @@ impl crate::engine::Engine {
 /// under it, so [`Engine::begin_status_op`] is one method rather than one per
 /// flavour.
 pub trait PendingStatusOp {
+    /// The key the op's busy and final share.
     fn status_key(&self) -> &str;
+    /// The keyed busy shown while the op runs.
     fn pending_status(&self) -> StatusUpdate;
 }
 
@@ -402,6 +428,7 @@ impl<T, E> PendingStatusOp for StatusOp<T, E> {
     }
 }
 
+/// A status op whose success final is declared, before its failure final is.
 pub struct NeedsFailure<T> {
     key: String,
     pending: StatusText,
@@ -409,7 +436,17 @@ pub struct NeedsFailure<T> {
     _t: PhantomData<fn(&T)>,
 }
 
+impl<T> std::fmt::Debug for NeedsFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NeedsFailure")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> NeedsFailure<T> {
+    /// Declare the final the op ends on when it fails, completing it.
     pub fn on_failure<E, F>(self, f: F) -> StatusOp<T, E>
     where
         F: FnOnce(&E) -> Final + Send + 'static,
@@ -432,8 +469,17 @@ pub struct StatusOp<T, E> {
     on_failure: Box<dyn FnOnce(&E) -> Final + Send>,
 }
 
+impl<T, E> std::fmt::Debug for StatusOp<T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatusOp")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T, E> StatusOp<T, E> {
-    pub fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 

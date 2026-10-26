@@ -5,8 +5,16 @@
 //! [`Engine::process_project_base_branch_changed`], which saves the base and
 //! resolves the op into the final both surfaces show.
 
-use super::*;
-use crate::model::ProjectBranchStatus;
+use std::path::Path;
+use std::thread;
+
+use super::{
+    ChangeBaseOutcome, Engine, EventReaction, ProjectFolderAction, ResolvedFinal, StatusUpdate,
+    change_base_branch_busy_message, change_base_branch_path_missing_message, change_base_final,
+    status_op,
+};
+use crate::model::{Project, ProjectBranchStatus};
+use crate::worker::WorkerEvent;
 
 impl Engine {
     /// Start changing the base branch of project `project_id` to `branch`.
@@ -21,6 +29,11 @@ impl Engine {
     /// folder already known to be missing, an empty branch. Whether `branch`
     /// exists, is a valid branch name and is free is decided in the worker,
     /// because git must not run on a surface's thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown project, a project whose folder is known
+    /// to be missing, or an empty branch name.
     pub fn change_project_base_branch(
         &mut self,
         project_id: &str,
@@ -152,7 +165,7 @@ impl Engine {
         let outcome = match result {
             Ok(switched) => {
                 if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
-                    existing.current_branch = branch.clone();
+                    existing.current_branch.clone_from(&branch);
                     existing.branch_status = ProjectBranchStatus::Leading;
                 }
                 let base = self.adopt_project_base(project, &branch);
@@ -178,14 +191,11 @@ impl Engine {
                 }
             }
         };
-        match self.pending_change_base_ops.remove(&status_op_id) {
-            Some(op) => op.resolve(&outcome).into_reaction(),
-            // Unreachable while the op is registered before the worker starts;
-            // answered on the same key rather than dropped all the same.
-            None => {
-                let final_ = change_base_final(&project.name, &outcome);
-                ResolvedFinal::new(status_op_id, final_).into_reaction()
-            }
+        if let Some(op) = self.pending_change_base_ops.remove(&status_op_id) {
+            op.resolve(&outcome).into_reaction()
+        } else {
+            let final_ = change_base_final(&project.name, &outcome);
+            ResolvedFinal::new(status_op_id, final_).into_reaction()
         }
     }
 }

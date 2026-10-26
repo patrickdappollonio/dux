@@ -31,8 +31,11 @@ use super::{Engine, EventReaction};
 /// engine or from a snapshot. One trait, so the exhaustive match in
 /// [`owner_of_reaction`] cannot drift between the live and snapshot forms.
 pub trait WebFollowupOpsView {
+    /// Whether a web pull-request lookup op with this id is pending.
     fn has_pr_lookup(&self, id: &str) -> bool;
+    /// Whether a web add-project op with this id is pending.
     fn has_add_project(&self, id: &str) -> bool;
+    /// Whether a web checkout op with this id is pending.
     fn has_checkout(&self, id: &str) -> bool;
     /// A clone a browser asked for: one the terminal UI started is its own.
     fn has_web_clone(&self, id: &str) -> bool;
@@ -172,7 +175,7 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // recurses, and the web's `drive_*` follow-ups match bare variants
             // only), so routing is decided per leaf where the leaf is handled.
             // Answering for the wrapper would skip unrelated siblings.
-            EventReaction::Multi(_) => FollowupOwner::Drainer,
+            EventReaction::Multi(_)
 
             // Everything below is safe on both surfaces at once, and each arm
             // says why rather than leaning on a wildcard. Statuses and clears:
@@ -183,7 +186,7 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // pending map and does nothing when it is absent. That works only
             // because they resolve a keyed op the web itself opened; the routed
             // arms above start new work, so they cannot use the same trick.
-            EventReaction::Nothing
+            | EventReaction::Nothing
             | EventReaction::Status(_)
             | EventReaction::ClearStatus(_)
             // View refreshes touch only the surface that runs them.
@@ -280,7 +283,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             status_op_id,

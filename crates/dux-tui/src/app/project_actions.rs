@@ -75,10 +75,11 @@ impl App {
     /// project, or, with no agent selected (or an agent with no project),
     /// open the project list and run it on the pick.
     pub(crate) fn run_project_command(&mut self, action: ProjectAction) -> Result<()> {
-        match self.selected_project().cloned() {
-            Some(project) => self.run_project_action(&project, action, None),
-            None => self.open_project_chooser(ProjectChooserIntent::Action(action)),
-        }
+        let Some(project) = self.selected_project().cloned() else {
+            self.open_project_chooser(ProjectChooserIntent::Action(action));
+            return Ok(());
+        };
+        self.run_project_action(&project, action, None)
     }
 
     /// Run `action` on `project` through its existing flow. `return_to` is the
@@ -92,7 +93,10 @@ impl App {
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) -> Result<()> {
         match action {
-            ProjectAction::NewAgent => self.begin_new_agent_for_project(project.clone()),
+            ProjectAction::NewAgent => {
+                self.begin_new_agent_for_project(project.clone());
+                Ok(())
+            }
             ProjectAction::NewAgentFromPr => {
                 if !self.github_pr_agent_command_available() {
                     self.set_error(
@@ -101,14 +105,21 @@ impl App {
                     );
                     return Ok(());
                 }
-                self.begin_pr_agent_for_project(project.clone())
+                {
+                    self.begin_pr_agent_for_project(project.clone());
+                    Ok(())
+                }
             }
             ProjectAction::Worktrees => {
-                self.begin_manage_worktrees_for_project(project.clone(), return_to)
+                self.begin_manage_worktrees_for_project(project.clone(), return_to);
+                Ok(())
             }
             ProjectAction::NewTerminal => {
                 self.prompt = PromptState::None;
-                self.show_project_terminal(project)
+                {
+                    self.show_project_terminal(project);
+                    Ok(())
+                }
             }
             ProjectAction::Pull => self.pull_project(project),
             ProjectAction::CheckoutDefaultBranch => {
@@ -124,13 +135,18 @@ impl App {
                 Ok(())
             }
             ProjectAction::DefaultProvider => {
-                self.open_change_project_default_provider_for(project, return_to)
+                self.open_change_project_default_provider_for(project, return_to);
+                Ok(())
             }
             ProjectAction::AutoReopen => self.toggle_project_auto_reopen_agents_for(project),
             ProjectAction::StartupCommand => {
-                self.open_configure_startup_command_for(project, return_to)
+                self.open_configure_startup_command_for(project, return_to);
+                Ok(())
             }
-            ProjectAction::Environment => self.open_configure_project_env_for(project, return_to),
+            ProjectAction::Environment => {
+                self.open_configure_project_env_for(project, return_to);
+                Ok(())
+            }
             ProjectAction::StartupLogs => {
                 // The logs open in their own modal once they are read, over
                 // whatever is open then: the action list stays up meanwhile
@@ -379,13 +395,15 @@ impl App {
 
     /// A click on the action list's `index`th row selects it; a double click
     /// runs it, like every other picker.
-    pub(super) fn click_project_action_row(&mut self, index: usize, double_click: bool) {
+    pub(super) fn click_project_action_row(&mut self, index: usize, clicks: ClickCount) {
         let rows = match &self.prompt {
             PromptState::ProjectActions(prompt) => self.project_action_rows(&prompt.target),
             _ => return,
         };
         self.place_project_actions_cursor(index, &rows);
-        if double_click && let Err(err) = self.activate_project_action_row() {
+        if clicks == ClickCount::Double
+            && let Err(err) = self.activate_project_action_row()
+        {
             self.set_error(format!("{err:#}"));
         }
     }
@@ -766,7 +784,14 @@ impl App {
             return None;
         };
         let searching = prompt.list.searching;
-        let action = if binding_lookup_is_suppressed(key, searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings
@@ -803,7 +828,7 @@ impl App {
 
     /// A click on the picker's `index`th visible row selects it; a double
     /// click picks it.
-    pub(super) fn click_change_base_branch_row(&mut self, index: usize, double_click: bool) {
+    pub(super) fn click_change_base_branch_row(&mut self, index: usize, clicks: ClickCount) {
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
             let visible = prompt
                 .list
@@ -813,7 +838,7 @@ impl App {
                 prompt.list.selected = index;
             }
         }
-        if double_click {
+        if clicks == ClickCount::Double {
             self.pick_change_base_branch_row();
         }
     }
@@ -822,12 +847,12 @@ impl App {
     /// change to the engine (which takes the folder's lock, switches it in a
     /// worker and saves the base); cancelling steps back to the picker and
     /// says nothing moved.
-    pub(crate) fn resolve_confirm_change_base_branch(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_change_base_branch(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::ConfirmChangeBaseBranch(prompt) = &self.prompt else {
             return false;
         };
         let prompt = (**prompt).clone();
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             let name = prompt.previous.project_name.clone();
             let Some(project) = self
                 .engine
@@ -873,13 +898,15 @@ impl App {
         let PromptState::ConfirmChangeBaseBranch(prompt) = &mut self.prompt else {
             return None;
         };
-        let confirm = prompt.focus.is_confirm();
+        let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
-            ModalKeyStep::Close => return Some(self.resolve_confirm_change_base_branch(false)),
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => prompt.focus = prompt.focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_change_base_branch(confirm));
+                return Some(self.resolve_confirm_change_base_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -978,14 +1005,14 @@ mod tests {
         }
     }
 
-    fn picker(app: &App, loading: bool, branches: Vec<BranchChoice>) -> PromptState {
+    fn picker(app: &App, listing: Listing, branches: Vec<BranchChoice>) -> PromptState {
         let project = &app.engine.projects[0];
         PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
             holders: std::collections::HashMap::new(),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             current_base: Some("develop".to_string()),
-            loading,
+            loading: listing == Listing::Loading,
             branches,
             fetch_note: None,
             error: None,
@@ -1008,7 +1035,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = picker(
             &app,
-            false,
+            Listing::Loaded,
             vec![branch("develop"), branch("main"), branch("release")],
         );
         type_search(&mut app, "rel");
@@ -1025,7 +1052,7 @@ mod tests {
     #[test]
     fn a_listing_that_lands_mid_search_selects_among_the_visible_rows() {
         let mut app = test_app(default_bindings());
-        app.prompt = picker(&app, true, Vec::new());
+        app.prompt = picker(&app, Listing::Loading, Vec::new());
         type_search(&mut app, "e");
         press(&mut app, KeyCode::Enter);
         let project_id = app.engine.projects[0].id.clone();
@@ -1128,7 +1155,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         let mut held = branch("agent-one");
         held.held_by = Some(PathBuf::from("/srv/wt/agent-one"));
-        app.prompt = picker(&app, false, vec![branch("develop"), held]);
+        app.prompt = picker(&app, Listing::Loaded, vec![branch("develop"), held]);
         if let PromptState::ChangeBaseBranch(prompt) = &mut app.prompt {
             prompt.holders.insert(
                 "agent-one".to_string(),

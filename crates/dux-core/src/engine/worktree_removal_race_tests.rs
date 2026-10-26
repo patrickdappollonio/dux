@@ -152,6 +152,10 @@ fn wait_for_writers(pidfile: &Path, count: usize) {
 
 /// Delete the agent with its worktree the way both surfaces do, driving the
 /// reaper as their tick does, and return what the removal worker reported.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
     let outcome =
         engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
@@ -168,7 +172,7 @@ fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
             Ok(crate::worker::WorkerEvent::WorktreeRemoveCompleted { result, .. }) => {
                 return result;
             }
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(_) => {
                 assert!(Instant::now() < deadline, "the removal never reported");
                 std::thread::sleep(Duration::from_millis(20));
@@ -251,7 +255,8 @@ fn removal_waits_for_a_background_job_in_its_own_process_group() {
         writer_script(&fx.pidfile).display()
     );
     let client = spawn_in(&fx.worktree, script);
-    let leader = client.child_process_id().expect("leader pid") as i32;
+    let leader = i32::try_from(client.child_process_id().expect("leader pid"))
+        .expect("a process id fits in i32");
     fx.engine.providers.insert(TabId::new("s1-slot"), client);
     wait_for_writers(&fx.pidfile, 1);
     let writer = writer_pids(&fx.pidfile)[0];
@@ -807,15 +812,15 @@ fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
             delete_branch: Some(true),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .expect("record");
 
     fx.engine.resume_pending_worktree_removals();
 
-    let warning = match fx.engine.worker_rx.try_recv() {
-        Ok(crate::worker::WorkerEvent::PollerStatus(status)) => status,
-        _ => panic!("expected the refusal"),
+    let Ok(crate::worker::WorkerEvent::PollerStatus(warning)) = fx.engine.worker_rx.try_recv()
+    else {
+        panic!("expected the refusal")
     };
     assert_eq!(warning.tone, crate::statusline::StatusTone::Warning);
     assert!(
@@ -890,7 +895,7 @@ fn a_resumed_removal_claims_the_folder_and_waits_for_work_in_it() {
             delete_branch: Some(true),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .expect("record");
     // A pull already running in the worktree when dux starts.

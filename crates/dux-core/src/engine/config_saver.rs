@@ -27,6 +27,7 @@ use crate::worker::WorkerEvent;
 /// [`ConfigSurface::reload`] implementation must drive its completion through
 /// this guard: call [`ReloadCompletionGuard::complete`] with the real result on
 /// the success and error paths; `Drop` posts an `Err` if it was never reached.
+#[derive(Debug)]
 pub struct ReloadCompletionGuard {
     worker_tx: Sender<WorkerEvent>,
     sent: bool,
@@ -92,6 +93,7 @@ pub trait ConfigSurface: Send + Sync {
 /// `reload` posts a success `WorkerEvent` immediately so a caller draining the
 /// worker channel still observes completion; `recover_render` serializes plainly.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct NoopConfigSurface;
 
 impl ConfigSurface for NoopConfigSurface {

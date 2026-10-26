@@ -199,7 +199,7 @@ impl Default for GhProbeState {
     fn default() -> Self {
         Self {
             policy: Arc::new(Mutex::new(crate::gh::GithubHostPolicy::DenyAll)),
-            protocols: Arc::new(Mutex::new(Default::default())),
+            protocols: Arc::new(Mutex::new(std::collections::BTreeMap::default())),
             generation: 0,
             program: std::ffi::OsString::from("gh"),
             last_probe_at: None,
@@ -245,7 +245,7 @@ pub struct LaunchedDropPaste {
 /// worktree is the one the user is looking at. The pending slot and the running
 /// flag live under the same lock, which closes the gap between a worker deciding
 /// it has nothing left to do and a requester seeing it still marked running.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ChangedFilesRefreshQueue {
     pending: Option<PathBuf>,
     running: bool,
@@ -309,21 +309,33 @@ fn lock_changed_files_queue(
 /// See [`Engine::serve_memory`].
 pub(crate) type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
 
+/// The workspace's state and the one place every change to it is made, shared
+/// by both surfaces.
 pub struct Engine {
+    /// The running config.
     pub config: Config,
+    /// Where dux keeps its files.
     pub paths: DuxPaths,
+    /// The session database.
     pub session_store: SessionStore,
+    /// The workspace's projects.
     pub projects: Vec<Project>,
+    /// The workspace's agents, in sidebar order.
     pub sessions: Vec<AgentSession>,
+    /// The watched worktree's staged files.
     pub staged_files: Vec<ChangedFile>,
+    /// The watched worktree's unstaged files.
     pub unstaged_files: Vec<ChangedFile>,
     /// Moves every time new lists are assigned through
     /// [`Engine::set_changed_files`], so a surface caching something derived
     /// from them (the terminal UI's row layout) can tell a new read from the
     /// one it built from without comparing the lists.
     pub changed_files_revision: u64,
+    /// How many terminals have been opened, which numbers the next one.
     pub terminal_counter: usize,
+    /// Whether the GitHub integration is on.
     pub github_integration_enabled: bool,
+    /// This process's hold on `dux.lock`, which also owns the control socket.
     pub single_instance_lock: SingleInstanceLock,
     /// Which surface currently owns this engine. Decides how a `terminal_identity`
     /// of `auto` resolves (mirror on the TUI, ghostty on the headless server). The
@@ -342,7 +354,9 @@ pub struct Engine {
     /// and the in-flight guard already serialises those samples.
     pub resource_collector: Arc<Mutex<crate::resource_stats::ResourceCollector>>,
 
+    /// Where workers send their events.
     pub worker_tx: Sender<WorkerEvent>,
+    /// Where the engine reads worker events from.
     pub worker_rx: Receiver<WorkerEvent>,
     /// The single ordered, off-thread, atomic config writer for this process.
     /// Every config-mutating handler writes through this, so saves never block
@@ -388,6 +402,7 @@ pub struct Engine {
     /// Who asked for the reloads running and deferred, so one dux asked for
     /// after its own write is not announced.
     pub reload_origin: reload_origin::ReloadOrigin,
+    /// Each live agent tab's provider terminal, by tab id.
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
@@ -417,6 +432,7 @@ pub struct Engine {
     /// user edits in their own editor and dux reloads, so there is no point at
     /// which a refusal could be delivered.
     pub launched_drop_paste: HashMap<TabId, LaunchedDropPaste>,
+    /// Every open terminal, by terminal id.
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
@@ -454,6 +470,7 @@ pub struct Engine {
     /// `reap_terminating_ptys` drains the waits; `sweep_recreate_restarts`
     /// starts the tabs.
     pub pending_tab_restarts: Vec<lifecycle::PendingTabRestart>,
+    /// Whether `gh` is usable, as the last probe found.
     pub gh_status: GhStatus,
     /// Test-only injection point for the rare synchronous worker-spawn failure
     /// (PID/RLIMIT exhaustion in production). Consumed by the next
@@ -475,6 +492,7 @@ pub struct Engine {
     /// State owned by the `gh` host probe: which hosts qualify, the generation
     /// stamp that keeps overlapping probes ordered, and the program to run.
     pub gh_probe: GhProbeState,
+    /// Each agent's pull request, by session id.
     pub pr_statuses: HashMap<String, PrInfo>,
     /// Manually attached ("pinned") pull requests, keyed by session id: the
     /// in-memory mirror of the `session_pr_overrides` table. While a session
@@ -493,7 +511,9 @@ pub struct Engine {
     /// `ResumePullRequestAutodetection`, and loaded at boot by
     /// [`Engine::seed_pr_statuses_from_store`].
     pub pr_suppressions: HashSet<String>,
+    /// The agents the branch-sync poller checks, shared with it.
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
+    /// The agents the pull-request poller asks about, shared with it.
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     /// Arm state and single-instance guard for pull-request background work.
     /// See [`PrSyncControl`]: a bare `AtomicBool` could not keep the poller
@@ -615,6 +635,7 @@ pub struct Engine {
     /// should be cleared) or by an unrelated operation (and should be left
     /// alone). Cleared per-session when the worker event arrives.
     pub deletion_busy_messages: HashMap<String, StatusText>,
+    /// The worktree the changed-files poller watches, shared with it.
     pub watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     /// Coalescing state for [`Engine::spawn_changed_files_refresh`]: at most one
     /// reader thread and at most one queued worktree, newest wins. Shared by
@@ -629,6 +650,8 @@ pub struct Engine {
     /// the wrong session's files (cross-tab safety). Written exclusively by
     /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
+    /// Whether any provider or terminal is running, shared with the web's
+    /// changed-files poller to pick its cadence.
     pub has_active_processes: Arc<AtomicBool>,
     /// What a web serve keeps for the life of this engine, which is the life
     /// of this dux process, rather than for one serve: the web layer's address
@@ -921,15 +944,31 @@ pub struct Engine {
     pub removal_coordination: RemovalCoordination,
 }
 
+/// Shows what the engine is managing (its paths, projects, agents and tabs);
+/// the runtime machinery around them (process handles, workers, caches) is
+/// left out.
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("paths", &self.paths)
+            .field("projects", &self.projects)
+            .field("sessions", &self.sessions)
+            .field("agent_tabs", &self.agent_tabs)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Handler-computed outcome for a create-agent op (see
 /// [`Engine::pending_create_ops`]). The create launch resolves to one of these in
 /// the engine's launch-ready / launch-failed handlers; the resolver (declared at
 /// the `DispatchCreateAgentRequest` dispatch site) maps it to the final user
 /// message, byte-identical to the pre-op wording on both surfaces.
+#[derive(Debug)]
 pub enum CreateLaunchOutcome {
     /// The session was committed and the agent surface is ready. `status_message`
     /// is the create-kind success line.
     Committed {
+        /// The create's success line.
         status_message: StatusText,
         /// Which surfaces withhold that line. A create whose pane launches and
         /// streams confirms nothing; one whose sentence carries a fact the
@@ -944,21 +983,28 @@ pub enum CreateLaunchOutcome {
     /// notes said, such as that the agent is a fresh copy of a pull request)
     /// follow it when there were any.
     StartupFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the startup command failed.
         error: String,
+        /// What the create's notes said, when it had any.
         notes: Option<StatusText>,
     },
     /// `session_store.upsert_session` failed before the session could be
     /// committed; `error` is the persistence error.
     PersistFailed {
+        /// The store's error.
         error: String,
+        /// The name the create had settled on, when it had one.
         attempted_name: Option<String>,
     },
     /// The launch (or the create worker) failed; `message` is the already-formatted
     /// error line. `attempted_name` is the name the create had settled on, when
     /// it had.
     Failed {
+        /// The failure line.
         message: StatusText,
+        /// The name the create had settled on, when it had one.
         attempted_name: Option<String>,
     },
 }
@@ -972,6 +1018,7 @@ pub enum CreateLaunchOutcome {
 pub enum LaunchOutcome {
     /// Reconnect / force-reconnect succeeded; `status_message` is the success line.
     Ready {
+        /// The success line.
         status_message: StatusText,
         /// Which surfaces withhold that line. A resumed pane relaunches and
         /// paints its prior conversation, so it confirms nothing; a pane that
@@ -980,12 +1027,16 @@ pub enum LaunchOutcome {
     },
     /// Reconnect failed; `branch_name`/`message` build the reconnect-failure line.
     ReconnectFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the relaunch failed.
         message: String,
     },
     /// Force-restart failed; `branch_name`/`message` build the fresh-restart line.
     ForceReconnectFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the restart failed.
         message: String,
     },
     /// The session vanished between dispatch and launch; the busy is cleared with
@@ -1029,6 +1080,7 @@ pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
 /// confirmation warned about may have been stopped while the checkout ran, and a
 /// final telling the user to stop a process that already ended is a lie the
 /// dispatch could not have avoided.
+#[derive(Debug)]
 pub struct RecreateOutcome {
     /// The branch arm the checkout took, or the sentence explaining what stopped
     /// it.
@@ -1044,8 +1096,9 @@ pub struct RecreateOutcome {
 /// and, when the confirmation asked for the tabs that cannot follow the folder
 /// to be restarted once the checkout lands, which tabs those were when it
 /// asked.
+#[derive(Debug)]
 pub struct PendingRecreate {
-    pub op: HandlerStatusOp<RecreateOutcome>,
+    pub(crate) op: HandlerStatusOp<RecreateOutcome>,
     /// The tabs to restart, captured with the request: exactly the set the
     /// attachment guard reserved, so a tab that comes up during the checkout,
     /// which nothing reserved and somebody may have attached to since, is
@@ -1059,6 +1112,7 @@ pub struct PendingRecreate {
 /// record is still present (driving the `FinishDeleteSession` cascade vs the
 /// already-gone fallback). The resolver (declared at dispatch) maps this to the
 /// final user message, byte-identical to the pre-op web wording.
+#[derive(Debug)]
 pub enum WebDeleteOutcome {
     /// Git removal succeeded and a report could be authored for it: either the
     /// session was still present and the `FinishDeleteSession` cascade produced
@@ -1066,16 +1120,27 @@ pub enum WebDeleteOutcome {
     /// message came from the snapshot it left behind. `refused` is true when git
     /// would not delete one of the branches, which leaves the user something to
     /// clean up and is the difference between an info and a warning.
-    Succeeded { message: StatusText, refused: bool },
+    Succeeded {
+        /// The report.
+        message: StatusText,
+        /// Whether git refused to delete one of the branches.
+        refused: bool,
+    },
     /// Git removal succeeded but the session was already gone (e.g. its project
     /// was removed) before the worker reported back.
     SucceededGone,
     /// Git removal failed; `message` is the authored failure sentence, which
     /// names the agent when the dispatch-time snapshot was still there to name it.
-    Failed { message: StatusText },
+    Failed {
+        /// The failure sentence.
+        message: StatusText,
+    },
     /// Git removal succeeded but the post-removal `FinishDeleteSession` cascade
     /// failed; `message` is the formatted error.
-    CleanupFailed { message: String },
+    CleanupFailed {
+        /// The formatted error.
+        message: String,
+    },
 }
 
 /// Handler-computed outcome for the web checkout-project-default-branch op. The
@@ -1084,33 +1149,47 @@ pub enum WebDeleteOutcome {
 /// inspection (worker 1) can short-circuit with already-leading / heuristic /
 /// inspect-failed before any switch runs, and the switch (worker 2) finishes
 /// with success / failure.
+#[derive(Debug)]
 pub enum WebCheckoutOutcome {
     /// The `git switch` (worker 2) succeeded onto `target_branch`; `base` says
     /// whether it became the project's base.
     Ok {
+        /// The branch switched to.
         target_branch: String,
+        /// What became of the project's base.
         base: ProjectBaseAdoption,
     },
     /// The `git switch` (worker 2) failed; `repo_path` is the source checkout path.
     Failed {
+        /// The branch the switch was for.
         target_branch: String,
+        /// The checkout the switch ran in.
         repo_path: String,
     },
     /// Worker 1 found the project already on its leading branch; no switch ran.
     /// `base` as for `Ok`.
     AlreadyLeading {
+        /// The branch the checkout is on.
         current_branch: String,
+        /// What became of the project's base.
         base: ProjectBaseAdoption,
     },
     /// Worker 1 could only heuristically guess the default branch, so it refused.
-    Heuristic { current_branch: String },
+    Heuristic {
+        /// The branch the checkout is on.
+        current_branch: String,
+    },
     /// Worker 1's inspection itself failed.
-    InspectFailed { error: String },
+    InspectFailed {
+        /// Why the inspection failed.
+        error: String,
+    },
 }
 
 /// What a finished "check out the default branch" did to the project's base,
 /// the branch new worktrees start from. The base moves only once SQLite has
 /// saved it, so memory and disk always agree on it.
+#[derive(Debug)]
 pub enum ProjectBaseAdoption {
     /// It already was the checked-out branch.
     Unchanged,
@@ -1119,7 +1198,9 @@ pub enum ProjectBaseAdoption {
     /// SQLite refused the new base, so the base stayed `previous` (`None` when
     /// the project had none recorded); `reason` is the refusal.
     SaveFailed {
+        /// The base that stayed, or `None` when there was none.
         previous: Option<String>,
+        /// Why SQLite refused the new base.
         reason: String,
     },
 }
@@ -1199,18 +1280,25 @@ impl ProjectBaseAdoption {
 /// What a finished "Change base branch" came to, computed where its worker's
 /// answer lands so the base can be saved first. Resolved into the one final
 /// both surfaces show by [`change_base_final`].
+#[derive(Debug)]
 pub enum ChangeBaseOutcome {
     /// The folder is on `branch` (switched just now, or already there) and the
     /// save of the base came to `base`.
     Changed {
+        /// The branch that became the base.
         branch: String,
+        /// Whether the folder was on it already, so nothing was checked out.
         folder_was_on_it: bool,
+        /// What became of the saved base.
         base: ProjectBaseAdoption,
     },
     /// Nothing ran: the folder, or the branch, did not allow it.
     Refused {
+        /// The branch asked for.
         branch: String,
+        /// What refused it.
         failure: crate::base_branch::BaseBranchChangeFailure,
+        /// The project folder.
         repo_path: String,
     },
 }
@@ -1237,7 +1325,6 @@ fn push_quoted_list(text: &mut StatusText, names: &[String]) {
 /// refusals are plain errors, because picking again from a fresh list is the
 /// whole fix.
 pub(crate) fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Final {
-    use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
     match outcome {
         ChangeBaseOutcome::Changed {
             branch,
@@ -1260,128 +1347,154 @@ pub(crate) fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome)
             branch,
             failure,
             repo_path,
-        } => match failure {
-            BaseBranchChangeFailure::FolderMissing => {
-                Final::error(change_base_branch_path_missing_message(project_name))
-            }
-            BaseBranchChangeFailure::ListFailed(reason) => Final::error(status_text![
-                "Couldn't list the branches of project ",
-                q(project_name),
-                format!(" to change its base branch: {reason}")
-            ]),
-            BaseBranchChangeFailure::NotListed => Final::error(status_text![
+        } => change_base_refusal_final(project_name, branch, failure, repo_path),
+    }
+}
+
+/// The final for a "Change base branch" the worker refused: the folder or
+/// its branches could not be read, or `branch` cannot become the base.
+fn change_base_refusal_final(
+    project_name: &str,
+    branch: &str,
+    failure: &crate::base_branch::BaseBranchChangeFailure,
+    repo_path: &str,
+) -> Final {
+    use crate::base_branch::BaseBranchChangeFailure;
+    match failure {
+        BaseBranchChangeFailure::FolderMissing => {
+            Final::error(change_base_branch_path_missing_message(project_name))
+        }
+        BaseBranchChangeFailure::ListFailed(reason) => Final::error(status_text![
+            "Couldn't list the branches of project ",
+            q(project_name),
+            format!(" to change its base branch: {reason}")
+        ]),
+        BaseBranchChangeFailure::NotListed => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": no local branch or branch on origin has that name any more. Open the \
+         branch list again and pick from what is there now."
+        ]),
+        // Every way out offered here frees the branch AND keeps it: the
+        // user wants that branch as the base, and both delete dialogs tick
+        // their branch box by default for a branch dux made. Each holder
+        // gets the one way out that works for it, through dux's own
+        // confirmed dialogs, never a worktree removed by hand.
+        BaseBranchChangeFailure::Held { holder, by } => {
+            branch_held_final(project_name, branch, holder, by)
+        }
+        BaseBranchChangeFailure::SwitchFailed(_) => Final::error(status_text![
+            "Couldn't check out ",
+            q(branch),
+            " in ",
+            n(repo_path),
+            ". Resolve in your terminal and retry."
+        ])
+        .sticky(),
+    }
+}
+
+/// The refusal when `branch` is checked out somewhere else, with the one way
+/// out that works for whoever holds it.
+fn branch_held_final(
+    project_name: &str,
+    branch: &str,
+    holder: &std::path::Path,
+    by: &crate::base_branch::BranchHolder,
+) -> Final {
+    use crate::base_branch::BranchHolder;
+    match by {
+        BranchHolder::Agent(agent) => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": the worktree of agent ",
+            q(agent),
+            " has it checked out, and git checks a branch out in one place at a time. \
+         Pick another branch, or delete agent ",
+            q(agent),
+            " together with its worktree but keep its branch: in the delete dialog, \
+         tick the box that deletes the worktree and untick the one that also \
+         deletes the branch."
+        ]),
+        BranchHolder::SharedAgentWorktree(agents) => {
+            let mut text = status_text![
                 "Can't change the base branch of project ",
                 q(project_name),
                 " to ",
                 q(branch),
-                ": no local branch or branch on origin has that name any more. Open the \
-                 branch list again and pick from what is there now."
-            ]),
-            // Every way out offered here frees the branch AND keeps it: the
-            // user wants that branch as the base, and both delete dialogs tick
-            // their branch box by default for a branch dux made. Each holder
-            // gets the one way out that works for it, through dux's own
-            // confirmed dialogs, never a worktree removed by hand.
-            BaseBranchChangeFailure::Held { holder, by } => match by {
-                BranchHolder::Agent(agent) => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": the worktree of agent ",
-                    q(agent),
-                    " has it checked out, and git checks a branch out in one place at a time. \
-                     Pick another branch, or delete agent ",
-                    q(agent),
-                    " together with its worktree but keep its branch: in the delete dialog, \
-                     tick the box that deletes the worktree and untick the one that also \
-                     deletes the branch."
-                ]),
-                BranchHolder::SharedAgentWorktree(agents) => {
-                    let mut text = status_text![
-                        "Can't change the base branch of project ",
-                        q(project_name),
-                        " to ",
-                        q(branch),
-                        ": the worktree agents "
-                    ];
-                    push_quoted_list(&mut text, agents);
-                    text.push(
-                        " share has it checked out, and git checks a branch out in one place at \
-                         a time. Pick another branch, or delete every one of those agents, the \
-                         last of them together with the worktree but keeping its branch: in that \
-                         last delete dialog, tick the box that deletes the worktree and untick \
-                         the one that also deletes the branch.",
-                    );
-                    Final::error(text)
-                }
-                BranchHolder::MissingWorktree => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": git still counts it as checked out in the worktree at ",
-                    n(holder.display().to_string()),
-                    ", whose folder is gone, and git checks a branch out in one place at a \
-                     time. Pick another branch, or make git forget that one worktree, keeping \
-                     the branch, by running ",
-                    n("git worktree remove"),
-                    " with that path in the project folder."
-                ]),
-                BranchHolder::UnreadableWorktree => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": it is checked out in the worktree at ",
-                    n(holder.display().to_string()),
-                    ", and dux could not look at that folder to say whose it is. Pick another \
-                     branch, or fix access to that folder and try again."
-                ]),
-                BranchHolder::UnheldManagedWorktree => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": it is checked out in the worktree at ",
-                    n(holder.display().to_string()),
-                    ", which no agent holds, and git checks a branch out in one place at a \
-                     time. Pick another branch, or remove that worktree in the project's \
-                     worktree manager but keep its branch: untick the box that also deletes \
-                     the branch."
-                ]),
-                BranchHolder::StandaloneAgent(agent) => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": the folder of standalone agent ",
-                    q(agent),
-                    " has it checked out, and git checks a branch out in one place at a time. \
-                     Pick another branch, or switch that folder to another branch first: \
-                     deleting a standalone agent leaves its folder where it is."
-                ]),
-                BranchHolder::OtherWorktree => Final::error(status_text![
-                    "Can't change the base branch of project ",
-                    q(project_name),
-                    " to ",
-                    q(branch),
-                    ": it is checked out in the worktree at ",
-                    n(holder.display().to_string()),
-                    ", which dux does not manage, and git checks a branch out in one place \
-                     at a time. Pick another branch, or switch that worktree to another branch \
-                     first."
-                ]),
-            },
-            BaseBranchChangeFailure::SwitchFailed(_) => Final::error(status_text![
-                "Couldn't check out ",
-                q(branch),
-                " in ",
-                n(repo_path),
-                ". Resolve in your terminal and retry."
-            ])
-            .sticky(),
-        },
+                ": the worktree agents "
+            ];
+            push_quoted_list(&mut text, agents);
+            text.push(
+                " share has it checked out, and git checks a branch out in one place at \
+             a time. Pick another branch, or delete every one of those agents, the \
+             last of them together with the worktree but keeping its branch: in that \
+             last delete dialog, tick the box that deletes the worktree and untick \
+             the one that also deletes the branch.",
+            );
+            Final::error(text)
+        }
+        BranchHolder::MissingWorktree => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": git still counts it as checked out in the worktree at ",
+            n(holder.display().to_string()),
+            ", whose folder is gone, and git checks a branch out in one place at a \
+         time. Pick another branch, or make git forget that one worktree, keeping \
+         the branch, by running ",
+            n("git worktree remove"),
+            " with that path in the project folder."
+        ]),
+        BranchHolder::UnreadableWorktree => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": it is checked out in the worktree at ",
+            n(holder.display().to_string()),
+            ", and dux could not look at that folder to say whose it is. Pick another \
+         branch, or fix access to that folder and try again."
+        ]),
+        BranchHolder::UnheldManagedWorktree => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": it is checked out in the worktree at ",
+            n(holder.display().to_string()),
+            ", which no agent holds, and git checks a branch out in one place at a \
+         time. Pick another branch, or remove that worktree in the project's \
+         worktree manager but keep its branch: untick the box that also deletes \
+         the branch."
+        ]),
+        BranchHolder::StandaloneAgent(agent) => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": the folder of standalone agent ",
+            q(agent),
+            " has it checked out, and git checks a branch out in one place at a time. \
+         Pick another branch, or switch that folder to another branch first: \
+         deleting a standalone agent leaves its folder where it is."
+        ]),
+        BranchHolder::OtherWorktree => Final::error(status_text![
+            "Can't change the base branch of project ",
+            q(project_name),
+            " to ",
+            q(branch),
+            ": it is checked out in the worktree at ",
+            n(holder.display().to_string()),
+            ", which dux does not manage, and git checks a branch out in one place \
+         at a time. Pick another branch, or switch that worktree to another branch \
+         first."
+        ]),
     }
 }
 
@@ -1603,38 +1716,58 @@ fn base_moved_suffix(branch: &str, base: &ProjectBaseAdoption) -> StatusText {
 }
 
 /// Handler-computed outcome for the web add-project "Check Out & Add" op.
+#[derive(Debug)]
 pub enum WebAddProjectOutcome {
     /// The switch and the inline project-add both succeeded; `status_message` is
     /// the combined "Checked out X and added project Y" line.
-    Added { status_message: StatusText },
+    Added {
+        /// The combined line.
+        status_message: StatusText,
+    },
     /// The `git switch` failed before the add ran.
     SwitchFailed {
+        /// The branch the switch was for.
         target_branch: String,
+        /// The checkout the switch ran in.
         repo_path: String,
     },
     /// The switch succeeded but the inline add was rolled back; `message` is the
     /// already-formatted failure line.
-    AddFailed { message: StatusText },
+    AddFailed {
+        /// The failure line.
+        message: StatusText,
+    },
 }
 
 /// Handler-computed outcome for the web new-agent-from-PR lookup op.
+#[derive(Debug)]
 pub enum WebPrLookupOutcome {
     /// The lookup resolved and the create dispatch took over (its busy, keyed by
     /// the shared create op's opaque id, now owns the spinner), so this op's busy
     /// is cleared with no message.
     HandedOff,
     /// The lookup failed; `message` is the already-formatted error line.
-    Failed { message: String },
+    Failed {
+        /// The error line.
+        message: String,
+    },
 }
 
 /// Handler-computed outcome for a manual PR-attach op (both surfaces).
+#[derive(Debug)]
 pub enum PrAttachOutcome {
     /// The lookup resolved and the pin was applied; `message` is the
     /// already-formatted confirmation from [`Engine::apply_pr_attach`].
-    Attached { message: StatusText },
+    Attached {
+        /// The confirmation.
+        message: StatusText,
+    },
     /// The lookup failed or applying the pin failed; `message` is the
     /// already-formatted error line.
-    Failed { message: StatusText },
+    Failed {
+        /// The error line.
+        message: StatusText,
+    },
     /// The agent the lookup was for is gone by the time the answer landed.
     /// There is nothing to attach it to and nothing on either surface the
     /// sentence could be about, so the operation ends with its spinner retired
@@ -1895,20 +2028,31 @@ pub(crate) fn pr_attach_in_flight_message(agent_name: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionGitAccess {
     /// A managed working copy: the whole git surface, as always.
-    Full { worktree: PathBuf },
+    Full {
+        /// The working copy.
+        worktree: PathBuf,
+    },
     /// A managed working copy whose directory is gone from disk. Its own answer
     /// rather than an error every poll cycle: there is no directory to run git
     /// in, so the panel is quiet and says so, and the way out is to recreate the
     /// working copy at the same path.
-    WorkingCopyMissing { worktree: PathBuf },
+    WorkingCopyMissing {
+        /// Where the working copy was, and where it is recreated.
+        worktree: PathBuf,
+    },
     /// A standalone agent whose folder IS a repository's top level: the changes
     /// panel works here exactly as anywhere, and nothing branch-shaped exists.
-    ChangesOnly { directory: PathBuf },
+    ChangesOnly {
+        /// The agent's folder.
+        directory: PathBuf,
+    },
     /// A standalone agent with no repository to work in: no branch features and
     /// a quiet changes region. `quiet_reason` says why, in the user's terms,
     /// and never "the repository is busy".
     NoRepository {
+        /// The agent's folder.
         directory: PathBuf,
+        /// The sentence the quiet changes region shows.
         quiet_reason: String,
     },
 }
@@ -1944,12 +2088,12 @@ impl SessionGitAccess {
     /// Whether the branch-identity features exist for this agent.
     pub fn supports_branch_git(&self) -> bool {
         match self {
-            Self::Full { .. } => true,
+            Self::Full { .. }
             // A managed agent keeps its branch identity when the directory
             // goes: the branch is still in the repository, which is exactly what
             // makes recreating the working copy possible. What the FEATURES do
             // about a missing directory is their own refusal, not this gate's.
-            Self::WorkingCopyMissing { .. } => true,
+            | Self::WorkingCopyMissing { .. } => true,
             Self::ChangesOnly { .. } | Self::NoRepository { .. } => false,
         }
     }
@@ -2047,7 +2191,8 @@ pub(crate) fn pr_pause_notice(
         .filter(|r| r.remaining < crate::gh::RATE_LIMIT_BACKOFF_FLOOR)
     {
         let secs_until = r.reset_at.map_or(PR_RATE_LIMIT_BACKOFF_SECS, |t| {
-            (t - now).num_seconds().clamp(0, 3600) as u64
+            u64::try_from((t - now).num_seconds().clamp(0, 3600))
+                .expect("clamped to a non-negative number of seconds")
         });
         let when = r
             .reset_at
@@ -2904,6 +3049,11 @@ impl Engine {
     /// and config/SQLite-sourced entries load through `load_projects`, whose
     /// looser `is_git_repo` probe is deliberately untouched so existing
     /// subfolder projects keep working.
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing sentence when the path is not a git repository,
+    /// sits inside one or inside its git directory, or is already a project.
     pub fn validate_project_add_path(
         &self,
         raw_path: &str,
@@ -2955,6 +3105,12 @@ impl Engine {
     /// not already be (or sit inside) a git repository, and must not already
     /// be registered. Unlike the add gate, `Indeterminate` fails closed here:
     /// this validation front-runs a mutation (`git init`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing sentence when the path is not an existing folder,
+    /// is or sits inside a git repository (or its git directory), cannot be
+    /// classified, or is already a project.
     pub fn validate_project_init_path(
         &self,
         raw_path: &str,
@@ -3014,6 +3170,10 @@ impl Engine {
     /// persistence so the portable config stays in sync with SQLite. (The TUI has
     /// its own config-sync path.) Eager synchronous write via the queue; blocks
     /// until the writer confirms or times out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config writer does not confirm the save.
     pub fn persist_projects_to_config(&mut self) -> anyhow::Result<()> {
         self.config.projects = self
             .projects
@@ -3030,6 +3190,11 @@ impl Engine {
     /// the store under the new config, swap the config, and refresh derived
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot load the projects to
+    /// merge; the new config is still adopted.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
         self.apply_reloaded_config_probing(config, GhReprobe::Now)
     }
@@ -3095,6 +3260,9 @@ impl Engine {
         }
     }
 
+    /// Adopt a reloaded config the surface could not fully apply, so memory,
+    /// the projects and the file agree; a session database that cannot be read
+    /// keeps the config's own projects.
     pub fn keep_reloaded_config(&mut self, config: Config) {
         self.github_integration_enabled = config.ui.github_integration;
         let derived = self
@@ -3215,6 +3383,8 @@ impl Engine {
         }
     }
 
+    /// Start the branch-sync poller, at most once, unless the config turns it
+    /// off.
     pub fn spawn_branch_sync_worker(&self) {
         let configured = self.config.ui.branch_sync_interval;
         // Seeded even on the disabled path so a running loop from an earlier,
@@ -3337,6 +3507,85 @@ fn report_missing_directory(
         session_id: session_id.to_string(),
         status: crate::git::FolderRepoStatus::Missing,
     });
+}
+
+/// Why a reconnect cannot start: the agent's directory is gone. A managed
+/// working copy can be recreated; a standalone agent's folder is the user's,
+/// so dux cannot.
+fn reconnect_directory_missing_message(session: &AgentSession) -> StatusText {
+    match &session.workspace {
+        crate::model::AgentWorkspace::Managed(managed) => crate::status_text![
+            "The working copy for agent ",
+            q(session.display_label()),
+            " at ",
+            n(crate::home_path::shorten_home(Path::new(
+                &managed.worktree_path
+            ))),
+            " no longer exists. Recreate the \
+             working copy to check its branch out there again, or delete this agent."
+        ],
+        crate::model::AgentWorkspace::Folder(folder) => crate::status_text![
+            "The folder agent ",
+            q(session.display_label()),
+            " runs in (",
+            n(crate::home_path::shorten_home(Path::new(
+                &folder.folder_path
+            ))),
+            ") no longer exists. Restore the folder, or delete this agent and create a new one pointing at the folder you want."
+        ],
+    }
+}
+
+/// Report, once each, the pull-request sync entries whose working copy has
+/// gone, so their agents drop out of the plan on its next rebuild. The lock is
+/// let go before anything is sent.
+fn report_missing_pr_sync_worktrees(
+    sessions: &Mutex<Vec<PrSyncEntry>>,
+    tx: &std::sync::mpsc::Sender<WorkerEvent>,
+) {
+    let Ok(guard) = sessions.lock() else {
+        return;
+    };
+    let gone: Vec<(String, std::path::PathBuf)> = guard
+        .iter()
+        .map(|entry| {
+            (
+                entry.session_id.clone(),
+                std::path::PathBuf::from(&entry.worktree_path),
+            )
+        })
+        .filter(|(_, path)| {
+            crate::git::directory_presence(path) == crate::git::DirectoryPresence::Missing
+        })
+        .collect();
+    drop(guard);
+    for (session_id, path) in gone {
+        report_missing_directory(tx, &session_id, &path);
+    }
+}
+
+/// Which agents this pull-request sync cycle covers: everything once the
+/// inactive tail's slower clock is due, the active half otherwise. An unset
+/// clock starts now rather than sweeping at once.
+fn pr_sync_scope(
+    last_inactive_sweep: &Mutex<Option<Instant>>,
+    inactive_interval_secs: u64,
+) -> crate::gh::SyncScope {
+    let mut swept_at = last_inactive_sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let since = if let Some(at) = *swept_at {
+        at.elapsed()
+    } else {
+        *swept_at = Some(Instant::now());
+        Duration::ZERO
+    };
+    if crate::gh::inactive_sweep_due(since, inactive_interval_secs) {
+        *swept_at = Some(Instant::now());
+        crate::gh::SyncScope::Everything
+    } else {
+        crate::gh::SyncScope::ActiveOnly
+    }
 }
 
 impl Engine {
@@ -3537,7 +3786,7 @@ impl Engine {
         let worktree = resolved.as_ref().map(|(_, path)| path.clone());
         // Keep the background poller in sync with the watched worktree.
         if let Ok(mut guard) = self.watched_worktree.lock() {
-            *guard = worktree.clone();
+            (*guard).clone_from(&worktree);
         }
         // The WATCHED SESSION is whichever session the panel is showing, even
         // when there is no repository to poll in it. Dropping the id here
@@ -3926,6 +4175,8 @@ impl Engine {
         );
     }
 
+    /// List `dir` for the folder browser off the engine thread; the rows arrive
+    /// as `BrowserEntriesReady`.
     pub fn spawn_browser_entries(&mut self, dir: &Path) {
         let dir = dir.to_path_buf();
         let dir_for_panic = dir.clone();
@@ -3954,6 +4205,8 @@ impl Engine {
         );
     }
 
+    /// List `project`'s worktrees for the adopt picker off the engine thread;
+    /// they arrive as `ProjectWorktreesReady` under `status_op_id`.
     pub fn spawn_project_worktrees_worker(
         &mut self,
         project: Project,
@@ -4057,6 +4310,8 @@ impl Engine {
         }
     }
 
+    /// Read each project checkout's branch off the engine thread, for the
+    /// sidebar.
     pub fn spawn_project_branch_status_checks(&mut self) {
         // Not guarded against re-spawn: each project's check is a one-shot
         // background job (post per-branch events, exit). Re-running on a
@@ -4173,25 +4428,7 @@ impl Engine {
                 // rebuild. Without this, every question the sync asks runs git
                 // in a directory that is not there, once per cycle, for as long
                 // as nobody happens to look at the agent.
-                if let Ok(guard) = sessions.lock() {
-                    let gone: Vec<(String, std::path::PathBuf)> = guard
-                        .iter()
-                        .map(|entry| {
-                            (
-                                entry.session_id.clone(),
-                                std::path::PathBuf::from(&entry.worktree_path),
-                            )
-                        })
-                        .filter(|(_, path)| {
-                            crate::git::directory_presence(path)
-                                == crate::git::DirectoryPresence::Missing
-                        })
-                        .collect();
-                    drop(guard);
-                    for (session_id, path) in gone {
-                        report_missing_directory(tx, &session_id, &path);
-                    }
-                }
+                report_missing_pr_sync_worktrees(&sessions, tx);
                 // Backed-off hosts are skipped inside run_pr_sync via this
                 // snapshot (their sessions keep last-known PRs), so no global
                 // pause is needed here.
@@ -4207,28 +4444,10 @@ impl Engine {
                 // clock: nobody is working in it, nothing on screen is waiting
                 // on the answer, and its pull request moves rarely. Most cycles
                 // therefore cover the active half alone.
-                let scope = {
-                    let mut swept_at = last_inactive_sweep
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let since = match *swept_at {
-                        Some(at) => at.elapsed(),
-                        // Never swept: start the clock, sweep nothing.
-                        None => {
-                            *swept_at = Some(Instant::now());
-                            Duration::ZERO
-                        }
-                    };
-                    if crate::gh::inactive_sweep_due(
-                        since,
-                        inactive_interval_secs.load(Ordering::Relaxed),
-                    ) {
-                        *swept_at = Some(Instant::now());
-                        crate::gh::SyncScope::Everything
-                    } else {
-                        crate::gh::SyncScope::ActiveOnly
-                    }
-                };
+                let scope = pr_sync_scope(
+                    &last_inactive_sweep,
+                    inactive_interval_secs.load(Ordering::Relaxed),
+                );
                 // The blind poll: nobody asked, so a dormant agent whose pull
                 // request is already closed is left alone until a one-shot
                 // trigger looks at it.
@@ -4462,6 +4681,8 @@ impl Engine {
         targets
     }
 
+    /// Sample the resource monitor's process trees off the engine thread,
+    /// unless a sample is already running.
     pub fn spawn_resource_stats_worker(&mut self) {
         // The resource monitor refreshes itself periodically; an
         // already-in-flight refresh is a silent skip rather than a
@@ -4833,6 +5054,8 @@ impl Engine {
         changed
     }
 
+    /// Record whether the agent should be running when dux next starts, and
+    /// save it.
     pub fn mark_session_desired_running(
         &mut self,
         session_id: &str,
@@ -4937,29 +5160,8 @@ impl Engine {
     ) -> BranchRenamePlan {
         let rename_branch = branch == BranchRename::AlsoTheBranch;
         let name = new_name.trim().to_string();
-        let branch_named = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .is_none_or(super::model::AgentSession::supports_branch_git);
-        if name.is_empty() {
-            // An empty name resets the label to the branch (or, for a
-            // standalone agent, the folder) name. A branch cannot be renamed
-            // to nothing, so asking for both at once is refused rather than
-            // quietly doing only the reset.
-            if rename_branch && branch_named {
-                return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
-            }
-        } else if !crate::git::is_valid_agent_name(&name) {
-            // A STANDALONE agent has no branch, but its name follows the same
-            // rules as every other agent's, as it did when it was created.
-            return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
-        }
-        // Block overlapping renames: a second concurrent `git branch -m` on the
-        // same worktree would race the first (and could corrupt the in-flight
-        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
-        if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
-            return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
+        if let Some(rejection) = self.branch_rename_rejection(session_id, &name, branch) {
+            return BranchRenamePlan::Rejected(rejection);
         }
         // A worktree being removed (or deleted or moved) takes no rename:
         // nothing new may start in a folder that is about to go. A branch
@@ -5086,6 +5288,43 @@ impl Engine {
             new_branch: name,
             previous_title,
         })
+    }
+
+    /// Why a rename may not start before anything is touched: the name is
+    /// empty while the branch is to be renamed too, the name is not a valid
+    /// agent name, or a rename of this agent is already running. `name` is
+    /// already trimmed.
+    fn branch_rename_rejection(
+        &self,
+        session_id: &str,
+        name: &str,
+        branch: BranchRename,
+    ) -> Option<BranchRenameRejection> {
+        let branch_named = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .is_none_or(crate::model::AgentSession::supports_branch_git);
+        if name.is_empty() {
+            // An empty name resets the label to the branch (or, for a
+            // standalone agent, the folder) name. A branch cannot be renamed
+            // to nothing, so asking for both at once is refused rather than
+            // quietly doing only the reset.
+            if branch == BranchRename::AlsoTheBranch && branch_named {
+                return Some(BranchRenameRejection::EmptyName);
+            }
+        } else if !crate::git::is_valid_agent_name(name) {
+            // A STANDALONE agent has no branch, but its name follows the same
+            // rules as every other agent's, as it did when it was created.
+            return Some(BranchRenameRejection::MalformedName);
+        }
+        // Block overlapping renames: a second concurrent `git branch -m` on the
+        // same worktree would race the first (and could corrupt the in-flight
+        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
+        if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
+            return Some(BranchRenameRejection::AlreadyInFlight);
+        }
+        None
     }
 
     /// Set (or, with `None`, clear) a session's custom title and persist it.
@@ -5252,7 +5491,10 @@ impl Engine {
     /// so the next cycle queries the pin. Shared by the `AttachPullRequest` wire
     /// command and the `PullRequestResolved` attach handler, so both surfaces
     /// apply the exact same mutation. Returns the user-facing confirmation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one field of the pull request being attached, passed straight from the wire command and the resolver"
+    )]
     pub(crate) fn apply_pr_attach(
         &mut self,
         session_id: &str,
@@ -5328,6 +5570,11 @@ impl Engine {
     /// The suppression is durable: a restart is not the user changing their
     /// mind. It is lifted by a manual attach or by
     /// [`Self::resume_pr_autodetection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, a standalone agent, an attach
+    /// still running for the agent, or a session database write that fails.
     pub fn clear_pull_request_override(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
@@ -5384,6 +5631,11 @@ impl Engine {
     /// CLI that could have been uninstalled since. Without a usable `gh` the
     /// check is a no-op and the next cycle after the integration re-arms picks
     /// the session up.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, a standalone agent, an attach
+    /// still running for the agent, or a session database write that fails.
     pub fn resume_pr_autodetection(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
@@ -5442,6 +5694,12 @@ impl Engine {
     /// id in the `202` body). The final is resolved engine-side in
     /// `process_worker_event`'s `PullRequestResolved` attach arm, so neither
     /// surface can drift on the outcome handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal when the GitHub integration or `gh` is unavailable,
+    /// the session is unknown or standalone, an attach is already running for
+    /// it, its project is gone, or the input is empty.
     pub fn dispatch_attach_pull_request(
         &mut self,
         session_id: &str,
@@ -5555,6 +5813,8 @@ pub(crate) fn pinned_pr_from_stored(row: &crate::storage::StoredPr) -> crate::wo
 }
 
 impl Engine {
+    /// The provider the project chose itself, or `None` when it follows the
+    /// global default.
     pub fn project_explicit_default_provider(&self, project_id: &str) -> Option<ProviderKind> {
         self.projects
             .iter()
@@ -5562,10 +5822,13 @@ impl Engine {
             .and_then(|project| project.explicit_default_provider.clone())
     }
 
+    /// Whether the project chose its own default provider.
     pub fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
         self.project_explicit_default_provider(project_id).is_some()
     }
 
+    /// Whether the project's agents reopen at startup; a project with no choice
+    /// of its own does.
     pub fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
         self.projects
             .iter()
@@ -5574,6 +5837,8 @@ impl Engine {
             .unwrap_or(true)
     }
 
+    /// The name of the agent's project, or `unknown` when it has none dux
+    /// knows.
     pub fn project_name_for_session(&self, session: &AgentSession) -> String {
         session
             .project_id()
@@ -5588,6 +5853,11 @@ impl Engine {
     /// and the TUI's folder browser cannot answer the same question
     /// differently. Also returns the Busy message, because a keyed busy and its
     /// final have to name the same thing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal for a relative folder, a folder another agent already
+    /// works in, an invalid agent name, or a provider that is not configured.
     pub fn plan_standalone_agent(
         &self,
         folder: &str,
@@ -5746,6 +6016,11 @@ impl Engine {
     ///
     /// `feature` and `remedy` are the two halves of the refusal sentence; see
     /// [`standalone_agent_refusal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, and the refusal sentence for an
+    /// agent with no managed working copy.
     pub fn branch_git_workspace(
         &self,
         session_id: &str,
@@ -5853,6 +6128,10 @@ impl Engine {
     /// The resume decision uses `tab_resume_decision` (collision-aware) for both
     /// the request and the announced `resume`, so a surface never announces a
     /// resume that the dispatch downgrades to fresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session.
     pub fn reconnect_plan(
         &mut self,
         session_id: &str,
@@ -5885,28 +6164,9 @@ impl Engine {
         if crate::git::directory_presence(std::path::Path::new(session.directory()))
             == crate::git::DirectoryPresence::Missing
         {
-            let message = match &session.workspace {
-                crate::model::AgentWorkspace::Managed(managed) => crate::status_text![
-                    "The working copy for agent ",
-                    q(session.display_label()),
-                    " at ",
-                    n(crate::home_path::shorten_home(Path::new(
-                        &managed.worktree_path
-                    ))),
-                    " no longer exists. Recreate the \
-                     working copy to check its branch out there again, or delete this agent."
-                ],
-                crate::model::AgentWorkspace::Folder(folder) => crate::status_text![
-                    "The folder agent ",
-                    q(session.display_label()),
-                    " runs in (",
-                    n(crate::home_path::shorten_home(Path::new(
-                        &folder.folder_path
-                    ))),
-                    ") no longer exists. Restore the folder, or delete this agent and create a new one pointing at the folder you want."
-                ],
-            };
-            return Ok(ReconnectPlan::WorktreeMissing { message });
+            return Ok(ReconnectPlan::WorktreeMissing {
+                message: reconnect_directory_missing_message(&session),
+            });
         }
 
         if force {
@@ -5942,23 +6202,8 @@ impl Engine {
         }
         // A standalone agent has no project whose default provider it could
         // be diverging from, so the note is simply not written for one.
-        if let Some(project) = session
-            .project_id()
-            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
-            && project.default_provider != session.provider
-        {
-            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
-                "current project provider"
-            } else {
-                "current global default provider"
-            };
-            msg.push(crate::status_text![
-                " Note: this agent uses ",
-                n(session.provider.as_str()),
-                format!(". Your {} is ", provider_label),
-                n(project.default_provider.as_str()),
-                "."
-            ]);
+        if let Some(note) = self.provider_divergence_note(&session) {
+            msg.push(note);
         }
 
         let branch_name = session.display_label();
@@ -5994,6 +6239,29 @@ impl Engine {
         })
     }
 
+    /// The note a reconnect adds when the agent's provider is not its project's
+    /// default, or `None` when they agree or the agent has no project.
+    fn provider_divergence_note(&self, session: &AgentSession) -> Option<StatusText> {
+        let project = session
+            .project_id()
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))?;
+        if project.default_provider == session.provider {
+            return None;
+        }
+        let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+            "current project provider"
+        } else {
+            "current global default provider"
+        };
+        Some(crate::status_text![
+            " Note: this agent uses ",
+            n(session.provider.as_str()),
+            format!(". Your {} is ", provider_label),
+            n(project.default_provider.as_str()),
+            "."
+        ])
+    }
+
     /// Provider currently driving the session's live PTY, if any. After an
     /// in-place provider swap while the agent is still running, this returns
     /// the *original* provider until the user exits and relaunches, so the
@@ -6007,6 +6275,7 @@ impl Engine {
             .unwrap_or_else(|| session.provider.clone())
     }
 
+    /// Whether the agent's own provider may resume its prior conversation here.
     pub fn should_resume_session(&self, session: &AgentSession) -> bool {
         self.should_resume_provider(session, &session.provider)
     }
@@ -6313,6 +6582,12 @@ impl Engine {
     /// this just-created row (it is `is_fresh`). The per-agent cap is enforced
     /// here, in one synchronous call (the single-threaded engine makes the
     /// check-then-insert atomic); it counts the session-slot tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, an agent being deleted, a
+    /// provider that is not configured, an agent already at its tab cap, a
+    /// session database failure, or a launch that cannot be dispatched.
     pub fn create_tab(
         &mut self,
         session_id: &str,
@@ -6573,6 +6848,12 @@ impl Engine {
     /// Either way the row goes first (a persistence failure leaves in-memory
     /// state untouched), then the PTY is torn down gracefully and every runtime
     /// map the tab keyed is cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the agent is being deleted (naming the delete when
+    /// one is followed), the tab is the agent's last, does not belong to the
+    /// session or is unknown, or the session database cannot delete its row.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         // Mid-deletion every tab is already being torn down with the worktree;
         // closing one on its own would race that teardown.
@@ -6667,6 +6948,11 @@ impl Engine {
     /// this delegates to the untouched
     /// [`Engine::change_agent_provider`]; for an extra tab it updates only that
     /// tab's row, pinning the previously-running provider if it is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session or tab, a provider that is not
+    /// configured, or a session database write that fails.
     pub fn change_tab_provider(
         &mut self,
         session_id: &str,
@@ -6749,6 +7035,11 @@ impl Engine {
     /// persisted. DB-first (mirroring `ToggleAgentAutoReopen`): the storage
     /// write happens before the in-memory session is updated, so a persistence
     /// failure leaves memory and SQLite in sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session or a session database write that
+    /// fails.
     pub fn set_last_focused_tab(
         &mut self,
         session_id: &str,
@@ -6790,18 +7081,28 @@ impl Engine {
 pub enum ReconnectPlan {
     /// Normal reconnect refused: a provider is already live. The caller shows
     /// `message` and does nothing else.
-    AlreadyConnected { message: StatusText },
+    AlreadyConnected {
+        /// The sentence to show.
+        message: StatusText,
+    },
     /// The session's worktree is gone. The caller surfaces `message` as an error
     /// (the TUI as a status error, the web as a 400).
-    WorktreeMissing { message: StatusText },
+    WorktreeMissing {
+        /// The error to show.
+        message: StatusText,
+    },
     /// Relaunch: dispatch `request` and surface `busy_message` as the pending
     /// status. `resume` is the collision-aware decision the request carries, so a
     /// surface can announce it truthfully. `detached_label` names any conflicting
     /// same-worktree agent that was detached to make room (already applied).
     Launch {
+        /// The launch to dispatch.
         request: Box<crate::worker::AgentLaunchRequest>,
+        /// The busy shown while it runs.
         busy_message: StatusText,
+        /// Whether the launch resumes the provider's conversation.
         resume: bool,
+        /// The agent detached to make room, if any.
         detached_label: Option<String>,
     },
 }
@@ -7133,7 +7434,7 @@ mod tests {
     /// pull-request sync kept running git in a deleted directory every cycle.
     #[test]
     fn a_pollers_own_failure_downgrades_the_verdict_and_takes_the_agent_out() {
-        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        let (mut engine, tmp, _folder) = engine_with_a_standalone_agent();
         engine.update_branch_sync_sessions();
         assert_eq!(
             engine.branch_sync_sessions.lock().expect("lock").len(),
@@ -7142,7 +7443,7 @@ mod tests {
         );
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let gone = _tmp.path().join("never-existed");
+        let gone = tmp.path().join("never-existed");
         report_missing_directory(&tx, "s1", &gone);
         let event = rx.try_recv().expect("the poller reports the directory");
         let _ = engine.process_worker_event(event);
@@ -7619,14 +7920,14 @@ mod tests {
                 tab_id: session.slot_tab_id().to_owned(),
                 provider: session.provider.clone(),
                 session,
-                provider_config: Default::default(),
+                provider_config: crate::config::ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 100,
                 kind: crate::worker::AgentLaunchKind::Create {
-                    status_message: Default::default(),
+                    status_message: StatusText::default(),
                     status_warns: false,
                     status_notes: None,
                     pull_request_pin: None,
@@ -8032,7 +8333,9 @@ mod tests {
         // Older than the suppression window → not typing.
         engine.pty_input.insert(
             "b".to_string(),
-            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!engine.is_typing("b"));
 
@@ -8113,7 +8416,9 @@ mod tests {
         // Stamped past the window → not streaming.
         engine.pty_activity.insert(
             "stale".to_string(),
-            Instant::now() - (AGENT_STREAMING_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_STREAMING_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!engine.is_agent_streaming("stale"));
 
@@ -8158,7 +8463,9 @@ mod tests {
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert(
             "s1".to_string(),
-            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(
             engine.is_agent_streaming("s1"),
@@ -8234,7 +8541,9 @@ mod tests {
             TabId::new("s1"),
             ProgressReport {
                 working: true,
-                at: Instant::now() - (PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50)),
+                at: Instant::now()
+                    .checked_sub(PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50))
+                    .expect("the monotonic clock reads later than the rewind"),
             },
         );
         assert!(
@@ -8449,7 +8758,9 @@ mod tests {
         engine.pty_pointer.insert(
             "s1".to_string(),
             PointerStamp {
-                at: Instant::now() - (POINTER_REPAINT_WINDOW + Duration::from_millis(50)),
+                at: Instant::now()
+                    .checked_sub(POINTER_REPAINT_WINDOW + Duration::from_millis(50))
+                    .expect("the monotonic clock reads later than the rewind"),
                 window: POINTER_REPAINT_WINDOW,
             },
         );
@@ -8520,7 +8831,8 @@ mod tests {
         // Stale view → not engaged.
         viewed.insert(
             TabId::new("s1"),
-            now - (ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50)),
+            now.checked_sub(ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!attention_engaged(
             &viewed,
@@ -8536,7 +8848,8 @@ mod tests {
         // Stale typing → not engaged.
         typed.insert(
             "s1".to_string(),
-            now - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            now.checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!attention_engaged(
             &viewed,
@@ -8995,8 +9308,11 @@ mod tests {
 
         // Rewind the timestamp past the interval to simulate elapsed wall-clock
         // time, then the next call runs again and re-stamps.
-        engine.last_foreground_refresh =
-            Some(first - (FOREGROUND_REFRESH_INTERVAL + Duration::from_millis(50)));
+        engine.last_foreground_refresh = Some(
+            first
+                .checked_sub(FOREGROUND_REFRESH_INTERVAL + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.refresh_terminal_foregrounds();
         let second = engine
             .last_foreground_refresh
@@ -9131,7 +9447,7 @@ mod tests {
             outcome: GhProbe::Decided {
                 available: true,
                 policy: hosts(&["github.com"]),
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         });
 
@@ -9153,8 +9469,8 @@ mod tests {
             generation: 1,
             outcome: GhProbe::Decided {
                 available: false,
-                policy: GithubHostPolicy::Hosts(Default::default()),
-                protocols: Default::default(),
+                policy: GithubHostPolicy::Hosts(std::collections::BTreeSet::default()),
+                protocols: std::collections::BTreeMap::default(),
             },
         });
         assert_eq!(
@@ -9355,14 +9671,22 @@ mod tests {
             "nothing is due until the interval has passed",
         );
 
-        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.gh_probe.last_probe_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(31))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.poll_gh_probe_schedule();
         assert_eq!(engine.gh_probe.generation, 1, "the re-check was spawned");
         settle_gh_probe(&mut engine);
         assert_eq!(engine.gh_status, GhStatus::Available);
 
         // And it stops asking, because there is nothing left to recover.
-        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.gh_probe.last_probe_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(31))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.poll_gh_probe_schedule();
         assert_eq!(engine.gh_probe.generation, 1, "no further probes");
     }
@@ -9391,7 +9715,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         assert!(
@@ -9415,7 +9739,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         assert!(repeat.is_empty(), "a repeat answer says nothing");
@@ -9525,7 +9849,7 @@ mod tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::DenyAll,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         let status = reactions
@@ -9818,6 +10142,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn config_reload_ready_drains_deferred_commands() {
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
@@ -10649,7 +10977,7 @@ mod tests {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(remaining) {
                 Ok(WorkerEvent::PollerStatus(status)) => return status,
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(_) => break,
             }
         }
@@ -10813,6 +11141,10 @@ mod tests {
     /// Every ending of a "Change base branch", in the words both surfaces
     /// print, with its tone, its stickiness and the names it chips.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of every change-base ending with its expected words, tone, stickiness and chips; the check over it is a short loop"
+    )]
     fn every_change_base_final_says_what_happened_and_chips_its_names() {
         use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
         use crate::prose::ProseSegment;
@@ -11025,7 +11357,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|segment| match segment {
                     ProseSegment::Name { name, .. } => Some(name),
-                    _ => None,
+                    ProseSegment::Text(_) => None,
                 })
                 .collect();
             assert_eq!(names, want_names, "{plain}");
@@ -12347,7 +12679,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         for (i, (id, provider)) in extras.iter().enumerate() {
             let mut tab = extra_tab(id, "s1", provider);
-            tab.sort_order = i as i64 + 1;
+            tab.sort_order = i64::try_from(i).expect("tab index fits in i64") + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }
@@ -12795,9 +13127,15 @@ mod tab_ops_tests {
         });
         let _ = engine
             .drive_web_launch_followup(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
-        let state = |id: &str| engine.operations.view(id, now()).unwrap().state;
-        assert_eq!(state("op-slot"), crate::operations::OperationState::Failed);
-        assert_eq!(state("op-t2"), crate::operations::OperationState::Running);
+        let op_state = |id: &str| engine.operations.view(id, now()).unwrap().state;
+        assert_eq!(
+            op_state("op-slot"),
+            crate::operations::OperationState::Failed
+        );
+        assert_eq!(
+            op_state("op-t2"),
+            crate::operations::OperationState::Running
+        );
     }
 
     #[test]
@@ -12996,7 +13334,7 @@ mod tab_ops_tests {
         engine.sessions.push(session);
         for (i, (id, provider)) in [("t2", "codex"), ("t3", "claude")].iter().enumerate() {
             let mut tab = extra_tab(id, "s1", provider);
-            tab.sort_order = i as i64 + 1;
+            tab.sort_order = i64::try_from(i).expect("tab index fits in i64") + 1;
             engine.session_store.insert_agent_tab(&tab).unwrap();
             engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
         }

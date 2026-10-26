@@ -299,7 +299,7 @@ fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_nu
             delete_branch: None,
             process_sessions: vec![recorded],
             process_snapshot: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .unwrap();
 
@@ -461,7 +461,7 @@ fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
                 start_time: start,
                 boot: other_boot,
             }],
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .unwrap();
 
@@ -495,9 +495,9 @@ fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
 /// engine thread for a quarter second per PTY.
 #[test]
 fn review9_reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
+    const N: usize = 8;
     let (mut engine, tmp) = test_engine();
     let pidfile = tmp.path().join("jobs.pid");
-    const N: usize = 8;
     for i in 0..N {
         let mut client = PtyClient::spawn_with_env(
             "bash",

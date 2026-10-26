@@ -40,9 +40,10 @@ use crate::operations::{Hold, InTheWay};
 use crate::wire::WireCommand;
 
 /// What a change wants admitted, and what it holds once admitted.
+#[derive(Debug)]
 pub struct Admission {
-    pub wants: Vec<Hold>,
-    pub takes: Vec<Hold>,
+    pub(crate) wants: Vec<Hold>,
+    pub(crate) takes: Vec<Hold>,
 }
 
 impl Engine {
@@ -57,6 +58,11 @@ impl Engine {
 
     /// Check `admission` without holding anything: refused when an open
     /// record other than the one being dispatched holds what it wants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`InTheWay`] naming the open record, other than the one
+    /// being dispatched, that holds something `admission` wants.
     pub fn check_admission(&self, admission: &Admission) -> Result<(), InTheWay> {
         self.operations
             .admit(self.operation_in_dispatch.as_deref(), &admission.wants, &[])
@@ -117,6 +123,11 @@ impl Engine {
     }
 
     /// Admit `admission`, holding its keys on `record` when there is one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`InTheWay`] naming the open record, other than `record`,
+    /// that holds something `admission` wants.
     pub fn admit(&self, record: Option<&str>, admission: &Admission) -> Result<(), InTheWay> {
         self.operations
             .admit(record, &admission.wants, &admission.takes)
@@ -290,6 +301,10 @@ mod tests {
     /// naming who and from where; the terminal UI's own attachments are never
     /// in its way.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_terminal_ui_command_is_refused_while_a_followed_operation_holds_what_it_changes() {
         use crate::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
 
@@ -381,14 +396,14 @@ mod tests {
             (
                 "a macro save",
                 Command::UpdateMacros {
-                    macros: Default::default(),
+                    macros: crate::config::MacrosConfig::default(),
                 },
                 Some(held),
             ),
             (
                 "an environment save",
                 Command::PersistGlobalEnv {
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::default(),
                 },
                 Some(held),
             ),

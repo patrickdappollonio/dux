@@ -180,8 +180,13 @@ fn review20_refused_base_branch_switch_leaves_the_branch_it_created() {
     let guard = engine.checkout_move_guard();
     let r = repo.clone();
     let result = std::thread::spawn(move || {
-        crate::base_branch::switch_to_base_branch(&r, "feat", &guard, &Default::default())
-            .map(|_| ())
+        crate::base_branch::switch_to_base_branch(
+            &r,
+            "feat",
+            &guard,
+            &crate::base_branch::HolderContext::default(),
+        )
+        .map(|_| ())
     })
     .join()
     .unwrap();
@@ -248,7 +253,7 @@ fn a_switch_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_switch() {
     if !in_child() {
         return;
@@ -292,7 +297,7 @@ fn a_pull_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_pull() {
     if !in_child() {
         return;
@@ -357,7 +362,7 @@ fn a_worktree_add_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_worktree_add() {
     if !in_child() {
         return;

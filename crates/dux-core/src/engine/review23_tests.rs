@@ -146,13 +146,6 @@ fn review23_removal_retries_git_after_the_last_look_without_looking_again() {
     std::thread::sleep(std::time::Duration::from_millis(400));
     // During the pause: something dux started walks in, and the transient
     // refusal clears.
-    struct Kill(std::process::Child);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
     let walked_in = Kill(
         std::process::Command::new("sleep")
             .arg("30")
@@ -227,4 +220,14 @@ fn a_removal_retry_looks_again_and_keeps_the_folder_for_a_new_occupant() {
     assert_eq!(looks.get(), 2, "looked again before the retry");
     assert_eq!(runs.get(), 1, "and did not run git again");
     assert!(result.unwrap_err().contains("walked in"));
+}
+
+/// Kills and reaps the child it holds when dropped, so a failing test leaves
+/// no process behind.
+struct Kill(std::process::Child);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

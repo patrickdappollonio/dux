@@ -16,7 +16,7 @@ use crate::storage::SessionStore;
 
 /// The TUI's `ConfigSurface` implementation. Stateless because each operation
 /// derives the runtime bindings it needs from the `Config` passed in.
-pub struct TuiConfigSurface;
+pub(crate) struct TuiConfigSurface;
 
 impl ConfigSurface for TuiConfigSurface {
     /// Its reload (`ensure_config`) refuses what stops the terminal UI. The

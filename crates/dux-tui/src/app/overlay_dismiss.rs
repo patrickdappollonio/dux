@@ -70,7 +70,7 @@ pub(super) fn refusal_blink_is_running(elapsed_ms: u128) -> bool {
 ///
 /// `None` (no modal painted this frame) is not outside anything; see the
 /// fail-closed contract on [`OverlayMouseLayoutState::frame`].
-pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: &MouseEvent) -> bool {
+pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: MouseEvent) -> bool {
     let Some(rect) = frame else {
         return false;
     };
@@ -264,7 +264,7 @@ impl App {
             PromptState::ChangeBaseBranch(_) => self.dismiss_change_base_branch(),
             // Steps back to the picker, the kill-running idiom.
             PromptState::ConfirmChangeBaseBranch(_) => {
-                self.resolve_confirm_change_base_branch(false);
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel);
             }
 
             // Closing the log viewer must also drop the drag-selection state,
@@ -292,24 +292,24 @@ impl App {
             // Same resolve path as its Close button (see `handle_prompt_key`,
             // which now also routes Esc here).
             PromptState::ConfigReloadFailed { .. } => {
-                self.resolve_config_reload_failed(false);
+                self.resolve_config_reload_failed(ConfirmAnswer::Cancel);
             }
 
             // Restores the KillRunning list this confirm was raised from, so
             // cancelling the nested confirm steps back rather than closing the
             // whole stack.
             PromptState::ConfirmKillRunning(_) => {
-                self.resolve_confirm_kill_running(false);
+                self.resolve_confirm_kill_running(ConfirmAnswer::Cancel);
             }
 
             // Restores its `return_prompt` (the browser, as the user left it).
             PromptState::ConfirmInitRepo { .. } => {
-                self.resolve_confirm_init_repo(false);
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
             }
 
             // Drops the pending add and explains why (its helper's message).
             PromptState::ConfirmCreateInitialCommit { .. } => {
-                self.resolve_confirm_create_initial_commit(false);
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
             }
 
             // Confirmations: route through the resolve helpers so the
@@ -317,45 +317,45 @@ impl App {
             // the app exit", and cancelling never exits, which the caller's
             // `false` return preserves.
             PromptState::ConfirmDeleteAgent { .. } => {
-                self.resolve_confirm_delete_agent(false);
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel);
             }
             // Steps back to the manager's list rather than closing the stack,
             // the kill-running idiom.
             PromptState::ConfirmDeleteWorktree(_) => {
-                self.resolve_confirm_delete_worktree(false);
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDeleteTerminal { .. } => {
-                self.resolve_confirm_delete_terminal(false);
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmCloseTab { .. } => {
-                self.resolve_confirm_close_tab(false);
+                self.resolve_confirm_close_tab(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmStopTab { .. } => {
-                self.resolve_confirm_stop_tab(false);
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmRecreateWorkingCopy { .. } => {
-                self.resolve_confirm_recreate_working_copy(false);
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmCheckoutDefaultBranch { .. } => {
-                self.resolve_confirm_checkout_default_branch(false);
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDeleteProject { .. } => {
-                self.resolve_confirm_delete_project(false);
+                self.resolve_confirm_delete_project(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmRemoveProject { .. } => {
-                self.resolve_confirm_remove_project(false);
+                self.resolve_confirm_remove_project(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDetachAgent { .. } => {
-                self.resolve_confirm_detach_agent(false);
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDiscardFile { .. } => {
-                self.resolve_confirm_discard_file(false);
+                self.resolve_confirm_discard_file(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmQuit { .. } => {
-                self.resolve_confirm_quit(false);
+                self.resolve_confirm_quit(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmUseExistingBranch { .. } => {
-                self.resolve_confirm_use_existing_branch(false);
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Cancel);
             }
 
             // The nested macro delete-confirm: clears the confirm and leaves
@@ -364,7 +364,7 @@ impl App {
                 pending_delete: Some(_),
                 ..
             } => {
-                self.resolve_confirm_delete_macro(false);
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel);
             }
 
             // The macro LIST closes the overlay, exactly as its close binding
@@ -410,7 +410,7 @@ impl App {
     /// row, a checkbox, a text input, or a modal's deliberate blank
     /// misclick-safe spacer row. That also means a click INSIDE a refusing
     /// modal never arms the cue: it was handled by the control it hit.
-    pub(super) fn dismiss_prompt_on_outside_click(&mut self, mouse: &MouseEvent) -> bool {
+    pub(super) fn dismiss_prompt_on_outside_click(&mut self, mouse: MouseEvent) -> bool {
         if !click_outside_frame(self.overlay_layout.frame.get(), mouse) {
             return false;
         }
@@ -1050,33 +1050,33 @@ mod tests {
     #[test]
     fn click_outside_frame_requires_a_recorded_rect() {
         // Fail-closed: with nothing recorded, no click is "outside" anything.
-        assert!(!click_outside_frame(None, &left_down(0, 0)));
+        assert!(!click_outside_frame(None, left_down(0, 0)));
     }
 
     #[test]
     fn click_outside_frame_matches_only_a_left_press_outside_the_rect() {
         let rect = Some(Rect::new(10, 5, 20, 10));
 
-        assert!(click_outside_frame(rect, &left_down(0, 0)));
-        assert!(!click_outside_frame(rect, &left_down(15, 8)));
+        assert!(click_outside_frame(rect, left_down(0, 0)));
+        assert!(!click_outside_frame(rect, left_down(15, 8)));
         // A press that starts inside and releases outside is a drag off a
         // control, not a dismissal.
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Up(MouseButton::Left), 0, 0)
+            mouse(MouseEventKind::Up(MouseButton::Left), 0, 0)
         ));
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0)
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0)
         ));
         // A stray right-click is not a dismissal either.
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Down(MouseButton::Right), 0, 0)
+            mouse(MouseEventKind::Down(MouseButton::Right), 0, 0)
         ));
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::ScrollUp, 0, 0)
+            mouse(MouseEventKind::ScrollUp, 0, 0)
         ));
     }
 
@@ -1235,7 +1235,7 @@ mod tests {
     #[test]
     fn clicking_a_list_row_inside_a_modal_still_selects_it() {
         let mut app = test_app(default_bindings());
-        app.open_change_theme_prompt().expect("theme picker");
+        app.open_change_theme_prompt();
         render(&mut app);
         let (list, offset) = match app.overlay_layout.active {
             OverlayMouseLayout::ChangeTheme { list, offset, .. } => (list, offset),
@@ -1370,7 +1370,7 @@ mod tests {
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         render(&mut app);
 
@@ -1654,7 +1654,7 @@ mod tests {
     /// live preview is actually applied. Otherwise "cancel reverts the
     /// preview" has nothing to revert and the test would pass vacuously.
     fn open_theme_picker_with_live_preview(app: &mut App) {
-        app.open_change_theme_prompt().expect("open theme picker");
+        app.open_change_theme_prompt();
         let before = format!("{:?}", app.theme.app_bg);
         let enough_themes = match &mut app.prompt {
             PromptState::ChangeTheme(prompt) => {
@@ -1701,7 +1701,7 @@ mod tests {
                 let config_path = app.engine.paths.config_path.clone();
                 app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
                     dux_core::welcome_screen::welcome_screen(&config_path),
-                    true,
+                    crate::app::first_load::SeenNote::Write,
                 ));
             },
             stamp,

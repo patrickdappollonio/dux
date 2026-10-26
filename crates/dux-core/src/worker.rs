@@ -12,8 +12,10 @@ use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, Prov
 use crate::pty::PtyClient;
 use crate::storage::StoredPr;
 
+/// One worktree of a project, as the adopt picker lists it.
 #[derive(Clone, Debug)]
 pub struct ProjectWorktreeEntry {
+    /// Where the worktree is on disk.
     pub path: PathBuf,
     /// The row LABEL: the branch when there is one, else a "detached <sha>"
     /// stand-in. Good for display and useless for deciding anything.
@@ -22,8 +24,12 @@ pub struct ProjectWorktreeEntry {
     /// `branch_name` because "is there a branch here to delete?" cannot be
     /// answered from a label that invents one.
     pub branch: Option<String>,
+    /// Whether the worktree lives in dux's managed folder for its project.
     pub is_managed_by_dux: bool,
+    /// The agent already working in this worktree, if any.
     pub existing_session_id: Option<String>,
+    /// Whether this is the project's own checkout rather than an extra
+    /// worktree.
     pub is_project_checkout: bool,
 }
 
@@ -39,6 +45,7 @@ impl ProjectWorktreeEntry {
         self.existing_session_id.is_none() && !self.is_project_checkout
     }
 
+    /// The worktree's folder name, or its whole path when it has none.
     pub fn display_name(&self) -> String {
         self.path
             .file_name()
@@ -47,14 +54,23 @@ impl ProjectWorktreeEntry {
     }
 }
 
+/// A pull request `gh` resolved, with the project it belongs to.
 #[derive(Clone, Debug)]
 pub struct ResolvedPullRequest {
+    /// The project whose repository the pull request is in.
     pub project: Project,
+    /// The host the pull request lives on, such as `github.com`.
     pub host: String,
+    /// The repository as `owner/repo`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's state as `gh` reports it (`OPEN`, `MERGED`,
+    /// `CLOSED`).
     pub state: String,
+    /// The pull request's head branch.
     pub head_ref_name: String,
     /// Caller-supplied display name to carry through the resolution. The TUI
     /// resolves the PR first and then prompts for a name, so it passes `None`
@@ -177,10 +193,12 @@ impl ReviewCopyConsent {
 /// resolved PR to the right consumer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrLookupPurpose {
+    /// Resolving to create a new agent from the pull request.
     CreateAgent,
     /// Resolving for a manual attach; carries the target session so the
     /// engine-side handler can re-check it still exists before applying.
     Attach {
+        /// The agent the pull request is attached to.
         session_id: String,
     },
 }
@@ -196,27 +214,39 @@ pub(crate) struct PullRequestLookup {
     pub number: u64,
 }
 
+/// How sure dux is that a checkout is not on its repository's default branch.
 #[derive(Clone, Debug)]
 pub enum BranchWarningKind {
     /// We resolved `origin/HEAD` and know the default branch for certain.
-    Known { default_branch: String },
+    Known {
+        /// The repository's default branch, as `origin/HEAD` names it.
+        default_branch: String,
+    },
     /// `origin/HEAD` unavailable; current branch is not `main` or `master`.
     Heuristic,
 }
 
+/// What to do once a checkout found on a non-default branch has been switched.
 #[derive(Clone, Debug)]
 pub enum NonDefaultBranchAction {
+    /// Register the folder as a project.
     AddProject {
+        /// The folder to register.
         path: String,
+        /// The project's display name.
         name: String,
+        /// The branch the project leads with.
         leading_branch: String,
     },
+    /// Switch an existing project's checkout to its default branch.
     CheckoutProjectDefault {
+        /// The project whose checkout is switched.
         project: Project,
     },
 }
 
 impl NonDefaultBranchAction {
+    /// The folder the switch runs in.
     pub fn repo_path(&self) -> &str {
         match self {
             Self::AddProject { path, .. } => path,
@@ -232,7 +262,9 @@ impl NonDefaultBranchAction {
 /// from its resolved `leading_branch`.
 #[derive(Clone, Debug)]
 pub struct InitialCommitAdd {
+    /// The folder to register as a project.
     pub path: String,
+    /// The project's display name.
     pub name: String,
     /// The branch HEAD points at (unborn now; the commit lands on it).
     pub branch: String,
@@ -248,17 +280,25 @@ pub struct InitialCommitAdd {
     pub seed_warning: Option<String>,
 }
 
+/// What a project checkout is on, read before the New Agent prompt opens.
 #[derive(Clone, Debug)]
 pub struct CreateAgentBranchInspection {
+    /// The branch the checkout has checked out.
     pub current_branch: String,
+    /// The branch the project leads with.
     pub leading_branch: String,
 }
 
+/// One process in a sampled process tree.
 #[derive(Clone, Debug)]
 pub struct ProcessInfo {
+    /// The process's name.
     pub name: String,
+    /// The process id.
     pub pid: u32,
+    /// CPU use over the sample window, as a percentage of one core.
     pub cpu_percent: f32,
+    /// Resident memory, in bytes.
     pub rss_bytes: u64,
     /// True for the one entry that IS the row's root process rather than a
     /// subprocess under it. The breakdown deliberately includes the root so it
@@ -293,24 +333,32 @@ pub struct ResourceTarget {
     /// The spine id: a tab id for [`ResourceKind::Agent`], a terminal id for
     /// [`ResourceKind::Terminal`].
     pub id: String,
-    pub kind: ResourceKind,
+    pub(crate) kind: ResourceKind,
     /// Human-readable description, for display only. Never parse it.
     pub label: String,
     /// Root of the process tree to aggregate.
     pub pid: u32,
 }
 
+/// One row of the resource monitor: a process tree and what it uses.
 #[derive(Clone, Debug)]
 pub struct ResourceStats {
     /// The spine id this row was sampled for, or `None` for the dux and total
     /// rows, which describe no single spine entity.
     pub id: Option<String>,
+    /// What the row describes.
     pub kind: ResourceKind,
+    /// Human-readable description, for display only. Never parse it.
     pub label: String,
+    /// The root process id, or `None` for a row with no single process.
     pub pid: Option<u32>,
+    /// CPU use of the whole tree, as a percentage of one core.
     pub cpu_percent: f32,
+    /// Resident memory of the whole tree, in bytes.
     pub rss_bytes: u64,
+    /// How many processes the tree holds.
     pub process_count: usize,
+    /// The tree's processes, the root included.
     pub children: Vec<ProcessInfo>,
 }
 
@@ -330,10 +378,14 @@ impl ResourceStats {
     }
 }
 
+/// One row of the project folder browser.
 #[derive(Clone, Debug)]
 pub struct BrowserEntry {
+    /// The directory the row opens.
     pub path: PathBuf,
+    /// The row's label.
     pub label: String,
+    /// Whether the directory is a git repository.
     pub is_git_repo: bool,
     /// True only for the synthetic parent-directory ("../") row synthesized at
     /// the top of `browser_entries`. Real directory entries are always `false`.
@@ -351,11 +403,11 @@ pub struct BrowserEntry {
 /// nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequestPin {
-    pub host: String,
-    pub owner_repo: String,
-    pub number: u64,
-    pub title: String,
-    pub state: String,
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) state: String,
     /// The pull request's own branch, which is checked out elsewhere; named in
     /// the sentence that says where a push from the copy goes.
     pub(crate) busy_branch: String,
@@ -363,9 +415,12 @@ pub struct PullRequestPin {
     pub(crate) new_branch: String,
 }
 
+/// Why an agent launch runs, and what its completion has to report.
 #[derive(Clone, Debug)]
 pub enum AgentLaunchKind {
+    /// The first launch of a newly created agent.
     Create {
+        /// The create's success line.
         status_message: crate::status_text::StatusText,
         /// The success line is a warning rather than an info: it carries
         /// something the user must act on, such as a fresh copy of a pull
@@ -377,8 +432,11 @@ pub enum AgentLaunchKind {
         status_notes: Option<Box<crate::status_text::StatusText>>,
         /// A pull request to pin the new agent to once it is committed.
         pull_request_pin: Option<Box<PullRequestPin>>,
+        /// The project repository the create made its worktree in.
         repo_path: String,
+        /// Whether this create made the worktree, so a failure removes it.
         owns_worktree: bool,
+        /// How the project's startup command ran, when it ran.
         startup_result: Option<crate::startup::StartupCommandResult>,
         /// Opaque correlation id of the shared create-agent `HandlerStatusOp`
         /// (see `Engine::pending_create_ops`). Threads from the
@@ -386,15 +444,22 @@ pub enum AgentLaunchKind {
         /// launch-ready / launch-failed handlers can resolve the op's final.
         status_op_id: String,
     },
+    /// A relaunch of a detached agent.
     Reconnect {
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
+    /// A relaunch that stops the running provider first and starts fresh.
     ForceReconnect {
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
+    /// A fresh launch after a resume did not come up.
     ResumeFallback {
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
+    /// A launch of an agent reopened at startup.
     StartupAutoReopen,
     /// An extra-tab launch. Whether it resumes is decided dynamically, per
     /// provider, by `Engine::tab_resume_decision` (the same rule every other
@@ -403,13 +468,18 @@ pub enum AgentLaunchKind {
     /// spawn fails) from an explicit relaunch of an already-persisted dormant
     /// extra tab (whose row is kept and whose real error is surfaced).
     Tab {
+        /// Whether the tab was created just now, so a failed first spawn
+        /// removes its row.
         is_fresh: bool,
+        /// The line the launch reports.
         status_message: crate::status_text::StatusText,
     },
 }
 
+/// Everything a launch worker needs to spawn one tab's provider.
 #[derive(Clone, Debug)]
 pub struct AgentLaunchRequest {
+    /// The agent the tab belongs to.
     pub session: AgentSession,
     /// The tab this launch belongs to and the key under which its PTY / runtime
     /// state is tracked. Resolves to `AgentSession::slot_tab_id` for the
@@ -421,15 +491,21 @@ pub struct AgentLaunchRequest {
     /// The effective provider for this tab. Equals `session.provider` for the
     /// session-slot tab; may differ for an extra tab that was retargeted.
     pub provider: ProviderKind,
+    /// The command and arguments to run.
     pub provider_config: ProviderCommandConfig,
+    /// The environment the provider runs with.
     pub env: Vec<(String, String)>,
     /// The terminal identity (env add/remove) applied at spawn so the agent sees a
     /// useful terminal name. Resolved from engine state at build time. Empty for
     /// `terminal_identity = "none"` (the pre-capabilities behavior).
     pub identity: crate::term_identity::TerminalIdentity,
+    /// Whether the provider continues its previous conversation.
     pub resume: bool,
+    /// The terminal size to spawn at, as rows and columns.
     pub pty_size: (u16, u16),
+    /// How many lines of scrollback the terminal keeps.
     pub scrollback_lines: usize,
+    /// Why the launch runs.
     pub kind: AgentLaunchKind,
     /// TUI-only landing hint: `true` when a fullscreen-seeking gesture started
     /// the launch, so its completion lands fullscreen; every other launch lands
@@ -454,17 +530,32 @@ impl AgentLaunchRequest {
     }
 }
 
+/// A launch whose provider came up, with the client attached to it.
 pub struct AgentLaunchReadyData {
+    /// The launch that ran.
     pub request: AgentLaunchRequest,
+    /// The running provider's terminal.
     pub client: PtyClient,
     /// The spawn's ticket, kept until the engine has registered the new
     /// session (see [`crate::process_sessions::SpawnGate`]).
     pub spawn_ticket: Option<crate::process_sessions::SpawnTicket>,
 }
 
+impl std::fmt::Debug for AgentLaunchReadyData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLaunchReadyData")
+            .field("request", &self.request)
+            .field("spawn_ticket", &self.spawn_ticket)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A launch whose provider could not be spawned.
 #[derive(Clone, Debug)]
 pub struct AgentLaunchFailedData {
+    /// The launch that ran.
     pub request: AgentLaunchRequest,
+    /// Why the spawn failed.
     pub message: String,
 }
 
@@ -473,32 +564,49 @@ pub struct AgentLaunchFailedData {
 /// code.
 #[derive(Clone, Debug)]
 pub struct AgentAtWorktree {
-    pub name: String,
-    pub worktree_path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) worktree_path: PathBuf,
 }
 
+/// A request to create an agent, by where its working copy comes from.
 #[derive(Clone, Debug)]
 pub enum CreateAgentRequest {
+    /// A new worktree in a project, on a new or existing branch.
     NewProject {
+        /// The project the agent is created in.
         project: Project,
+        /// The agent's name, or `None` for a generated one.
         custom_name: Option<String>,
+        /// Attach to a branch of the agent's name that already exists.
         use_existing_branch: bool,
+        /// Pull the project's checkout before branching from it.
         pull_before_create: bool,
+        /// Copy the checkout's uncommitted changes into the new worktree.
         copy_uncommitted_changes: bool,
         /// Set for the first agent of a clone dux just made: the agent must
         /// start a fresh branch (one that already exists is refused, never
         /// attached to), and a create that fails says what the clone did.
         cloned: Option<crate::clone_project::ClonedFor>,
     },
+    /// A new worktree on a pull request's code.
     PullRequest {
+        /// The project the pull request belongs to.
         project: Project,
+        /// The host the pull request lives on.
         host: String,
+        /// The repository as `owner/repo`.
         owner_repo: String,
+        /// The pull request's number.
         number: u64,
+        /// The pull request's title.
         title: String,
+        /// The pull request's state as `gh` reports it.
         state: String,
+        /// The pull request's head branch.
         head_branch: String,
+        /// The agent's name, or `None` for one named after the branch.
         custom_name: Option<String>,
+        /// Attach to a branch of that name that already exists.
         use_existing_branch: bool,
         /// Whether the user agreed to a review copy. Without it a create that
         /// needs one creates nothing and asks.
@@ -516,23 +624,39 @@ pub enum CreateAgentRequest {
         /// it empty.
         cloned: Option<crate::clone_project::ClonedFor>,
     },
+    /// A new worktree branched from another agent's branch.
     ForkSession {
+        /// The project both agents belong to.
         project: Project,
+        /// The agent forked from.
         source_session: Box<AgentSession>,
+        /// The forked agent's display name.
         source_label: String,
+        /// The new agent's name, or `None` for a generated one.
         custom_name: Option<String>,
     },
+    /// An agent adopting a dux-managed worktree no agent holds.
     ExistingManagedWorktree {
+        /// The project the worktree belongs to.
         project: Project,
+        /// The worktree adopted.
         worktree_path: PathBuf,
+        /// The branch the worktree is on.
         branch_name: String,
+        /// The agent's name, or `None` for one named after the branch.
         custom_name: Option<String>,
     },
+    /// A new worktree branched from a worktree dux does not manage.
     ForkExternalWorktree {
+        /// The project the worktree belongs to.
         project: Project,
+        /// The worktree forked from.
         source_worktree_path: PathBuf,
+        /// The forked worktree's display name.
         source_label: String,
+        /// The branch the forked worktree is on.
         source_branch: String,
+        /// The new agent's name, or `None` for a generated one.
         custom_name: Option<String>,
     },
     /// A standalone agent: run the provider in a folder the user already has.
@@ -562,16 +686,18 @@ impl CreateAgentRequest {
     /// final share an opaque `status_op_id`, which is already project-free.
     pub fn project_id(&self) -> Option<&str> {
         match self {
-            Self::NewProject { project, .. } => Some(&project.id),
-            Self::PullRequest { project, .. } => Some(&project.id),
-            Self::ForkSession { project, .. } => Some(&project.id),
-            Self::ExistingManagedWorktree { project, .. } => Some(&project.id),
-            Self::ForkExternalWorktree { project, .. } => Some(&project.id),
+            Self::NewProject { project, .. }
+            | Self::PullRequest { project, .. }
+            | Self::ForkSession { project, .. }
+            | Self::ExistingManagedWorktree { project, .. }
+            | Self::ForkExternalWorktree { project, .. } => Some(&project.id),
             Self::Standalone { .. } => None,
         }
     }
 }
 
+/// A message a background worker sends back to the engine.
+#[derive(Debug)]
 pub enum WorkerEvent {
     /// Status update delivered via the worker channel so it stays FIFO with
     /// the completion event of the operation it announces. Posted by
@@ -584,6 +710,7 @@ pub enum WorkerEvent {
     /// records what the checkout did, and resolves the op that produces the
     /// final, which needs the engine to see what is running by then.
     WorkingCopyRecreated {
+        /// The agent whose working copy was recreated.
         session_id: String,
         /// The branch arm the checkout took, or the sentence explaining what
         /// stopped it. The in-flight guard is released either way.
@@ -599,19 +726,27 @@ pub enum WorkerEvent {
     /// `op.progress(message)` on the same id, so the dispatch's busy and every
     /// progress update render as one in-place toast that the final state dismisses.
     CreateAgentProgress {
+        /// The create op the update belongs to.
         status_op_id: String,
+        /// What the create is doing now.
         message: crate::status_text::StatusText,
     },
+    /// A create stopped before its agent existed.
     CreateAgentFailed {
+        /// The create op that failed.
         status_op_id: String,
+        /// Why the create failed.
         message: crate::status_text::StatusText,
         /// The name the create had settled on when it failed (a pull request's
         /// review copy has a different one from the name asked for), or
         /// `None` when it had not settled one.
         attempted_name: Option<String>,
     },
+    /// A provider launch came up.
     AgentLaunchReady(Box<AgentLaunchReadyData>),
+    /// A provider launch could not be spawned.
     AgentLaunchFailed(Box<AgentLaunchFailedData>),
+    /// A changed-files listing was computed for the watched worktree.
     ChangedFilesReady {
         /// The computed (staged, unstaged) lists, or the message git failed
         /// with. The error is carried rather than flattened into empty lists:
@@ -631,32 +766,45 @@ pub enum WorkerEvent {
     /// changed-files watch to match, so a folder that became a repository since
     /// the last look starts working without the user doing anything else.
     FolderRepoStatusReady {
+        /// The standalone agent whose folder was classified.
         session_id: String,
+        /// What the folder is.
         status: crate::git::FolderRepoStatus,
     },
     /// A `spawn_status_op` worker finished and carried back its resolved final
     /// (the success/failure message or a clear, already keyed).
     StatusOpCompleted {
+        /// The final to show.
         resolved: crate::engine::ResolvedFinal,
     },
     /// A worker changed a worktree's files (a discard) and has sent its final:
     /// the changed-files listing is read again.
     WorktreeFilesChanged,
+    /// A pull of a project checkout or an agent's worktree finished.
     PullCompleted {
+        /// The repository pulled.
         repo_path: String,
+        /// What was pulled.
         target: PullTarget,
+        /// How the pull ended, or git's error.
         result: Result<PullOutcome, String>,
         /// The status final resolved by the dispatch-site `StatusOp` (the success
         /// or failure message, already keyed). The handler still uses `result`
         /// for its domain mutations and emits this for the user-facing status.
         status: crate::engine::ResolvedFinal,
     },
+    /// A folder browser listing was read.
     BrowserEntriesReady {
+        /// The directory listed.
         dir: PathBuf,
+        /// Its rows.
         entries: Vec<BrowserEntry>,
     },
+    /// A project's worktrees were listed for the adopt picker.
     ProjectWorktreesReady {
+        /// The project listed.
         project_id: String,
+        /// The worktrees, or why they could not be listed.
         result: Result<Vec<ProjectWorktreeEntry>, String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler (the final depends on whether the picker is
@@ -668,27 +816,38 @@ pub enum WorkerEvent {
     /// distinct from `ProjectWorktreesReady`, which feeds the adopt picker and
     /// carries the whole classification without dirtiness.
     ManageableWorktreesReady {
+        /// The project listed.
         project_id: String,
+        /// The managed worktrees, or why they could not be listed.
         result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler (it depends on whether the manager is still
         /// open, which the worker can't see).
         status_op_id: Option<String>,
     },
+    /// A copy to the clipboard finished.
     ClipboardCopyCompleted {
         /// Human-readable success message shown in the status bar.
         label: String,
+        /// Whether the copy worked, or why not.
         result: Result<(), String>,
         /// Status final resolved at the call site by the clipboard `StatusOp`:
         /// the success (`label`) or failure message, already keyed. The handler
         /// emits this for the user-facing status.
         status: crate::engine::ResolvedFinal,
     },
+    /// Agents whose worktree is on a branch other than the recorded one, as
+    /// session id and branch.
     BranchSyncReady(Vec<(String, String)>),
+    /// A git branch rename for an agent finished.
     BranchRenameCompleted {
+        /// The agent renamed.
         session_id: String,
+        /// The branch's new name.
         new_branch: String,
+        /// The title the agent had before, restored when the rename failed.
         previous_title: Option<String>,
+        /// Whether git renamed the branch, or its error.
         result: Result<(), String>,
         /// Status final resolved at dispatch by the rename `StatusOp`; the handler
         /// runs its domain revert/persist and emits this for the user message.
@@ -706,9 +865,12 @@ pub enum WorkerEvent {
     /// handler discards a stale generation before anything else it would do, so
     /// two probes launched close together cannot let the older answer win.
     GhStatusChecked {
+        /// The probe run this answers.
         generation: u64,
+        /// What `gh` said.
         outcome: crate::gh::GhProbe,
     },
+    /// Pull-request answers for the agents a sync cycle asked about.
     PrStatusReady(Vec<PrStatusResult>),
     /// The debounce that refused an agent's owed branch check has passed.
     PrCheckOwedDue(String),
@@ -745,9 +907,12 @@ pub enum WorkerEvent {
         /// With no match and an offer possible but the lookup failed: the
         /// lookup's own sentence.
         clone_unavailable: Option<String>,
+        /// The op the lookup reports under, when a surface keyed one.
         status_op_id: Option<String>,
     },
+    /// A `gh pr view` lookup finished.
     PullRequestResolved {
+        /// The pull request, or why it could not be resolved.
         result: Result<ResolvedPullRequest, String>,
         /// Why the lookup ran. A create-flow resolution opens the name prompt
         /// (TUI) or hands off to the create dispatch (web); an attach-flow
@@ -768,26 +933,34 @@ pub enum WorkerEvent {
     /// the formatted error; the session record must be preserved so the user
     /// can retry.
     WorktreeRemoveCompleted {
+        /// The agent whose worktree was removed.
         session_id: String,
+        /// What happened to each branch, or the formatted error.
         result: Result<crate::engine::RemovedBranches, String>,
     },
     /// A worktree removal found operations still running in the worktree and
     /// is waiting for them. `waiting_for` names them ("a pull and a push").
     WorktreeRemoveWaiting {
+        /// The agent whose worktree is being removed.
         session_id: String,
+        /// What the removal is waiting for.
         waiting_for: String,
     },
     /// A project deletion that was waiting for an agent being created in the
     /// project may go on: the create finished, or the wait ran out.
     ProjectDeletionContinue {
+        /// The project being deleted.
         project_id: String,
     },
     /// Background `git switch <target_branch>` run from a non-default branch
     /// warning modal has finished. On `Ok`, the main loop continues the
     /// original action. On `Err`, the formatted git error is surfaced.
     NonDefaultBranchCheckoutCompleted {
+        /// What runs once the switch landed.
         action: NonDefaultBranchAction,
+        /// The branch switched to.
         target_branch: String,
+        /// Whether the switch worked, or git's error.
         result: Result<(), String>,
         /// Correlation id for a web `HandlerStatusOp`. For a `CheckoutProjectDefault`
         /// action it resolves the checkout op in `process_worker_event` (both
@@ -800,7 +973,9 @@ pub enum WorkerEvent {
     /// finished. On `Ok`, the followup registers the project on its now-born
     /// branch. On `Err`, the formatted git error is surfaced.
     InitialCommitCreated {
+        /// The project add the commit was made for.
         add: InitialCommitAdd,
+        /// Whether the commit was made, or git's error.
         result: Result<(), String>,
         /// Correlation id for a web add-project `HandlerStatusOp` (resolved in
         /// `drive_add_project_followup`), or a TUI `pending_checkout_inspect_ops`
@@ -811,19 +986,26 @@ pub enum WorkerEvent {
     /// names its in-flight key). `Ok` is a clone ready to add as a project;
     /// `Err` says how it stopped short of one (never `HandedOff`).
     RepositoryCloned {
+        /// The clone's op, when one was opened.
         status_op_id: Option<String>,
+        /// The clone's destination.
         path: PathBuf,
+        /// The name of the agent the clone is for.
         agent_name: String,
         /// The repository key a pull request clone holds, released when the
         /// pending clone is gone.
         repository_key: Option<String>,
+        /// Whether the clone made a new copy or added an existing folder.
         mode: crate::clone_project::CloneMode,
+        /// The clone ready to add, or how it stopped short.
         result: Result<crate::clone_project::ClonedRepository, crate::clone_project::CloneOutcome>,
     },
     /// Background inspection of the selected project checkout before opening
     /// the New Agent prompt.
     CreateAgentBranchInspected {
+        /// The project inspected.
         project: Project,
+        /// What its checkout is on, or why it could not be read.
         result: Result<CreateAgentBranchInspection, String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose keyed busy is dismissed
         /// when the inspection completes (the visible final comes from the
@@ -832,12 +1014,21 @@ pub enum WorkerEvent {
         /// that don't drive a handler-resolved status. This flow is TUI-only.
         status_op_id: Option<String>,
     },
+    /// A project checkout's branch was read for the sidebar.
     ProjectBranchStatusReady {
+        /// The project read.
         project_id: String,
+        /// The checkout's branch and how it relates to the leading branch, or
+        /// the error.
         result: Result<(String, ProjectBranchStatus), String>,
     },
+    /// A project checkout was inspected before switching it to its default
+    /// branch.
     CheckoutProjectDefaultBranchInspected {
+        /// The project inspected.
         project: Project,
+        /// The checkout's branch and how sure dux is it is not the default, or
+        /// the error.
         result: Result<(String, Option<BranchWarningKind>), String>,
         /// Correlation id for a web checkout `HandlerStatusOp`, carried through to
         /// worker 2 (`run_add_project_checkout_job`) so the eventual
@@ -851,17 +1042,26 @@ pub enum WorkerEvent {
     /// `Engine::pending_change_base_ops` under `status_op_id`, for either
     /// surface.
     ProjectBaseBranchChanged {
+        /// The project whose base branch changed.
         project: Project,
+        /// The branch asked for.
         branch: String,
+        /// What the switch did, or why it was refused.
         result: Result<
             crate::base_branch::BaseBranchSwitched,
             crate::base_branch::BaseBranchChangeFailure,
         >,
+        /// The op the change reports under.
         status_op_id: String,
     },
+    /// A config reload read the file: the new config, or why it could not be
+    /// loaded.
     ConfigReloadReady(Box<Result<Config, String>>),
+    /// A project change finished saving to the session database.
     ProjectPersistenceCompleted {
+        /// The change saved.
         action: ProjectPersistenceAction,
+        /// Whether it was saved, or the error.
         result: Result<(), String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler (after the fallible post-worker config write).
@@ -872,7 +1072,9 @@ pub enum WorkerEvent {
     /// whole listing (newest first) plus the newest run's contents, because the
     /// picker shows both.
     StartupCommandLogsLoaded {
+        /// Whose startup command runs were listed.
         scope_label: String,
+        /// The listing, or why it could not be read.
         result: Result<crate::startup::StartupCommandLogListing, String>,
     },
     /// One already-listed run finished reading off-thread, because the user
@@ -880,7 +1082,9 @@ pub enum WorkerEvent {
     /// a reply for a run that is no longer selected is dropped, so a fast walk
     /// down the list cannot land a stale body under a newer selection.
     StartupCommandLogContentLoaded {
+        /// The run file that was read.
         path: std::path::PathBuf,
+        /// Its contents, or why it could not be read.
         result: Result<String, String>,
     },
     /// The in-process web-server flip pre-flight finished on a worker thread,
@@ -889,7 +1093,9 @@ pub enum WorkerEvent {
     /// listeners and their display URLs come back so the main loop can stash the
     /// flip; on failure the TUI stays up. `warning` is a non-fatal note.
     ServerFlipPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
         /// What the pre-flight learned, carried to the flip's log so it opens
         /// with the same lines `dux server` prints.
@@ -902,7 +1108,9 @@ pub enum WorkerEvent {
     /// the flip's listeners end a TUI session, and these start a serve alongside
     /// one.
     BackgroundServerPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
         /// What the pre-flight learned, carried to the serve's log so it opens
         /// with the same lines `dux server` prints.
@@ -915,7 +1123,9 @@ pub enum WorkerEvent {
     /// UI's run loop, which is also the serve's engine servicer: blocking it
     /// would stop both surfaces for the length of a subprocess call.
     TailscaleModeApplied {
+        /// The mode asked for.
         mode: crate::config::TailscaleMode,
+        /// What applying it did.
         outcome: crate::config::TailscaleModeOutcome,
     },
 }
@@ -925,14 +1135,20 @@ pub enum WorkerEvent {
 #[derive(Clone, Debug)]
 pub enum PullOutcome {
     /// The branch was pulled from origin.
-    Pulled { current_branch: Option<String> },
+    Pulled {
+        /// The branch the checkout is on after the pull, when it was re-read.
+        current_branch: Option<String>,
+    },
     /// The repo has no `origin` remote: nothing to pull, and that is a normal
     /// state for local-only repos, not a failure.
-    NoOrigin { current_branch: Option<String> },
+    NoOrigin {
+        /// The branch the checkout is on, when it was re-read.
+        current_branch: Option<String>,
+    },
 }
 
 impl PullOutcome {
-    pub fn current_branch(&self) -> Option<&String> {
+    pub(crate) fn current_branch(&self) -> Option<&String> {
         match self {
             PullOutcome::Pulled { current_branch } | PullOutcome::NoOrigin { current_branch } => {
                 current_branch.as_ref()
@@ -941,22 +1157,28 @@ impl PullOutcome {
     }
 }
 
+/// What a pull runs in.
 #[derive(Clone, Debug)]
 pub enum PullTarget {
+    /// A project's own checkout.
     Project {
+        /// The project pulled.
         project_id: String,
+        /// The project's display name.
         project_name: String,
+        /// The branch the project leads with, when known.
         leading_branch: Option<String>,
     },
+    /// An agent's worktree.
     Session,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
 #[derive(Clone, Debug)]
 pub struct BranchSyncEntry {
-    pub session_id: String,
-    pub worktree_path: String,
-    pub branch_name: String,
+    pub(crate) session_id: String,
+    pub(crate) worktree_path: String,
+    pub(crate) branch_name: String,
 }
 
 /// The identity of a manually attached ("pinned") pull request, carried on a
@@ -967,9 +1189,9 @@ pub struct BranchSyncEntry {
 /// for a pinned session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedPr {
-    pub host: String,
-    pub owner_repo: String,
-    pub number: u64,
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
 }
 
 /// One agent's pull-request answer, with the branch generation it was asked
@@ -978,17 +1200,17 @@ pub struct PinnedPr {
 /// against the new one, while one that lands after an explicit rename stands.
 #[derive(Clone, Debug)]
 pub struct PrStatusResult {
-    pub session_id: String,
+    pub(crate) session_id: String,
     pub(crate) branch_generation: u64,
-    pub pr: Option<crate::model::PrInfo>,
+    pub(crate) pr: Option<crate::model::PrInfo>,
 }
 
 /// Snapshot of session data shared with the PR-sync background worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
-    pub session_id: String,
-    pub branch_name: String,
-    pub worktree_path: String,
+    pub(crate) session_id: String,
+    pub(crate) branch_name: String,
+    pub(crate) worktree_path: String,
     /// If we already know a PR for this session, the worker can use `gh pr view`
     /// (works even after branch deletion) and skip a merged PR entirely. A CLOSED
     /// one is still refreshed, because it can be reopened.
@@ -1025,39 +1247,68 @@ pub struct PrSyncEntry {
     pub(crate) branch_generation: u64,
 }
 
+/// A project change to save to the session database.
 #[derive(Clone, Debug)]
 pub enum ProjectPersistenceAction {
+    /// Register a project.
     Add {
+        /// The project registered.
         project: Project,
+        /// The line reported once it is saved.
         status_message: crate::status_text::StatusText,
     },
+    /// Forget a project, keeping its worktrees.
     Remove {
+        /// The project forgotten.
         project_id: String,
+        /// Its display name.
         project_name: String,
     },
+    /// Delete a project and its worktrees.
     Delete {
+        /// The project deleted.
         project_id: String,
+        /// Its display name.
         project_name: String,
     },
+    /// Change a project's default provider.
     UpdateDefaultProvider {
+        /// The project changed.
         project_id: String,
+        /// Its display name.
         project_name: String,
+        /// The provider it now defaults to, or `None` to follow the global
+        /// default.
         provider: Option<ProviderKind>,
+        /// The global default, named when the project follows it.
         global_default: ProviderKind,
     },
+    /// Change whether a project's agents reopen at startup.
     UpdateAutoReopen {
+        /// The project changed.
         project_id: String,
+        /// Its display name.
         project_name: String,
+        /// The project's choice, or `None` to follow the global setting.
         auto_reopen_agents: Option<bool>,
     },
+    /// Change a project's startup command.
     UpdateStartupCommand {
+        /// The project changed.
         project_id: String,
+        /// Its display name.
         project_name: String,
+        /// The command new agents run, or `None` for none.
         startup_command: Option<String>,
     },
+    /// Change a project's environment variables.
     UpdateEnv {
+        /// The project changed.
         project_id: String,
+        /// Its display name.
         project_name: String,
+        /// The variables the project's agents and terminals get on top of the
+        /// global ones.
         env: BTreeMap<String, String>,
     },
 }

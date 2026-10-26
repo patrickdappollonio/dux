@@ -208,6 +208,14 @@ struct Arrived {
     rows: usize,
 }
 
+/// Whether the log panel's pinned rows stay put above the scrolling part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinnedRows {
+    /// They stay on screen; only the rest scrolls.
+    Stuck,
+    /// They scroll with the rest.
+    Scrolling,
+}
 impl LogView {
     fn new(capacity: usize) -> Self {
         Self {
@@ -303,8 +311,8 @@ impl LogView {
     }
 
     /// Rows that scroll, given whether the pinned startup sticks.
-    fn scroll_total(&self, sticky: bool) -> usize {
-        if sticky {
+    fn scroll_total(&self, pinned: PinnedRows) -> usize {
+        if pinned == PinnedRows::Stuck {
             self.rows.len()
         } else {
             self.pinned_rows.len() + self.rows.len()
@@ -313,8 +321,8 @@ impl LogView {
 
     /// How many whole lines of the bounded log lie entirely after scrolling row
     /// `end`.
-    fn lines_below(&self, sticky: bool, end: usize) -> usize {
-        let mut rows_below = self.scroll_total(sticky).saturating_sub(end);
+    fn lines_below(&self, pinned: PinnedRows, end: usize) -> usize {
+        let mut rows_below = self.scroll_total(pinned).saturating_sub(end);
         let mut lines = 0;
         for rows in self.line_rows.iter().rev() {
             if *rows > rows_below {
@@ -327,8 +335,12 @@ impl LogView {
     }
 
     /// Clone the scrolling rows `start..end` for drawing, and nothing else.
-    fn scroll_window(&self, sticky: bool, start: usize, end: usize) -> Vec<Line<'static>> {
-        let pinned = if sticky { 0 } else { self.pinned_rows.len() };
+    fn scroll_window(&self, pinned: PinnedRows, start: usize, end: usize) -> Vec<Line<'static>> {
+        let pinned = if pinned == PinnedRows::Stuck {
+            0
+        } else {
+            self.pinned_rows.len()
+        };
         (start..end)
             .map(|i| {
                 if i < pinned {
@@ -560,7 +572,11 @@ impl ServerStatusScreen {
     }
 
     fn scroll_by(&mut self, action: Action) {
-        let total = self.view.scroll_total(self.sticky);
+        let total = self.view.scroll_total(if self.sticky {
+            PinnedRows::Stuck
+        } else {
+            PinnedRows::Scrolling
+        });
         let viewport = self.log_rows.max(1);
         match action {
             Action::ScrollLineUp => self.scroll.line_up(viewport, total),
@@ -801,13 +817,24 @@ fn draw_log_panel(
     let sticky = view.pinned_sticks(panel_rows);
     let pinned_rows = if sticky { view.pinned_rows.len() } else { 0 };
     let viewport = panel_rows.saturating_sub(pinned_rows);
-    let total = view.scroll_total(sticky);
+    let total = view.scroll_total(if sticky {
+        PinnedRows::Stuck
+    } else {
+        PinnedRows::Scrolling
+    });
     let end_label = bindings
         .labels_reaching(Action::ScrollToBottom, server_screen_reaches)
         .into_iter()
         .next();
     let (start, note) = place_log(scroll, viewport, total, end_label.as_deref(), |end| {
-        view.lines_below(sticky, end)
+        view.lines_below(
+            if sticky {
+                PinnedRows::Stuck
+            } else {
+                PinnedRows::Scrolling
+            },
+            end,
+        )
     });
     let block = match note {
         Some(note) => block.title_bottom(
@@ -832,7 +859,15 @@ fn draw_log_panel(
     };
     let end = (start + viewport).min(total);
     frame.render_widget(
-        Paragraph::new(view.scroll_window(sticky, start, end)),
+        Paragraph::new(view.scroll_window(
+            if sticky {
+                PinnedRows::Stuck
+            } else {
+                PinnedRows::Scrolling
+            },
+            start,
+            end,
+        )),
         scroll_area,
     );
     render_scroll_indicator(frame, area, scroll_area, start, viewport, total, theme);
@@ -1216,7 +1251,11 @@ impl ServerLogViewer {
 
     /// Scroll by `action`; an action that is not a scroll does nothing.
     pub(crate) fn scroll_by(&mut self, action: Action) {
-        let total = self.view.scroll_total(self.sticky);
+        let total = self.view.scroll_total(if self.sticky {
+            PinnedRows::Stuck
+        } else {
+            PinnedRows::Scrolling
+        });
         let viewport = self.log_rows.max(1);
         match action {
             Action::ScrollLineUp => self.scroll.line_up(viewport, total),
@@ -1329,16 +1368,13 @@ mod tests {
     }
 
     fn bindings() -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
+        RuntimeBindings::new(|action| {
+            BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -1597,9 +1633,9 @@ mod tests {
         LogLine::event("12:00:00", LogTone::Info, msg)
     }
 
-    fn row_texts(view: &LogView, sticky: bool) -> Vec<String> {
-        let total = view.scroll_total(sticky);
-        view.scroll_window(sticky, 0, total)
+    fn row_texts(view: &LogView, pinned: PinnedRows) -> Vec<String> {
+        let total = view.scroll_total(pinned);
+        view.scroll_window(pinned, 0, total)
             .iter()
             .map(line_text)
             .collect()
@@ -1641,7 +1677,7 @@ mod tests {
             view.sync(&ring, &theme);
         }
         assert_eq!(
-            row_texts(&view, true),
+            row_texts(&view, PinnedRows::Stuck),
             vec![
                 "12:00:00 \u{279c} line 2".to_string(),
                 "12:00:00 \u{279c} line 3".to_string(),
@@ -1681,11 +1717,18 @@ mod tests {
             view.pinned_rows.iter().map(line_text).collect::<Vec<_>>(),
             vec!["12:00:00 \u{279c} banner".to_string()]
         );
-        assert_eq!(row_texts(&view, true).len(), 2, "the bounded part scrolls");
+        assert_eq!(
+            row_texts(&view, PinnedRows::Stuck).len(),
+            2,
+            "the bounded part scrolls"
+        );
         // A panel too short to hold it on top scrolls it with the log instead,
         // so nothing of it is cut off.
         assert!(!view.pinned_sticks(1));
-        assert_eq!(row_texts(&view, false)[0], "12:00:00 \u{279c} banner");
+        assert_eq!(
+            row_texts(&view, PinnedRows::Scrolling)[0],
+            "12:00:00 \u{279c} banner"
+        );
     }
 
     /// The note on the border describes the position actually drawn: decided
@@ -1858,9 +1901,9 @@ mod tests {
                 for n in 0..frames {
                     ring.push(line(n));
                     view.sync(&ring, &theme);
-                    let total = view.scroll_total(true);
+                    let total = view.scroll_total(PinnedRows::Stuck);
                     let start = total.saturating_sub(viewport);
-                    std::hint::black_box(view.scroll_window(true, start, total));
+                    std::hint::black_box(view.scroll_window(PinnedRows::Stuck, start, total));
                 }
                 new_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
             }

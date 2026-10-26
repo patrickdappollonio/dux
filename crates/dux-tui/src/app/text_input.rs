@@ -9,7 +9,7 @@ type CharMapFn = fn(&str, usize, char) -> Option<char>;
 /// Single-line by default; [`TextInput::with_multiline`] enables multiline
 /// editing, where Enter inserts newlines and Up/Down navigate between lines.
 #[derive(Clone, Debug)]
-pub struct TextInput {
+pub(crate) struct TextInput {
     pub text: String,
     pub cursor: usize,
     multiline: Option<MultilineState>,
@@ -37,7 +37,7 @@ impl Default for TextInput {
 }
 
 impl TextInput {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             cursor: 0,
@@ -47,7 +47,7 @@ impl TextInput {
         }
     }
 
-    pub fn with_text(text: String) -> Self {
+    pub(crate) fn with_text(text: String) -> Self {
         let cursor = text.len();
         Self {
             text,
@@ -59,26 +59,26 @@ impl TextInput {
     }
 
     /// Set placeholder text shown when the input is empty.
-    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+    pub(crate) fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = Some(placeholder.into());
         self
     }
 
     /// Returns the placeholder text, if set, for rendering when the input is empty.
-    pub fn placeholder(&self) -> Option<&str> {
+    pub(crate) fn placeholder(&self) -> Option<&str> {
         self.placeholder.as_deref()
     }
 
     /// Set a character mapper consulted before each insertion with the current
     /// text, cursor byte-offset, and candidate character. `Some(c)` inserts `c`,
     /// which may differ from the input; `None` silently rejects.
-    pub fn with_char_map(mut self, map: fn(&str, usize, char) -> Option<char>) -> Self {
+    pub(crate) fn with_char_map(mut self, map: fn(&str, usize, char) -> Option<char>) -> Self {
         self.char_map = Some(map);
         self
     }
 
     /// Enable multiline editing with a visible line limit for rendering.
-    pub fn with_multiline(mut self, visible_lines: usize) -> Self {
+    pub(crate) fn with_multiline(mut self, visible_lines: usize) -> Self {
         self.multiline = Some(MultilineState {
             visible_lines,
             scroll_offset: 0,
@@ -92,13 +92,13 @@ impl TextInput {
     /// called at construction and not by its rendered height, its label, or the
     /// modal it sits in. Public because the dual-mode rule in
     /// [`crate::app::modal`] has to ask a live instance.
-    pub fn is_multiline(&self) -> bool {
+    pub(crate) fn is_multiline(&self) -> bool {
         self.multiline.is_some()
     }
 
     /// Set the display width for soft-wrapping in multiline mode.
     /// Lines longer than this width are wrapped visually. Pass `None` to disable.
-    pub fn set_display_width(&mut self, width: Option<usize>) {
+    pub(crate) fn set_display_width(&mut self, width: Option<usize>) {
         if let Some(m) = &mut self.multiline {
             m.display_width = width;
         }
@@ -106,23 +106,23 @@ impl TextInput {
 
     // ── Character-level operations ──────────────────────────────────
 
-    pub fn move_left(&mut self) {
+    pub(crate) fn move_left(&mut self) {
         self.cursor = prev_char_boundary(&self.text, self.cursor);
     }
 
-    pub fn move_right(&mut self) {
+    pub(crate) fn move_right(&mut self) {
         self.cursor = next_char_boundary(&self.text, self.cursor);
     }
 
-    pub fn move_home(&mut self) {
+    pub(crate) fn move_home(&mut self) {
         self.cursor = 0;
     }
 
-    pub fn move_end(&mut self) {
+    pub(crate) fn move_end(&mut self) {
         self.cursor = self.text.len();
     }
 
-    pub fn insert_char(&mut self, ch: char) {
+    pub(crate) fn insert_char(&mut self, ch: char) {
         let index = clamp_cursor(&self.text, self.cursor);
         let ch = if let Some(map) = self.char_map {
             match map(&self.text, index, ch) {
@@ -148,7 +148,7 @@ impl TextInput {
     ///
     /// Goes through [`TextInput::insert_char`] per character so the optional
     /// `char_map` filters a paste exactly as it filters typing.
-    pub fn insert_str(&mut self, text: &str) {
+    pub(crate) fn insert_str(&mut self, text: &str) {
         let multiline = self.multiline.is_some();
         let mut pending_separator = false;
         let mut inserted_any = false;
@@ -181,7 +181,7 @@ impl TextInput {
         }
     }
 
-    pub fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         let index = clamp_cursor(&self.text, self.cursor);
         if index == 0 {
             return;
@@ -191,7 +191,7 @@ impl TextInput {
         self.cursor = prev;
     }
 
-    pub fn delete(&mut self) {
+    pub(crate) fn delete(&mut self) {
         let index = clamp_cursor(&self.text, self.cursor);
         if index >= self.text.len() {
             return;
@@ -203,15 +203,15 @@ impl TextInput {
 
     // ── Word-level operations ───────────────────────────────────────
 
-    pub fn move_left_word(&mut self) {
+    pub(crate) fn move_left_word(&mut self) {
         self.cursor = prev_word_boundary(&self.text, self.cursor);
     }
 
-    pub fn move_right_word(&mut self) {
+    pub(crate) fn move_right_word(&mut self) {
         self.cursor = next_word_boundary(&self.text, self.cursor);
     }
 
-    pub fn backspace_word(&mut self) {
+    pub(crate) fn backspace_word(&mut self) {
         let index = clamp_cursor(&self.text, self.cursor);
         let target = prev_word_boundary(&self.text, index);
         if target < index {
@@ -220,7 +220,7 @@ impl TextInput {
         }
     }
 
-    pub fn delete_word(&mut self) {
+    pub(crate) fn delete_word(&mut self) {
         let index = clamp_cursor(&self.text, self.cursor);
         let target = next_word_boundary(&self.text, index);
         if target > index {
@@ -231,17 +231,17 @@ impl TextInput {
 
     // ── Bulk operations ─────────────────────────────────────────────
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
     }
 
-    pub fn set_text(&mut self, text: String) {
+    pub(crate) fn set_text(&mut self, text: String) {
         self.cursor = text.len();
         self.text = text;
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
 
@@ -250,7 +250,7 @@ impl TextInput {
     /// Move cursor to the same column on the previous visual line.
     /// If the previous line is shorter, the cursor lands at its end.
     /// No-op when already on the first line or in single-line mode.
-    pub fn move_up(&mut self) {
+    pub(crate) fn move_up(&mut self) {
         if self.multiline.is_none() {
             return;
         }
@@ -266,7 +266,7 @@ impl TextInput {
     /// Move cursor to the same column on the next visual line.
     /// If the next line is shorter, the cursor lands at its end.
     /// No-op when already on the last line or in single-line mode.
-    pub fn move_down(&mut self) {
+    pub(crate) fn move_down(&mut self) {
         if self.multiline.is_none() {
             return;
         }
@@ -282,7 +282,7 @@ impl TextInput {
 
     /// Move cursor to the start of the current visual line (multiline) or
     /// to the start of the entire text (single-line).
-    pub fn move_line_home(&mut self) {
+    pub(crate) fn move_line_home(&mut self) {
         if self.multiline.is_none() {
             self.cursor = 0;
             return;
@@ -294,7 +294,7 @@ impl TextInput {
 
     /// Move cursor to the end of the current visual line (multiline) or
     /// to the end of the entire text (single-line).
-    pub fn move_line_end(&mut self) {
+    pub(crate) fn move_line_end(&mut self) {
         if self.multiline.is_none() {
             self.cursor = self.text.len();
             return;
@@ -306,18 +306,18 @@ impl TextInput {
     }
 
     /// Total number of visual lines (accounting for soft-wrap).
-    pub fn total_lines(&self) -> usize {
+    pub(crate) fn total_lines(&self) -> usize {
         visual_line_count(&self.text, self.wrap_width())
     }
 
     /// Current scroll offset (first visible visual line index). Returns 0 in single-line mode.
-    pub fn scroll_offset(&self) -> usize {
+    pub(crate) fn scroll_offset(&self) -> usize {
         self.multiline.as_ref().map_or(0, |m| m.scroll_offset)
     }
 
     /// Returns the visual lines currently visible for rendering
     /// (accounting for soft-wrap and scroll offset).
-    pub fn visible_lines(&self) -> Vec<String> {
+    pub(crate) fn visible_lines(&self) -> Vec<String> {
         let width = self.wrap_width();
         let all = compute_visual_lines(&self.text, width);
         match &self.multiline {
@@ -332,7 +332,7 @@ impl TextInput {
 
     /// Returns `(row, col)` of the cursor relative to the scroll offset, for rendering.
     /// In single-line mode, returns `(0, cursor_position)`.
-    pub fn cursor_display_position(&self) -> (usize, usize) {
+    pub(crate) fn cursor_display_position(&self) -> (usize, usize) {
         let width = self.wrap_width();
         let (vrow, vcol) = cursor_visual_pos(&self.text, self.cursor, width);
         let offset = self.scroll_offset();
@@ -342,7 +342,7 @@ impl TextInput {
     /// Set the cursor position from a visual (row, col) relative to the scroll
     /// offset, as produced by a mouse click. The row is relative to the visible
     /// area (0 = first visible line), not the absolute visual row.
-    pub fn set_cursor_from_display_pos(&mut self, display_row: usize, display_col: usize) {
+    pub(crate) fn set_cursor_from_display_pos(&mut self, display_row: usize, display_col: usize) {
         let offset = self.scroll_offset();
         let abs_row = offset + display_row;
         let width = self.wrap_width();
@@ -351,7 +351,7 @@ impl TextInput {
 
     /// Scroll by a signed number of lines (positive = down, negative = up).
     /// Clamps to valid range. No-op in single-line mode.
-    pub fn scroll_by(&mut self, delta: isize) {
+    pub(crate) fn scroll_by(&mut self, delta: isize) {
         let Some(m) = &mut self.multiline else {
             return;
         };
@@ -365,7 +365,7 @@ impl TextInput {
     }
 
     /// Update the visible line count (e.g. when the render area height changes).
-    pub fn set_visible_lines(&mut self, visible: usize) {
+    pub(crate) fn set_visible_lines(&mut self, visible: usize) {
         if let Some(m) = &mut self.multiline {
             m.visible_lines = visible;
         }
@@ -408,7 +408,7 @@ impl TextInput {
     ///
     /// Everything else (Esc, Tab, and Enter/Up/Down in single-line mode)
     /// returns `false` for the caller to handle.
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let is_multiline = self.multiline.is_some();
@@ -1877,14 +1877,10 @@ mod tests {
         assert_eq!(input.text, "y");
     }
 
-    /// A mapper that converts 'a' to 'A'.
-    fn upcase_a(_text: &str, _cursor: usize, ch: char) -> Option<char> {
-        if ch == 'a' { Some('A') } else { Some(ch) }
-    }
-
     #[test]
     fn map_transforms_char() {
-        let mut input = TextInput::new().with_char_map(upcase_a);
+        let mut input =
+            TextInput::new().with_char_map(|_, _, ch| Some(if ch == 'a' { 'A' } else { ch }));
         input.handle_key(key(KeyCode::Char('a')));
         input.handle_key(key(KeyCode::Char('b')));
         input.handle_key(key(KeyCode::Char('a')));

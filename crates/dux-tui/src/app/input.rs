@@ -1,5 +1,5 @@
 use super::components::wrap_lines::cluster_width;
-use super::components::{ButtonPressedTarget, PressedButton, next_focus};
+use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
 use chrono::Local;
@@ -184,6 +184,15 @@ fn is_reverse_tab(key: KeyEvent) -> bool {
 /// rebound key simply moves forwards.
 fn focus_move_is_reverse(key: KeyEvent) -> bool {
     is_reverse_tab(key) || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+}
+
+/// Which way a focus-moving key travels.
+fn focus_move_step(key: KeyEvent) -> FocusStep {
+    if focus_move_is_reverse(key) {
+        FocusStep::Backward
+    } else {
+        FocusStep::Forward
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,16 +538,6 @@ impl ForwardedInput {
 }
 
 impl RawInputDispatch {
-    fn new(is_scrolled_back: bool, may_write_pty: bool) -> Self {
-        Self {
-            forward_batch: Vec::new(),
-            is_scrolled_back,
-            may_write_pty,
-            needs_selection_clear: false,
-            forwarded: ForwardedInput::default(),
-        }
-    }
-
     fn queue(&mut self, bytes: &[u8]) {
         self.forward_batch.extend_from_slice(bytes);
     }
@@ -565,12 +564,12 @@ impl RawInputDispatch {
         app.stamp_forwarded_input(&mut self.forwarded);
     }
 
-    fn finish(&mut self, app: &mut App, normalized_paste_forwarded: bool) {
+    fn finish(&mut self, app: &mut App, paste: NormalizedPaste) {
         self.flush(app);
         if self.needs_selection_clear {
             app.terminal_selection = None;
         }
-        if normalized_paste_forwarded
+        if paste == NormalizedPaste::Forwarded
             && !self.is_scrolled_back
             && app.selected_terminal_surface_client().is_some()
         {
@@ -580,11 +579,16 @@ impl RawInputDispatch {
     }
 }
 
-fn raw_action_can_reach_pty(
-    action: &RawSeqAction,
+/// What a scrolled-back pane can do with a scroll key right now.
+#[derive(Clone, Copy, Debug)]
+struct LocalScroll {
+    /// The pane is scrolled back from the live edge.
     has_scrollback: bool,
+    /// The pty has a known height to scroll by.
     has_page_height: bool,
-) -> bool {
+}
+
+fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
     match action {
         RawSeqAction::Forward(_) => true,
         RawSeqAction::Intercept(
@@ -596,15 +600,71 @@ fn raw_action_can_reach_pty(
             _,
         ) => false,
         RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
-        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, conditional, _) => {
-            !(*conditional && has_scrollback && has_page_height)
+        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
+            !(*scroll == RawScroll::WhenScrolledBack
+                && local.has_scrollback
+                && local.has_page_height)
         }
-        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, conditional, _) => {
-            !(*conditional && has_scrollback)
+        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, _) => {
+            !(*scroll == RawScroll::WhenScrolledBack && local.has_scrollback)
         }
         RawSeqAction::Intercept(..) => true,
         RawSeqAction::Mouse(..) => false,
     }
+}
+
+/// Who a key pressed in the typeable center pane belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyClaim {
+    /// Typing: the agent would get it.
+    Typing,
+    /// A dux chord.
+    Dux,
+}
+
+/// Which of the selected agent's git verdicts a changes-panel action needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitUse {
+    /// A change to the repository (stage, discard, commit).
+    Mutation,
+    /// A read for the changes panel (a diff).
+    Read,
+}
+
+/// What a terminal focus report said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusChange {
+    /// The host terminal gained focus.
+    Gained,
+    /// It lost focus.
+    Lost,
+}
+
+/// Where a mouse press landed relative to the open overlay's frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressPlace {
+    /// Outside the frame, which dismisses most overlays.
+    Outside,
+    /// Inside it.
+    Inside,
+}
+
+/// Whether the screen shows the windowed layout or one maximized surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneLayout {
+    /// The windowed layout, with every pane on screen.
+    Windowed,
+    /// A fullscreen surface.
+    Maximized,
+}
+
+/// Whether the child asked for mouse reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseReporting {
+    /// It did, so it wants wheel events.
+    On,
+    /// It did not.
+    Off,
 }
 
 /// Decide whether a mouse-wheel event should be forwarded to the embedded
@@ -614,20 +674,20 @@ fn raw_action_can_reach_pty(
 /// or not. `Some(true)` always forwards, `Some(false)` never does. Page keys have
 /// their own rule below, keyed on the alt screen, because a normal-buffer app has
 /// host scrollback for them to page through.
-fn should_forward_wheel(forward_scroll: Option<bool>, _alt_screen: bool, mouse_mode: bool) -> bool {
+fn should_forward_wheel(forward_scroll: Option<bool>, mouse: MouseReporting) -> bool {
     match forward_scroll {
         Some(v) => v,
-        None => mouse_mode,
+        None => mouse == MouseReporting::On,
     }
 }
 
 /// Decide whether a page-scroll key (PgUp/PgDn) should be forwarded to the
 /// embedded child process. Page keys don't need mouse mode: in the alt screen
 /// there is no host scrollback, so forward them to the child.
-fn should_forward_page(forward_scroll: Option<bool>, alt_screen: bool) -> bool {
+fn should_forward_page(forward_scroll: Option<bool>, screen: dux_core::pty::ScreenBuffer) -> bool {
     match forward_scroll {
         Some(v) => v,
-        None => alt_screen,
+        None => screen == dux_core::pty::ScreenBuffer::Alternate,
     }
 }
 
@@ -757,7 +817,7 @@ pub(crate) struct LinkPressDecision {
 
 /// Decide what a press means. `link_uri` is the address under the pressed cell
 /// (already resolved through the rendered snapshot, `None` when the cell
-/// carries no link or hyperlinks are off), and `child_wants_mouse` says whether
+/// carries no link or hyperlinks are off), and `mouse_reporting` says whether
 /// the child has mouse reporting on.
 ///
 /// Shift is deliberately absent from the rule on this surface, unlike the web:
@@ -768,7 +828,7 @@ pub(crate) fn decide_terminal_press(
     kind: MouseEventKind,
     modifiers: KeyModifiers,
     link_uri: Option<&str>,
-    child_wants_mouse: bool,
+    mouse_reporting: MouseReporting,
 ) -> TerminalPressAction {
     if !matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
         return TerminalPressAction::Unclaimed;
@@ -776,7 +836,7 @@ pub(crate) fn decide_terminal_press(
     let Some(uri) = link_uri else {
         return TerminalPressAction::Unclaimed;
     };
-    if !child_wants_mouse {
+    if mouse_reporting == MouseReporting::Off {
         // Nothing reaches a child that never asked for the mouse, so there is
         // nothing to withhold: the press keeps its ordinary meaning (focus, or
         // the start of a selection) and only the release can open. The hatch
@@ -989,7 +1049,7 @@ impl App {
             return Ok(KeyRoute::Return(false));
         }
         if self.macro_bar.is_some() {
-            return self.handle_macro_bar_key(key).map(KeyRoute::Return);
+            return Ok(KeyRoute::Return(self.handle_macro_bar_key(key)));
         }
         debug_assert!(
             !matches!(
@@ -1020,11 +1080,11 @@ impl App {
             return Ok(KeyRoute::Return(false));
         }
         if self.input_target == InputTarget::CommitMessage {
-            self.handle_commit_input_key(key)?;
+            self.handle_commit_input_key(key);
             return Ok(KeyRoute::Return(false));
         }
         if self.input_target == InputTarget::StartupCommand {
-            self.handle_startup_command_input_key(key)?;
+            self.handle_startup_command_input_key(key);
             return Ok(KeyRoute::Return(false));
         }
         Ok(KeyRoute::Continue)
@@ -1037,7 +1097,7 @@ impl App {
             && self.focused_pty_is_covered_by_card()
     }
 
-    fn handle_takeover_card_key(&mut self, key: KeyEvent, typing_owns_key: bool) -> bool {
+    fn handle_takeover_card_key(&mut self, key: KeyEvent, claim: KeyClaim) -> bool {
         let presses_button = self.bindings.lookup(&key, BindingScope::Center)
             == Some(Action::FocusAgent)
             || (key.code == KeyCode::Char(' ') && key.modifiers.is_empty());
@@ -1045,16 +1105,25 @@ impl App {
             self.take_over_focused_pty();
             return true;
         }
-        typing_owns_key && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+        claim == KeyClaim::Typing && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
     }
 
     fn route_minimized_center_key(&mut self, key: KeyEvent) -> bool {
         let typing_owns_key = crate::keybindings::center_typing_owns_key(
             &key,
-            self.engine.config.ui.tab_reaches_agent,
+            if self.engine.config.ui.tab_reaches_agent {
+                crate::keybindings::TabKey::ReachesAgent
+            } else {
+                crate::keybindings::TabKey::MovesPanes
+            },
         );
         let card_owns_center = self.takeover_card_owns_center_key();
-        if card_owns_center && self.handle_takeover_card_key(key, typing_owns_key) {
+        let claim = if typing_owns_key {
+            KeyClaim::Typing
+        } else {
+            KeyClaim::Dux
+        };
+        if card_owns_center && self.handle_takeover_card_key(key, claim) {
             return true;
         }
         if !card_owns_center && self.center_typeable() && typing_owns_key {
@@ -1084,7 +1153,11 @@ impl App {
     }
 
     fn focus_next_pane(&mut self) {
-        let has_staged = !self.engine.staged_files.is_empty();
+        let has_staged = if self.engine.staged_files.is_empty() {
+            StagedFiles::Absent
+        } else {
+            StagedFiles::Present
+        };
         if self.focus == FocusPane::Left
             && self.left_section == LeftSection::Projects
             && self.has_terminal_items()
@@ -1104,7 +1177,7 @@ impl App {
             }
         } else {
             self.focus = self.focus.next();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.next();
             }
             if self.focus == FocusPane::Files {
@@ -1119,12 +1192,16 @@ impl App {
     }
 
     fn focus_previous_pane(&mut self) {
-        let has_staged = !self.engine.staged_files.is_empty();
+        let has_staged = if self.engine.staged_files.is_empty() {
+            StagedFiles::Absent
+        } else {
+            StagedFiles::Present
+        };
         if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
             self.left_section = LeftSection::Projects;
         } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Projects {
             self.focus = self.focus.previous();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.previous();
             }
             if self.focus == FocusPane::Files {
@@ -1141,7 +1218,7 @@ impl App {
             }
         } else {
             self.focus = self.focus.previous();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.previous();
             }
             if self.focus == FocusPane::Files {
@@ -1184,16 +1261,16 @@ impl App {
                 self.help_scroll = self.help_scroll.is_none().then_some(0);
             }
             Action::ForceRedraw => {
-                self.force_redraw = true;
+                self.notes.force_redraw = true;
                 self.set_ui_hint("Interface redrawn. All screen contents have been repainted.");
             }
             Action::OpenPalette => self.open_command_palette(),
             Action::FocusNext => self.focus_next_pane(),
             Action::FocusPrev => self.focus_previous_pane(),
-            Action::ToggleSidebar => self.left_collapsed = !self.left_collapsed,
+            Action::ToggleSidebar => self.panes.left_collapsed = !self.panes.left_collapsed,
             Action::ToggleGitPane => {
-                self.right_collapsed = !self.right_collapsed;
-                if self.right_collapsed && self.focus == FocusPane::Files {
+                self.panes.right_collapsed = !self.panes.right_collapsed;
+                if self.panes.right_collapsed && self.focus == FocusPane::Files {
                     self.focus = FocusPane::Center;
                 }
             }
@@ -1325,41 +1402,44 @@ impl App {
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.left_section == LeftSection::Terminals {
-            return self.handle_left_terminal_key(key);
+            return {
+                self.handle_left_terminal_key(key);
+                Ok(())
+            };
         }
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
-                Action::FocusAgent => self.activate_selected_left_item(true)?,
+                Action::FocusAgent => self.activate_selected_left_item(OnDormant::Launch)?,
                 // From the sidebar, the fullscreen toggle reopens fullscreen
                 // for a live agent and never launches a dormant one;
                 // `InteractAgent` stays the explicit jump-to-fullscreen.
-                Action::ToggleFullscreen => self.activate_selected_left_item(false)?,
+                Action::ToggleFullscreen => self.activate_selected_left_item(OnDormant::Leave)?,
                 Action::OpenProjectBrowser => {
-                    self.open_project_browser()?;
+                    self.open_project_browser();
                 }
                 Action::FilterAgents => self.open_agent_filter(),
-                Action::NewAgent => self.create_agent_for_selected_project()?,
-                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
+                Action::NewAgent => self.create_agent_for_selected_project(),
+                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree(),
                 // The same folder browser the palette command opens: one way
                 // in, two gestures.
-                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
-                Action::ForkAgent => self.fork_selected_session()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser(),
+                Action::ForkAgent => self.fork_selected_session(),
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
                     self.checkout_selected_project_default_branch()?;
                 }
                 Action::ChangeProjectBaseBranch => self.change_selected_project_base_branch()?,
-                Action::ShowTerminal => self.show_or_open_first_terminal()?,
-                Action::DeleteSession => self.confirm_delete_selected_session()?,
-                Action::RenameSession => self.open_rename_session()?,
-                Action::OpenAgentInfo => self.open_agent_info()?,
+                Action::ShowTerminal => self.show_or_open_first_terminal(),
+                Action::DeleteSession => self.confirm_delete_selected_session(),
+                Action::RenameSession => self.open_rename_session(),
+                Action::OpenAgentInfo => self.open_agent_info(),
                 Action::EditMacros => self.open_edit_macros(),
                 Action::CopyPath => self.copy_selected_path()?,
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
-                Action::ChooseWorktreeEditor => self.open_worktree_editor_picker()?,
+                Action::ChooseWorktreeEditor => self.open_worktree_editor_picker(),
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
                 Action::InteractAgent => {
                     if self.selected_session().is_some()
@@ -1416,7 +1496,7 @@ impl App {
                     .terminal_items()
                     .get(self.selected_terminal_index)
                     .map(|(id, _)| (*id).clone());
-                self.open_terminal_from_terminal_list()?;
+                self.open_terminal_from_terminal_list();
                 self.close_agent_filter();
                 if let Some(id) = keep {
                     self.reselect_left_terminal(&id);
@@ -1427,7 +1507,7 @@ impl App {
                 // Preserve the activated agent across the exit so the restored full
                 // list keeps it selected (Enter on the Inactive toggle has no agent).
                 let keep = self.selected_session().map(|s| s.id.clone());
-                self.activate_selected_left_item(true)?;
+                self.activate_selected_left_item(OnDormant::Launch)?;
                 self.close_agent_filter();
                 if let Some(id) = keep {
                     self.reselect_left_session(&id);
@@ -1490,35 +1570,36 @@ impl App {
     /// surviving one is a pruned list waiting behind a modal under a query the
     /// user has forgotten typing. Both Left handlers route through here so the
     /// two cannot drift.
-    fn leave_pane_for_standalone_browser(&mut self) -> Result<()> {
+    fn leave_pane_for_standalone_browser(&mut self) {
         if self.agent_filter.is_some() {
             self.close_agent_filter();
         }
-        self.open_standalone_agent_browser()
+        {
+            self.open_standalone_agent_browser();
+        }
     }
 
-    fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_left_terminal_key(&mut self, key: KeyEvent) {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent | Action::ToggleFullscreen => {
                     // Open terminal overlay for the selected terminal item.
-                    self.open_terminal_from_terminal_list()?;
+                    self.open_terminal_from_terminal_list();
                 }
                 Action::ShowTerminal => {
-                    self.spawn_terminal_for_selected_terminal()?;
+                    self.spawn_terminal_for_selected_terminal();
                 }
-                Action::DeleteSession => self.confirm_delete_selected_terminal()?,
+                Action::DeleteSession => self.confirm_delete_selected_terminal(),
                 // A standalone agent belongs to no row, so it is creatable
                 // from anywhere in the Left pane: the terminals subsection is
                 // still the agents pane, and the footer names the key there
                 // too.
-                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser(),
                 _ => {}
             }
         }
-        Ok(())
     }
 
     fn focus_or_activate_center(&mut self, key: KeyEvent) -> Result<()> {
@@ -1527,14 +1608,14 @@ impl App {
                 self.forward_typing_key_to_center(&key);
             }
         } else {
-            self.activate_center_agent(true, false)?;
+            self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
         }
         Ok(())
     }
 
     fn toggle_center_fullscreen(&mut self) -> Result<()> {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            self.activate_center_agent(true, true)?;
+            self.activate_center_agent(OnDormant::Launch, LaunchView::Fullscreen)?;
         } else {
             self.close_top_overlay();
         }
@@ -1557,8 +1638,8 @@ impl App {
 
     fn handle_center_tab_action(&mut self, action: Action) -> Result<bool> {
         match action {
-            Action::NextTab => self.focus_tab_relative(true),
-            Action::PrevTab => self.focus_tab_relative(false),
+            Action::NextTab => self.focus_tab_relative(FocusStep::Forward),
+            Action::PrevTab => self.focus_tab_relative(FocusStep::Backward),
             Action::NewTab => self.open_new_tab_provider_prompt()?,
             Action::CloseTab => self.close_focused_tab_prompt(),
             Action::StopTab => self.stop_focused_tab_prompt(),
@@ -1584,14 +1665,16 @@ impl App {
             Action::FocusAgent => self.focus_or_activate_center(key)?,
             Action::ToggleFullscreen => self.toggle_center_fullscreen()?,
             Action::OpenMacroBar => self.open_center_macro_bar(),
-            Action::ShowTerminal => self.show_or_open_first_terminal()?,
-            Action::DeleteSession => self.confirm_delete_selected_session()?,
-            Action::RenameSession => self.open_rename_session()?,
-            Action::OpenAgentInfo => self.open_agent_info()?,
+            Action::ShowTerminal => self.show_or_open_first_terminal(),
+            Action::DeleteSession => self.confirm_delete_selected_session(),
+            Action::RenameSession => self.open_rename_session(),
+            Action::OpenAgentInfo => self.open_agent_info(),
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
                 self.open_current_pr_in_browser();
             }
-            Action::ReconnectAgent => self.activate_center_agent(true, false)?,
+            Action::ReconnectAgent => {
+                self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
+            }
             _ => {}
         }
         Ok(())
@@ -1685,8 +1768,8 @@ impl App {
         true
     }
 
-    fn forward_unbound_center_key(&mut self, key: &KeyEvent, in_diff: bool) {
-        if !in_diff && self.center_typeable() && !self.scroll_mode_active() {
+    fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
+        if self.center_typeable() && !self.scroll_mode_active() {
             self.forward_typing_key_to_center(key);
         }
     }
@@ -1694,7 +1777,9 @@ impl App {
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         let Some(action) = self.bindings.lookup(&key, BindingScope::Center) else {
-            self.forward_unbound_center_key(&key, in_diff);
+            if !in_diff {
+                self.forward_unbound_center_key(&key);
+            }
             return Ok(());
         };
 
@@ -1721,9 +1806,14 @@ impl App {
     /// policy (or the live alt-screen state) says the child owns page keys.
     fn should_forward_center_page(&self) -> bool {
         let fs = self.selected_surface_forward_scroll();
-        let alt = self
+        let alt = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen)
+        {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
         should_forward_page(fs, alt)
     }
 
@@ -1740,7 +1830,11 @@ impl App {
         // The child's DECCKM state is read at encode time so an app that
         // flips application cursor keys on or off mid-session gets the form
         // it currently expects.
-        let app_cursor = provider.has_app_cursor();
+        let app_cursor = if provider.has_app_cursor() {
+            crate::key_encode::CursorKeys::Application
+        } else {
+            crate::key_encode::CursorKeys::Normal
+        };
         let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key, app_cursor) else {
             return;
         };
@@ -2528,11 +2622,11 @@ impl App {
                             self.input_target = InputTarget::CommitMessage;
                         }
                     } else {
-                        self.open_diff_for_selected_file()?;
+                        self.open_diff_for_selected_file();
                     }
                 }
                 Action::DiscardChanges if self.right_section != RightSection::CommitInput => {
-                    self.confirm_discard_selected_file()?;
+                    self.confirm_discard_selected_file();
                 }
                 Action::EngageCommitInput if !self.engine.staged_files.is_empty() => {
                     self.input_target = InputTarget::CommitMessage;
@@ -2557,12 +2651,12 @@ impl App {
         Ok(())
     }
 
-    fn handle_commit_input_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_commit_input_key(&mut self, key: KeyEvent) {
         // Exit actions are dispatched via bindings; text input stays hardcoded.
         if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.input_target = InputTarget::None;
-            return Ok(());
+            return;
         }
         // The advertised "empty the focused full-text field" key. The commit
         // pane IS a focused full-text field, and `TextInput` does not answer
@@ -2571,19 +2665,18 @@ impl App {
         if let Some(Action::ClearTextField) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.commit_input.clear();
-            return Ok(());
+            return;
         }
         // TextInput handles Enter (newline), Up/Down (line nav), and all
         // editing keys in multiline mode.
         self.commit_input.handle_key(key);
-        Ok(())
     }
 
-    fn handle_startup_command_input_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_startup_command_input_key(&mut self, key: KeyEvent) {
         if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.input_target = InputTarget::None;
-            return Ok(());
+            return;
         }
         if let Some(input) = match &mut self.prompt {
             PromptState::ConfigureStartupCommand { input, .. }
@@ -2602,10 +2695,9 @@ impl App {
         } else {
             self.input_target = InputTarget::None;
         }
-        Ok(())
     }
 
-    fn handle_macro_bar_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_macro_bar_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
                 // The palette and the macro bar are the deliberate exception to the
@@ -2621,7 +2713,7 @@ impl App {
                 let (query, selected) = if let Some(bar) = &self.macro_bar {
                     (bar.input.text.clone(), bar.selected)
                 } else {
-                    return Ok(false);
+                    return false;
                 };
                 let filtered = self.filtered_macros(&query);
                 if let Some((name, payload)) = filtered.get(selected).map(|(name, text)| {
@@ -2701,7 +2793,7 @@ impl App {
                 }
             }
         }
-        Ok(false)
+        false
     }
 
     /// Open the macro bar over the focused center surface. Shared by the
@@ -2713,7 +2805,7 @@ impl App {
             input: TextInput::new(),
             selected: 0,
         };
-        self.palette_opened_over = Some(self.status.showing());
+        self.palette_opened_over = PaletteOpenedOver::from_line(self.status.showing());
         self.palette_hint_gen = Some(self.status.set(
             Instant::now(),
             Some(UI_HINT_KEY.to_string()),
@@ -2822,17 +2914,17 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn confirm_discard_selected_file(&mut self) -> Result<()> {
+    pub(crate) fn confirm_discard_selected_file(&mut self) {
         match self.right_section {
             RightSection::Unstaged => {}
             RightSection::Staged => {
                 self.set_error("Unstage the file first to discard changes.");
-                return Ok(());
+                return;
             }
-            RightSection::CommitInput => return Ok(()),
+            RightSection::CommitInput => return,
         }
         let Some(file) = self.selected_changed_file() else {
-            return Ok(());
+            return;
         };
         // Two folders a delete would not act on get a sentence, not a dialog
         // that offers a deletion: one holding only repositories of their own
@@ -2851,7 +2943,7 @@ impl App {
                     contents.linked_worktrees,
                     git::FolderAction::Delete,
                 ));
-                return Ok(());
+                return;
             }
             dux_core::model::ChangedFileKind::LinkedWorktree => {
                 let path = file.path.clone();
@@ -2859,7 +2951,7 @@ impl App {
                     "\"{path}/\" is a worktree of this same repository, not a repository of its \
                      own; remove it from the worktree manager so git forgets it too."
                 ));
-                return Ok(());
+                return;
             }
             dux_core::model::ChangedFileKind::File
             | dux_core::model::ChangedFileKind::Directory(_)
@@ -2873,7 +2965,6 @@ impl App {
             kind: file.kind.clone(),
             focus: ConfirmFocus::Cancel,
         };
-        Ok(())
     }
 
     fn execute_commit(&mut self) -> Result<()> {
@@ -2932,7 +3023,7 @@ impl App {
     /// The web twin is `git_routes::resolve_changes_worktree`, and both read the
     /// one engine verdict.
     pub(crate) fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
-        self.selection_changes_directory(true)
+        self.selection_changes_directory(GitUse::Mutation)
     }
 
     /// The same directory for a changes-panel READ (the file diff). A separate
@@ -2943,15 +3034,15 @@ impl App {
     /// session's directory raw is what keeps a stale `WorkingRepo` verdict from
     /// rendering every file in a folder with no repository as fully added.
     pub(crate) fn diff_worktree_for_selection(&mut self) -> Option<PathBuf> {
-        self.selection_changes_directory(false)
+        self.selection_changes_directory(GitUse::Read)
     }
 
-    /// `mutating` picks which of the two engine predicates decides. Both set the
+    /// `git_use` picks which of the two engine predicates decides. Both set the
     /// folder's own refusal sentence and answer `None`.
-    fn selection_changes_directory(&mut self, mutating: bool) -> Option<PathBuf> {
+    fn selection_changes_directory(&mut self, git_use: GitUse) -> Option<PathBuf> {
         let session_id = self.selected_session()?.id.clone();
         let access = self.engine.session_git_access(&session_id)?;
-        let allowed = if mutating {
+        let allowed = if git_use == GitUse::Mutation {
             access.mutations_allowed()
         } else {
             access.changes_panel_works()
@@ -3080,7 +3171,7 @@ impl App {
             return Ok(false);
         }
 
-        if self.process_raw_input_bytes(&buf[..n])? {
+        if self.process_raw_input_bytes(&buf[..n]) {
             return Ok(true);
         }
 
@@ -3095,7 +3186,7 @@ impl App {
     pub(super) fn reset_raw_input_state(&mut self) {
         self.input_target = InputTarget::None;
         self.terminal_selection = None;
-        self.in_bracket_paste = false;
+        self.raw_paste.in_bracket = false;
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
@@ -3183,7 +3274,7 @@ impl App {
             {
                 break;
             }
-            let should_exit = self.process_raw_input_bytes(&buf[..n2])?;
+            let should_exit = self.process_raw_input_bytes(&buf[..n2]);
             if should_exit {
                 return Ok(true);
             }
@@ -3222,11 +3313,11 @@ impl App {
                 crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
             };
             if n != 0 {
-                return self.process_raw_input_bytes(&buf[..n]);
+                return Ok(self.process_raw_input_bytes(&buf[..n]));
             }
         }
 
-        self.process_raw_input_bytes(&[])
+        Ok(self.process_raw_input_bytes(&[]))
     }
 
     fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {
@@ -3245,7 +3336,7 @@ impl App {
             });
         }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
-        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         sequences
     }
 
@@ -3294,39 +3385,37 @@ impl App {
         if intercepts_allowed && patterns.palette.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
                 Action::OpenPalette,
-                false,
+                RawScroll::Never,
                 seq.to_vec(),
             ));
         }
         if intercepts_allowed && patterns.takeover.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
                 Action::FocusAgent,
-                false,
+                RawScroll::Never,
                 seq.to_vec(),
             ));
         }
         if seq == crate::raw_input::BRACKET_PASTE_START {
-            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-            self.raw_paste_normalize = !self
+            self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
+            self.raw_paste.normalize = !self
                 .selected_terminal_surface_client()
                 .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste);
-            self.raw_paste_prev_cr = false;
-            return (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+            self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
+            return (!self.raw_paste.normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
         }
         if seq == crate::raw_input::BRACKET_PASTE_END {
-            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-            let action = (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
-            self.raw_paste_normalize = false;
-            self.raw_paste_prev_cr = false;
+            self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
+            let action = (!self.raw_paste.normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+            self.raw_paste.normalize = false;
+            self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
             return action;
         }
         if parsed.in_bracket_paste {
-            if !self.raw_paste_normalize {
+            if !self.raw_paste.normalize {
                 return Some(RawSeqAction::Forward(seq.to_vec()));
             }
-            let (bytes, prev_cr) =
-                crate::raw_input::normalize_paste_newlines(seq, self.raw_paste_prev_cr);
-            self.raw_paste_prev_cr = prev_cr;
+            let bytes = self.raw_paste.newlines.normalize(seq);
             if bytes.is_empty() {
                 return None;
             }
@@ -3334,7 +3423,11 @@ impl App {
             return Some(RawSeqAction::Forward(bytes));
         }
         if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
-            self.observe_raw_terminal_focus(gained);
+            self.observe_raw_terminal_focus(if gained {
+                FocusChange::Gained
+            } else {
+                FocusChange::Lost
+            });
             return None;
         }
         // The rest of the host's report family, dropped for the same reason the
@@ -3348,13 +3441,18 @@ impl App {
             return Some(RawSeqAction::Mouse(mouse_event, seq.to_vec()));
         }
         if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
-            return Some(RawSeqAction::Intercept(action, conditional, seq.to_vec()));
+            let scroll = if conditional {
+                RawScroll::WhenScrolledBack
+            } else {
+                RawScroll::Never
+            };
+            return Some(RawSeqAction::Intercept(action, scroll, seq.to_vec()));
         }
         Some(RawSeqAction::Forward(seq.to_vec()))
     }
 
-    fn observe_raw_terminal_focus(&mut self, gained: bool) {
-        if gained {
+    fn observe_raw_terminal_focus(&mut self, change: FocusChange) {
+        if change == FocusChange::Gained {
             self.terminal_focus.on_focus_gained(Instant::now());
         } else {
             self.retire_pending_link_click();
@@ -3366,19 +3464,17 @@ impl App {
     /// write then asks again in its own critical section. A take-over landing
     /// between two stdin batches therefore cuts a host paste mid-sequence, which
     /// is what losing the pty mid-paste has always done.
-    fn raw_input_batch_may_write(
-        &mut self,
-        actions: &[RawSeqAction],
-        is_scrolled_back: bool,
-    ) -> bool {
-        let has_scrollback = self
-            .selected_terminal_surface_client()
-            .is_some_and(|provider| provider.scrollback_offset() > 0);
-        let has_page_height = self.last_pty_size.0 > 0;
+    fn raw_input_batch_may_write(&mut self, actions: &[RawSeqAction]) -> bool {
+        let local = LocalScroll {
+            has_scrollback: self
+                .selected_terminal_surface_client()
+                .is_some_and(|provider| provider.scrollback_offset() > 0),
+            has_page_height: self.last_pty_size.0 > 0,
+        };
         let batch_can_reach_pty = actions
             .iter()
-            .any(|action| raw_action_can_reach_pty(action, has_scrollback, has_page_height));
-        is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty()
+            .any(|action| raw_action_can_reach_pty(action, local));
+        !batch_can_reach_pty || self.may_type_into_focused_pty()
     }
 
     fn route_raw_page_scroll(
@@ -3389,9 +3485,14 @@ impl App {
     ) {
         dispatch.flush(self);
         let forward_scroll = self.selected_surface_forward_scroll();
-        let alt_screen = self
+        let alt_screen = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen)
+        {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
         if should_forward_page(forward_scroll, alt_screen) {
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
@@ -3404,14 +3505,14 @@ impl App {
     fn route_raw_line_scroll(
         &mut self,
         direction: ScrollDirection,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.last_pty_size.0 > 0 {
             dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
@@ -3421,14 +3522,14 @@ impl App {
 
     fn route_raw_scroll_to_bottom(
         &mut self,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback {
             dispatch.flush(self);
             self.reset_pty_scrollback();
         } else {
@@ -3438,14 +3539,14 @@ impl App {
 
     fn route_raw_scroll_to_top(
         &mut self,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback {
             dispatch.flush(self);
             self.set_pty_scrollback_max();
         } else {
@@ -3460,7 +3561,7 @@ impl App {
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
         dispatch.flush(self);
-        if self.handle_takeover_card_mouse(&mouse) || self.handle_dormant_card_mouse(&mouse) {
+        if self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse) {
             return RawInputFlow::Continue;
         }
 
@@ -3484,12 +3585,15 @@ impl App {
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
         let forward_scroll = self.selected_surface_forward_scroll();
-        let (alt_screen, mouse_mode) = self
+        let mouse_mode = if self
             .selected_terminal_surface_client()
-            .map_or((false, false), |provider| {
-                (provider.is_alt_screen(), provider.has_mouse_mode())
-            });
-        if should_forward_wheel(forward_scroll, alt_screen, mouse_mode) {
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
+        if should_forward_wheel(forward_scroll, mouse_mode) {
             self.terminal_selection = None;
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
@@ -3506,28 +3610,33 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
-        if self.handle_pending_link_mouse(&mouse) {
+        if self.handle_pending_link_mouse(mouse) {
             return RawInputFlow::Continue;
         }
-        if self.continue_raw_mouse_forward(&mouse) {
+        if self.continue_raw_mouse_forward(mouse) {
             return RawInputFlow::Continue;
         }
-        if self.raw_mouse_is_outside_overlay(&mouse) {
+        if self.raw_mouse_is_outside_overlay(mouse) {
             self.exit_interactive_mode();
             return RawInputFlow::Return(false);
         }
 
-        let child_wants_mouse = self
+        let child_wants_mouse = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
-        if self.handle_raw_terminal_press(&mouse, child_wants_mouse, dispatch.is_scrolled_back) {
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
+        if self.handle_raw_terminal_press(mouse, child_wants_mouse, dispatch) {
             return RawInputFlow::Continue;
         }
         self.route_raw_terminal_pointer(mouse, raw, child_wants_mouse, dispatch);
         RawInputFlow::Continue
     }
 
-    fn continue_raw_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+    fn continue_raw_mouse_forward(&mut self, mouse: MouseEvent) -> bool {
         if self.center_mouse_forward.is_none() {
             return false;
         }
@@ -3544,7 +3653,7 @@ impl App {
         }
     }
 
-    fn raw_mouse_is_outside_overlay(&self, mouse: &MouseEvent) -> bool {
+    fn raw_mouse_is_outside_overlay(&self, mouse: MouseEvent) -> bool {
         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
@@ -3554,9 +3663,9 @@ impl App {
 
     fn handle_raw_terminal_press(
         &mut self,
-        mouse: &MouseEvent,
-        child_wants_mouse: bool,
-        is_scrolled_back: bool,
+        mouse: MouseEvent,
+        mouse_reporting: MouseReporting,
+        dispatch: &RawInputDispatch,
     ) -> bool {
         let link = self
             .link_at_screen_point(mouse.column, mouse.row)
@@ -3565,7 +3674,7 @@ impl App {
             mouse.kind,
             mouse.modifiers,
             link.as_deref(),
-            child_wants_mouse,
+            mouse_reporting,
         ) {
             TerminalPressAction::Link(decision) => {
                 let suppress = decision.suppress;
@@ -3573,7 +3682,7 @@ impl App {
                 suppress
             }
             TerminalPressAction::ForwardPlainClick => {
-                if !is_scrolled_back {
+                if !dispatch.is_scrolled_back {
                     let button_code = sgr_button_code(MouseButton::Left);
                     self.center_mouse_forward = Some(button_code);
                     self.write_center_mouse_report(button_code, b'M', mouse.column, mouse.row);
@@ -3588,13 +3697,13 @@ impl App {
         &mut self,
         mouse: MouseEvent,
         raw: &[u8],
-        child_wants_mouse: bool,
+        mouse_reporting: MouseReporting,
         dispatch: &mut RawInputDispatch,
     ) {
         let shift_held = mouse
             .modifiers
             .contains(crossterm::event::KeyModifiers::SHIFT);
-        if !child_wants_mouse || shift_held {
+        if mouse_reporting == MouseReporting::Off || shift_held {
             self.handle_terminal_selection_mouse(mouse);
         } else if !dispatch.is_scrolled_back {
             // SGR coordinates are screen-absolute; the child expects them
@@ -3662,17 +3771,17 @@ impl App {
                 RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
                     self.route_raw_page_scroll(ScrollDirection::Down, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Up, conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineUp, scroll, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Up, scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Down, conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineDown, scroll, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Down, scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
-                    self.route_raw_scroll_to_bottom(conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToBottom, scroll, raw) => {
+                    self.route_raw_scroll_to_bottom(scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
-                    self.route_raw_scroll_to_top(conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToTop, scroll, raw) => {
+                    self.route_raw_scroll_to_top(scroll, &raw, dispatch);
                 }
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
@@ -3696,24 +3805,34 @@ impl App {
     ///
     /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
     /// call it directly, without real stdin I/O.
-    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
         let sequences = self.parse_raw_input_sequences(bytes);
         let plan = self.classify_raw_input_sequences(&sequences);
         let actions = plan.actions;
-        let normalized_paste_forwarded = plan.normalized_paste_forwarded;
+        let paste = if plan.normalized_paste_forwarded {
+            NormalizedPaste::Forwarded
+        } else {
+            NormalizedPaste::None
+        };
 
         let is_scrolled_back = self.scroll_mode_active();
         self.reconcile_scroll_mode();
-        let may_write_pty = self.raw_input_batch_may_write(&actions, is_scrolled_back);
+        let may_write_pty = is_scrolled_back || self.raw_input_batch_may_write(&actions);
 
-        let mut dispatch = RawInputDispatch::new(is_scrolled_back, may_write_pty);
+        let mut dispatch = RawInputDispatch {
+            forward_batch: Vec::new(),
+            is_scrolled_back,
+            may_write_pty,
+            needs_selection_clear: false,
+            forwarded: ForwardedInput::default(),
+        };
 
         if let Some(should_exit) = self.execute_raw_input_actions(actions, &mut dispatch) {
-            return Ok(should_exit);
+            return should_exit;
         }
-        dispatch.finish(self, normalized_paste_forwarded);
+        dispatch.finish(self, paste);
 
-        Ok(false)
+        false
     }
 
     /// Record input that actually reached the focused PTY so the output it
@@ -4012,14 +4131,14 @@ impl App {
         }
     }
 
-    fn move_kill_running_selection(&mut self, down: bool) {
+    fn move_kill_running_selection(&mut self, direction: ScrollDirection) {
         let PromptState::KillRunning(prompt) = &mut self.prompt else {
             return;
         };
         if !matches!(prompt.focus, KillRunningFocus::List) {
             return;
         }
-        if down {
+        if direction == ScrollDirection::Down {
             let count = Self::visible_kill_running_indices(prompt).len();
             prompt.list.move_down(count);
         } else {
@@ -4027,30 +4146,31 @@ impl App {
         }
     }
 
-    fn move_kill_running_focus(&mut self, forward: bool) {
+    fn move_kill_running_focus(&mut self, direction: FocusStep) {
         let PromptState::KillRunning(prompt) = &mut self.prompt else {
             return;
         };
         prompt.focus = match prompt.focus {
-            KillRunningFocus::List => Self::next_kill_running_footer_action(prompt, None, forward),
+            KillRunningFocus::List => {
+                Self::next_kill_running_footer_action(prompt, None, direction)
+            }
             KillRunningFocus::Footer(action) => {
-                Self::next_kill_running_footer_action(prompt, Some(action), forward)
+                Self::next_kill_running_footer_action(prompt, Some(action), direction)
             }
         };
     }
 
-    fn confirm_kill_running_prompt(&mut self) -> Result<()> {
+    fn confirm_kill_running_prompt(&mut self) {
         let focus = match &self.prompt {
             PromptState::KillRunning(prompt) => prompt.focus,
-            _ => return Ok(()),
+            _ => return,
         };
         match focus {
             KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
             KillRunningFocus::Footer(action) => {
-                self.execute_kill_running_footer_action(action)?;
+                self.execute_kill_running_footer_action(action);
             }
         }
-        Ok(())
     }
 
     fn handle_kill_running_search_key(&mut self, key: KeyEvent) {
@@ -4060,9 +4180,9 @@ impl App {
         }
     }
 
-    fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         if !matches!(self.prompt, PromptState::KillRunning(..)) {
-            return Ok(None);
+            return None;
         }
 
         let is_searching = matches!(
@@ -4075,7 +4195,14 @@ impl App {
                 ..
             })
         );
-        let action = if binding_lookup_is_suppressed(key, is_searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if is_searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::RuntimeKill)
@@ -4092,16 +4219,16 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                self.move_kill_running_selection(true);
+                self.move_kill_running_selection(ScrollDirection::Down);
             }
             Some(Action::MoveUp) => {
-                self.move_kill_running_selection(false);
+                self.move_kill_running_selection(ScrollDirection::Up);
             }
             Some(Action::FocusNext) => {
-                self.move_kill_running_focus(true);
+                self.move_kill_running_focus(FocusStep::Forward);
             }
             Some(Action::FocusPrev) => {
-                self.move_kill_running_focus(false);
+                self.move_kill_running_focus(FocusStep::Backward);
             }
             Some(Action::ToggleMarked) => {
                 self.toggle_hovered_kill_running_selection();
@@ -4109,7 +4236,7 @@ impl App {
             Some(Action::Confirm) => {
                 // Confirm marks the highlighted row without leaving search, or
                 // activates the focused footer action.
-                self.confirm_kill_running_prompt()?;
+                self.confirm_kill_running_prompt();
             }
             _ => {
                 if is_searching {
@@ -4118,7 +4245,7 @@ impl App {
             }
         }
 
-        Ok(Some(false))
+        Some(false)
     }
 
     fn reset_project_browser_path_editor(&mut self) {
@@ -4225,7 +4352,7 @@ impl App {
         }
     }
 
-    fn move_project_browser_selection(&mut self, down: bool) {
+    fn move_project_browser_selection(&mut self, direction: ScrollDirection) {
         let PromptState::BrowseProjects {
             entries,
             selected,
@@ -4235,7 +4362,7 @@ impl App {
         else {
             return;
         };
-        if !down {
+        if direction == ScrollDirection::Up {
             *selected = selected.saturating_sub(1);
             return;
         }
@@ -4286,7 +4413,7 @@ impl App {
             return;
         };
         match purpose {
-            BrowsePurpose::AddProject => self.add_project_from_browser_path(path),
+            BrowsePurpose::AddProject => self.add_project_from_browser_path(&path),
             BrowsePurpose::StandaloneAgent => self.open_standalone_agent_name_prompt(path),
         }
     }
@@ -4330,7 +4457,14 @@ impl App {
             return Some(false);
         }
 
-        let action = if binding_lookup_is_suppressed(key, is_searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if is_searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Browser)
@@ -4350,10 +4484,10 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                self.move_project_browser_selection(true);
+                self.move_project_browser_selection(ScrollDirection::Down);
             }
             Some(Action::MoveUp) => {
-                self.move_project_browser_selection(false);
+                self.move_project_browser_selection(ScrollDirection::Up);
             }
             Some(Action::GoToPath) if !is_searching => {
                 self.begin_project_browser_path_editor();
@@ -4412,13 +4546,13 @@ impl App {
         handled
     }
 
-    fn move_startup_command_log_selection(&mut self, down: bool) {
+    fn move_startup_command_log_selection(&mut self, direction: ScrollDirection) {
         let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
             return;
         };
         let visible = Self::startup_command_log_filtered_indices(prompt);
         let visual = Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
-        let next = if down {
+        let next = if direction == ScrollDirection::Down {
             visible.get(visual + 1).copied()
         } else if visual > 0 {
             visible.get(visual - 1).copied()
@@ -4487,12 +4621,14 @@ impl App {
                 prompt.focus = next_focus(
                     &StartupCommandLogFocus::RING,
                     prompt.focus,
-                    !focus_move_is_reverse(key),
+                    focus_move_step(key),
                 );
             }
             Some(Action::SearchToggle) => prompt.searching = true,
-            Some(Action::MoveDown) => self.move_startup_command_log_selection(true),
-            Some(Action::MoveUp) => self.move_startup_command_log_selection(false),
+            Some(Action::MoveDown) => {
+                self.move_startup_command_log_selection(ScrollDirection::Down);
+            }
+            Some(Action::MoveUp) => self.move_startup_command_log_selection(ScrollDirection::Up),
             Some(Action::ScrollPageDown) => scroll_startup_command_log(prompt, body, page),
             Some(Action::ScrollPageUp) => scroll_startup_command_log(prompt, body, -page),
             Some(Action::ScrollLineDown) => scroll_startup_command_log(prompt, body, 1),
@@ -4598,19 +4734,18 @@ impl App {
                     prompt.selected = removable.into_iter().next();
                 }
             }
-            Some(Action::Confirm) => {
-                if let Err(err) = self.confirm_delete_selected_worktree() {
-                    self.set_error(format!("{err:#}"));
-                }
-            }
+            Some(Action::Confirm) => self.confirm_delete_selected_worktree(),
             _ => {}
         }
         Some(false)
     }
 
-    fn handle_pick_project_worktree_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_pick_project_worktree_prompt_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> std::option::Option<bool> {
         let PromptState::PickProjectWorktree(prompt) = &mut self.prompt else {
-            return Ok(None);
+            return None;
         };
         match self.bindings.lookup(&key, BindingScope::Palette) {
             Some(Action::CloseOverlay) => self.prompt = PromptState::None,
@@ -4636,10 +4771,10 @@ impl App {
                     prompt.selected = selectable.into_iter().next();
                 }
             }
-            Some(Action::Confirm) => self.open_selected_project_worktree_agent_prompt()?,
+            Some(Action::Confirm) => self.open_selected_project_worktree_agent_prompt(),
             _ => {}
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_set_tailscale_mode_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
@@ -4669,9 +4804,9 @@ impl App {
         Some(false)
     }
 
-    fn handle_change_theme_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_change_theme_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         let PromptState::ChangeTheme(prompt) = &mut self.prompt else {
-            return Ok(None);
+            return None;
         };
         let action = self
             .bindings
@@ -4679,7 +4814,7 @@ impl App {
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         if matches!(action, Some(Action::CloseOverlay)) {
             self.cancel_change_theme();
-            return Ok(Some(false));
+            return Some(false);
         }
         let moved = match action {
             Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
@@ -4691,7 +4826,7 @@ impl App {
                 true
             }
             Some(Action::Confirm) => {
-                self.apply_change_theme()?;
+                self.apply_change_theme();
                 false
             }
             _ => false,
@@ -4699,7 +4834,7 @@ impl App {
         if moved {
             self.preview_change_theme_selection();
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_pick_project_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -4707,7 +4842,14 @@ impl App {
             return Ok(None);
         };
         let searching = list.searching;
-        let action = if binding_lookup_is_suppressed(key, searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings
@@ -4747,7 +4889,7 @@ impl App {
             self.confirm_project_chooser_selection()?;
         }
         if go_standalone {
-            self.open_standalone_agent_browser()?;
+            self.open_standalone_agent_browser();
         }
         Ok(Some(false))
     }
@@ -4761,7 +4903,7 @@ impl App {
         }
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         if matches!(action, Some(Action::CloseOverlay)) {
-            return Some(self.resolve_config_reload_failed(false));
+            return Some(self.resolve_config_reload_failed(ConfirmAnswer::Cancel));
         }
         let PromptState::ConfigReloadFailed {
             recover_old_config,
@@ -4777,17 +4919,17 @@ impl App {
                 (ConfigReloadFailedFocus::Apply, true),
                 (ConfigReloadFailedFocus::Checkbox, true),
             ];
-            *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
+            *focus = next_focus(&ring, *focus, focus_move_step(key));
             return Some(false);
         }
         if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
             match *focus {
                 ConfigReloadFailedFocus::Checkbox => *recover_old_config = !*recover_old_config,
                 ConfigReloadFailedFocus::Close => {
-                    return Some(self.resolve_config_reload_failed(false));
+                    return Some(self.resolve_config_reload_failed(ConfirmAnswer::Cancel));
                 }
                 ConfigReloadFailedFocus::Apply => {
-                    return Some(self.resolve_config_reload_failed(true));
+                    return Some(self.resolve_config_reload_failed(ConfirmAnswer::Confirm));
                 }
             }
         }
@@ -4871,9 +5013,9 @@ impl App {
         let PromptState::ConfirmKillRunning(prompt) = &mut self.prompt else {
             return None;
         };
-        let confirm = prompt.focus.is_confirm();
+        let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::KillRunning(previous);
@@ -4883,7 +5025,7 @@ impl App {
             }
             ModalKeyStep::MoveFocus(_) => prompt.focus = prompt.focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_kill_running(confirm));
+                return Some(self.resolve_confirm_kill_running(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4910,13 +5052,17 @@ impl App {
             ),
             (
                 DeleteAgentFocus::BranchCheckbox,
-                target.offers_branch_checkbox(*delete_worktree),
+                target.offers_branch_checkbox(if *delete_worktree {
+                    dux_core::engine::WorktreeOnDelete::Remove
+                } else {
+                    dux_core::engine::WorktreeOnDelete::Keep
+                }),
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 DeleteAgentFocus::WorktreeCheckbox => {
                     *delete_worktree = !*delete_worktree;
@@ -4928,10 +5074,10 @@ impl App {
                 }
                 DeleteAgentFocus::BranchCheckbox => *delete_branch = !*delete_branch,
                 DeleteAgentFocus::Cancel => {
-                    return Some(self.resolve_confirm_delete_agent(false));
+                    return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel));
                 }
                 DeleteAgentFocus::Delete => {
-                    return Some(self.resolve_confirm_delete_agent(true));
+                    return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Confirm));
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -4943,13 +5089,13 @@ impl App {
         let PromptState::ConfirmDeleteTerminal { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_delete_terminal(confirm));
+                return Some(self.resolve_confirm_delete_terminal(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4960,13 +5106,13 @@ impl App {
         let PromptState::ConfirmCloseTab { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_close_tab(confirm));
+                return Some(self.resolve_confirm_close_tab(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4977,13 +5123,13 @@ impl App {
         let PromptState::ConfirmStopTab { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_stop_tab(confirm));
+                return Some(self.resolve_confirm_stop_tab(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4994,13 +5140,13 @@ impl App {
         let PromptState::ConfirmDetachAgent { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_detach_agent(confirm));
+                return Some(self.resolve_confirm_detach_agent(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5026,16 +5172,18 @@ impl App {
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 RecreateWorkingCopyFocus::RestartCheckbox => *restart_tabs = !*restart_tabs,
                 RecreateWorkingCopyFocus::Cancel => {
-                    return Some(self.resolve_confirm_recreate_working_copy(false));
+                    return Some(self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel));
                 }
                 RecreateWorkingCopyFocus::Recreate => {
-                    return Some(self.resolve_confirm_recreate_working_copy(true));
+                    return Some(
+                        self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm),
+                    );
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -5047,16 +5195,16 @@ impl App {
         let PromptState::ConfirmCheckoutDefaultBranch { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
             ModalKeyStep::Close => {
-                return Some(self.resolve_confirm_checkout_default_branch(false));
+                return Some(self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel));
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_checkout_default_branch(confirm));
+                return Some(self.resolve_confirm_checkout_default_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5067,14 +5215,16 @@ impl App {
         let PromptState::ConfirmDeleteProject { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
-            ModalKeyStep::Close => return Some(self.resolve_confirm_delete_project(false)),
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_delete_project(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_delete_project(confirm));
+                return Some(self.resolve_confirm_delete_project(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5085,14 +5235,16 @@ impl App {
         let PromptState::ConfirmRemoveProject { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
-            ModalKeyStep::Close => return Some(self.resolve_confirm_remove_project(false)),
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_remove_project(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_remove_project(confirm));
+                return Some(self.resolve_confirm_remove_project(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5103,13 +5255,13 @@ impl App {
         let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_quit(confirm));
+                return Some(self.resolve_confirm_quit(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5120,13 +5272,13 @@ impl App {
         let PromptState::ConfirmDiscardFile { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_discard_file(confirm));
+                return Some(self.resolve_confirm_discard_file(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5137,15 +5289,15 @@ impl App {
         let PromptState::ConfirmCreateInitialCommit { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
-                self.resolve_confirm_create_initial_commit(false);
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                self.resolve_confirm_create_initial_commit(confirm);
+                self.resolve_confirm_create_initial_commit(answer);
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5156,44 +5308,19 @@ impl App {
         let PromptState::ConfirmInitRepo { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
-                self.resolve_confirm_init_repo(false);
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                self.resolve_confirm_init_repo(confirm);
+                self.resolve_confirm_init_repo(answer);
             }
             ModalKeyStep::FallThroughToField => {}
         }
         Some(false)
-    }
-
-    fn next_non_default_branch_focus(
-        focus: ConfirmNonDefaultBranchFocus,
-        has_checkbox: bool,
-        reverse: bool,
-    ) -> ConfirmNonDefaultBranchFocus {
-        match (focus, has_checkbox, reverse) {
-            (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
-                ConfirmNonDefaultBranchFocus::Add
-            }
-            (ConfirmNonDefaultBranchFocus::Add, true, false) => {
-                ConfirmNonDefaultBranchFocus::Checkbox
-            }
-            (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
-                ConfirmNonDefaultBranchFocus::Cancel
-            }
-            (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
-                ConfirmNonDefaultBranchFocus::Checkbox
-            }
-            (ConfirmNonDefaultBranchFocus::Add, true, true) => ConfirmNonDefaultBranchFocus::Cancel,
-            (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => ConfirmNonDefaultBranchFocus::Add,
-            (ConfirmNonDefaultBranchFocus::Cancel, false, _) => ConfirmNonDefaultBranchFocus::Add,
-            (ConfirmNonDefaultBranchFocus::Add, false, _) => ConfirmNonDefaultBranchFocus::Cancel,
-        }
     }
 
     fn handle_confirm_non_default_branch_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
@@ -5208,10 +5335,18 @@ impl App {
         };
         let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => {
-                *focus = Self::next_non_default_branch_focus(*focus, has_checkbox, !forward);
+            ModalKeyStep::MoveFocus(direction) => {
+                *focus = next_focus(
+                    &[
+                        (ConfirmNonDefaultBranchFocus::Cancel, true),
+                        (ConfirmNonDefaultBranchFocus::Add, true),
+                        (ConfirmNonDefaultBranchFocus::Checkbox, has_checkbox),
+                    ],
+                    *focus,
+                    direction,
+                );
             }
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 ConfirmNonDefaultBranchFocus::Checkbox => {
@@ -5231,13 +5366,13 @@ impl App {
         let PromptState::ConfirmUseExistingBranch { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_use_existing_branch(confirm));
+                return Some(self.resolve_confirm_use_existing_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5254,23 +5389,23 @@ impl App {
             (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::ManageWorktrees(previous);
             }
-            ModalKeyStep::MoveFocus(forward) => {
-                prompt.focus = next_focus(&ring, prompt.focus, forward);
+            ModalKeyStep::MoveFocus(direction) => {
+                prompt.focus = next_focus(&ring, prompt.focus, direction);
             }
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match prompt.focus {
                 DeleteWorktreeFocus::Checkbox => {
                     prompt.delete_branch = !prompt.delete_branch;
                 }
                 DeleteWorktreeFocus::Cancel => {
-                    return Some(self.resolve_confirm_delete_worktree(false));
+                    return Some(self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel));
                 }
                 DeleteWorktreeFocus::Delete => {
-                    return Some(self.resolve_confirm_delete_worktree(true));
+                    return Some(self.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm));
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -5333,31 +5468,46 @@ impl App {
         self.handle_confirm_use_existing_branch_prompt_key(key)
     }
 
-    fn handle_pull_request_input_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_pull_request_input_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         let PromptState::PullRequestInput { focus, .. } = &self.prompt else {
-            return Ok(None);
+            return None;
         };
         let field_focused = *focus == PullRequestInputFocus::Input;
-        let action = if binding_lookup_is_suppressed(key, field_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if field_focused {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, field_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if field_focused {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             ModalKeyStep::Close => {
                 self.prompt = PromptState::None;
                 self.pending_pr_reference = None;
                 self.invalidate_pull_request_resolution();
             }
-            ModalKeyStep::Confirm if field_focused => self.confirm_pull_request_input()?,
+            ModalKeyStep::Confirm if field_focused => self.confirm_pull_request_input(),
             ModalKeyStep::Confirm => {
-                self.open_pull_request_project_picker()?;
+                self.open_pull_request_project_picker();
             }
             ModalKeyStep::ActivateFocus if !field_focused => {
-                self.open_pull_request_project_picker()?;
+                self.open_pull_request_project_picker();
             }
             ModalKeyStep::ActivateFocus => {}
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_pull_request_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_pull_request_control(direction),
             ModalKeyStep::FallThroughToField => {
                 if field_focused
                     && let PromptState::PullRequestInput { input, .. } = &mut self.prompt
@@ -5366,24 +5516,25 @@ impl App {
                 }
             }
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_attach_pull_request_input_prompt_key(
         &mut self,
         key: KeyEvent,
-    ) -> Result<Option<bool>> {
+    ) -> std::option::Option<bool> {
         if !matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
-            return Ok(None);
+            return None;
         }
-        let action = if binding_lookup_is_suppressed(key, true) {
+        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
+        {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, true) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::Confirm => self.confirm_attach_pull_request_input()?,
+            ModalKeyStep::Confirm => self.confirm_attach_pull_request_input(),
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
             ModalKeyStep::FallThroughToField => {
                 if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
@@ -5391,7 +5542,7 @@ impl App {
                 }
             }
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     /// The standalone-agent name field. One single-line control, so the shape
@@ -5401,12 +5552,13 @@ impl App {
         if !matches!(self.prompt, PromptState::NameStandaloneAgent { .. }) {
             return None;
         }
-        let action = if binding_lookup_is_suppressed(key, true) {
+        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
+        {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, true) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::Confirm => self.confirm_standalone_agent_name(),
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
@@ -5424,12 +5576,27 @@ impl App {
             return None;
         };
         let checkbox_focused = *focus == RenameSessionFocus::RenameBranchCheckbox;
-        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, !checkbox_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::Confirm => {
                 let PromptState::RenameSession {
@@ -5454,11 +5621,19 @@ impl App {
                     return Some(false);
                 }
                 // Any other refusal keeps it up too, with the name as typed.
-                if self.apply_rename_session(&id, new_name, also_rename_branch) {
+                if self.apply_rename_session(
+                    &id,
+                    &new_name,
+                    if also_rename_branch {
+                        dux_core::engine::BranchRename::AlsoTheBranch
+                    } else {
+                        dux_core::engine::BranchRename::NameOnly
+                    },
+                ) {
                     self.prompt = PromptState::None;
                 }
             }
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_rename_session_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_rename_session_control(direction),
             ModalKeyStep::ActivateFocus if checkbox_focused => {
                 self.toggle_rename_session_branch();
             }
@@ -5611,7 +5786,7 @@ impl App {
         match action {
             Some(Action::CloseOverlay) => self.prompt = PromptState::None,
             Some(Action::ToggleSelection) => {
-                self.focus_next_name_new_agent_control(!focus_move_is_reverse(key));
+                self.focus_next_name_new_agent_control(focus_move_step(key));
             }
             Some(Action::Confirm) => self.confirm_name_new_agent_prompt()?,
             _ if checkbox_focused && key.code == KeyCode::Char(' ') => {
@@ -5639,12 +5814,27 @@ impl App {
                 | CloneProjectFocus::ReviewCopyCheckbox
                 | CloneProjectFocus::ChooseExisting
         );
-        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, !checkbox_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             ModalKeyStep::Close => {
                 self.prompt = PromptState::None;
                 self.pr_clone_check_rx = None;
@@ -5653,7 +5843,7 @@ impl App {
                 self.choose_existing_project_from_clone_form();
             }
             ModalKeyStep::Confirm => self.confirm_clone_project(),
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_clone_project_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_clone_project_control(direction),
             ModalKeyStep::ActivateFocus => match focus {
                 CloneProjectFocus::RandomizedNameCheckbox => self.toggle_clone_randomized_name(),
                 CloneProjectFocus::ReviewCopyCheckbox => self.toggle_pr_clone_review_copy(),
@@ -5727,7 +5917,7 @@ impl App {
         }
     }
 
-    fn focus_next_clone_project_control(&mut self, forward: bool) {
+    fn focus_next_clone_project_control(&mut self, direction: FocusStep) {
         if let PromptState::CloneProject {
             focus,
             agent_name,
@@ -5738,7 +5928,7 @@ impl App {
             // The pull-request form has no address stop and no random-name box;
             // the stops it adds are present only while they mean something.
             *focus = match pull_request {
-                Some(form) => next_focus(&form.focus_ring(&agent_name.text), *focus, forward),
+                Some(form) => next_focus(&form.focus_ring(&agent_name.text), *focus, direction),
                 None => next_focus(
                     &[
                         (CloneProjectFocus::Address, true),
@@ -5747,7 +5937,7 @@ impl App {
                         (CloneProjectFocus::RandomizedNameCheckbox, true),
                     ],
                     *focus,
-                    forward,
+                    direction,
                 ),
             };
         }
@@ -5818,13 +6008,13 @@ impl App {
 
     fn handle_form_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
-            self.handle_edit_macros_key(key)?;
+            self.handle_edit_macros_key(key);
             return Ok(Some(false));
         }
-        if let Some(exit) = self.handle_pull_request_input_prompt_key(key)? {
+        if let Some(exit) = self.handle_pull_request_input_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_attach_pull_request_input_prompt_key(key)? {
+        if let Some(exit) = self.handle_attach_pull_request_input_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
@@ -5850,7 +6040,7 @@ impl App {
         if let Some(exit) = self.handle_command_palette_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_kill_running_prompt_key(key)? {
+        if let Some(exit) = self.handle_kill_running_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_project_browser_prompt_key(key) {
@@ -5862,7 +6052,7 @@ impl App {
         if let Some(exit) = self.handle_manage_worktrees_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key)? {
+        if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_pick_project_prompt_key(key)? {
@@ -5880,7 +6070,7 @@ impl App {
         if let Some(exit) = self.handle_set_tailscale_mode_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_change_theme_prompt_key(key)? {
+        if let Some(exit) = self.handle_change_theme_prompt_key(key) {
             return Ok(Some(exit));
         }
         Ok(self.handle_startup_logs_prompt_key(key))
@@ -5987,11 +6177,11 @@ impl App {
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         match action {
             Some(Action::CloseOverlay) => self.close_provider_picker(),
-            Some(Action::MoveDown) => self.move_provider_picker_selection(true),
-            Some(Action::MoveUp) => self.move_provider_picker_selection(false),
+            Some(Action::MoveDown) => self.move_provider_picker_selection(FocusStep::Forward),
+            Some(Action::MoveUp) => self.move_provider_picker_selection(FocusStep::Backward),
             Some(Action::Confirm) => match which {
                 ProviderPickerKind::Agent => self.apply_change_agent_provider()?,
-                ProviderPickerKind::GlobalDefault => self.apply_change_default_provider()?,
+                ProviderPickerKind::GlobalDefault => self.apply_change_default_provider(),
                 ProviderPickerKind::ProjectDefault => {
                     self.apply_change_project_default_provider()?;
                 }
@@ -6002,7 +6192,7 @@ impl App {
     }
 
     /// Step the open provider picker's selection cursor, clamped at both ends.
-    fn move_provider_picker_selection(&mut self, forward: bool) {
+    fn move_provider_picker_selection(&mut self, direction: FocusStep) {
         let (selected, len) = match &mut self.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let len = prompt.options.len();
@@ -6018,7 +6208,7 @@ impl App {
             }
             _ => return,
         };
-        if forward {
+        if direction == FocusStep::Forward {
             if *selected + 1 < len {
                 *selected += 1;
             }
@@ -6027,7 +6217,7 @@ impl App {
         }
     }
 
-    fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_edit_macros_key(&mut self, key: KeyEvent) -> bool {
         if matches!(
             self.prompt,
             PromptState::EditMacros {
@@ -6049,7 +6239,7 @@ impl App {
             ..
         } = &mut self.prompt
         else {
-            return Ok(false);
+            return false;
         };
 
         // ── List view: an ordinary Picker ─────────────────────────────────
@@ -6090,7 +6280,7 @@ impl App {
                 if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
                     let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
-                        return Ok(false);
+                        return false;
                     };
                     *pending_delete = Some(PendingMacroDelete {
                         name,
@@ -6100,7 +6290,7 @@ impl App {
             }
             _ => {}
         }
-        Ok(false)
+        false
     }
 
     /// Open the highlighted macro in the editor. Shared by the confirm key and
@@ -6148,14 +6338,14 @@ impl App {
     /// button). Escape cancels, except inside the engaged body, where it exits
     /// edit mode and leaves the modal open, the same contract
     /// `configure_startup_command_escape_exits_edit_mode_only` pins.
-    fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> Result<bool> {
+    fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> bool {
         // ── The engaged body owns every key but the exit binding ──────────
         if focus == MacroEditFocus::Text && self.macro_text_engaged() {
             if let Some(Action::ExitCommitInput) =
                 self.bindings.lookup(&key, BindingScope::CommitInput)
             {
                 self.input_target = InputTarget::None;
-                return Ok(false);
+                return false;
             }
             let clear = matches!(
                 self.bindings.lookup(&key, BindingScope::CommitInput),
@@ -6168,7 +6358,7 @@ impl App {
                     state.text_input.handle_key(key);
                 }
             }
-            return Ok(false);
+            return false;
         }
 
         // A focused text field owns the plain characters and the horizontal
@@ -6176,7 +6366,11 @@ impl App {
         // movement key. `owns_keys` and not `is_text_field`: an unengaged body
         // takes no keystrokes, so the movement keys keep working while focus is
         // parked on it.
-        let owned_by_field = focus.owns_keys(self.macro_text_engaged()) && text_field_owns_key(key);
+        let owned_by_field = focus.owns_keys(if self.macro_text_engaged() {
+            FieldEngagement::Engaged
+        } else {
+            FieldEngagement::Unengaged
+        }) && text_field_owns_key(key);
         let action = if owned_by_field {
             None
         } else {
@@ -6190,11 +6384,11 @@ impl App {
         match action {
             Some(Action::CloseOverlay) => {
                 self.cancel_macro_edit();
-                return Ok(false);
+                return false;
             }
             Some(Action::ToggleSelection) => {
-                self.focus_next_macro_edit_control(!focus_move_is_reverse(key));
-                return Ok(false);
+                self.focus_next_macro_edit_control(focus_move_step(key));
+                return false;
             }
             Some(Action::ClearTextField) if focus == MacroEditFocus::Text => {
                 // "Empty the focused full-text field", which the body is whether
@@ -6203,7 +6397,7 @@ impl App {
                 if let Some(state) = self.macro_edit_state_mut() {
                     state.text_input.clear();
                 }
-                return Ok(false);
+                return false;
             }
             Some(Action::Confirm) => {
                 // Enter acts on the focused control. On the unengaged BODY that
@@ -6216,7 +6410,7 @@ impl App {
                     MacroEditFocus::Text => self.engage_macro_text(),
                     _ => self.save_macro_edit(),
                 }
-                return Ok(false);
+                return false;
             }
             _ => {}
         }
@@ -6248,7 +6442,7 @@ impl App {
             }
             MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => {}
         }
-        Ok(false)
+        false
     }
 
     /// The three `Configure*` modals' key handling: an ordinary modal with a
@@ -6265,7 +6459,7 @@ impl App {
     ) -> Result<bool> {
         // ── The engaged field owns every key but the exit binding ─────────
         if self.input_target == InputTarget::StartupCommand {
-            self.handle_startup_command_input_key(key)?;
+            self.handle_startup_command_input_key(key);
             return Ok(false);
         }
 
@@ -6303,7 +6497,7 @@ impl App {
                 return Ok(false);
             }
             Some(Action::ToggleSelection) => {
-                self.focus_next_configure_control(!focus_move_is_reverse(key));
+                self.focus_next_configure_control(focus_move_step(key));
                 return Ok(false);
             }
             Some(Action::Confirm) => {
@@ -6353,10 +6547,10 @@ impl App {
     /// Move focus between the configure modal's controls. Leaving the field
     /// always drops edit mode, so focus can never sit on a button while the
     /// field still swallows keystrokes.
-    fn focus_next_configure_control(&mut self, forward: bool) {
+    fn focus_next_configure_control(&mut self, direction: FocusStep) {
         self.input_target = InputTarget::None;
         if let Some(focus) = configure_focus(&self.prompt) {
-            set_configure_focus(&mut self.prompt, focus.step(forward));
+            set_configure_focus(&mut self.prompt, focus.step(direction));
         }
     }
 
@@ -6402,10 +6596,10 @@ impl App {
     ///
     /// Leaving the body always drops edit mode, so focus can never sit on a
     /// different control while the body still swallows keystrokes.
-    pub(super) fn focus_next_macro_edit_control(&mut self, forward: bool) {
+    pub(super) fn focus_next_macro_edit_control(&mut self, direction: FocusStep) {
         self.input_target = InputTarget::None;
         if let Some(state) = self.macro_edit_state_mut() {
-            state.focus = state.focus.step(forward);
+            state.focus = state.focus.step(direction);
         }
     }
 
@@ -6541,38 +6735,38 @@ impl App {
         }
     }
 
-    fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> bool {
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         let is_space = key.code == KeyCode::Char(' ');
         let activate = matches!(action, Some(Action::Confirm)) || is_space;
 
-        let confirm = {
+        let answer = {
             let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
-                return Ok(false);
+                return false;
             };
             let Some(pending) = pending_delete else {
-                return Ok(false);
+                return false;
             };
 
             if matches!(action, Some(Action::CloseOverlay)) {
                 *pending_delete = None;
-                return Ok(false);
+                return false;
             }
             if matches!(action, Some(Action::ToggleSelection)) {
                 pending.focus = pending.focus.toggled();
-                return Ok(false);
+                return false;
             }
             if !activate {
-                return Ok(false);
+                return false;
             }
-            pending.focus.is_confirm()
+            pending.focus.answer()
         };
 
-        self.resolve_confirm_delete_macro(confirm);
-        Ok(false)
+        self.resolve_confirm_delete_macro(answer);
+        false
     }
 
-    pub(super) fn resolve_confirm_delete_macro(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_macro(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
             return false;
         };
@@ -6580,7 +6774,7 @@ impl App {
             return false;
         };
 
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
 
@@ -7491,11 +7685,11 @@ impl App {
             self.mouse_layout.center.x + self.mouse_layout.center.width.saturating_sub(1);
         let right_left = self.mouse_layout.right.x;
 
-        if !self.left_collapsed && (column == left_edge || column == center_left) {
+        if !self.panes.left_collapsed && (column == left_edge || column == center_left) {
             return Some(ResizeDragState::LeftDivider);
         }
 
-        if !self.right_hidden && (column == center_right || column == right_left) {
+        if !self.panes.right_hidden && (column == center_right || column == right_left) {
             return Some(ResizeDragState::RightDivider);
         }
 
@@ -7663,7 +7857,7 @@ impl App {
             String::new()
         };
         self.prompt = PromptState::None;
-        if let Err(e) = self.execute_command(command) {
+        if let Err(e) = self.execute_command(&command) {
             self.set_error(format!("{e:#}"));
         }
     }
@@ -7858,10 +8052,7 @@ impl App {
         }
     }
 
-    fn execute_kill_running_footer_action(
-        &mut self,
-        action: KillRunningFooterAction,
-    ) -> Result<()> {
+    fn execute_kill_running_footer_action(&mut self, action: KillRunningFooterAction) {
         let enabled = match &self.prompt {
             PromptState::KillRunning(prompt) => Self::kill_running_footer_enabled(prompt, action),
             _ => true,
@@ -7872,7 +8063,7 @@ impl App {
                     "Select one or more runtimes before using Kill Selected. Press Space to mark the highlighted row.",
                 );
             }
-            return Ok(());
+            return;
         }
         match action {
             KillRunningFooterAction::Cancel => {
@@ -7881,11 +8072,10 @@ impl App {
             }
             _ => {
                 if let Some(action) = action.action() {
-                    self.open_confirm_kill_running_action(action)?;
+                    self.open_confirm_kill_running_action(action);
                 }
             }
         }
-        Ok(())
     }
 
     pub(crate) fn kill_running_footer_enabled(
@@ -7904,7 +8094,7 @@ impl App {
     fn next_kill_running_footer_action(
         prompt: &KillRunningPrompt,
         current: Option<KillRunningFooterAction>,
-        forward: bool,
+        direction: FocusStep,
     ) -> KillRunningFocus {
         const ACTIONS: [KillRunningFooterAction; 4] = [
             KillRunningFooterAction::Cancel,
@@ -7924,7 +8114,7 @@ impl App {
 
         match current {
             None => {
-                if forward {
+                if direction == FocusStep::Forward {
                     KillRunningFocus::Footer(enabled[0])
                 } else {
                     KillRunningFocus::Footer(*enabled.last().unwrap())
@@ -7932,13 +8122,13 @@ impl App {
             }
             Some(current) => {
                 let Some(index) = enabled.iter().position(|action| *action == current) else {
-                    return if forward {
+                    return if direction == FocusStep::Forward {
                         KillRunningFocus::Footer(enabled[0])
                     } else {
                         KillRunningFocus::Footer(*enabled.last().unwrap())
                     };
                 };
-                if forward {
+                if direction == FocusStep::Forward {
                     if index + 1 < enabled.len() {
                         KillRunningFocus::Footer(enabled[index + 1])
                     } else {
@@ -8039,14 +8229,14 @@ impl App {
         }
     }
 
-    fn add_project_from_browser_path(&mut self, path: String) {
+    fn add_project_from_browser_path(&mut self, path: &str) {
         let return_prompt = self.prompt.clone();
-        if let Err(message) = self.engine.validate_project_add_path(&path) {
+        if let Err(message) = self.engine.validate_project_add_path(path) {
             // Not addable as-is. A plain folder gets the adopt-a-folder prompt
             // (git init + seed + initial commit); anything else (a subfolder,
             // a .git dir, an already-registered path) keeps the failure modal
             // with the ORIGINAL add error, which now names the enclosing root.
-            if let Ok(canonical) = self.engine.validate_project_init_path(&path) {
+            if let Ok(canonical) = self.engine.validate_project_init_path(path) {
                 let candidates = dux_core::gitignore_seed::matched_candidates(&canonical)
                     .iter()
                     .map(|c| c.dir.to_string())
@@ -8190,7 +8380,11 @@ impl App {
             PromptState::ManageWorktrees(prompt) => {
                 let rows = manage_worktree_visual_rows(
                     &prompt.entries,
-                    prompt.loading,
+                    if prompt.loading {
+                        Listing::Loading
+                    } else {
+                        Listing::Loaded
+                    },
                     prompt.error.as_deref(),
                 );
                 rows.get(visual_index).and_then(|row| match row {
@@ -8220,7 +8414,11 @@ impl App {
             PromptState::PickProjectWorktree(prompt) => {
                 let rows = project_worktree_visual_rows(
                     &prompt.entries,
-                    prompt.loading,
+                    if prompt.loading {
+                        Listing::Loading
+                    } else {
+                        Listing::Loaded
+                    },
                     prompt.error.as_deref(),
                 );
                 rows.get(visual_index).and_then(|row| match row {
@@ -8245,24 +8443,24 @@ impl App {
         }
     }
 
-    fn open_selected_project_worktree_agent_prompt(&mut self) -> Result<()> {
+    fn open_selected_project_worktree_agent_prompt(&mut self) {
         let (project, entry) = match &self.prompt {
             PromptState::PickProjectWorktree(prompt) => {
                 let Some(selected) = prompt.selected else {
                     self.set_error("No available worktree is selected.");
-                    return Ok(());
+                    return;
                 };
                 let Some(entry) = prompt.entries.get(selected).cloned() else {
                     self.set_error("No available worktree is selected.");
-                    return Ok(());
+                    return;
                 };
                 if !entry.is_selectable() {
                     self.set_error("That worktree already has an agent.");
-                    return Ok(());
+                    return;
                 }
                 (prompt.project.clone(), entry)
             }
-            _ => return Ok(()),
+            _ => return,
         };
 
         let request = if entry.is_external() {
@@ -8289,7 +8487,9 @@ impl App {
                 custom_name: Some(default_name),
             }
         };
-        self.open_name_new_agent_prompt_for_request(request)
+        {
+            self.open_name_new_agent_prompt_for_request(request);
+        }
     }
 
     fn set_change_agent_provider_selection(&mut self, index: usize) {
@@ -8331,7 +8531,7 @@ impl App {
         }
     }
 
-    pub(super) fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_agent(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, delete_worktree, branch_answer) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
@@ -8342,17 +8542,36 @@ impl App {
             } => (
                 session_id.clone(),
                 *delete_worktree,
-                target.branch_answer(*delete_worktree, *delete_branch),
+                target.branch_answer(
+                    if *delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    },
+                    if *delete_branch {
+                        dux_core::worktree_manager::BranchRemoval::Delete
+                    } else {
+                        dux_core::worktree_manager::BranchRemoval::Keep
+                    },
+                ),
             ),
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if confirm {
+        if answer == ConfirmAnswer::Confirm {
             // Dispatches git work to a worker when needed, so the UI stays
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
             let refused = self.guarded_by(&asked, |app| {
-                app.begin_delete_session(&session_id, delete_worktree, branch_answer)
+                app.begin_delete_session(
+                    &session_id,
+                    if delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    },
+                    branch_answer,
+                )
             });
             if let Some(refused) = refused {
                 self.reopen_naming_attached(asked, refused);
@@ -8361,13 +8580,13 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_delete_terminal(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_terminal(&mut self, answer: ConfirmAnswer) -> bool {
         let terminal_id = match &self.prompt {
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => terminal_id.clone(),
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if confirm
+        if answer == ConfirmAnswer::Confirm
             && let Some(refused) =
                 self.guarded_by(&asked, |app| app.do_delete_terminal(&terminal_id))
         {
@@ -8380,13 +8599,13 @@ impl App {
     /// asks every live tab to shut down and the row goes Detached at once; the
     /// spinner raised here is retired by the reaper's own outcome, once the last
     /// child is actually gone or the grace has run out.
-    pub(super) fn resolve_confirm_detach_agent(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_detach_agent(&mut self, answer: ConfirmAnswer) -> bool {
         let session_id = match &self.prompt {
             PromptState::ConfirmDetachAgent { session_id, .. } => session_id.clone(),
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let Err(in_the_way) = self
@@ -8440,7 +8659,7 @@ impl App {
     /// A ticked restart stops tabs, so it reserves them through the attachment
     /// guard like any stop, and reopens naming whoever is attached rather than
     /// stopping a tab somebody else is using.
-    pub(super) fn resolve_confirm_recreate_working_copy(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_recreate_working_copy(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, restart_tabs) = match &self.prompt {
             PromptState::ConfirmRecreateWorkingCopy {
                 session_id,
@@ -8454,7 +8673,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         let reservation = if restart_tabs {
@@ -8498,7 +8717,10 @@ impl App {
     /// removed while the dialog was up); cancelling runs nothing and says so,
     /// because a silent close is indistinguishable from a checkout that quietly
     /// did nothing.
-    pub(super) fn resolve_confirm_checkout_default_branch(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_checkout_default_branch(
+        &mut self,
+        answer: ConfirmAnswer,
+    ) -> bool {
         let (project_id, project_name, return_to) = match &self.prompt {
             PromptState::ConfirmCheckoutDefaultBranch {
                 project_id,
@@ -8517,7 +8739,7 @@ impl App {
             .iter()
             .find(|p| p.id == project_id)
             .cloned();
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             match &project {
                 Some(project) => {
                     self.set_info(dux_core::engine::checkout_default_branch_cancelled_message(
@@ -8549,7 +8771,7 @@ impl App {
     /// while the dialog was up, which is said out loud); cancelling deletes
     /// nothing and says so, because a silent close is indistinguishable from a
     /// delete that quietly did nothing.
-    pub(crate) fn resolve_confirm_delete_project(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_delete_project(&mut self, answer: ConfirmAnswer) -> bool {
         let (project_id, project_name, painted, return_to) = match &self.prompt {
             PromptState::ConfirmDeleteProject {
                 project_id,
@@ -8565,7 +8787,7 @@ impl App {
             ),
             _ => return false,
         };
-        if confirm
+        if answer == ConfirmAnswer::Confirm
             && self.ask_again_if_project_grew(
                 &project_id,
                 &project_name,
@@ -8576,7 +8798,7 @@ impl App {
             return false;
         }
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(dux_core::project_prose::delete_project_cancelled_message(
                 &project_name,
                 self.project_agent_count(&project_id),
@@ -8597,7 +8819,7 @@ impl App {
             ));
             return false;
         };
-        let outcome = self.guarded_by(&asked, |app| app.run_delete_project(project));
+        let outcome = self.guarded_by(&asked, |app| app.run_delete_project(&project));
         self.settle_guarded(asked, outcome);
         false
     }
@@ -8635,7 +8857,7 @@ impl App {
     /// target: a real project must still exist and still hold no agents, and
     /// an orphaned group must still have agents to clear. Cancelling removes
     /// nothing and says so.
-    pub(crate) fn resolve_confirm_remove_project(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_remove_project(&mut self, answer: ConfirmAnswer) -> bool {
         let (project_id, project_name, orphaned, painted, return_to) = match &self.prompt {
             PromptState::ConfirmRemoveProject {
                 project_id,
@@ -8655,7 +8877,7 @@ impl App {
         };
         // A real project's removal needs no re-ask: `run_remove_project` refuses
         // one that has gained any agent at all.
-        if confirm
+        if answer == ConfirmAnswer::Confirm
             && orphaned
             && self.ask_again_if_project_grew(
                 &project_id,
@@ -8667,7 +8889,7 @@ impl App {
             return false;
         }
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(dux_core::project_prose::remove_project_cancelled_message(
                 &project_name,
             ));
@@ -8697,7 +8919,7 @@ impl App {
                 self.set_warning(gone);
                 return false;
             };
-            self.guarded_by(&asked, |app| app.run_remove_project(project))
+            self.guarded_by(&asked, |app| app.run_remove_project(&project))
         };
         self.settle_guarded(asked, outcome);
         false
@@ -8705,7 +8927,7 @@ impl App {
 
     /// Stop the tab the dialog named through the engine command the browser and
     /// the command line send, so its guards and its sentence are theirs.
-    pub(super) fn resolve_confirm_stop_tab(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_stop_tab(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmStopTab {
                 session_id, tab_id, ..
@@ -8713,7 +8935,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         match self.guarded_by(&asked, |app| {
@@ -8735,7 +8957,7 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_close_tab(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmCloseTab {
                 session_id, tab_id, ..
@@ -8743,7 +8965,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let Err(in_the_way) = self.engine.check_admission(
@@ -8828,12 +9050,12 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_kill_running(&mut self, answer: ConfirmAnswer) -> bool {
         let confirm_prompt = match &self.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
             _ => return false,
         };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.prompt = PromptState::KillRunning(confirm_prompt.previous);
             self.set_info(
                 "Kill cancelled. Your running agents and companion terminals are unchanged.",
@@ -8874,12 +9096,12 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_quit(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::ConfirmQuit { attached, .. } = &self.prompt else {
-            return confirm;
+            return answer == ConfirmAnswer::Confirm;
         };
         let attached = attached.clone();
-        if confirm {
+        if answer == ConfirmAnswer::Confirm {
             // Once reserved, nobody can attach to anything here until dux has gone.
             if let Err(now) = self.engine.reserve_quit(&attached) {
                 self.prompt.name_attached(now.blockers);
@@ -8892,10 +9114,10 @@ impl App {
             }
         }
         self.prompt = PromptState::None;
-        confirm
+        answer == ConfirmAnswer::Confirm
     }
 
-    pub(crate) fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_discard_file(&mut self, answer: ConfirmAnswer) -> bool {
         let (file_path, kind) = match &self.prompt {
             PromptState::ConfirmDiscardFile {
                 file_path, kind, ..
@@ -8905,7 +9127,7 @@ impl App {
         self.prompt = PromptState::None;
         // A folder is deleted whole on a worker, which re-checks live status
         // before it removes anything (see `changes_tree`).
-        if confirm && kind != dux_core::model::ChangedFileKind::File {
+        if answer == ConfirmAnswer::Confirm && kind != dux_core::model::ChangedFileKind::File {
             let folder = ChangedFile {
                 status: "?".to_string(),
                 path: file_path,
@@ -8922,7 +9144,9 @@ impl App {
         // Discard is the most destructive of the changes actions, so the
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
-        if confirm && let Some(worktree) = self.changes_worktree_for_selection() {
+        if answer == ConfirmAnswer::Confirm
+            && let Some(worktree) = self.changes_worktree_for_selection()
+        {
             // Classified against LIVE git status on the discard's worker, right
             // before it acts, so the delete-vs-restore decision and the
             // destructive action agree with the worktree as it is THEN (not as
@@ -8949,7 +9173,7 @@ impl App {
     /// no commits. On confirm: dispatch the commit to a background worker (which
     /// registers the project on completion). On cancel: leave the repo and
     /// workspace untouched. Always returns `false` (never quits).
-    pub(crate) fn resolve_confirm_create_initial_commit(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_create_initial_commit(&mut self, answer: ConfirmAnswer) -> bool {
         let (path, name) = match &self.prompt {
             PromptState::ConfirmCreateInitialCommit { path, name, .. } => {
                 (path.clone(), name.clone())
@@ -8957,7 +9181,7 @@ impl App {
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(
                 "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and confirm) to create the initial commit.",
             );
@@ -8966,7 +9190,7 @@ impl App {
         // The commit runs on a worker (it can invoke slow filesystem/lock work);
         // completion posts `InitialCommitCreated`, whose reaction registers the
         // project. Keeps the UI thread free per the CLAUDE.md workers tenet.
-        self.dispatch_create_initial_commit(path, name);
+        self.dispatch_create_initial_commit(&path, name);
         false
     }
 
@@ -8975,7 +9199,7 @@ impl App {
     /// commit to a background worker (which registers the project on
     /// completion). On cancel: leave the folder untouched and restore the
     /// project browser. Always returns `false` (never quits).
-    pub(crate) fn resolve_confirm_init_repo(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_init_repo(&mut self, answer: ConfirmAnswer) -> bool {
         let (path, name, return_prompt) =
             match std::mem::replace(&mut self.prompt, PromptState::None) {
                 PromptState::ConfirmInitRepo {
@@ -8989,14 +9213,14 @@ impl App {
                     return false;
                 }
             };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             // Restore the browser exactly as the user left it (location,
             // typed path), the AddProjectFailed pattern; never rebuild it at
             // the start directory.
             self.prompt = *return_prompt;
             return false;
         }
-        self.dispatch_init_repo(path, name);
+        self.dispatch_init_repo(&path, name);
         false
     }
 
@@ -9046,16 +9270,17 @@ impl App {
             self.dispatch_non_default_branch_checkout(
                 action,
                 target,
-                "before adding the project".to_string(),
+                "before adding the project",
                 None,
             );
-        } else if let Err(e) = self.finish_add_project(add.path, add.name, branch, leading_branch) {
+        } else if let Err(e) = self.finish_add_project(&add.path, &add.name, branch, leading_branch)
+        {
             self.set_error(format!("{e:#}"));
         }
         false
     }
 
-    pub(super) fn resolve_confirm_use_existing_branch(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_use_existing_branch(&mut self, answer: ConfirmAnswer) -> bool {
         let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
         let PromptState::ConfirmUseExistingBranch {
             mut request,
@@ -9065,7 +9290,7 @@ impl App {
         else {
             return false;
         };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let CreateAgentRequest::NewProject {
@@ -9215,7 +9440,7 @@ impl App {
     /// `_forward` is accepted so the call site reads exactly like the new-agent
     /// modal's, but with only two controls both directions land on the other
     /// one, so it has nothing to decide here.
-    fn focus_next_rename_session_control(&mut self, forward: bool) {
+    fn focus_next_rename_session_control(&mut self, direction: FocusStep) {
         if let PromptState::RenameSession {
             focus,
             branch_named,
@@ -9233,7 +9458,7 @@ impl App {
                     (RenameSessionFocus::RenameBranchCheckbox, branch_named),
                 ],
                 *focus,
-                forward,
+                direction,
             );
         }
     }
@@ -9241,16 +9466,20 @@ impl App {
     /// Confirm on the reference field. With a project already chosen this is the
     /// project-first lookup, exactly as before. With none, dux resolves the
     /// project from the reference.
-    pub(crate) fn confirm_pull_request_input(&mut self) -> Result<()> {
+    pub(crate) fn confirm_pull_request_input(&mut self) {
         let (project, raw_input) = match &self.prompt {
             PromptState::PullRequestInput { project, input, .. } => {
                 (project.clone(), input.text.trim().to_string())
             }
-            _ => return Ok(()),
+            _ => return,
         };
         match project {
-            Some(project) => self.dispatch_pull_request_lookup(project, raw_input),
-            None => self.dispatch_pull_request_reference(raw_input),
+            Some(project) => {
+                self.dispatch_pull_request_lookup(project, raw_input);
+            }
+            None => {
+                self.dispatch_pull_request_reference(raw_input);
+            }
         }
     }
 
@@ -9260,16 +9489,16 @@ impl App {
     /// text to the engine's one keyed resolve→attach op, whose pending busy is
     /// applied here as a reaction. The final (info/error) arrives through the
     /// normal `drain_events` path, so no per-op bookkeeping lives in the TUI.
-    pub(crate) fn confirm_attach_pull_request_input(&mut self) -> Result<()> {
+    pub(crate) fn confirm_attach_pull_request_input(&mut self) {
         let (session_id, raw_input) = match &self.prompt {
             PromptState::AttachPullRequestInput {
                 session_id, input, ..
             } => (session_id.clone(), input.text.trim().to_string()),
-            _ => return Ok(()),
+            _ => return,
         };
         if raw_input.is_empty() {
             self.set_error("Enter a GitHub PR URL, owner/repo#123, or a PR number.");
-            return Ok(());
+            return;
         }
         self.prompt = PromptState::None;
         match self
@@ -9281,13 +9510,12 @@ impl App {
             }
             Err(err) => self.set_error(format!("{err:#}")),
         }
-        Ok(())
     }
 
     /// The modal's secondary action: hand over to the existing project selector
     /// and come back in project-first mode. Whatever has been typed travels
     /// with it, so stepping out to choose a project never costs the reference.
-    pub(crate) fn open_pull_request_project_picker(&mut self) -> Result<()> {
+    pub(crate) fn open_pull_request_project_picker(&mut self) {
         let typed = match &self.prompt {
             PromptState::PullRequestInput { input, .. } => input.text.trim().to_string(),
             _ => String::new(),
@@ -9295,13 +9523,15 @@ impl App {
         self.pending_pr_reference = if typed.is_empty() { None } else { Some(typed) };
         // Stepping out to the picker supersedes any resolution still out.
         self.invalidate_pull_request_resolution();
-        self.open_project_chooser(ProjectChooserIntent::FromPr)
+        {
+            self.open_project_chooser(ProjectChooserIntent::FromPr);
+        }
     }
 
     /// Focus order for the Create-Agent-From-PR modal. The secondary action is
     /// a CONDITIONAL stop: with a project already chosen it is not offered, so
     /// the ring has one enabled entry and focus cannot leave the field.
-    fn focus_next_pull_request_control(&mut self, forward: bool) {
+    fn focus_next_pull_request_control(&mut self, direction: FocusStep) {
         let has_project = matches!(
             self.prompt,
             PromptState::PullRequestInput {
@@ -9316,7 +9546,7 @@ impl App {
                     (PullRequestInputFocus::ChooseProject, !has_project),
                 ],
                 *focus,
-                forward,
+                direction,
             );
         }
     }
@@ -9333,7 +9563,7 @@ impl App {
         }
     }
 
-    fn focus_next_name_new_agent_control(&mut self, forward: bool) {
+    fn focus_next_name_new_agent_control(&mut self, direction: FocusStep) {
         if let PromptState::NameNewAgent {
             request,
             review_copy,
@@ -9355,7 +9585,7 @@ impl App {
                 ring.push(NameNewAgentFocus::ReviewCopyCheckbox);
             }
             let at = ring.iter().position(|stop| stop == focus).unwrap_or(0);
-            *focus = if forward {
+            *focus = if direction == FocusStep::Forward {
                 ring[(at + 1) % ring.len()]
             } else {
                 ring[(at + ring.len() - 1) % ring.len()]
@@ -9451,7 +9681,11 @@ impl App {
                     target,
                     ..
                 } = &mut self.prompt
-                    && target.offers_branch_checkbox(*delete_worktree)
+                    && target.offers_branch_checkbox(if *delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    })
                 {
                     *delete_branch = !*delete_branch;
                     *focus = DeleteAgentFocus::BranchCheckbox;
@@ -9523,7 +9757,7 @@ impl App {
         }
     }
 
-    fn handle_first_load_prompt_mouse(&mut self, mouse: &MouseEvent) -> Option<bool> {
+    fn handle_first_load_prompt_mouse(&mut self, mouse: MouseEvent) -> Option<bool> {
         if !matches!(self.prompt, PromptState::FirstLoad(_)) {
             return None;
         }
@@ -9542,8 +9776,8 @@ impl App {
 
     fn handle_resource_monitor_mouse(
         &mut self,
-        mouse: &MouseEvent,
-        outside_press: bool,
+        mouse: MouseEvent,
+        press: PressPlace,
     ) -> Option<bool> {
         let PromptState::ResourceMonitor {
             scroll_offset,
@@ -9555,7 +9789,7 @@ impl App {
         else {
             return None;
         };
-        if outside_press {
+        if press == PressPlace::Outside {
             return None;
         }
 
@@ -9595,11 +9829,7 @@ impl App {
         Some(false)
     }
 
-    fn handle_debug_input_mouse(
-        &mut self,
-        mouse: &MouseEvent,
-        outside_press: bool,
-    ) -> Option<bool> {
+    fn handle_debug_input_mouse(&mut self, mouse: MouseEvent, press: PressPlace) -> Option<bool> {
         let PromptState::DebugInput {
             lines,
             scroll_offset,
@@ -9607,7 +9837,7 @@ impl App {
         else {
             return None;
         };
-        if outside_press {
+        if press == PressPlace::Outside {
             return None;
         }
 
@@ -9685,7 +9915,7 @@ impl App {
 
     fn handle_prompt_mouse_down(&mut self, mouse: MouseEvent) -> bool {
         let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
-            self.dismiss_prompt_on_outside_click(&mouse);
+            self.dismiss_prompt_on_outside_click(mouse);
             return false;
         };
         if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
@@ -9699,7 +9929,7 @@ impl App {
         }
     }
 
-    fn handle_prompt_mouse_drag(&mut self, mouse: &MouseEvent) {
+    fn handle_prompt_mouse_drag(&mut self, mouse: MouseEvent) {
         let Some(target) = self.pressed_button.map(|pressed| pressed.target) else {
             return;
         };
@@ -9712,7 +9942,7 @@ impl App {
         }
     }
 
-    fn handle_prompt_mouse_up(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_prompt_mouse_up(&mut self, mouse: MouseEvent) -> bool {
         let Some(pressed) = self.pressed_button.take() else {
             return false;
         };
@@ -9736,18 +9966,22 @@ impl App {
     }
 
     fn dispatch_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if let Some(result) = self.handle_first_load_prompt_mouse(&mouse) {
+        if let Some(result) = self.handle_first_load_prompt_mouse(mouse) {
             return result;
         }
-        if let Some(result) = self.handle_confirm_body_wheel(&mouse) {
+        if let Some(result) = self.handle_confirm_body_wheel(mouse) {
             return result;
         }
         let outside_press =
-            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse);
-        if let Some(result) = self.handle_resource_monitor_mouse(&mouse, outside_press) {
+            if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse) {
+                PressPlace::Outside
+            } else {
+                PressPlace::Inside
+            };
+        if let Some(result) = self.handle_resource_monitor_mouse(mouse, outside_press) {
             return result;
         }
-        if let Some(result) = self.handle_debug_input_mouse(&mouse, outside_press) {
+        if let Some(result) = self.handle_debug_input_mouse(mouse, outside_press) {
             return result;
         }
         if let Some(result) = self.handle_startup_command_logs_mouse(mouse) {
@@ -9762,10 +9996,10 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.handle_prompt_mouse_down(mouse),
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.handle_prompt_mouse_drag(&mouse);
+                self.handle_prompt_mouse_drag(mouse);
                 false
             }
-            MouseEventKind::Up(MouseButton::Left) => self.handle_prompt_mouse_up(&mouse),
+            MouseEventKind::Up(MouseButton::Left) => self.handle_prompt_mouse_up(mouse),
             _ => false,
         }
     }
@@ -9797,19 +10031,16 @@ impl App {
     fn click_project_worktree_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         self.set_project_worktree_selection_from_visual_row(index);
-        if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.open_selected_project_worktree_agent_prompt();
         }
     }
 
     fn click_manage_worktree_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         let landed = self.set_manage_worktree_selection_from_visual_row(index);
-        if landed
-            && double_click
-            && let Err(err) = self.confirm_delete_selected_worktree()
-        {
-            self.set_error(format!("{err:#}"));
+        if landed && double_click {
+            self.confirm_delete_selected_worktree();
         }
     }
 
@@ -9862,8 +10093,8 @@ impl App {
         if moved {
             self.preview_change_theme_selection();
         }
-        if double_click && let Err(err) = self.apply_change_theme() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.apply_change_theme();
         }
     }
 
@@ -9878,8 +10109,8 @@ impl App {
     fn click_default_provider_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         self.set_change_default_provider_selection(index);
-        if double_click && let Err(err) = self.apply_change_default_provider() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.apply_change_default_provider();
         }
     }
 
@@ -9969,7 +10200,11 @@ impl App {
             }
             PromptMouseTarget::ProjectActionItem(index) => {
                 let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                    if self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index)) {
+                        ClickCount::Double
+                    } else {
+                        ClickCount::Single
+                    };
                 self.click_project_action_row(index, double_click);
             }
             PromptMouseTarget::ChangeBaseBranchInput => {
@@ -9977,7 +10212,11 @@ impl App {
             }
             PromptMouseTarget::ChangeBaseBranchItem(index) => {
                 let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                    if self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index)) {
+                        ClickCount::Double
+                    } else {
+                        ClickCount::Single
+                    };
                 self.click_change_base_branch_row(index, double_click);
             }
             PromptMouseTarget::StartupCommandLogItem(index) => {
@@ -10129,9 +10368,7 @@ impl App {
             // end to end.
             ButtonPressedTarget::TakeOverCard | ButtonPressedTarget::DormantTabCard => false,
             ButtonPressedTarget::PullRequestChooseProject => {
-                if let Err(e) = self.open_pull_request_project_picker() {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.open_pull_request_project_picker();
                 false
             }
             ButtonPressedTarget::CloneChooseExisting => {
@@ -10139,102 +10376,102 @@ impl App {
                 false
             }
             ButtonPressedTarget::RuntimeKillCancel => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel);
                 false
             }
             ButtonPressedTarget::RuntimeKillHovered => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered);
                 false
             }
             ButtonPressedTarget::RuntimeKillSelected => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Selected)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Selected);
                 false
             }
             ButtonPressedTarget::RuntimeKillVisible => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Visible)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Visible);
                 false
             }
-            ButtonPressedTarget::ConfirmKillCancel => self.resolve_confirm_kill_running(false),
-            ButtonPressedTarget::ConfirmKillConfirm => self.resolve_confirm_kill_running(true),
-            ButtonPressedTarget::ConfirmDeleteCancel => self.resolve_confirm_delete_agent(false),
-            ButtonPressedTarget::ConfirmDeleteConfirm => self.resolve_confirm_delete_agent(true),
+            ButtonPressedTarget::ConfirmKillCancel => {
+                self.resolve_confirm_kill_running(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmKillConfirm => {
+                self.resolve_confirm_kill_running(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmDeleteCancel => {
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmDeleteConfirm => {
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmDeleteWorktreeCancel => {
-                self.resolve_confirm_delete_worktree(false)
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteWorktreeConfirm => {
-                self.resolve_confirm_delete_worktree(true)
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteTerminalCancel => {
-                self.resolve_confirm_delete_terminal(false)
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteTerminalConfirm => {
-                self.resolve_confirm_delete_terminal(true)
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
-            ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
-            ButtonPressedTarget::ConfirmStopTabCancel => self.resolve_confirm_stop_tab(false),
-            ButtonPressedTarget::ConfirmStopTabConfirm => self.resolve_confirm_stop_tab(true),
+            ButtonPressedTarget::ConfirmCloseTabCancel => {
+                self.resolve_confirm_close_tab(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmCloseTabConfirm => {
+                self.resolve_confirm_close_tab(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmStopTabCancel => {
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmStopTabConfirm => {
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmDetachAgentCancel => {
-                self.resolve_confirm_detach_agent(false)
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDetachAgentConfirm => {
-                self.resolve_confirm_detach_agent(true)
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel => {
-                self.resolve_confirm_recreate_working_copy(false)
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm => {
-                self.resolve_confirm_recreate_working_copy(true)
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmChangeBaseBranchCancel => {
-                self.resolve_confirm_change_base_branch(false)
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmChangeBaseBranchConfirm => {
-                self.resolve_confirm_change_base_branch(true)
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ProjectInfoClose => {
                 self.close_project_info();
                 false
             }
             ButtonPressedTarget::ConfirmCheckoutDefaultBranchCancel => {
-                self.resolve_confirm_checkout_default_branch(false)
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmCheckoutDefaultBranchConfirm => {
-                self.resolve_confirm_checkout_default_branch(true)
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteProjectCancel => {
-                self.resolve_confirm_delete_project(false)
+                self.resolve_confirm_delete_project(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteProjectConfirm => {
-                self.resolve_confirm_delete_project(true)
+                self.resolve_confirm_delete_project(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmRemoveProjectCancel => {
-                self.resolve_confirm_remove_project(false)
+                self.resolve_confirm_remove_project(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmRemoveProjectConfirm => {
-                self.resolve_confirm_remove_project(true)
+                self.resolve_confirm_remove_project(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteMacroCancel => {
-                self.resolve_confirm_delete_macro(false)
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteMacroConfirm => {
-                self.resolve_confirm_delete_macro(true)
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Confirm)
             }
             // Focus follows the click first, so the button that renders as armed
             // is the one that acts.
@@ -10260,18 +10497,30 @@ impl App {
                 }
                 false
             }
-            ButtonPressedTarget::ConfirmQuitCancel => self.resolve_confirm_quit(false),
-            ButtonPressedTarget::ConfirmQuitConfirm => self.resolve_confirm_quit(true),
-            ButtonPressedTarget::ConfirmDiscardCancel => self.resolve_confirm_discard_file(false),
-            ButtonPressedTarget::ConfirmDiscardConfirm => self.resolve_confirm_discard_file(true),
+            ButtonPressedTarget::ConfirmQuitCancel => {
+                self.resolve_confirm_quit(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmQuitConfirm => {
+                self.resolve_confirm_quit(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmDiscardCancel => {
+                self.resolve_confirm_discard_file(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmDiscardConfirm => {
+                self.resolve_confirm_discard_file(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmCreateInitialCommitCancel => {
-                self.resolve_confirm_create_initial_commit(false)
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmCreateInitialCommitConfirm => {
-                self.resolve_confirm_create_initial_commit(true)
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmInitRepoCancel => self.resolve_confirm_init_repo(false),
-            ButtonPressedTarget::ConfirmInitRepoConfirm => self.resolve_confirm_init_repo(true),
+            ButtonPressedTarget::ConfirmInitRepoCancel => {
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmInitRepoConfirm => {
+                self.resolve_confirm_init_repo(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
                 self.prompt = PromptState::None;
                 false
@@ -10283,15 +10532,17 @@ impl App {
                 self.resolve_confirm_non_default_branch()
             }
             ButtonPressedTarget::ConfirmUseExistingBranchCancel => {
-                self.resolve_confirm_use_existing_branch(false)
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmUseExistingBranchUse => {
-                self.resolve_confirm_use_existing_branch(true)
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfigReloadFailedClose => {
-                self.resolve_config_reload_failed(false)
+                self.resolve_config_reload_failed(ConfirmAnswer::Cancel)
             }
-            ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
+            ButtonPressedTarget::ConfigReloadFailedApply => {
+                self.resolve_config_reload_failed(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
             ButtonPressedTarget::AgentInfoClose => {
                 self.prompt = PromptState::None;
@@ -10323,7 +10574,7 @@ impl App {
         }
     }
 
-    pub(super) fn resolve_config_reload_failed(&mut self, apply: bool) -> bool {
+    pub(super) fn resolve_config_reload_failed(&mut self, answer: ConfirmAnswer) -> bool {
         let recover = matches!(
             &self.prompt,
             PromptState::ConfigReloadFailed {
@@ -10331,12 +10582,12 @@ impl App {
                 ..
             }
         );
-        if apply && !recover {
+        if answer == ConfirmAnswer::Confirm && !recover {
             self.set_info("Check \"Recover last working config\" before restoring config.toml.");
             return false;
         }
         self.prompt = PromptState::None;
-        if apply && recover {
+        if answer == ConfirmAnswer::Confirm && recover {
             // RecoverConfig now writes synchronously and returns a FINAL status
             // (restored / failed); surface that and do NOT set a trailing Busy,
             // which would never clear (the recovery already completed).
@@ -10352,17 +10603,17 @@ impl App {
         false
     }
 
-    /// Activate the selected Projects-pane item. `allow_launch` distinguishes the
+    /// Activate the selected Projects-pane item. `on_dormant` distinguishes the
     /// explicit activate action, which always launches a dormant agent, from the
     /// fullscreen toggle, which never does: focus alone never launches. With
-    /// `allow_launch` false and the target dormant, this minimizes a fullscreen
+    /// [`OnDormant::Leave`] and the target dormant, this minimizes a fullscreen
     /// overlay or is a no-op.
     ///
     /// The two callers also part ways on a live agent: the explicit activate
     /// focuses the windowed typeable center pane, while the fullscreen toggle
     /// reopens fullscreen. `InteractAgent` keeps its own jump-straight-to-
     /// fullscreen path in `handle_left_key`.
-    fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
+    fn activate_selected_left_item(&mut self, on_dormant: OnDormant) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
@@ -10372,7 +10623,7 @@ impl App {
                     .selected_session()
                     .is_some_and(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                 {
-                    if allow_launch {
+                    if on_dormant == OnDormant::Launch {
                         // Enter (and the sidebar double-click) lands on the
                         // windowed typeable pane: snap to the live edge and
                         // leave fullscreen and the raw-input target off, so
@@ -10386,11 +10637,11 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
                     }
                 } else if self.selected_session().is_some() {
-                    if allow_launch {
+                    if on_dormant == OnDormant::Launch {
                         // Enter from the sidebar focuses the minimized
                         // typeable center, so its dormant-agent
                         // launch is minimized-seeking.
-                        self.reconnect_selected_session(false)?;
+                        self.reconnect_selected_session(LaunchView::Minimized)?;
                     } else {
                         self.exit_interactive_without_launch();
                     }
@@ -10404,23 +10655,24 @@ impl App {
     }
 
     fn activate_selected_left_item_from_mouse(&mut self) {
-        if let Err(err) = self.activate_selected_left_item(true) {
+        if let Err(err) = self.activate_selected_left_item(OnDormant::Launch) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
 
     /// Activate the focused tab of the Center pane's selected agent.
     ///
-    /// `allow_launch` distinguishes the explicit activate actions, which always
+    /// `on_dormant` distinguishes the explicit activate actions, which always
     /// launch a dormant tab, from the fullscreen toggle, which never does. See
     /// `activate_selected_left_item` for the same distinction in the Projects
-    /// pane. `seek_fullscreen` marks a fullscreen-seeking activation: a launch it
-    /// starts lands fullscreen rather than focused but minimized, and only the
-    /// fullscreen toggle and the double-click maximize gesture pass `true`.
+    /// pane. `view` marks a fullscreen-seeking activation: a launch it starts
+    /// lands fullscreen rather than focused but minimized, and only the
+    /// fullscreen toggle and the double-click maximize gesture pass
+    /// [`LaunchView::Fullscreen`].
     pub(crate) fn activate_center_agent(
         &mut self,
-        allow_launch: bool,
-        seek_fullscreen: bool,
+        on_dormant: OnDormant,
+        view: LaunchView,
     ) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
@@ -10453,13 +10705,13 @@ impl App {
             // `tab_resume_decision` inside the launch: this tab may resume
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
-            if allow_launch {
-                self.launch_focused_extra_tab(&session_id, &tab_id, seek_fullscreen)?;
+            if on_dormant == OnDormant::Launch {
+                self.launch_focused_extra_tab(&session_id, &tab_id, view);
             } else {
                 self.exit_interactive_without_launch();
             }
-        } else if allow_launch {
-            self.reconnect_selected_session(seek_fullscreen)?;
+        } else if on_dormant == OnDormant::Launch {
+            self.reconnect_selected_session(view)?;
         } else {
             self.exit_interactive_without_launch();
         }
@@ -10495,15 +10747,13 @@ impl App {
         }
         // Double-click is the maximize gesture, so a dormant tab launched by
         // it is fullscreen-seeking.
-        if let Err(err) = self.activate_center_agent(true, true) {
+        if let Err(err) = self.activate_center_agent(OnDormant::Launch, LaunchView::Fullscreen) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
 
     fn open_selected_file_diff_from_mouse(&mut self) {
-        if let Err(err) = self.open_diff_for_selected_file() {
-            self.set_error(format!("Mouse activation failed: {err}"));
-        }
+        self.open_diff_for_selected_file();
     }
 
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
@@ -10535,8 +10785,8 @@ impl App {
             .set_cursor_from_display_pos(display_row, display_col);
     }
 
-    fn scroll_commit_input(&mut self, down: bool) {
-        let delta = if down {
+    fn scroll_commit_input(&mut self, direction: ScrollDirection) {
+        let delta = if direction == ScrollDirection::Down {
             MOUSE_WHEEL_LINES as isize
         } else {
             -(MOUSE_WHEEL_LINES as isize)
@@ -10544,7 +10794,7 @@ impl App {
         self.commit_input.scroll_by(delta);
     }
 
-    fn scroll_file_selection(&mut self, section: RightSection, down: bool) {
+    fn scroll_file_selection(&mut self, section: RightSection, direction: ScrollDirection) {
         self.set_file_selection(section, Some(self.files_index));
         if self.right_section == RightSection::CommitInput {
             return;
@@ -10555,7 +10805,7 @@ impl App {
             return;
         }
 
-        if down {
+        if direction == ScrollDirection::Down {
             if self.files_index + 1 < len {
                 self.files_index += 1;
             }
@@ -10564,14 +10814,14 @@ impl App {
         }
     }
 
-    fn handle_left_mouse_wheel(&mut self, down: bool, column: u16, row: u16) {
+    fn handle_left_mouse_wheel(&mut self, direction: ScrollDirection, column: u16, row: u16) {
         let target_index = match self.mouse_target(column, row) {
             Some(MouseTarget::LeftRow(index)) => index,
             _ => self.selected_left,
         };
         self.set_left_selection(target_index);
 
-        if down {
+        if direction == ScrollDirection::Down {
             if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
                 self.selected_left = next;
                 self.reload_changed_files();
@@ -10601,11 +10851,16 @@ impl App {
         // `forward_scroll` policy (or live alt-screen + mouse-reporting state)
         // says so; otherwise scroll dux's own host scrollback.
         let fs = self.selected_surface_forward_scroll();
-        let (alt, mouse_mode) = self
+        let mouse_mode = if self
             .selected_terminal_surface_client()
-            .map_or((false, false), |p| (p.is_alt_screen(), p.has_mouse_mode()));
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
 
-        if should_forward_wheel(fs, alt, mouse_mode) {
+        if should_forward_wheel(fs, mouse_mode) {
             // Reconstruct the SGR wheel report the child expects, translated
             // from screen-absolute coordinates to child-relative ones via the
             // terminal content area's origin. ScrollUp = button 64, down = 65.
@@ -10691,7 +10946,7 @@ impl App {
 
     /// Record a press dux took an interest in. Nothing opens here: the press
     /// decides, the release acts.
-    fn note_link_press(&mut self, decision: LinkPressDecision, mouse: &MouseEvent) {
+    fn note_link_press(&mut self, decision: LinkPressDecision, mouse: MouseEvent) {
         // The second click of a double click is the select-a-word gesture, not
         // a second visit to the same page. Refused at press time, on the cell,
         // so it holds for both surfaces and for a child that tracks the mouse
@@ -10755,7 +11010,7 @@ impl App {
     /// The band the press claimed has to still be the band on screen: a lane that
     /// moved, went away or now belongs to another agent is not the control the
     /// gesture began on.
-    fn handle_pending_pr_banner_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_pending_pr_banner_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(pressed) = self.pending_pr_banner_press else {
             return false;
         };
@@ -10795,7 +11050,7 @@ impl App {
     /// A new press retires the record instead of being swallowed, so a release
     /// that never arrived cannot strand the next click. A surface change under
     /// the pending press retires it the same way.
-    fn handle_pending_link_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_pending_link_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(pending) = self.pending_link_click.clone() else {
             return false;
         };
@@ -10831,7 +11086,7 @@ impl App {
     /// A press over the WINDOWED agent grid, asked the link question first.
     /// Returns whether the press was consumed; `false` leaves it to today's
     /// behavior (focus, the double-click bookkeeping, a forward to the child).
-    fn handle_center_link_press(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_center_link_press(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -10842,9 +11097,14 @@ impl App {
         let link = self
             .link_at_screen_point(mouse.column, mouse.row)
             .map(str::to_string);
-        let child_wants_mouse = self
+        let child_wants_mouse = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
         match decide_terminal_press(
             mouse.kind,
             mouse.modifiers,
@@ -10886,7 +11146,7 @@ impl App {
     /// - a modal surface owns the pane (macro bar, resize mode), matching the
     ///   keyboard's `center_typeable()` gates,
     /// - the surface is dormant or the child has no mouse tracking on.
-    fn begin_center_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+    fn begin_center_mouse_forward(&mut self, mouse: MouseEvent) -> bool {
         if !mouse.modifiers.is_empty() {
             return false;
         }
@@ -10901,7 +11161,7 @@ impl App {
     /// A refused gate is not a fall-through: the caller claims the press either
     /// way, so a hatch click on a scrolled-back pane does nothing rather than
     /// focusing the pane and half-arming a double click.
-    fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: &MouseEvent) -> bool {
+    fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -10946,7 +11206,7 @@ impl App {
     /// when the child asked for them (DECSET 1002/1003), with coordinates
     /// clamped to the pane edge exactly as a real emulator clamps a drag that
     /// leaves the window.
-    fn continue_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+    fn continue_center_mouse_forward(&mut self, mouse: MouseEvent) {
         let Some(cb) = self.center_mouse_forward else {
             return;
         };
@@ -10966,7 +11226,7 @@ impl App {
     /// a child that dropped mouse tracking MID-DRAG: it no longer wants any
     /// report, so the state is simply cleared (writing one anyway would type
     /// the raw SGR bytes at whatever replaced the mouse-mode app).
-    fn finish_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+    fn finish_center_mouse_forward(&mut self, mouse: MouseEvent) {
         let Some(cb) = self.center_mouse_forward.take() else {
             return;
         };
@@ -11130,11 +11390,11 @@ impl App {
     /// palette command so both stay in sync; mirrors `persist_pane_widths`'
     /// lazy config write.
     pub(crate) fn toggle_git_pane_removed(&mut self) {
-        self.right_hidden = !self.right_hidden;
-        if self.right_hidden && self.focus == FocusPane::Files {
+        self.panes.right_hidden = !self.panes.right_hidden;
+        if self.panes.right_hidden && self.focus == FocusPane::Files {
             self.focus = FocusPane::Center;
         }
-        self.engine.config.ui.show_changes_pane = !self.right_hidden;
+        self.engine.config.ui.show_changes_pane = !self.panes.right_hidden;
         self.engine
             .config_writer
             .save_lazy(self.engine.config.clone());
@@ -11203,10 +11463,10 @@ impl App {
         // this toggle just gave to the agent.
         let next_pane = self
             .bindings
-            .label_for_typeable_center(Action::FocusNext, true);
+            .label_for_typeable_center(Action::FocusNext, crate::keybindings::TabKey::ReachesAgent);
         let prev_pane = self
             .bindings
-            .label_for_typeable_center(Action::FocusPrev, true);
+            .label_for_typeable_center(Action::FocusPrev, crate::keybindings::TabKey::ReachesAgent);
         let handed_over = "Tab and Shift-Tab now reach the agent in the center pane.";
         match (next_pane, prev_pane) {
             (Some(next_pane), Some(prev_pane)) => self.set_ui_hint(format!(
@@ -11229,7 +11489,7 @@ impl App {
             && self.center_mouse_forward.is_some()
             && matches!(mouse.kind, MouseEventKind::Up(_))
         {
-            self.finish_center_mouse_forward(&mouse);
+            self.finish_center_mouse_forward(mouse);
         }
         if !matches!(self.prompt, PromptState::None) {
             return Some(self.handle_prompt_mouse(mouse));
@@ -11241,7 +11501,7 @@ impl App {
         if self.help_scroll.is_none() {
             return false;
         }
-        if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
+        if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse) {
             self.close_help_overlay();
             return true;
         }
@@ -11296,7 +11556,7 @@ impl App {
         true
     }
 
-    fn dismiss_noninteractive_fullscreen_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn dismiss_noninteractive_fullscreen_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
@@ -11310,7 +11570,7 @@ impl App {
         false
     }
 
-    fn intercept_mouse_before_targets(&mut self, mouse: &MouseEvent) -> bool {
+    fn intercept_mouse_before_targets(&mut self, mouse: MouseEvent) -> bool {
         if matches!(self.center_mode, CenterMode::Agent)
             && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
             && (self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse))
@@ -11323,8 +11583,8 @@ impl App {
         self.handle_pending_pr_banner_mouse(mouse)
     }
 
-    fn handle_pr_banner_press(&mut self, mouse: &MouseEvent, windowed: bool) -> bool {
-        if windowed
+    fn handle_pr_banner_press(&mut self, mouse: MouseEvent, layout: PaneLayout) -> bool {
+        if layout == PaneLayout::Windowed
             && let Some(band) = self.mouse_layout.pr_banner
             && contains_point(band, mouse.column, mouse.row)
         {
@@ -11366,7 +11626,7 @@ impl App {
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 if double_click {
-                    let _ = self.open_terminal_from_terminal_list();
+                    let () = self.open_terminal_from_terminal_list();
                 } else {
                     self.arm_row_drag(RowDragList::Terminals, index);
                 }
@@ -11382,7 +11642,7 @@ impl App {
         true
     }
 
-    fn handle_files_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) -> bool {
+    fn handle_files_pointer_target(&mut self, target: MouseTarget, mouse: MouseEvent) -> bool {
         match target {
             MouseTarget::FilesPane => {
                 self.focus = FocusPane::Files;
@@ -11428,7 +11688,7 @@ impl App {
         true
     }
 
-    fn handle_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) {
+    fn handle_pointer_target(&mut self, target: MouseTarget, mouse: MouseEvent) {
         if self.handle_left_pointer_target(target) {
             return;
         }
@@ -11457,7 +11717,7 @@ impl App {
     /// The remaining gates are the forward's own: a surface that is not the agent
     /// grid, a dormant one, and the modal surfaces that suspend the pane have
     /// nothing to select.
-    fn begin_windowed_terminal_selection(&mut self, mouse: &MouseEvent) {
+    fn begin_windowed_terminal_selection(&mut self, mouse: MouseEvent) {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -11466,7 +11726,7 @@ impl App {
         {
             return;
         }
-        self.handle_terminal_selection_mouse(*mouse);
+        self.handle_terminal_selection_mouse(mouse);
     }
 
     fn terminal_selection_is_dragging(&self) -> bool {
@@ -11496,7 +11756,7 @@ impl App {
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
     fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
-        if self.left_collapsed {
+        if self.panes.left_collapsed {
             // The collapsed rail is a column of glyphs: there is no room to show a
             // row being carried or a gap opening, so it does not drag.
             self.row_drag = None;
@@ -11533,7 +11793,7 @@ impl App {
     /// section finds no row there. This is the promotion threshold's question
     /// ("is the pointer still on the row it pressed on?"), which is about the
     /// rect and not about whether a drop there would mean anything.
-    fn row_drag_target_row(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
+    fn row_drag_target_row(&self, list: RowDragList, mouse: MouseEvent) -> Option<usize> {
         match (list, self.mouse_target(mouse.column, mouse.row)) {
             (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
             (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
@@ -11549,7 +11809,7 @@ impl App {
     /// a click changes nothing. Once promoted, `hover` follows the pointer and is
     /// `None` wherever a drop would mean nothing: over the source row, the
     /// Inactive tail, empty space, or outside the sidebar.
-    fn continue_row_drag(&mut self, mouse: &MouseEvent) {
+    fn continue_row_drag(&mut self, mouse: MouseEvent) {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
@@ -11616,7 +11876,7 @@ impl App {
         }
     }
 
-    fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
+    fn handle_primary_mouse_down(&mut self, mouse: MouseEvent, layout: PaneLayout) {
         // A new press retires any previous row drag, wherever it lands. A release
         // does not always come back: the take-over card swallows one that lands on
         // the covered pane, and a gesture left armed would be finished later by an
@@ -11624,15 +11884,19 @@ impl App {
         // a press on a row still starts its own gesture.
         self.row_drag = None;
         self.end_terminal_selection_drag();
-        if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
+        if layout == PaneLayout::Windowed
+            && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row)
+        {
             self.mouse_drag = Some(drag);
             self.update_dragged_panes(mouse.column, mouse.row);
             return;
         }
-        if windowed && self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
+        if layout == PaneLayout::Windowed
+            && self.handle_agent_tab_strip_click(mouse.column, mouse.row)
+        {
             return;
         }
-        if self.handle_pr_banner_press(mouse, windowed) {
+        if self.handle_pr_banner_press(mouse, layout) {
             return;
         }
         if self.handle_center_link_press(mouse) {
@@ -11646,40 +11910,40 @@ impl App {
         }
     }
 
-    fn route_mouse_wheel(&mut self, mouse: MouseEvent, down: bool) {
+    fn route_mouse_wheel(&mut self, mouse: MouseEvent, direction: ScrollDirection) {
         match self.mouse_target(mouse.column, mouse.row) {
             Some(MouseTarget::LeftRow(_)) => {
-                self.handle_left_mouse_wheel(down, mouse.column, mouse.row);
+                self.handle_left_mouse_wheel(direction, mouse.column, mouse.row);
             }
             Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
             Some(MouseTarget::UnstagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Unstaged, down);
+                self.scroll_file_selection(RightSection::Unstaged, direction);
             }
             Some(MouseTarget::StagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Staged, down);
+                self.scroll_file_selection(RightSection::Staged, direction);
             }
             Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
                 self.focus = FocusPane::Files;
                 self.right_section = RightSection::CommitInput;
-                self.scroll_commit_input(down);
+                self.scroll_commit_input(direction);
             }
             _ => {}
         }
     }
 
-    fn dispatch_mouse_event(&mut self, mouse: MouseEvent, windowed: bool) {
+    fn dispatch_mouse_event(&mut self, mouse: MouseEvent, layout: PaneLayout) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_primary_mouse_down(&mouse, windowed);
+                self.handle_primary_mouse_down(mouse, layout);
             }
             MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
-                self.begin_center_mouse_forward(&mouse);
+                self.begin_center_mouse_forward(mouse);
             }
             MouseEventKind::Drag(_) if self.center_mouse_forward.is_some() => {
-                self.continue_center_mouse_forward(&mouse);
+                self.continue_center_mouse_forward(mouse);
             }
             MouseEventKind::Up(_) if self.center_mouse_forward.is_some() => {
-                self.finish_center_mouse_forward(&mouse);
+                self.finish_center_mouse_forward(mouse);
             }
             MouseEventKind::Drag(MouseButton::Left) if self.mouse_drag.is_some() => {
                 self.update_dragged_panes(mouse.column, mouse.row);
@@ -11690,7 +11954,7 @@ impl App {
             // A selection drag on the minimized grid. The press that started it
             // cleared the row drag, so the two can never be live at once.
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-                if windowed && self.terminal_selection_is_dragging() =>
+                if layout == PaneLayout::Windowed && self.terminal_selection_is_dragging() =>
             {
                 self.handle_terminal_selection_mouse(mouse);
             }
@@ -11698,13 +11962,13 @@ impl App {
             // a pane resize and a row reorder can never be live at once; these
             // arms sit after it for exactly that reason.
             MouseEventKind::Drag(MouseButton::Left) if self.row_drag.is_some() => {
-                self.continue_row_drag(&mouse);
+                self.continue_row_drag(mouse);
             }
             MouseEventKind::Up(MouseButton::Left) if self.row_drag.is_some() => {
                 self.finish_row_drag();
             }
-            MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, true),
-            MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, false),
+            MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, ScrollDirection::Down),
+            MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, ScrollDirection::Up),
             _ => {}
         }
     }
@@ -11725,12 +11989,16 @@ impl App {
         if self.route_startup_log_mouse(mouse) {
             return false;
         }
-        if self.dismiss_noninteractive_fullscreen_mouse(&mouse) {
+        if self.dismiss_noninteractive_fullscreen_mouse(mouse) {
             return false;
         }
 
-        let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
-        if self.intercept_mouse_before_targets(&mouse) {
+        let windowed = if matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            PaneLayout::Windowed
+        } else {
+            PaneLayout::Maximized
+        };
+        if self.intercept_mouse_before_targets(mouse) {
             return false;
         }
         self.dispatch_mouse_event(mouse, windowed);
@@ -11762,7 +12030,7 @@ impl App {
     /// covers a live grid and swallows every event over it, while this one is
     /// drawn where there is no process, so only the button's own gesture is
     /// consumed. A drag off the button before release cancels it, as everywhere.
-    pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(button) = self.mouse_layout.dormant_tab_button else {
             // The card can vanish under the pointer: the tab launched, or the
             // selection moved. An in-flight press dies with its button rather
@@ -11774,7 +12042,7 @@ impl App {
             crate::app::modal::click_target(&[(button, ())], mouse.column, mouse.row).is_some()
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if on_button(mouse) => {
+            MouseEventKind::Down(MouseButton::Left) if on_button(&mouse) => {
                 self.focus = FocusPane::Center;
                 self.dormant_tab_press = Some(components::PressedButton {
                     target: ButtonPressedTarget::DormantTabCard,
@@ -11783,7 +12051,7 @@ impl App {
                 true
             }
             MouseEventKind::Drag(_) if self.dormant_tab_press.is_some() => {
-                let inside = on_button(mouse);
+                let inside = on_button(&mouse);
                 if let Some(press) = self.dormant_tab_press.as_mut() {
                     press.inside = inside;
                 }
@@ -11794,7 +12062,7 @@ impl App {
                     .dormant_tab_press
                     .take()
                     .is_some_and(|press| press.inside);
-                if held && on_button(mouse) {
+                if held && on_button(&mouse) {
                     self.start_focused_dormant_tab();
                 }
                 true
@@ -11810,9 +12078,7 @@ impl App {
             return;
         };
         let tab_id = self.focused_tab_id(&session_id);
-        if let Err(err) = self.launch_focused_extra_tab(&session_id, &tab_id, false) {
-            self.set_error(format!("{err:#}"));
-        }
+        self.launch_focused_extra_tab(&session_id, &tab_id, LaunchView::Minimized);
     }
 
     /// The take-over card's answer to one mouse event. Returns whether the card
@@ -11827,7 +12093,7 @@ impl App {
     ///
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
-    pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !self.focused_pty_is_covered_by_card() {
             // The card can vanish under the pointer: this surface takes over, or
             // a launch started here claims the pty, between press and release.
@@ -11844,7 +12110,7 @@ impl App {
             })
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if on_button(self, mouse) => {
+            MouseEventKind::Down(MouseButton::Left) if on_button(self, &mouse) => {
                 self.focus = FocusPane::Center;
                 self.takeover_press = Some(components::PressedButton {
                     target: ButtonPressedTarget::TakeOverCard,
@@ -11853,7 +12119,7 @@ impl App {
                 true
             }
             MouseEventKind::Drag(_) if self.takeover_press.is_some() => {
-                let inside = on_button(self, mouse);
+                let inside = on_button(self, &mouse);
                 if let Some(press) = self.takeover_press.as_mut() {
                     press.inside = inside;
                 }
@@ -11861,7 +12127,7 @@ impl App {
             }
             MouseEventKind::Up(_) if self.takeover_press.is_some() => {
                 let held = self.takeover_press.take().is_some_and(|press| press.inside);
-                if held && on_button(self, mouse) {
+                if held && on_button(self, &mouse) {
                     self.take_over_focused_pty();
                 }
                 true
@@ -12156,9 +12422,9 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
-        self.in_bracket_paste = false;
-        self.raw_paste_normalize = false;
-        self.raw_paste_prev_cr = false;
+        self.raw_paste.in_bracket = false;
+        self.raw_paste.normalize = false;
+        self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
@@ -12271,7 +12537,7 @@ impl App {
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
         let sequences = self.raw_input_parser.feed_sequences(new_bytes);
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
-        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         self.scan_loading_phase_focus(&sequences);
         self.scan_loading_phase_exit()
     }
@@ -12324,6 +12590,15 @@ fn killed_runtime_message(agents: usize, terminals: usize, already_gone: usize) 
 
 #[cfg(test)]
 mod tests {
+
+    /// A test's explicit `forward_scroll` setting for the agent's provider.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ForwardScroll {
+        /// Always forward scroll input to the child.
+        Always,
+        /// Never forward it.
+        Never,
+    }
     use dux_core::ids::{TabId, TabIdRef};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -12333,7 +12608,6 @@ mod tests {
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
-    use crate::app::ConfirmFocus;
     use crate::app::ResizeDragState;
     use crate::app::SelectionOrigin;
     use crate::app::input::{
@@ -12341,6 +12615,7 @@ mod tests {
         configure_project_text_input, cursor_from_single_line_position, snapshot_cell_columns,
         startup_command_log_visual_lines,
     };
+    use crate::app::{ConfirmAnswer, ConfirmFocus};
 
     /// The commit success message advertises the push key only where pushing can
     /// succeed. A standalone agent has no branch, so the key it used to name
@@ -12406,52 +12681,71 @@ mod tests {
         use super::should_forward_wheel;
         // None = auto: mouse reporting alone decides. An app that asks for
         // the mouse owns the wheel whether or not it took the alt screen.
-        assert!(should_forward_wheel(None, true, true));
-        assert!(!should_forward_wheel(None, true, false));
-        assert!(should_forward_wheel(None, false, true));
-        assert!(!should_forward_wheel(None, false, false));
+        assert!(should_forward_wheel(None, super::MouseReporting::On));
+        assert!(!should_forward_wheel(None, super::MouseReporting::Off));
+        assert!(should_forward_wheel(None, super::MouseReporting::On));
+        assert!(!should_forward_wheel(None, super::MouseReporting::Off));
         // Some(true) = always forward, regardless of live signals.
-        assert!(should_forward_wheel(Some(true), false, false));
-        assert!(should_forward_wheel(Some(true), true, true));
-        assert!(should_forward_wheel(Some(true), false, true));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::Off));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
         // Some(false) = never forward, even in the alt screen with mouse.
-        assert!(!should_forward_wheel(Some(false), true, true));
-        assert!(!should_forward_wheel(Some(false), false, false));
+        assert!(!should_forward_wheel(
+            Some(false),
+            super::MouseReporting::On
+        ));
+        assert!(!should_forward_wheel(
+            Some(false),
+            super::MouseReporting::Off
+        ));
     }
 
     #[test]
     fn should_forward_page_matrix() {
         use super::should_forward_page;
         // None = auto: page keys forward in the alt screen (no mouse needed).
-        assert!(should_forward_page(None, true));
-        assert!(!should_forward_page(None, false));
+        assert!(should_forward_page(
+            None,
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
+        assert!(!should_forward_page(
+            None,
+            dux_core::pty::ScreenBuffer::Primary
+        ));
         // Some(true) = always forward.
-        assert!(should_forward_page(Some(true), false));
-        assert!(should_forward_page(Some(true), true));
+        assert!(should_forward_page(
+            Some(true),
+            dux_core::pty::ScreenBuffer::Primary
+        ));
+        assert!(should_forward_page(
+            Some(true),
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
         // Some(false) = never forward, even in the alt screen.
-        assert!(!should_forward_page(Some(false), true));
-        assert!(!should_forward_page(Some(false), false));
+        assert!(!should_forward_page(
+            Some(false),
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
+        assert!(!should_forward_page(
+            Some(false),
+            dux_core::pty::ScreenBuffer::Primary
+        ));
     }
 
     fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                if let Some((_, keys)) =
-                    overrides.iter().find(|(candidate, _)| *candidate == action)
-                {
-                    return keys
-                        .iter()
-                        .map(|key| crokey::parse(key).expect("valid test binding"))
-                        .collect();
-                }
-                BINDING_DEFS
+        RuntimeBindings::new(|action| {
+            if let Some((_, keys)) = overrides.iter().find(|(candidate, _)| *candidate == action) {
+                return keys
                     .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
+                    .map(|key| crokey::parse(key).expect("valid test binding"))
+                    .collect();
+            }
+            BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     fn set_remote_default(path: &std::path::Path, branch: &str) {
@@ -13414,7 +13708,7 @@ mod tests {
     #[test]
     fn the_collapsed_rail_arms_no_drag() {
         let mut app = drag_test_app();
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -13630,7 +13924,7 @@ mod tests {
         )
         .expect("write valid config");
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         assert_eq!(app.status.message(), "Reloading config.toml.");
@@ -13638,7 +13932,7 @@ mod tests {
         drain_until(&mut app, |app| app.engine.config.ui.right_width_pct == 37);
 
         assert_eq!(app.right_width_pct, 37);
-        assert!(app.show_diff_line_numbers);
+        assert!(app.view_prefs.show_diff_line_numbers);
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(
             app.status.message(),
@@ -13660,7 +13954,7 @@ not_a_real_action = ["x"]
         )
         .expect("write invalid config");
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
 
@@ -13709,7 +14003,7 @@ not_a_real_action = ["x"]
             let before = app.engine.config.clone();
             std::fs::write(&app.engine.paths.config_path, body).expect("write config");
 
-            app.execute_command("reload-config".to_string())
+            app.execute_command("reload-config")
                 .expect("start reload config");
             drain_until(&mut app, |app| {
                 matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
@@ -13765,7 +14059,7 @@ not_a_real_action = ["x"]
         let before = app.engine.config.clone();
         let _ = std::fs::remove_file(&app.engine.paths.config_path);
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         drain_until(&mut app, |app| {
             matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
@@ -13831,7 +14125,7 @@ not_a_real_action = ["x"]
             error: "the session database could not be read".to_string(),
         });
         assert_eq!(app.left_width_pct, 37);
-        assert!(app.right_hidden);
+        assert!(app.panes.right_hidden);
         assert!(
             !matches!(app.prompt, PromptState::ConfigReloadFailed { .. }),
             "the config was not refused"
@@ -13873,7 +14167,10 @@ not_a_real_action = ["x"]
         )
         .unwrap();
         let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
-        assert!(!app.right_hidden, "precondition: the changes pane shows");
+        assert!(
+            !app.panes.right_hidden,
+            "precondition: the changes pane shows"
+        );
         rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
             .unwrap()
             .execute("DROP TABLE projects", [])
@@ -13886,7 +14183,7 @@ not_a_real_action = ["x"]
         );
         assert_eq!(app.left_width_pct, 33, "the view follows the kept config");
         assert!(
-            app.right_hidden,
+            app.panes.right_hidden,
             "every view setting follows the kept config"
         );
 
@@ -13920,7 +14217,7 @@ not_a_real_action = ["x"]
             crate::config::render_config_with(&config, &bindings),
         )
         .expect("write valid config");
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         drain_until(&mut app, |app| app.engine.config.server.auth.has_password());
         assert_eq!(app.engine.config.server.auth, config.server.auth);
@@ -13939,7 +14236,7 @@ not_a_real_action = ["x"]
             scroll: 0,
         };
 
-        app.resolve_config_reload_failed(true);
+        app.resolve_config_reload_failed(ConfirmAnswer::Confirm);
         // RecoverConfig is synchronous: it writes through the engine while
         // holding the quiesce barrier and returns the FINAL status directly.
         // There is no trailing Busy (which would never clear) and nothing to drain.
@@ -13991,7 +14288,7 @@ not_a_real_action = ["x"]
             focus: ConfigReloadFailedFocus::Apply,
             scroll: 0,
         };
-        app.resolve_config_reload_failed(true);
+        app.resolve_config_reload_failed(ConfirmAnswer::Confirm);
         let recovered: Config =
             toml::from_str(&std::fs::read_to_string(&app.engine.paths.config_path).expect("read"))
                 .expect("parse");
@@ -14285,10 +14582,6 @@ not_a_real_action = ["x"]
         assert_eq!(prompt.selected_ids, before);
     }
 
-    fn clipboard_ok(_: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn clipboard_fail(_: &str) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("linux clipboard unavailable"))
     }
@@ -14535,8 +14828,7 @@ not_a_real_action = ["x"]
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
 
-        app.open_diff_for_selected_file()
-            .expect("the refusal is not an error");
+        app.open_diff_for_selected_file();
 
         assert!(
             !matches!(app.center_mode, CenterMode::Diff { .. }),
@@ -14597,7 +14889,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
 
         let CenterMode::Diff { ref lines, .. } = app.center_mode else {
             panic!("the pane switched to the diff view");
@@ -14638,7 +14930,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
         let stale_key = app.pending_diff.as_ref().expect("pending").key.clone();
         let real_answer = app
             .pending_diff
@@ -14651,7 +14943,7 @@ not_a_real_action = ["x"]
 
         // The user asked again (a line-numbers toggle, say) before the first
         // answer was drained, so the pending key moved on.
-        app.show_diff_line_numbers = !app.show_diff_line_numbers;
+        app.view_prefs.show_diff_line_numbers = !app.view_prefs.show_diff_line_numbers;
         app.refresh_current_diff();
         let live_key = app.pending_diff.as_ref().expect("pending").key.clone();
         assert_ne!(live_key, stale_key);
@@ -14680,7 +14972,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
         assert!(app.pending_diff.is_some());
 
         app.close_diff_view();
@@ -14823,7 +15115,7 @@ not_a_real_action = ["x"]
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
 
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
@@ -14836,7 +15128,7 @@ not_a_real_action = ["x"]
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
         // Opening the read-only modal drops any interactive/fullscreen surface.
@@ -14851,7 +15143,7 @@ not_a_real_action = ["x"]
         app.selected_left = 0;
         assert!(app.selected_session().is_none());
 
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -14864,7 +15156,7 @@ not_a_real_action = ["x"]
         // all return the read-only modal to PromptState::None.
         for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char(' ')] {
             let mut app = test_app(default_bindings());
-            app.open_agent_info().unwrap();
+            app.open_agent_info();
             assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
 
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -14883,7 +15175,7 @@ not_a_real_action = ["x"]
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         // Render once so the overlay layout (the Close button rect) is populated.
         let backend = TestBackend::new(100, 30);
@@ -15407,7 +15699,11 @@ not_a_real_action = ["x"]
             .expect("managed test session")
             .to_string();
 
-        app.apply_rename_session("session-1", "new-title".to_string(), false);
+        app.apply_rename_session(
+            "session-1",
+            "new-title",
+            dux_core::engine::BranchRename::NameOnly,
+        );
 
         assert_eq!(
             app.engine.sessions[0].title.as_deref(),
@@ -15731,7 +16027,7 @@ not_a_real_action = ["x"]
     fn open_rename_session_starts_unticked_with_the_custom_name() {
         let mut app = test_app(default_bindings());
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         match &app.prompt {
             PromptState::RenameSession {
                 rename_branch,
@@ -15746,7 +16042,7 @@ not_a_real_action = ["x"]
         }
 
         app.engine.sessions[0].title = Some("shiny".to_string());
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         match &app.prompt {
             PromptState::RenameSession { input, .. } => assert_eq!(input.text, "shiny"),
             other => panic!("expected RenameSession, got {other:?}"),
@@ -15759,7 +16055,7 @@ not_a_real_action = ["x"]
     fn an_empty_rename_resets_the_label_to_the_branch() {
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].title = Some("shiny".to_string());
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         if let PromptState::RenameSession { input, .. } = &mut app.prompt {
             *input = TextInput::with_text(String::new());
         }
@@ -15858,7 +16154,7 @@ not_a_real_action = ["x"]
                 url: "https://github.com/o/r/pull/42".to_string(),
             },
         );
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         assert!(matches!(
             app.prompt,
             PromptState::RenameSession {
@@ -15896,7 +16192,7 @@ not_a_real_action = ["x"]
         app.engine
             .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid));
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
 
         assert!(
             matches!(app.prompt, PromptState::None),
@@ -15917,7 +16213,11 @@ not_a_real_action = ["x"]
         app.engine
             .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid.clone()));
 
-        app.apply_rename_session(&sid, "brand-new-name".to_string(), true);
+        app.apply_rename_session(
+            &sid,
+            "brand-new-name",
+            dux_core::engine::BranchRename::AlsoTheBranch,
+        );
 
         assert_eq!(
             app.engine.sessions[0].title, original_title,
@@ -15948,7 +16248,11 @@ not_a_real_action = ["x"]
             )
             .unwrap();
 
-        app.apply_rename_session(&sid, "brand-new-name".to_string(), false);
+        app.apply_rename_session(
+            &sid,
+            "brand-new-name",
+            dux_core::engine::BranchRename::NameOnly,
+        );
 
         assert_eq!(app.engine.sessions[0].title, original_title);
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -15963,7 +16267,7 @@ not_a_real_action = ["x"]
     fn open_kill_running_requires_live_runtimes() {
         let mut app = test_app(default_bindings());
 
-        app.open_kill_running().unwrap();
+        app.open_kill_running();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -15996,7 +16300,7 @@ not_a_real_action = ["x"]
             },
         );
 
-        app.open_kill_running().unwrap();
+        app.open_kill_running();
 
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
@@ -16190,7 +16494,7 @@ not_a_real_action = ["x"]
             focus: ConfirmFocus::Cancel,
         });
 
-        app.resolve_confirm_kill_running(false);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Cancel);
 
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
@@ -16265,9 +16569,8 @@ not_a_real_action = ["x"]
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Visible),
         });
 
-        app.open_confirm_kill_running_action(KillRunningAction::Visible)
-            .unwrap();
-        app.resolve_confirm_kill_running(true);
+        app.open_confirm_kill_running_action(KillRunningAction::Visible);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine
@@ -16794,8 +17097,7 @@ not_a_real_action = ["x"]
                 .collect(),
                 focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
             });
-            app.open_confirm_kill_running_action(KillRunningAction::Selected)
-                .unwrap();
+            app.open_confirm_kill_running_action(KillRunningAction::Selected);
         };
 
         // Refused while a browser watches one of the targets: the
@@ -16804,7 +17106,7 @@ not_a_real_action = ["x"]
         let session_id = app.engine.sessions[0].id.clone();
         crate::app::test_support::watch_from_a_browser(&app, "term-1", &session_id);
         open(&mut app);
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmKillRunning(confirm) => {
                 assert_eq!(confirm.attached.len(), 1);
@@ -16817,7 +17119,7 @@ not_a_real_action = ["x"]
         assert!(!app.engine.companion_terminals.is_empty());
 
         // Confirming again kills them over the browser.
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert!(app.engine.providers.is_empty());
         assert!(app.engine.companion_terminals.is_empty());
@@ -16848,7 +17150,7 @@ not_a_real_action = ["x"]
             focus: ConfirmFocus::Confirm,
         });
 
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already gone"));
@@ -16858,7 +17160,7 @@ not_a_real_action = ["x"]
     fn fork_selected_session_sets_busy_state_and_keeps_fresh_create_flow() {
         let mut app = test_app(default_bindings());
 
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -16883,7 +17185,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
@@ -16925,7 +17227,7 @@ not_a_real_action = ["x"]
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         match &app.prompt {
@@ -16947,7 +17249,7 @@ not_a_real_action = ["x"]
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -16958,7 +17260,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -17190,7 +17492,7 @@ not_a_real_action = ["x"]
         app.engine.projects[0].leading_branch = Some("missing-main".to_string());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         drain_until(&mut app, |app| {
             app.status
                 .text()
@@ -17264,7 +17566,7 @@ not_a_real_action = ["x"]
             .enable_randomized_pet_name_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -17290,7 +17592,7 @@ not_a_real_action = ["x"]
             .defaults
             .enable_randomized_pet_name_by_default = true;
 
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -17328,8 +17630,7 @@ not_a_real_action = ["x"]
             };
             // This is the branch-inspection completion the chooser's new-agent
             // path dispatches into; it is what opens the naming prompt.
-            app.continue_create_agent_after_branch_inspection(project, inspection)
-                .expect("open naming prompt");
+            app.continue_create_agent_after_branch_inspection(project, inspection);
             match &app.prompt {
                 PromptState::NameNewAgent {
                     request,
@@ -17358,8 +17659,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         // Flat model: new-agent-from-worktree opens the project chooser first;
         // confirming a project then loads that project's worktrees.
-        app.execute_command("new-agent-from-worktree".to_string())
-            .unwrap();
+        app.execute_command("new-agent-from-worktree").unwrap();
         assert!(matches!(
             app.prompt,
             PromptState::PickProject {
@@ -17409,7 +17709,7 @@ not_a_real_action = ["x"]
         // agent-less project so the chooser must surface both.
         add_agentless_project(&mut app, "project-2", "empty");
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
 
         match &app.prompt {
             PromptState::PickProject {
@@ -17433,7 +17733,7 @@ not_a_real_action = ["x"]
         app.engine.projects.clear();
         app.rebuild_left_items();
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -17465,7 +17765,7 @@ not_a_real_action = ["x"]
             created_at: None,
         });
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
         // Move to the agent-less second project and confirm.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
@@ -17507,8 +17807,7 @@ not_a_real_action = ["x"]
         // fast without opening the chooser.
         assert!(!app.github_pr_agent_command_available());
 
-        app.execute_command("new-agent-from-pr".to_string())
-            .unwrap();
+        app.execute_command("new-agent-from-pr").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -17532,7 +17831,7 @@ not_a_real_action = ["x"]
             "the palette must offer refresh-changes"
         );
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         // The read runs on a worker, so the final lands on a later drain.
         drain_until(&mut app, |app| {
@@ -17580,7 +17879,7 @@ not_a_real_action = ["x"]
         app.engine.staged_files = vec![ghost.clone()];
         app.engine.unstaged_files = vec![ghost];
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
@@ -17618,7 +17917,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
 
         assert_eq!(
@@ -17656,7 +17955,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         // The user moves on before the answer lands.
         *app.engine.watched_worktree.lock().expect("watch lock") =
@@ -17694,7 +17993,7 @@ not_a_real_action = ["x"]
             .expect("managed test session")
             .worktree_path = not_a_repo.path().to_string_lossy().into_owned();
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
@@ -17726,7 +18025,7 @@ not_a_real_action = ["x"]
     fn esc_closes_the_project_chooser() {
         let mut app = test_app(default_bindings());
         let other = add_agentless_project(&mut app, "project-2", "empty");
-        app.execute_command("manage-projects".to_string()).unwrap();
+        app.execute_command("manage-projects").unwrap();
         assert!(matches!(app.prompt, PromptState::PickProject { .. }));
         let row_of_other = match &app.prompt {
             PromptState::PickProject { entries, .. } => entries
@@ -17788,7 +18087,7 @@ not_a_real_action = ["x"]
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("a session row");
 
-        app.execute_command("manage-projects".to_string()).unwrap();
+        app.execute_command("manage-projects").unwrap();
         let row_of_other = match &app.prompt {
             PromptState::PickProject { entries, .. } => entries
                 .iter()
@@ -17812,8 +18111,7 @@ not_a_real_action = ["x"]
             app.selected_project().map(|p| p.id.clone()),
             Some(own.clone())
         );
-        app.execute_command("configure-project-env".to_string())
-            .unwrap();
+        app.execute_command("configure-project-env").unwrap();
         match &app.prompt {
             PromptState::ConfigureProjectEnv { project_id, .. } => assert_eq!(project_id, &own),
             other => panic!("expected the environment editor, got {other:?}"),
@@ -17870,7 +18168,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent { request, input, .. } => match request {
@@ -17920,7 +18218,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -17977,7 +18275,7 @@ not_a_real_action = ["x"]
 
         let request = app.agent_launch_request(
             session.clone(),
-            true,
+            dux_core::model::ConversationStart::Resume,
             AgentLaunchKind::Create {
                 status_message: "imported".to_string().into(),
                 status_warns: false,
@@ -18036,7 +18334,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent { request, input, .. } => match request {
@@ -18079,7 +18377,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -18105,7 +18403,7 @@ not_a_real_action = ["x"]
             .pull_before_creating_agent_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -18130,7 +18428,7 @@ not_a_real_action = ["x"]
             .pull_before_creating_agent_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         let expect_focus = |app: &App, expected: NameNewAgentFocus| match &app.prompt {
@@ -18156,7 +18454,7 @@ not_a_real_action = ["x"]
     #[test]
     fn fork_prompt_has_no_copy_checkbox_focus_stop() {
         let mut app = test_app(default_bindings());
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
         assert!(matches!(
             &app.prompt,
             PromptState::NameNewAgent {
@@ -18231,7 +18529,7 @@ not_a_real_action = ["x"]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -18309,7 +18607,7 @@ not_a_real_action = ["x"]
             .position(|i| matches!(i, LeftItem::Session(_)))
             .expect("session row");
 
-        app.fork_selected_session().expect("fork");
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -18332,7 +18630,7 @@ not_a_real_action = ["x"]
             .managed_worktree()
             .expect("managed test session")
             .to_string();
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         app.copy_selected_path().unwrap();
         // Result arrives via WorkerEvent; wait for it.
@@ -18348,7 +18646,7 @@ not_a_real_action = ["x"]
     fn copy_path_copies_selected_agent_path() {
         let mut app = test_app(default_bindings());
         // Flat model: copy-path acts on the selected agent's worktree path.
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         app.copy_selected_path().unwrap();
         drain_until(&mut app, |app| {
@@ -18362,7 +18660,7 @@ not_a_real_action = ["x"]
     #[test]
     fn copy_path_with_no_agent_selected_copies_the_project_picked_from_the_list() {
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         // An agent-less project has no row of its own to select.
         let mut agentless = app.engine.projects[0].clone();
@@ -18379,7 +18677,7 @@ not_a_real_action = ["x"]
             .expect("inactive toggle row");
         assert!(app.selected_session().is_none());
 
-        app.execute_command("copy-path".to_string()).unwrap();
+        app.execute_command("copy-path").unwrap();
         let row = match &app.prompt {
             PromptState::PickProject {
                 intent, entries, ..
@@ -18843,7 +19141,7 @@ not_a_real_action = ["x"]
     #[test]
     fn mouse_click_terminal_row_selects_the_terminal_section() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal().expect("launch terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -18979,7 +19277,7 @@ not_a_real_action = ["x"]
         // The fixture seeds a single Detached agent and no active ones.
         app.rebuild_left_items();
         assert!(
-            !app.inactive_collapsed,
+            !app.inactive_tail.collapsed,
             "a wholly-inactive workspace expands the Inactive section by default",
         );
 
@@ -18990,17 +19288,17 @@ not_a_real_action = ["x"]
         app.engine.sessions.push(active);
         app.rebuild_left_items();
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "an active agent collapses the Inactive tail",
         );
 
         // A manual toggle takes over and sticks across rebuilds.
         app.toggle_collapse_selected_project();
-        assert!(app.inactive_collapse_overridden);
-        let after = app.inactive_collapsed;
+        assert!(app.inactive_tail.overridden);
+        let after = app.inactive_tail.collapsed;
         app.rebuild_left_items();
         assert_eq!(
-            app.inactive_collapsed, after,
+            app.inactive_tail.collapsed, after,
             "a manual toggle overrides the auto-manage",
         );
     }
@@ -19282,8 +19580,8 @@ not_a_real_action = ["x"]
         app.focus = FocusPane::Left;
         app.left_section = LeftSection::Projects;
         // Expand the Inactive section by hand so the inactive agent renders.
-        app.inactive_collapsed = false;
-        app.inactive_collapse_overridden = true;
+        app.inactive_tail.collapsed = false;
+        app.inactive_tail.overridden = true;
         app.rebuild_left_items();
         // Select the inactive agent (the Session that sorts after the toggle).
         let sel = app
@@ -20104,8 +20402,7 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
-        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
-            .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M");
         assert!(
             app.pending_link_click
                 .as_ref()
@@ -20117,8 +20414,7 @@ not_a_real_action = ["x"]
             "the press must still start dux's own selection"
         );
 
-        app.process_raw_input_bytes(b"\x1b[<32;41;9M")
-            .expect("the drag is handled");
+        app.process_raw_input_bytes(b"\x1b[<32;41;9M");
         let dragged = app
             .terminal_selection
             .clone()
@@ -20128,8 +20424,7 @@ not_a_real_action = ["x"]
             "a drag that reached the selection covers more than the cell it started on"
         );
 
-        app.process_raw_input_bytes(b"\x1b[<0;41;9m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;41;9m");
 
         nothing_opened(&rx);
     }
@@ -20566,16 +20861,13 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
-        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
-            .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M");
         assert!(app.pending_link_click.is_some());
 
-        app.process_raw_input_bytes(b"\x1b[O")
-            .expect("the focus report is handled");
+        app.process_raw_input_bytes(b"\x1b[O");
 
         assert!(app.pending_link_click.is_none());
-        app.process_raw_input_bytes(b"\x1b[<0;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6m");
         nothing_opened(&rx);
     }
 
@@ -20883,7 +21175,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 link,
-                true
+                super::MouseReporting::On
             ),
             withheld,
             "a plain press on a link is dux's, and a tracking child sees none of it"
@@ -20893,7 +21185,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 link,
-                false
+                super::MouseReporting::Off
             ),
             passed_through,
             "with tracking off there is nothing to withhold"
@@ -20903,7 +21195,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::CONTROL,
                 link,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::ForwardPlainClick,
         );
@@ -20912,7 +21204,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::CONTROL,
                 link,
-                false
+                super::MouseReporting::Off
             ),
             passed_through,
             "with no app to hand the click to, the hatch chord opens like a plain click"
@@ -20922,7 +21214,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::SHIFT,
                 link,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::Unclaimed,
             "Shift is the selection modifier and the host's own link gesture"
@@ -20932,7 +21224,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::SHIFT,
                 link,
-                false
+                super::MouseReporting::Off
             ),
             TerminalPressAction::Unclaimed,
             "and it stays a selection with tracking off, where dux parts company with the web"
@@ -20942,7 +21234,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 None,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::Unclaimed,
         );
@@ -20954,7 +21246,7 @@ not_a_real_action = ["x"]
             MouseEventKind::ScrollUp,
         ] {
             assert_eq!(
-                decide_terminal_press(kind, KeyModifiers::empty(), link, true),
+                decide_terminal_press(kind, KeyModifiers::empty(), link, super::MouseReporting::On),
                 TerminalPressAction::Unclaimed,
                 "only a left PRESS can start a link gesture; {kind:?} must not"
             );
@@ -21054,11 +21346,9 @@ not_a_real_action = ["x"]
     fn fullscreen_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
         let (mut app, rx) = interactive_link_app();
 
-        app.process_raw_input_bytes(&sgr_press(0, 31, 6))
-            .expect("the press is handled");
+        app.process_raw_input_bytes(&sgr_press(0, 31, 6));
         nothing_opened(&rx);
-        app.process_raw_input_bytes(b"\x1b[<0;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6m");
         assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -21077,13 +21367,10 @@ not_a_real_action = ["x"]
         let (mut app, rx) = interactive_link_app();
 
         // cb 16 is a left press with Ctrl held; cb 48 the drag that follows it.
-        app.process_raw_input_bytes(&sgr_press(16, 31, 6))
-            .expect("the press is handled");
+        app.process_raw_input_bytes(&sgr_press(16, 31, 6));
         wait_for_forwarded_echo(&app, "[<0;10;5M");
-        app.process_raw_input_bytes(&sgr_press(48, 33, 6))
-            .expect("the drag is handled");
-        app.process_raw_input_bytes(b"\x1b[<16;33;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(&sgr_press(48, 33, 6));
+        app.process_raw_input_bytes(b"\x1b[<16;33;6m");
 
         let rendered = wait_for_forwarded_echo(&app, "[<0;12;5m");
         assert!(
@@ -21103,10 +21390,8 @@ not_a_real_action = ["x"]
         let (mut app, rx) = interactive_link_app();
 
         // cb 4 is a left press with Shift held.
-        app.process_raw_input_bytes(&sgr_press(4, 31, 6))
-            .expect("the press is handled");
-        app.process_raw_input_bytes(b"\x1b[<4;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(&sgr_press(4, 31, 6));
+        app.process_raw_input_bytes(b"\x1b[<4;31;6m");
 
         nothing_opened(&rx);
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -21871,7 +22156,7 @@ not_a_real_action = ["x"]
     /// Point the selected agent's provider at a fixed `forward_scroll`, so a
     /// wheel test picks its branch instead of depending on whether the child
     /// happens to have raised the alt screen.
-    fn set_forward_scroll(app: &mut App, forward: bool) {
+    fn set_forward_scroll(app: &mut App, setting: ForwardScroll) {
         let provider = app.engine.sessions[0].provider.as_str().to_string();
         let entry = app
             .engine
@@ -21883,7 +22168,7 @@ not_a_real_action = ["x"]
                 command: provider,
                 ..Default::default()
             });
-        entry.forward_scroll = Some(forward);
+        entry.forward_scroll = Some(setting == ForwardScroll::Always);
     }
 
     /// Wheel-up over the PTY pane in interactive mode, as the host sends it
@@ -21899,11 +22184,10 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.terminal_selection.is_some(),
@@ -22021,11 +22305,10 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.terminal_selection.is_none(),
@@ -23896,7 +24179,7 @@ not_a_real_action = ["x"]
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
 
-        app.execute_command("attach-pull-request".to_string())
+        app.execute_command("attach-pull-request")
             .expect("open the attach modal");
         assert!(
             matches!(app.prompt, PromptState::AttachPullRequestInput { .. }),
@@ -23964,8 +24247,7 @@ not_a_real_action = ["x"]
             .pr_overrides
             .insert("session-1".to_string(), stored);
 
-        app.execute_command("detach-pull-request".to_string())
-            .expect("detach");
+        app.execute_command("detach-pull-request").expect("detach");
         assert!(app.engine.pr_overrides.is_empty(), "the pin must be gone");
         assert!(
             app.engine
@@ -23993,7 +24275,7 @@ not_a_real_action = ["x"]
         // resume message is right to wait its turn. This test wants to read the
         // second message without waiting a window for it.
         app.set_info(String::new());
-        app.execute_command("resume-pull-request-autodetection".to_string())
+        app.execute_command("resume-pull-request-autodetection")
             .expect("resume");
         assert!(app.engine.pr_suppressions.is_empty());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
@@ -24096,7 +24378,7 @@ not_a_real_action = ["x"]
         app.rebuild_left_items();
         app.selected_left = 2; // s3
 
-        app.execute_command("move-agent-top".to_string()).unwrap();
+        app.execute_command("move-agent-top").unwrap();
 
         let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(order, vec!["s3", "s1", "s2"]);
@@ -24598,7 +24880,7 @@ cyan = "#00ffff"
         )
         .expect("write theme");
 
-        app.open_change_theme_prompt().expect("open change theme");
+        app.open_change_theme_prompt();
         let item_count = match &app.prompt {
             PromptState::ChangeTheme(prompt) => prompt.options.len(),
             other => panic!("expected change theme prompt, got {other:?}"),
@@ -24682,7 +24964,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 3);
 
@@ -24754,7 +25036,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 3);
 
@@ -24796,7 +25078,7 @@ cyan = "#00ffff"
             selected_row: 4,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 10);
 
@@ -24820,7 +25102,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
             dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path),
-            false,
+            crate::app::first_load::SeenNote::Skip,
         ));
         app.last_first_load_lines = 20;
         app.last_first_load_height = 5;
@@ -25055,7 +25337,7 @@ cyan = "#00ffff"
 
         // Cancel restores the browser EXACTLY as the user left it: same
         // location, typed path intact (never rebuilt at the start directory).
-        app.resolve_confirm_init_repo(false);
+        app.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
         match &app.prompt {
             PromptState::BrowseProjects {
                 editing_path,
@@ -25080,7 +25362,7 @@ cyan = "#00ffff"
             focus: ConfirmFocus::Confirm,
             return_prompt: Box::new(PromptState::None),
         };
-        app.resolve_confirm_init_repo(true);
+        app.resolve_confirm_init_repo(ConfirmAnswer::Confirm);
         assert!(
             !app.engine
                 .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(canonical)),
@@ -25124,7 +25406,7 @@ cyan = "#00ffff"
         std::fs::create_dir_all(&project_dir).expect("project dir");
         init_test_repo(&project_dir);
 
-        app.add_project(project_dir.to_string_lossy().to_string(), String::new())
+        app.add_project(project_dir.to_string_lossy().as_ref(), String::new())
             .expect("add project");
         drain_until(&mut app, |app| {
             app.status
@@ -25364,7 +25646,8 @@ cyan = "#00ffff"
             busy: None,
         };
         let entries = vec![entry("free", None), entry("held", Some("session-1"))];
-        let rows = crate::app::manage_worktree_visual_rows(&entries, false, None);
+        let rows =
+            crate::app::manage_worktree_visual_rows(&entries, crate::app::Listing::Loaded, None);
         let held_row = rows
             .iter()
             .position(|r| matches!(r, crate::app::ManageWorktreeVisualRow::Entry(1)))
@@ -25778,7 +26061,10 @@ cyan = "#00ffff"
         if let PromptState::ConfirmQuit { focus, .. } = &mut app.prompt {
             *focus = ConfirmFocus::Confirm;
         }
-        assert!(!app.resolve_confirm_quit(true), "asked again");
+        assert!(
+            !app.resolve_confirm_quit(ConfirmAnswer::Confirm),
+            "asked again"
+        );
         match &app.prompt {
             PromptState::ConfirmQuit {
                 attached, focus, ..
@@ -25788,7 +26074,10 @@ cyan = "#00ffff"
             }
             _ => panic!("the quit confirmation stays open"),
         }
-        assert!(app.resolve_confirm_quit(true), "nobody new since");
+        assert!(
+            app.resolve_confirm_quit(ConfirmAnswer::Confirm),
+            "nobody new since"
+        );
     }
 
     #[test]
@@ -25813,8 +26102,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -25895,8 +26183,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the running session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -25970,8 +26257,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let codex_option = prompt
@@ -26025,8 +26311,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open picker");
+        app.open_change_agent_provider_prompt();
         match &app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let copilot = prompt
@@ -26062,8 +26347,7 @@ cyan = "#00ffff"
         // Regression: opening the ctrl+p retarget prompt (as opposed to the
         // new-agent-tab picker) must keep using ChangeAgentProviderMode::Retarget.
         let mut app = test_app(default_bindings());
-        app.open_change_agent_provider_prompt()
-            .expect("open retarget prompt");
+        app.open_change_agent_provider_prompt();
         match &app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 assert_eq!(prompt.mode, ChangeAgentProviderMode::Retarget);
@@ -26240,8 +26524,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         // The pane launches the shell and streams its prompt, which is the big
         // and unmistakable change a confirmation is not owed for.
@@ -26266,7 +26549,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
-        app.show_companion_terminal().expect("first terminal");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
 
         // Close overlay, launch another.
@@ -26274,7 +26557,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
 
-        app.show_companion_terminal().expect("second terminal");
+        app.show_companion_terminal();
         let second_id = app.active_terminal_id.clone().unwrap();
 
         // Neither launch announces itself: both stream into the pane.
@@ -26386,8 +26669,7 @@ cyan = "#00ffff"
     fn exit_interactive_from_terminal_overlay_resets_state() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
@@ -26437,7 +26719,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.process_raw_input_bytes(&[0x07]).unwrap();
+        app.process_raw_input_bytes(&[0x07]);
 
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -26471,7 +26753,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.process_raw_input_bytes(&[0x07]).unwrap();
+        app.process_raw_input_bytes(&[0x07]);
 
         assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
@@ -26602,7 +26884,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         // Ctrl-e is 0x05 on the wire; the raw path must honor the custom key.
-        app.process_raw_input_bytes(&[0x05]).unwrap();
+        app.process_raw_input_bytes(&[0x05]);
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.left_section, LeftSection::Projects);
@@ -26966,8 +27248,7 @@ cyan = "#00ffff"
     fn close_top_overlay_closes_terminal_overlay() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
 
@@ -26983,8 +27264,7 @@ cyan = "#00ffff"
     fn session_switch_closes_terminal_overlay_but_keeps_pty() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
 
@@ -27004,8 +27284,7 @@ cyan = "#00ffff"
         assert!(app.terminal_items().is_empty());
 
         // Launch a terminal.
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.terminal_items().len(), 1);
     }
@@ -27013,8 +27292,7 @@ cyan = "#00ffff"
     #[test]
     fn left_section_navigation_crosses_to_terminals() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
         // Close overlay and go back to projects section.
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
@@ -27068,8 +27346,7 @@ cyan = "#00ffff"
 
         assert!(app.engine.companion_terminals.is_empty());
 
-        app.show_or_open_first_terminal()
-            .expect("should spawn new terminal");
+        app.show_or_open_first_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
@@ -27085,7 +27362,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn an initial terminal.
-        app.show_companion_terminal().expect("spawn first");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
         assert_eq!(app.engine.companion_terminals.len(), 1);
 
@@ -27095,8 +27372,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Now use the "open first" method: it should reuse, not spawn.
-        app.show_or_open_first_terminal()
-            .expect("should reuse existing terminal");
+        app.show_or_open_first_terminal();
 
         assert_eq!(
             app.engine.companion_terminals.len(),
@@ -27116,13 +27392,13 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn two terminals.
-        app.show_companion_terminal().expect("first");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
 
-        app.show_companion_terminal().expect("second");
+        app.show_companion_terminal();
         let second_id = app.active_terminal_id.clone().unwrap();
         assert_ne!(first_id, second_id);
         assert_eq!(app.engine.companion_terminals.len(), 2);
@@ -27133,8 +27409,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Should pick the first (lowest ID), not the second.
-        app.show_or_open_first_terminal()
-            .expect("should reuse first");
+        app.show_or_open_first_terminal();
 
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(
@@ -27149,7 +27424,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn an initial terminal so the terminals list is populated.
-        app.show_companion_terminal().expect("initial terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -27160,8 +27435,7 @@ cyan = "#00ffff"
 
         let initial_count = app.engine.companion_terminals.len();
         let before = app.status.most_recent_tui().map(|(_, text)| text);
-        app.spawn_terminal_for_selected_terminal()
-            .expect("spawn from terminals pane");
+        app.spawn_terminal_for_selected_terminal();
 
         // Another terminal launches and streams, so nothing is owed.
         assert_eq!(
@@ -27186,8 +27460,7 @@ cyan = "#00ffff"
         // Deselect everything: no left item at this index.
         app.selected_left = usize::MAX;
 
-        app.new_companion_terminal()
-            .expect("should not error, just warn");
+        app.new_companion_terminal();
 
         assert_eq!(
             app.status.tone(),
@@ -27215,8 +27488,7 @@ cyan = "#00ffff"
             .expect("inactive toggle row");
         assert!(app.selected_session().is_none());
 
-        app.new_companion_terminal()
-            .expect("should not error, just warn");
+        app.new_companion_terminal();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("Select an agent first"));
@@ -27235,7 +27507,7 @@ cyan = "#00ffff"
         // An agent is selected (default fixture selects the session row's index).
         app.selected_left = 1;
 
-        app.execute_command("new-terminal-for-project".to_string())
+        app.execute_command("new-terminal-for-project")
             .expect("open project chooser");
 
         // The chooser is open with the ProjectTerminal intent.
@@ -27277,8 +27549,7 @@ cyan = "#00ffff"
     fn new_companion_terminal_spawns_when_session_selected() {
         let mut app = test_app(default_bindings());
 
-        app.new_companion_terminal()
-            .expect("should spawn new terminal");
+        app.new_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
@@ -27294,8 +27565,8 @@ cyan = "#00ffff"
     fn tui_terminal_spawn_stamps_distinct_sort_order_and_identity_label() {
         let mut app = test_app(default_bindings());
 
-        app.new_companion_terminal().expect("spawn first terminal");
-        app.new_companion_terminal().expect("spawn second terminal");
+        app.new_companion_terminal();
+        app.new_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 2);
         let mut orders: Vec<u64> = app
@@ -27336,7 +27607,7 @@ cyan = "#00ffff"
         app.engine.sessions.clear();
         app.engine.projects.clear();
 
-        app.execute_command("new-standalone-agent".to_string())
+        app.execute_command("new-standalone-agent")
             .expect("should open the folder browser");
 
         match &app.prompt {
@@ -27436,7 +27707,7 @@ cyan = "#00ffff"
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         ] {
             let mut app = test_app(default_bindings());
-            app.execute_command("new-agent".to_string())
+            app.execute_command("new-agent")
                 .expect("the chooser must open");
             assert!(matches!(app.prompt, PromptState::PickProject { .. }));
 
@@ -27462,8 +27733,7 @@ cyan = "#00ffff"
                 KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             ] {
                 let mut app = test_app(default_bindings());
-                app.open_project_chooser(intent)
-                    .expect("the chooser must open");
+                app.open_project_chooser(intent);
 
                 app.handle_key(key).expect("the key must be handled");
 
@@ -27487,7 +27757,7 @@ cyan = "#00ffff"
     #[test]
     fn the_searching_project_chooser_types_the_letter_and_fires_on_the_chord() {
         let mut app = test_app(default_bindings());
-        app.execute_command("new-agent".to_string())
+        app.execute_command("new-agent")
             .expect("the chooser must open");
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
             .expect("search engages");
@@ -27515,7 +27785,7 @@ cyan = "#00ffff"
     #[test]
     fn the_project_chooser_confirm_key_still_picks_the_highlighted_project() {
         let mut app = test_app(default_bindings());
-        app.execute_command("new-agent".to_string())
+        app.execute_command("new-agent")
             .expect("the chooser must open");
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -27568,8 +27838,7 @@ cyan = "#00ffff"
     /// That is the gesture the palette command, the agents-pane keys and the
     /// project chooser all end in.
     fn pick_standalone_folder(app: &mut App, folder: &std::path::Path) {
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         aim_and_pick(app, folder);
     }
 
@@ -27614,8 +27883,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
 
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
 
         match &app.prompt {
@@ -27637,8 +27905,7 @@ cyan = "#00ffff"
                 folder_path: folder.path().to_string_lossy().to_string(),
             });
 
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
@@ -27668,8 +27935,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
 
-        app.open_project_browser()
-            .expect("the folder browser must open");
+        app.open_project_browser();
         type_path_and_confirm(&mut app, folder.path());
 
         assert!(
@@ -27852,11 +28118,11 @@ cyan = "#00ffff"
         app.set_info("something happened");
         app.open_command_palette();
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "", "the line is empty");
 
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "The status line is already clear.");
     }
@@ -27869,7 +28135,7 @@ cyan = "#00ffff"
         app.open_command_palette();
         app.set_info("arrived while the palette was open");
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "arrived while the palette was open");
     }
@@ -27883,7 +28149,7 @@ cyan = "#00ffff"
         app.set_info("a confirmation waiting its turn");
         app.open_command_palette();
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "a confirmation waiting its turn");
     }
@@ -27896,7 +28162,7 @@ cyan = "#00ffff"
         let folder = tempfile::tempdir().expect("folder");
         let mut palette = test_app(default_bindings());
         palette
-            .execute_command("new-standalone-agent".to_string())
+            .execute_command("new-standalone-agent")
             .expect("the palette command must open the browser");
         aim_and_pick(&mut palette, folder.path());
         assert!(
@@ -27923,7 +28189,7 @@ cyan = "#00ffff"
         // the key that works there whether or not the search is engaged.
         let mut chooser = test_app(default_bindings());
         chooser
-            .execute_command("new-agent".to_string())
+            .execute_command("new-agent")
             .expect("the chooser must open");
         chooser
             .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
@@ -27946,7 +28212,7 @@ cyan = "#00ffff"
         app.engine.sessions.clear();
         app.engine.projects.clear();
 
-        app.execute_command("new-standalone-terminal".to_string())
+        app.execute_command("new-standalone-terminal")
             .expect("should spawn a standalone terminal");
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
@@ -27984,7 +28250,7 @@ cyan = "#00ffff"
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
-        app.execute_command("new-standalone-terminal".to_string())
+        app.execute_command("new-standalone-terminal")
             .expect("should spawn a standalone terminal");
         let new_id = app.active_terminal_id.clone().expect("a new terminal");
         app.exit_interactive_mode();
@@ -28025,8 +28291,7 @@ cyan = "#00ffff"
         }
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
-        app.execute_command("new-standalone-terminal".to_string())
-            .unwrap();
+        app.execute_command("new-standalone-terminal").unwrap();
         let new_id = app.active_terminal_id.clone().unwrap();
         app.engine
             .pty_input
@@ -28058,8 +28323,7 @@ cyan = "#00ffff"
         // Away from the top, where the typed-into terminal sorts, so a cursor
         // left alone cannot land on it by accident.
         app.selected_terminal_index = 3;
-        app.execute_command("new-standalone-terminal".to_string())
-            .unwrap();
+        app.execute_command("new-standalone-terminal").unwrap();
         let new_id = app.active_terminal_id.clone().unwrap();
         app.engine
             .pty_input
@@ -28431,8 +28695,7 @@ cyan = "#00ffff"
         app.files_index = 0;
 
         // Open the confirm prompt while the file is still untracked.
-        app.confirm_discard_selected_file()
-            .expect("open discard prompt");
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
 
         // The worktree changes between prompt-open and confirm: the file is now
@@ -28440,7 +28703,7 @@ cyan = "#00ffff"
         git(&["add", "ghost.txt"]);
         git(&["commit", "-m", "track ghost"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
         });
@@ -28765,8 +29028,8 @@ cyan = "#00ffff"
     fn delete_agent_prompt_state(
         app: &App,
         provenance: dux_core::model::BranchProvenance,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
             attached: Vec::new(),
@@ -28779,8 +29042,8 @@ cyan = "#00ffff"
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
-            delete_worktree,
-            delete_branch,
+            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
+            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
             unpushed_commits: None,
         }
     }
@@ -28800,8 +29063,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            false,
-            false,
+            dux_core::engine::WorktreeOnDelete::Keep,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         // Cancel, Delete, worktree box, and back to Cancel: three stops.
         for expected in [
@@ -28817,8 +29080,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         for expected in [
             DeleteAgentFocus::Delete,
@@ -28844,8 +29107,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         app.prompt = match app.prompt {
             PromptState::ConfirmDeleteAgent {
@@ -29243,7 +29506,7 @@ cyan = "#00ffff"
     #[test]
     fn startup_command_logs_drag_selection_copies_text() {
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
         app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
         install_startup_command_logs_overlay(&mut app, 2);
 
@@ -29880,7 +30143,7 @@ cyan = "#00ffff"
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
         app.startup_log_viewer = Some(crate::app::StartupLogViewer {
             scope_label: "project \"demo\"".to_string(),
             path: None,
@@ -29934,7 +30197,7 @@ cyan = "#00ffff"
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
         install_name_new_agent_overlay(&mut app);
 
@@ -30003,10 +30266,10 @@ cyan = "#00ffff"
     }
 
     /// Hand the form a folder check's answer for the fields as they stand,
-    /// as the press that asked for it (`pressed`) or as the check on open.
+    /// as the press that asked for it or as the check on open (`purpose`).
     fn apply_pr_answer(
         app: &mut App,
-        pressed: bool,
+        purpose: crate::app::pr_clone::PrFolderCheck,
         result: Result<
             (
                 crate::app::PrFolder,
@@ -30017,7 +30280,7 @@ cyan = "#00ffff"
     ) {
         let (_, destination, name, _) = clone_prompt_fields(app);
         let edits = pr_form(app).edits;
-        pr_form_mut(app).submit_pending = pressed;
+        pr_form_mut(app).check_purpose = purpose;
         app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
             destination: destination.trim().to_string(),
             agent_name: name.trim().to_string(),
@@ -30039,12 +30302,11 @@ cyan = "#00ffff"
     fn open_pr_clone_form(app: &mut App, offer: dux_core::pr_reference::PullRequestCloneFacts) {
         app.apply_pull_request_reference_resolution(
             PR_REFERENCE.to_string(),
-            "github.com/acme/widget".to_string(),
+            "github.com/acme/widget",
             Ok(resolved(Vec::new())),
             Some(offer),
             None,
-        )
-        .expect("resolve");
+        );
         settle_pr_clone_check(app);
     }
 
@@ -30090,7 +30352,7 @@ cyan = "#00ffff"
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
 
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let (address, destination, _, focus) = clone_prompt_fields(&app);
         assert_eq!(address, "");
         assert_eq!(destination, format!("{}/", start.path().display()));
@@ -30110,7 +30372,7 @@ cyan = "#00ffff"
     fn clone_destination_stops_following_the_address_once_edited() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         type_text(&mut app, "https://example.com/acme/widget");
 
         tap(&mut app, KeyCode::Tab);
@@ -30137,7 +30399,7 @@ cyan = "#00ffff"
             .config
             .defaults
             .enable_randomized_pet_name_by_default = true;
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let PromptState::CloneProject {
             randomize_name,
             agent_name,
@@ -30154,7 +30416,7 @@ cyan = "#00ffff"
             .config
             .defaults
             .enable_randomized_pet_name_by_default = false;
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
 
         let mut seen = Vec::new();
         for _ in 0..4 {
@@ -30234,7 +30496,7 @@ cyan = "#00ffff"
      {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
 
         // An empty address is refused and the form stays for a correction.
         tap(&mut app, KeyCode::Enter);
@@ -30284,7 +30546,7 @@ cyan = "#00ffff"
             ),
             other => panic!("expected the clone form, got {other:?}"),
         };
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let (address, destination, _, _) = typed(&app);
         assert_eq!(
             address,
@@ -30313,7 +30575,7 @@ cyan = "#00ffff"
         let key = InFlightKey::Clone(taken.canonicalize().unwrap());
         drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
         assert!(!app.engine.is_in_flight(&key), "the clone is still running");
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(typed(&app), submitted);
         type_text(&mut app, "x");
         assert_eq!(
@@ -30362,7 +30624,7 @@ cyan = "#00ffff"
             !app.engine.is_in_flight(&key) && !app.engine.is_in_flight(&InFlightKey::CreateAgent)
         });
         assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(typed(&app).0, "");
 
         // The same form for a pull request no project has the repository of.
@@ -30419,7 +30681,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            true,
+            crate::app::pr_clone::PrFolderCheck::Submit,
             Ok((
                 held.clone(),
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30442,7 +30704,7 @@ cyan = "#00ffff"
         // The same answer again is what the press agreed to: it goes ahead.
         apply_pr_answer(
             &mut app,
-            true,
+            crate::app::pr_clone::PrFolderCheck::Submit,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30450,7 +30712,11 @@ cyan = "#00ffff"
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         // A check that refuses the folder says why in the form and sends nothing.
-        apply_pr_answer(&mut app, true, Err("That folder is taken.".to_string()));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Err("That folder is taken.".to_string()),
+        );
         assert_eq!(
             pr_form(&app).error.as_deref(),
             Some("That folder is taken.")
@@ -30470,7 +30736,7 @@ cyan = "#00ffff"
             randomized_name: None,
             pull_request: Some(offer.clone()),
         });
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(
             clone_prompt_fields(&app).0,
             "",
@@ -30589,7 +30855,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30819,7 +31085,7 @@ cyan = "#00ffff"
         type_text(&mut app, "w");
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30845,7 +31111,10 @@ cyan = "#00ffff"
         // The press goes out for its folder check, and the name is edited
         // before the answer lands.
         tap(&mut app, KeyCode::Enter);
-        assert!(pr_form(&app).submit_pending);
+        assert_eq!(
+            pr_form(&app).check_purpose,
+            crate::app::pr_clone::PrFolderCheck::Submit
+        );
         tap(&mut app, KeyCode::Tab);
         type_text(&mut app, "x");
         assert_eq!(
@@ -30875,7 +31144,11 @@ cyan = "#00ffff"
             }
         };
         name_is_empty(&mut app);
-        apply_pr_answer(&mut app, true, Ok((crate::app::PrFolder::Free, None)));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Ok((crate::app::PrFolder::Free, None)),
+        );
         assert_eq!(app.status.text(), "Type a name for the agent, or cancel.");
     }
 
@@ -30887,7 +31160,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NoFreeName {
@@ -30905,7 +31178,7 @@ cyan = "#00ffff"
             crate::app::PrFolder::Checkout { .. }
         ));
         // A press is out for the old folder when the folder is edited.
-        pr_form_mut(&mut app).submit_pending = true;
+        pr_form_mut(&mut app).check_purpose = crate::app::pr_clone::PrFolderCheck::Submit;
         tap(&mut app, KeyCode::BackTab);
         tap(&mut app, KeyCode::BackTab);
         assert_eq!(clone_prompt_fields(&app).3, CloneProjectFocus::Destination);
@@ -30949,14 +31222,18 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held.clone(),
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
             )),
         );
         // Still a checkout, but now the copy is needed.
-        apply_pr_answer(&mut app, true, Ok((held, Some(needed_outlook()))));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Ok((held, Some(needed_outlook()))),
+        );
         let said = app.status.text();
         assert!(
             said.starts_with("The review copy answer for that folder changed."),
@@ -30982,7 +31259,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -31012,7 +31289,7 @@ cyan = "#00ffff"
     fn clone_form_escape_closes_with_nothing_dispatched() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         type_text(
             &mut app,
             &format!("{}/no-such-remote", start.path().display()),
@@ -31035,7 +31312,7 @@ cyan = "#00ffff"
     fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         if let PromptState::CloneProject {
             address,
             destination,
@@ -31211,15 +31488,15 @@ cyan = "#00ffff"
     #[test]
     fn toggle_git_pane_collapses_right() {
         let mut app = test_app(default_bindings());
-        assert!(!app.right_collapsed);
+        assert!(!app.panes.right_collapsed);
 
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.right_collapsed);
+        assert!(app.panes.right_collapsed);
 
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
-        assert!(!app.right_collapsed);
+        assert!(!app.panes.right_collapsed);
     }
 
     #[test]
@@ -31230,25 +31507,23 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
 
-        assert!(app.right_collapsed);
+        assert!(app.panes.right_collapsed);
         assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
     fn remove_git_pane_hides_right() {
         let mut app = test_app(default_bindings());
-        assert!(!app.right_hidden);
+        assert!(!app.panes.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
-        assert!(app.right_hidden);
+        app.execute_command("toggle-remove-git-pane").unwrap();
+        assert!(app.panes.right_hidden);
         // The toggle keeps the persisted setting in sync with the pane state.
         assert!(!app.engine.config.ui.show_changes_pane);
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
-        assert!(!app.right_hidden);
+        app.execute_command("toggle-remove-git-pane").unwrap();
+        assert!(!app.panes.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
     }
 
@@ -31257,12 +31532,10 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         assert!(!app.engine.config.ui.always_show_tab_strip);
 
-        app.execute_command("toggle-always-show-tabs".to_string())
-            .unwrap();
+        app.execute_command("toggle-always-show-tabs").unwrap();
         assert!(app.engine.config.ui.always_show_tab_strip);
 
-        app.execute_command("toggle-always-show-tabs".to_string())
-            .unwrap();
+        app.execute_command("toggle-always-show-tabs").unwrap();
         assert!(!app.engine.config.ui.always_show_tab_strip);
     }
 
@@ -31271,12 +31544,10 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         assert!(!app.engine.config.ui.tab_reaches_agent);
 
-        app.execute_command("toggle-tab-to-agent".to_string())
-            .unwrap();
+        app.execute_command("toggle-tab-to-agent").unwrap();
         assert!(app.engine.config.ui.tab_reaches_agent);
 
-        app.execute_command("toggle-tab-to-agent".to_string())
-            .unwrap();
+        app.execute_command("toggle-tab-to-agent").unwrap();
         assert!(!app.engine.config.ui.tab_reaches_agent);
     }
 
@@ -31285,17 +31556,16 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Files;
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
+        app.execute_command("toggle-remove-git-pane").unwrap();
 
-        assert!(app.right_hidden);
+        assert!(app.panes.right_hidden);
         assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
     fn focus_skips_removed_git_pane_forward() {
         let mut app = test_app(default_bindings());
-        app.right_hidden = true;
+        app.panes.right_hidden = true;
         app.focus = FocusPane::Center;
 
         // Tab from Center should skip Files and go to Left
@@ -31308,7 +31578,7 @@ cyan = "#00ffff"
     #[test]
     fn focus_skips_removed_git_pane_backward() {
         let mut app = test_app(default_bindings());
-        app.right_hidden = true;
+        app.panes.right_hidden = true;
         app.focus = FocusPane::Left;
 
         // Shift-Tab from Left should skip Files and go to Center
@@ -31363,7 +31633,7 @@ cyan = "#00ffff"
     #[test]
     fn focus_navigation_visits_the_terminal_list_as_a_left_pane_section() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal().expect("launch terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -31933,7 +32203,7 @@ cyan = "#00ffff"
         // Pin the local branch of every scroll path: with `forward_scroll`
         // unset these tests would depend on whether the child happened to raise
         // the alt screen, and a forwarded scroll never enters scroll mode.
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
 
         // Wait on the fact the test depends on (real history), not on a sleep.
         for _ in 0..200 {
@@ -31982,7 +32252,7 @@ cyan = "#00ffff"
             .expect("ScrollPageUp has a binding");
         let bytes = crate::keybindings::key_combination_to_bytes(&combo)
             .expect("the bound scroll key has a byte encoding");
-        app.process_raw_input_bytes(&bytes).expect("raw input");
+        app.process_raw_input_bytes(&bytes);
 
         assert!(
             app.selected_terminal_surface_client()
@@ -32004,8 +32274,7 @@ cyan = "#00ffff"
     fn a_real_wheel_scroll_enters_scroll_mode() {
         let mut app = app_with_history_at_the_live_edge();
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.selected_terminal_surface_client()
@@ -32053,7 +32322,7 @@ cyan = "#00ffff"
     fn scrolled_back_suppresses_regular_key_forwarding() {
         let mut app = app_with_scrolled_back_pty();
         // Feed a regular ASCII character 'x' (0x78): should be dropped.
-        let result = app.process_raw_input_bytes(b"x").unwrap();
+        let result = app.process_raw_input_bytes(b"x");
         assert!(!result, "should not request exit");
         // The key was consumed without error; the PTY didn't receive it.
         // We can't directly assert write_bytes wasn't called without a mock,
@@ -32073,7 +32342,7 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Agent);
 
         // Feed Ctrl-g (0x07): the fullscreen toggle should still work.
-        let result = app.process_raw_input_bytes(&[0x07]).unwrap();
+        let result = app.process_raw_input_bytes(&[0x07]);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -32106,7 +32375,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "a keystroke in scroll mode must not reach the PTY"
@@ -32234,7 +32503,7 @@ cyan = "#00ffff"
             .unwrap()
             .set_scrollback(0);
 
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "the keystroke that raced the mode's death must not reach the PTY"
@@ -32243,7 +32512,7 @@ cyan = "#00ffff"
         assert!(app.status.message().contains("Scroll mode ended"));
 
         // The NEXT keystroke is forwarded normally: the user has been told.
-        assert!(app.process_raw_input_bytes(b"y").is_ok());
+        app.process_raw_input_bytes(b"y");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "typing must work again once the mode is over"
@@ -32348,7 +32617,7 @@ cyan = "#00ffff"
             );
             // And typing really is back, which is what made the silence
             // dangerous in the first place.
-            assert!(app.process_raw_input_bytes(b"z").is_ok());
+            app.process_raw_input_bytes(b"z");
             assert!(
                 app.engine.pty_input.contains_key(&slot_tab),
                 "{name}: the child took the view back, so typing must reach it"
@@ -32535,7 +32804,7 @@ cyan = "#00ffff"
         );
 
         // And the harm the mode exists to prevent must still be prevented.
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&first),
             "a keystroke must not reach a pane whose view is frozen"
@@ -32565,7 +32834,7 @@ cyan = "#00ffff"
         let (mut app, slot_tab) = app_with_live_agent_pty();
         assert!(!app.engine.pty_input.contains_key(&slot_tab));
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "typing into the focused agent must record input so the echo isn't \
@@ -32583,7 +32852,7 @@ cyan = "#00ffff"
     fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"x\x07").unwrap();
+        app.process_raw_input_bytes(b"x\x07");
 
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
@@ -32596,7 +32865,7 @@ cyan = "#00ffff"
         let (mut app, slot_tab) = app_with_live_agent_pty();
         app.raw_input_buf = b"\x1b[".to_vec();
 
-        app.process_raw_input_bytes(b"A").unwrap();
+        app.process_raw_input_bytes(b"A");
 
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
@@ -32617,7 +32886,7 @@ cyan = "#00ffff"
             },
         );
 
-        app.process_raw_input_bytes(b"x\x1c").unwrap();
+        app.process_raw_input_bytes(b"x\x1c");
 
         assert!(
             app.macro_bar.is_some(),
@@ -32646,7 +32915,7 @@ cyan = "#00ffff"
             "the fixture must start selected"
         );
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
 
         assert!(
             app.terminal_selection.is_none(),
@@ -32665,7 +32934,7 @@ cyan = "#00ffff"
         // record input: the earlier Forward-only check missed this path.
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"\x1b[A").unwrap();
+        app.process_raw_input_bytes(b"\x1b[A");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "arrow-key passthrough reaches the agent PTY and must record input"
@@ -32679,7 +32948,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "input suppressed by scrollback must not record a stamp"
@@ -32712,7 +32981,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Terminal;
         app.input_target = InputTarget::Terminal;
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             app.engine.pty_input.contains_key("term-1"),
             "typing into a companion terminal must record input under the terminal id"
@@ -32733,12 +33002,11 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         app.input_target = InputTarget::Agent;
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
@@ -32760,7 +33028,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         app.handle_center_mouse_wheel(MouseEvent {
@@ -32787,7 +33055,7 @@ cyan = "#00ffff"
     fn typing_still_stamps_only_the_typing_window() {
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
 
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
@@ -33189,10 +33457,10 @@ cyan = "#00ffff"
             "test setup: neither chord may be an Interactive-scope intercept"
         );
 
-        app.process_raw_input_bytes(&[0x0f]).expect("Ctrl-o");
+        app.process_raw_input_bytes(&[0x0f]);
         wait_for_grid_row(&mut app, "READY^O");
 
-        app.process_raw_input_bytes(&[0x19]).expect("Ctrl-y");
+        app.process_raw_input_bytes(&[0x19]);
         wait_for_grid_row(&mut app, "READY^O^Y");
 
         assert_eq!(
@@ -33488,7 +33756,7 @@ cyan = "#00ffff"
     fn pgup_minimized_forwards_to_a_page_owning_child() {
         let mut app = app_with_minimized_typeable_agent();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
 
         tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
 
@@ -33510,7 +33778,7 @@ cyan = "#00ffff"
     fn pgup_minimized_scrolls_locally_for_a_normal_buffer_child() {
         let mut app = app_with_minimized_typeable_agent();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
         let mut fill = String::new();
         for n in 0..40 {
             fill.push_str(&format!("L{n:02}\n"));
@@ -33660,7 +33928,7 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
         assert_eq!(
             app.input_target,
             InputTarget::Agent,
@@ -33668,7 +33936,7 @@ cyan = "#00ffff"
         );
         assert_eq!(app.raw_input_buf, b"\x1b");
 
-        app.process_raw_input_bytes(&[]).unwrap();
+        app.process_raw_input_bytes(&[]);
         assert_eq!(
             app.input_target,
             InputTarget::None,
@@ -33690,7 +33958,7 @@ cyan = "#00ffff"
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
@@ -33698,7 +33966,7 @@ cyan = "#00ffff"
 
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
-        assert!(!app.in_bracket_paste);
+        assert!(!app.raw_paste.in_bracket);
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(!app.raw_input_parser.in_bracket_paste());
@@ -33730,8 +33998,7 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b\x1b[<35;138;12M")
-            .unwrap();
+        app.process_raw_input_bytes(b"\x1b\x1b[<35;138;12M");
         assert_eq!(
             app.input_target,
             InputTarget::None,
@@ -33747,10 +34014,10 @@ cyan = "#00ffff"
     fn fragmented_pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
         let mut app = app_with_scrolled_back_pty();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
         assert_eq!(app.raw_input_buf, b"\x1b");
 
-        app.process_raw_input_bytes(b"\x1b[<35;").unwrap();
+        app.process_raw_input_bytes(b"\x1b[<35;");
         assert_eq!(
             app.input_target,
             InputTarget::Agent,
@@ -33761,7 +34028,7 @@ cyan = "#00ffff"
             "incomplete mouse report should stay pending with its ESC prefix"
         );
 
-        app.process_raw_input_bytes(b"138;12M").unwrap();
+        app.process_raw_input_bytes(b"138;12M");
         assert!(
             app.raw_input_buf.is_empty(),
             "completed mouse report must not leave a [<...M printable remainder"
@@ -33775,8 +34042,8 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
+        app.process_raw_input_bytes(b"x");
 
         assert_eq!(
             app.input_target,
@@ -33811,7 +34078,7 @@ cyan = "#00ffff"
         );
 
         // Feed Ctrl-\ while scrolled back.
-        let result = app.process_raw_input_bytes(&[0x1c]).unwrap();
+        let result = app.process_raw_input_bytes(&[0x1c]);
         assert!(!result);
         assert!(
             app.macro_bar.is_none(),
@@ -33835,7 +34102,7 @@ cyan = "#00ffff"
         );
 
         // Feed a regular character: should be forwarded without error.
-        let result = app.process_raw_input_bytes(b"x").unwrap();
+        let result = app.process_raw_input_bytes(b"x");
         assert!(!result);
     }
 
@@ -33848,7 +34115,7 @@ cyan = "#00ffff"
             .scrollback_offset();
 
         // Feed PgUp (CSI 5~): should scroll further back.
-        let result = app.process_raw_input_bytes(b"\x1b[5~").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[5~");
         assert!(!result);
         let after = app
             .selected_terminal_surface_client()
@@ -33871,7 +34138,7 @@ cyan = "#00ffff"
         );
 
         // Feed 'q' (0x71): ScrollToBottom should reset scrollback.
-        let result = app.process_raw_input_bytes(b"q").unwrap();
+        let result = app.process_raw_input_bytes(b"q");
         assert!(!result);
         assert_eq!(
             app.selected_terminal_surface_client()
@@ -33903,7 +34170,7 @@ cyan = "#00ffff"
             .scrollback_offset();
 
         // Feed Home key escape sequence: ScrollToTop should maximize scrollback.
-        let result = app.process_raw_input_bytes(b"\x1b[H").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[H");
         assert!(!result);
         let after = app
             .selected_terminal_surface_client()
@@ -33926,7 +34193,7 @@ cyan = "#00ffff"
         );
 
         // Feed End key escape sequence: ScrollToBottom should reset scrollback.
-        let result = app.process_raw_input_bytes(b"\x1b[F").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[F");
         assert!(!result);
         assert_eq!(
             app.selected_terminal_surface_client()
@@ -33974,7 +34241,7 @@ cyan = "#00ffff"
         // Click at (1,1) which is inside the left pane, outside agent_term
         // (agent_term starts at x=21). SGR coords are 1-based.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -33996,7 +34263,7 @@ cyan = "#00ffff"
         // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         let bytes = sgr_mouse_down(31, 6);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34020,7 +34287,7 @@ cyan = "#00ffff"
 
         // Click outside agent_term.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34044,7 +34311,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
 
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -34073,7 +34340,7 @@ cyan = "#00ffff"
 
         // Click outside agent_term while scrolled back: the overlay must close.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34476,8 +34743,7 @@ cyan = "#00ffff"
     #[test]
     fn ctrl_d_in_terminal_list_shows_confirm_dialog() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         // Close overlay so we're back in the normal left pane.
         app.fullscreen_overlay = FullscreenOverlay::None;
@@ -34499,8 +34765,7 @@ cyan = "#00ffff"
     #[test]
     fn confirm_delete_terminal_removes_terminal() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
@@ -34517,7 +34782,7 @@ cyan = "#00ffff"
         // who, with focus back on Cancel, and the terminal keeps running.
         let session_id = app.engine.sessions[0].id.clone();
         crate::app::test_support::watch_from_a_browser(&app, &terminal_id, &session_id);
-        app.resolve_confirm_delete_terminal(true);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmDeleteTerminal {
                 attached, focus, ..
@@ -34530,7 +34795,7 @@ cyan = "#00ffff"
         assert_eq!(app.engine.companion_terminals.len(), 1);
 
         // Confirming again closes it over them.
-        app.resolve_confirm_delete_terminal(true);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine.companion_terminals.is_empty(),
@@ -34542,8 +34807,7 @@ cyan = "#00ffff"
     #[test]
     fn cancel_delete_terminal_keeps_terminal() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
@@ -34556,7 +34820,7 @@ cyan = "#00ffff"
             focus: ConfirmFocus::Cancel,
         };
 
-        app.resolve_confirm_delete_terminal(false);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel);
 
         assert_eq!(
             app.engine.companion_terminals.len(),
@@ -34569,8 +34833,7 @@ cyan = "#00ffff"
     #[test]
     fn delete_last_terminal_switches_to_projects() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
@@ -34624,7 +34887,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"hi\nyou");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         // `cat -v` renders ESC as `^[` and CR as `^M`; the LF stays a real
         // line feed, so the body must arrive with no `^M` in it.
@@ -34650,7 +34913,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"a\nb");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         let rendered = wait_for_paste_echo(&app, "a^Mb");
         assert!(
@@ -34668,12 +34931,12 @@ cyan = "#00ffff"
         let mut first = Vec::new();
         first.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         first.extend_from_slice(b"x\r");
-        app.process_raw_input_bytes(&first).unwrap();
+        app.process_raw_input_bytes(&first);
 
         let mut second = Vec::new();
         second.extend_from_slice(b"\ny");
         second.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&second).unwrap();
+        app.process_raw_input_bytes(&second);
 
         let rendered = wait_for_paste_echo(&app, "x^My");
         assert!(
@@ -34715,7 +34978,7 @@ cyan = "#00ffff"
         input.push(0x07); // Ctrl-g, which would be ToggleFullscreen outside paste
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
 
-        let result = app.process_raw_input_bytes(&input).unwrap();
+        let result = app.process_raw_input_bytes(&input);
         assert!(!result, "should not request exit");
 
         // The key assertion: we should still be in interactive mode.
@@ -34749,7 +35012,7 @@ cyan = "#00ffff"
         let grace = std::time::Duration::from_secs(3);
 
         // Focus-out: the terminal window is unfocused, so viewing must stop.
-        app.process_raw_input_bytes(b"\x1b[O").unwrap();
+        app.process_raw_input_bytes(b"\x1b[O");
         assert!(
             !app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), grace),
@@ -34758,7 +35021,7 @@ cyan = "#00ffff"
 
         // Focus-in: a genuine unfocused->focused transition. With zero grace
         // (passed to should_stamp_viewed below) stamping resumes immediately.
-        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        app.process_raw_input_bytes(b"\x1b[I");
         assert!(
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
@@ -34795,7 +35058,7 @@ cyan = "#00ffff"
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        app.process_raw_input_bytes(b"\x1b[I");
         assert!(
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
@@ -34828,7 +35091,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"\x1b[I");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         // Focus state untouched: still fail-open (stamps under any grace).
         assert!(
@@ -34874,7 +35137,7 @@ cyan = "#00ffff"
             b"\x1b[?2004;2$y",
             b"\x1b[8;24;80t",
         ] {
-            app.process_raw_input_bytes(report).unwrap();
+            app.process_raw_input_bytes(report);
             assert!(
                 app.engine.pty_input.is_empty(),
                 "the host's answer {:?} must not reach the child",
@@ -34887,7 +35150,7 @@ cyan = "#00ffff"
         pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         pasted.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x07");
         pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&pasted).unwrap();
+        app.process_raw_input_bytes(&pasted);
         assert!(
             !app.engine.pty_input.is_empty(),
             "a report-shaped bracketed paste is user data and must still forward"
@@ -35034,9 +35297,9 @@ cyan = "#00ffff"
         let mut chunk1 = Vec::new();
         chunk1.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         chunk1.extend_from_slice(b"abc");
-        app.process_raw_input_bytes(&chunk1).unwrap();
+        app.process_raw_input_bytes(&chunk1);
         assert!(
-            app.in_bracket_paste,
+            app.raw_paste.in_bracket,
             "should be in bracket paste after start marker"
         );
 
@@ -35044,9 +35307,9 @@ cyan = "#00ffff"
         let mut chunk2 = Vec::new();
         chunk2.extend_from_slice(b"def");
         chunk2.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&chunk2).unwrap();
+        app.process_raw_input_bytes(&chunk2);
         assert!(
-            !app.in_bracket_paste,
+            !app.raw_paste.in_bracket,
             "should exit bracket paste after end marker"
         );
     }
@@ -35072,15 +35335,15 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Enter bracket paste state.
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
 
         // Now send ToggleFullscreen (Ctrl-g) outside of paste context.
         // Reset in_bracket_paste first to simulate that the end marker
         // was never received (e.g. malformed paste), but we exit.
-        app.in_bracket_paste = false;
-        app.process_raw_input_bytes(b"\x07").unwrap();
+        app.raw_paste.in_bracket = false;
+        app.process_raw_input_bytes(b"\x07");
 
-        assert!(!app.in_bracket_paste, "should be reset after exit");
+        assert!(!app.raw_paste.in_bracket, "should be reset after exit");
         assert_eq!(app.input_target, InputTarget::None);
     }
 
@@ -35108,7 +35371,7 @@ cyan = "#00ffff"
 
         // Feed 100 'x' characters: they should all be forwarded.
         let input = vec![b'x'; 100];
-        let result = app.process_raw_input_bytes(&input).unwrap();
+        let result = app.process_raw_input_bytes(&input);
         assert!(!result);
         // We should still be in interactive mode (nothing intercepted).
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -36072,8 +36335,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.macro_bar.is_none(), "macro bar closes after send");
         assert_eq!(app.status.message(), "Sent macro \"greet\".");
@@ -36139,8 +36401,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.status.message(), "Sent macro \"multi\".");
 
@@ -36248,8 +36509,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.status.message(), "Sent macro \"quit\".");
         assert!(
             !app.engine.is_typing(slot_tab.as_str()),
@@ -36624,8 +36884,7 @@ cyan = "#00ffff"
 
         let original_session_provider = app.engine.sessions[0].provider.clone();
 
-        app.open_change_default_provider_prompt()
-            .expect("open default provider picker");
+        app.open_change_default_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeDefaultProvider(prompt) => {
                 prompt.selected = prompt
@@ -36637,8 +36896,7 @@ cyan = "#00ffff"
             other => panic!("expected change-default-provider prompt, got {other:?}"),
         }
 
-        app.apply_change_default_provider()
-            .expect("apply default provider");
+        app.apply_change_default_provider();
 
         // Config was updated in memory and on disk.
         assert_eq!(app.engine.config.defaults.provider, "claude");
@@ -36679,8 +36937,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.engine.config.defaults.provider = "codex".to_string();
 
-        app.open_change_default_provider_prompt()
-            .expect("open default provider picker");
+        app.open_change_default_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeDefaultProvider(prompt) => {
                 prompt.selected = prompt
@@ -36692,8 +36949,7 @@ cyan = "#00ffff"
             other => panic!("expected change-default-provider prompt, got {other:?}"),
         }
 
-        app.apply_change_default_provider()
-            .expect("apply no-op selection");
+        app.apply_change_default_provider();
 
         assert_eq!(app.engine.config.defaults.provider, "codex");
         assert!(matches!(app.prompt, PromptState::None));
@@ -36709,7 +36965,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         // Flat model: resolves the selected agent's project (projects[0]).
 
-        app.execute_command("toggle-project-auto-reopen-agents".to_string())
+        app.execute_command("toggle-project-auto-reopen-agents")
             .expect("toggle project auto-reopen");
         drain_until(&mut app, |app| {
             app.status
@@ -36735,7 +36991,7 @@ cyan = "#00ffff"
     fn toggle_agent_auto_reopen_persists_session_opt_out() {
         let mut app = test_app(default_bindings());
 
-        app.execute_command("toggle-agent-auto-reopen".to_string())
+        app.execute_command("toggle-agent-auto-reopen")
             .expect("toggle agent auto-reopen");
 
         assert!(!app.engine.sessions[0].auto_reopen_enabled);
@@ -37050,8 +37306,7 @@ cyan = "#00ffff"
             .expect("select the running session");
 
         // Swap provider while the agent is still running.
-        app.open_change_agent_provider_prompt()
-            .expect("open picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -37855,8 +38110,7 @@ cyan = "#00ffff"
         // passes.
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
-        app.open_new_agent_from_pr_prompt()
-            .expect("open the reference-first modal");
+        app.open_new_agent_from_pr_prompt();
         match &app.prompt {
             PromptState::PullRequestInput { project, focus, .. } => {
                 assert!(
@@ -37873,7 +38127,7 @@ cyan = "#00ffff"
     fn a_bare_number_with_no_project_is_refused_inline_and_the_modal_stays_open() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "123");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
 
         let status = app.status.text();
         assert!(
@@ -37890,7 +38144,7 @@ cyan = "#00ffff"
     fn unreadable_text_is_refused_inline_before_any_worker_runs() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "not a reference");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
         assert!(
             app.status.text().contains("Enter a pull request URL"),
             "{}",
@@ -37902,8 +38156,7 @@ cyan = "#00ffff"
     fn the_secondary_action_reaches_the_project_picker_and_keeps_what_was_typed() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "acme/widget#7");
-        app.open_pull_request_project_picker()
-            .expect("open the picker");
+        app.open_pull_request_project_picker();
 
         assert!(
             matches!(
@@ -38007,12 +38260,11 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(vec![project.clone()])),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert!(
             matches!(app.prompt, PromptState::None),
             "one match proceeds with no further question, got {:?}",
@@ -38032,12 +38284,11 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Err("worker panicked: boom".to_string()),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         let status = app.status.text();
         assert!(
@@ -38056,7 +38307,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(dux_core::pr_reference::ReferenceResolution {
                 matches: Vec::new(),
                 uninspected: vec![dux_core::pr_reference::UninspectedProject {
@@ -38066,8 +38317,7 @@ cyan = "#00ffff"
             }),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         let status = app.status.text();
         assert!(
@@ -38096,12 +38346,11 @@ cyan = "#00ffff"
 
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(vec![first.clone(), second.clone()])),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         match &app.prompt {
             PromptState::PickProject {
@@ -38127,12 +38376,11 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
-            "github.com/acme/unknown".to_string(),
+            "github.com/acme/unknown",
             Ok(resolved(Vec::new())),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             app.status.text(),
             "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
@@ -38155,12 +38403,11 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
-            "github.com/acme/unknown".to_string(),
+            "github.com/acme/unknown",
             Ok(resolved(Vec::new())),
             None,
             Some("Failed to resolve PR #3 from acme/unknown: not found".to_string()),
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             app.status.text(),
             "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
@@ -38209,7 +38456,7 @@ cyan = "#00ffff"
         let mut app = app_with_start_folder(start.path());
         app.apply_pull_request_reference_resolution(
             PR_REFERENCE.to_string(),
-            "github.com/acme/widget".to_string(),
+            "github.com/acme/widget",
             Ok(dux_core::pr_reference::ReferenceResolution {
                 matches: Vec::new(),
                 uninspected: vec![dux_core::pr_reference::UninspectedProject {
@@ -38222,8 +38469,7 @@ cyan = "#00ffff"
                 dux_core::status_text::ReviewCopyOutlook::NotNeeded,
             )),
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             pr_form(&app).body().plain(),
             "dux could not find a checked project for github.com/acme/widget. dux could not \
@@ -38239,12 +38485,11 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(Vec::new())),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
 
         app.confirm_project_chooser_selection().expect("pick");
@@ -38303,7 +38548,7 @@ cyan = "#00ffff"
                 ["github.com".to_string()].into_iter().collect(),
             ));
         reference_first_modal(&mut app, "https://gitlab.com/acme/widget/pull/1");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
 
         let status = app.status.text();
         assert!(
@@ -38341,7 +38586,7 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
 
         reference_first_modal(&mut app, "acme/widget#1");
-        app.confirm_pull_request_input().expect("submit the first");
+        app.confirm_pull_request_input();
         let stale_op = app
             .pending_pr_reference_op
             .clone()
@@ -38350,7 +38595,7 @@ cyan = "#00ffff"
         // Cancel, then open a new dialog for a different reference.
         app.handle_key(key(KeyCode::Esc)).expect("cancel");
         assert!(matches!(app.prompt, PromptState::None));
-        app.open_new_agent_from_pr_prompt().expect("reopen");
+        app.open_new_agent_from_pr_prompt();
         reference_first_modal(&mut app, "acme/gadget#2");
 
         // Now the first resolution finally answers, with a project it matched.
@@ -38450,8 +38695,7 @@ cyan = "#00ffff"
     fn the_project_first_path_still_dispatches_the_lookup_unchanged() {
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        app.begin_pr_agent_for_project(project)
-            .expect("project-first modal");
+        app.begin_pr_agent_for_project(project);
         match &app.prompt {
             PromptState::PullRequestInput { project, .. } => {
                 assert!(
@@ -38464,7 +38708,7 @@ cyan = "#00ffff"
         if let PromptState::PullRequestInput { input, .. } = &mut app.prompt {
             input.set_text("123".to_string());
         }
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
         assert!(
             matches!(app.prompt, PromptState::None),
             "a bare number with a project chosen goes to the lookup exactly as before"
@@ -38864,8 +39108,7 @@ cyan = "#00ffff"
         extra2.name = "beta-two".to_string();
         app.engine.projects.push(extra);
         app.engine.projects.push(extra2);
-        app.open_project_chooser(ProjectChooserIntent::NewAgent)
-            .expect("open the project chooser");
+        app.open_project_chooser(ProjectChooserIntent::NewAgent);
         app
     }
 
@@ -39021,19 +39264,16 @@ cyan = "#00ffff"
             crokey::KeyCombination::new(KeyCode::F(n), KeyModifiers::CONTROL | KeyModifiers::ALT)
         };
         let bindings = || {
-            crate::keybindings::RuntimeBindings::new(
-                |action| match action {
-                    Action::OpenEntry => vec![ctrl_alt(6)],
-                    Action::CloseOverlay => vec![ctrl_alt(7)],
-                    Action::Confirm => vec![ctrl_alt(8)],
-                    _ => crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default(),
-                },
-                true,
-            )
+            crate::keybindings::RuntimeBindings::new(|action| match action {
+                Action::OpenEntry => vec![ctrl_alt(6)],
+                Action::CloseOverlay => vec![ctrl_alt(7)],
+                Action::Confirm => vec![ctrl_alt(8)],
+                _ => crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            })
         };
         let press = |app: &mut App, n: u8| {
             app.handle_key(KeyEvent::new(
@@ -39265,20 +39505,17 @@ cyan = "#00ffff"
         assert!(!searching, "Enter must end the search");
         assert_eq!(query, "line 40", "and keep the query");
 
-        let rebound = crate::keybindings::RuntimeBindings::new(
-            |action| match action {
-                Action::Confirm => vec![crokey::KeyCombination::new(
-                    KeyCode::F(5),
-                    KeyModifiers::CONTROL | KeyModifiers::ALT,
-                )],
-                _ => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let rebound = crate::keybindings::RuntimeBindings::new(|action| match action {
+            Action::Confirm => vec![crokey::KeyCombination::new(
+                KeyCode::F(5),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )],
+            _ => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = startup_log_viewer_app();
         app.bindings = rebound;
         begin_search(&mut app);
@@ -39725,7 +39962,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         }
     }
 
@@ -39919,11 +40156,9 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         match which {
             "ConfirmDeleteTerminal" => {
-                app.show_companion_terminal()
-                    .expect("launch companion terminal");
+                app.show_companion_terminal();
                 app.selected_terminal_index = 0;
-                app.confirm_delete_selected_terminal()
-                    .expect("open the delete-terminal confirmation");
+                app.confirm_delete_selected_terminal();
             }
             "ConfirmCloseTab" => {
                 // Only an EXTRA tab reaches this confirmation; the first tab
@@ -39966,17 +40201,16 @@ cyan = "#00ffff"
                 }];
                 app.right_section = RightSection::Unstaged;
                 app.files_index = 0;
-                app.confirm_discard_selected_file()
-                    .expect("open the discard confirmation");
+                app.confirm_discard_selected_file();
             }
             "ConfirmCreateInitialCommit" => {
                 let repo = scratch_unborn_repo(&mut app);
-                app.add_project(repo, "Fresh".to_string())
+                app.add_project(&repo, "Fresh".to_string())
                     .expect("add an unborn repo");
             }
             "ConfirmInitRepo" => {
                 let dir = scratch_plain_dir(&mut app);
-                app.add_project_from_browser_path(dir);
+                app.add_project_from_browser_path(&dir);
             }
             "ConfirmUseExistingBranch" => {
                 let project = app.engine.projects[0].clone();
@@ -40010,9 +40244,8 @@ cyan = "#00ffff"
                 app.engine
                     .providers
                     .insert(TabId::new(slot_tab.clone()), spawn_idle_pty(&worktree));
-                app.open_kill_running().expect("open the kill picker");
-                app.open_confirm_kill_running_action(KillRunningAction::Hovered)
-                    .expect("open the kill confirmation");
+                app.open_kill_running();
+                app.open_confirm_kill_running_action(KillRunningAction::Hovered);
             }
             "PendingMacroDelete" => {
                 app.engine.config.macros.entries.insert(
@@ -40579,7 +40812,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         let selected = |app: &App| match &app.prompt {
             PromptState::ResourceMonitor { selected_row, .. } => *selected_row,

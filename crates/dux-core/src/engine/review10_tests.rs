@@ -44,6 +44,10 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
     worktree
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -123,7 +127,7 @@ fn review10_a_project_added_between_the_discard_check_and_the_delete_is_not_dele
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
         })
         .unwrap();
 

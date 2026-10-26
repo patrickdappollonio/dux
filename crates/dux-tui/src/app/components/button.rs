@@ -175,32 +175,27 @@ pub(crate) struct PressedButton {
     pub(crate) inside: bool,
 }
 
-/// Resolve the [`ButtonState`] for a given button at render time.
+/// The state a button renders in, from the one it rests in (`resting`: what
+/// keyboard focus and availability make it) and the app-wide press state (set on
+/// mouse-down, cleared on release or any keystroke). A press matching `target`
+/// with the cursor still inside the original button shows the focused look
+/// without changing keyboard focus; dragging off drops the override back to
+/// the resting state.
 ///
-/// `pressed` is the app-wide press state (set on mouse-down, cleared on release
-/// or any keystroke). A press matching `target` with the cursor still inside the
-/// original button shows the focused look without changing keyboard focus;
-/// dragging off drops the override for the caller's own `focused` signal.
-///
-/// `enabled` always wins, so a button that becomes unactivatable mid-drag does
-/// not pretend it is still armed.
+/// A disabled button always stays disabled, so one that becomes unactivatable
+/// mid-drag does not pretend it is still armed.
 pub(crate) fn button_state_for(
     target: ButtonPressedTarget,
     pressed: Option<PressedButton>,
-    focused: bool,
-    enabled: bool,
+    resting: ButtonState,
 ) -> ButtonState {
-    if !enabled {
+    if resting == ButtonState::Disabled {
         return ButtonState::Disabled;
     }
     if matches!(pressed, Some(p) if p.target == target && p.inside) {
         return ButtonState::Focused;
     }
-    if focused {
-        ButtonState::Focused
-    } else {
-        ButtonState::Normal
-    }
+    resting
 }
 
 /// Semantic intent of a button. Drives which theme color the focused
@@ -399,10 +394,6 @@ mod tests {
         assert_eq!(shared_button_width(&[]), MIN_BUTTON_WIDTH);
     }
 
-    fn pressed(target: ButtonPressedTarget, inside: bool) -> Option<PressedButton> {
-        Some(PressedButton { target, inside })
-    }
-
     #[test]
     fn button_state_for_pressed_inside_returns_focused() {
         // Holding the mouse on a button with the cursor still inside it
@@ -411,9 +402,11 @@ mod tests {
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::ConfirmKillConfirm,
-                pressed(ButtonPressedTarget::ConfirmKillConfirm, true),
-                false,
-                true,
+                Some(PressedButton {
+                    target: ButtonPressedTarget::ConfirmKillConfirm,
+                    inside: true
+                }),
+                ButtonState::Normal
             ),
             ButtonState::Focused
         );
@@ -427,18 +420,22 @@ mod tests {
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::ConfirmKillConfirm,
-                pressed(ButtonPressedTarget::ConfirmKillConfirm, false),
-                false,
-                true,
+                Some(PressedButton {
+                    target: ButtonPressedTarget::ConfirmKillConfirm,
+                    inside: false
+                }),
+                ButtonState::Normal
             ),
             ButtonState::Normal
         );
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::ConfirmKillConfirm,
-                pressed(ButtonPressedTarget::ConfirmKillConfirm, false),
-                true,
-                true,
+                Some(PressedButton {
+                    target: ButtonPressedTarget::ConfirmKillConfirm,
+                    inside: false
+                }),
+                ButtonState::Focused
             ),
             ButtonState::Focused
         );
@@ -450,9 +447,11 @@ mod tests {
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::ConfirmKillCancel,
-                pressed(ButtonPressedTarget::ConfirmKillConfirm, true),
-                false,
-                true,
+                Some(PressedButton {
+                    target: ButtonPressedTarget::ConfirmKillConfirm,
+                    inside: true
+                }),
+                ButtonState::Normal
             ),
             ButtonState::Normal
         );
@@ -465,9 +464,11 @@ mod tests {
         assert_eq!(
             button_state_for(
                 ButtonPressedTarget::RuntimeKillSelected,
-                pressed(ButtonPressedTarget::RuntimeKillSelected, true),
-                true,
-                false,
+                Some(PressedButton {
+                    target: ButtonPressedTarget::RuntimeKillSelected,
+                    inside: true
+                }),
+                ButtonState::Disabled
             ),
             ButtonState::Disabled
         );
@@ -476,11 +477,19 @@ mod tests {
     #[test]
     fn button_state_for_no_press_uses_focus_signal() {
         assert_eq!(
-            button_state_for(ButtonPressedTarget::ConfirmQuitConfirm, None, true, true,),
+            button_state_for(
+                ButtonPressedTarget::ConfirmQuitConfirm,
+                None,
+                ButtonState::Focused
+            ),
             ButtonState::Focused
         );
         assert_eq!(
-            button_state_for(ButtonPressedTarget::ConfirmQuitConfirm, None, false, true,),
+            button_state_for(
+                ButtonPressedTarget::ConfirmQuitConfirm,
+                None,
+                ButtonState::Normal
+            ),
             ButtonState::Normal
         );
     }

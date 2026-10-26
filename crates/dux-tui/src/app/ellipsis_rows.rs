@@ -355,7 +355,7 @@ fn the_changes_list_cuts_a_wide_path_and_keeps_the_stats_right_aligned() {
     app.right_section = RightSection::Unstaged;
     // The plain row is selected, so the wide one is cut like any other row.
     app.files_index = 0;
-    app.right_hidden = false;
+    app.panes.right_hidden = false;
     // Wide enough that the stats fit beside a path: below that the path keeps a
     // ten-column floor and the stats are clipped on every row, plain or wide.
     for (w, h) in [(120, 40), (160, 40)] {
@@ -487,7 +487,7 @@ fn the_resource_monitor_marks_a_wide_name_cut_by_its_column() {
         selected_row: 0,
         expanded: std::collections::HashSet::new(),
         last_refresh: std::time::Instant::now(),
-        short_window_sample: false,
+        cpu_window: crate::app::CpuWindow::Full,
     };
     for (w, h) in [(120, 40), (80, 24)] {
         let buf = render_at(&mut app, w, h);

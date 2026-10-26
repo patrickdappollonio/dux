@@ -19,12 +19,12 @@ pub(crate) mod scroll_view;
 pub(crate) mod wrap_lines;
 
 pub(crate) use button::{
-    BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, PressedButton, button_row,
+    BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, ButtonState, PressedButton, button_row,
     button_state_for, button_width_for, shared_button_width,
 };
 pub(crate) use centered::render_centered_lines;
-pub(crate) use checkbox::{Checkbox, CheckboxState};
-pub(crate) use focus_ring::next_focus;
+pub(crate) use checkbox::{CheckMark, Checkbox, CheckboxState};
+pub(crate) use focus_ring::{FocusStep, next_focus};
 pub(crate) use hint_bar::{
     Hint, HintTone, fitted_hint_spans, hint_line, hint_line_after, modal_hint_line, pane_hint_line,
     pane_hint_line_after,

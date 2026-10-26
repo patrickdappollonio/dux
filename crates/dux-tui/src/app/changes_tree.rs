@@ -432,7 +432,8 @@ impl App {
         let Some(worktree) = self.diff_worktree_for_selection() else {
             return true;
         };
-        let seq = self.spawn_folder_listing(&session_id, worktree, side, &path, true);
+        let seq =
+            self.spawn_folder_listing(&session_id, worktree, side, &path, ListingStatus::Announced);
         self.changes_tree
             .by_session
             .entry(session_id)
@@ -469,7 +470,7 @@ impl App {
         self.clamp_files_cursor();
     }
 
-    /// Ask a worker for one folder's contents. `announce` raises a keyed busy
+    /// Ask a worker for one folder's contents. An announced `status` raises a keyed busy
     /// and a final for it; a quiet refresh of a folder already on screen does
     /// neither, because the rows it replaces are still there to read.
     fn spawn_folder_listing(
@@ -478,11 +479,12 @@ impl App {
         worktree: PathBuf,
         side: ChangesSide,
         dir: &str,
-        announce: bool,
+        status: ListingStatus,
     ) -> u64 {
         self.changes_tree.listing_seq = self.changes_tree.listing_seq.wrapping_add(1);
         let seq = self.changes_tree.listing_seq;
-        let status_key = announce.then(|| listing_status_key(session_id, side, dir));
+        let status_key =
+            (status == ListingStatus::Announced).then(|| listing_status_key(session_id, side, dir));
         if let Some(key) = &status_key {
             self.changes_tree
                 .listing_status_owner
@@ -563,14 +565,14 @@ impl App {
         }
         let any = !landed.is_empty();
         for (pending, answer) in landed {
-            self.apply_folder_listing(pending, answer);
+            self.apply_folder_listing(&pending, answer);
         }
         any
     }
 
     fn apply_folder_listing(
         &mut self,
-        pending: PendingFolderListing,
+        pending: &PendingFolderListing,
         answer: Result<Vec<ChangedFile>, String>,
     ) {
         // Only the listing that raised the key's busy may finish or clear it:
@@ -686,7 +688,13 @@ impl App {
             return;
         };
         for (side, dir, seen) in refreshes {
-            let seq = self.spawn_folder_listing(&session_id, worktree.clone(), side, &dir, false);
+            let seq = self.spawn_folder_listing(
+                &session_id,
+                worktree.clone(),
+                side,
+                &dir,
+                ListingStatus::Silent,
+            );
             if let Some(entry) = self
                 .changes_tree
                 .by_session
@@ -815,13 +823,17 @@ impl App {
                     FolderOp::Unstage => {
                         git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
                     }
-                    FolderOp::Delete => {
-                        delete_untracked_folder(&worktree, &path, confirmed, &destructive, claim)
-                            .map(|deleted_files| FolderOpDone {
-                                deleted_files,
-                                ..FolderOpDone::default()
-                            })
-                    }
+                    FolderOp::Delete => delete_untracked_folder(
+                        &worktree,
+                        &path,
+                        confirmed,
+                        &destructive,
+                        claim.as_ref(),
+                    )
+                    .map(|deleted_files| FolderOpDone {
+                        deleted_files,
+                        ..FolderOpDone::default()
+                    }),
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
@@ -966,14 +978,14 @@ fn delete_untracked_folder(
     path: &str,
     confirmed: git::ConfirmedEntry,
     check: &dux_core::destructive::DestructiveCheck,
-    claim: Option<dux_core::worktree_ops::DestructiveClaim>,
+    claim: Option<&dux_core::worktree_ops::DestructiveClaim>,
 ) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
-    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.iter().collect();
+    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.into_iter().collect();
     git::discard_confirmed(
         worktree,
         path,
@@ -1069,7 +1081,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
         load_lists(&mut app, &worktree);
         (app, worktree)
     }
@@ -1235,7 +1247,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
         // Selected, so the row is drawn unabridged in this narrow pane.
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let screen = render_text(&mut app, 140, 40);
 
@@ -1271,7 +1283,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Staged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
         // Wide enough for the whole label.
         app.right_width_pct = 50;
 
@@ -1531,7 +1543,7 @@ mod tests {
     fn discarding_a_folder_asks_first_then_deletes_it_on_a_worker() {
         let (mut app, worktree) = repo_app();
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         let PromptState::ConfirmDiscardFile {
             file_path,
             kind,
@@ -1551,11 +1563,11 @@ mod tests {
         assert!(screen.contains("13 files"), "{screen}");
 
         // Cancel keeps everything.
-        app.resolve_confirm_discard_file(false);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Cancel);
         assert!(worktree.join("node_modules/top.js").exists());
 
-        app.confirm_discard_selected_file().unwrap();
-        app.resolve_confirm_discard_file(true);
+        app.confirm_discard_selected_file();
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         assert_eq!(app.status.tone(), StatusTone::Busy);
         settle(&mut app, idle);
         assert_eq!(app.status.tone(), StatusTone::Info);
@@ -1656,7 +1668,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -1712,7 +1724,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
 
         app.files_index = 0;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status
@@ -1723,7 +1735,7 @@ mod tests {
         );
 
         app.files_index = 1;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status.text().contains("worktree manager"),
@@ -1771,7 +1783,7 @@ mod tests {
             let mut app = test_app(default_bindings());
             repositories_only_rows(&mut app);
             app.files_index = index;
-            app.confirm_discard_selected_file().unwrap();
+            app.confirm_discard_selected_file();
             assert!(matches!(app.prompt, PromptState::None));
             let text = app.status.text();
             assert!(text.contains(holds), "{text}");
@@ -1868,7 +1880,7 @@ mod tests {
         assert_eq!(app.status.tone(), StatusTone::Busy);
 
         let superseded = app.changes_tree.pending_listings.remove(0);
-        app.apply_folder_listing(superseded, Ok(Vec::new()));
+        app.apply_folder_listing(&superseded, Ok(Vec::new()));
 
         assert_eq!(app.status.tone(), StatusTone::Busy, "{}", app.status.text());
         assert!(app.status.text().contains("Listing what is inside"));
@@ -1885,10 +1897,10 @@ mod tests {
     #[test]
     fn a_folder_that_grew_after_the_dialog_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         std::fs::write(worktree.join("node_modules/late.js"), "late\n").unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);
@@ -1905,10 +1917,10 @@ mod tests {
     #[test]
     fn a_folder_that_shrank_after_the_dialog_reports_what_went() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         std::fs::remove_file(worktree.join("node_modules/top.js")).unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Info, "{}", app.status.text());
@@ -1926,13 +1938,13 @@ mod tests {
     fn a_file_that_became_a_folder_after_the_dialog_is_not_cleaned() {
         let (mut app, worktree) = repo_app();
         app.files_index = 1;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
         std::fs::remove_file(worktree.join("notes.md")).unwrap();
         std::fs::create_dir_all(worktree.join("notes.md")).unwrap();
         std::fs::write(worktree.join("notes.md/a.txt"), "a\n").unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         // The discard runs on a worker; its final replaces the busy.
         let deadline = Instant::now() + Duration::from_secs(10);
         while app.status.tone() == StatusTone::Busy {
@@ -1955,10 +1967,10 @@ mod tests {
     #[test]
     fn a_folder_that_became_a_repository_after_the_dialog_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         run_git(&worktree.join("node_modules"), &["init", "-q"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);
@@ -1986,8 +1998,8 @@ mod tests {
             .position(|row| row.starts_with("clone/"))
             .expect("the repository row");
 
-        app.confirm_discard_selected_file().unwrap();
-        app.resolve_confirm_discard_file(true);
+        app.confirm_discard_selected_file();
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert!(!clone.exists());
@@ -2001,12 +2013,12 @@ mod tests {
     #[test]
     fn a_folder_that_became_tracked_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         // An agent commits the folder before the user confirms.
         run_git(&worktree, &["add", "--", "node_modules"]);
         run_git(&worktree, &["commit", "-q", "-m", "vendor"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);

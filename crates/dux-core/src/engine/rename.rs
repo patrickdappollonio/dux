@@ -120,6 +120,11 @@ impl Engine {
     /// Answers with the reaction to apply: a final for a rename that is already
     /// done, or the keyed busy of the branch rename now running. A refusal is an
     /// error carrying the sentence to show.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal sentence for an unknown session, a rejected name or
+    /// branch rename, or a new name the session database could not save.
     pub fn rename_agent(
         &mut self,
         session_id: &str,
@@ -392,8 +397,7 @@ mod tests {
         assert!(engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
         let again = engine
             .rename_agent("s1", "other", crate::engine::BranchRename::AlsoTheBranch)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert_eq!(
             again.to_string(),
             branch_rename_refusal(&BranchRenameRejection::AlreadyInFlight)
@@ -585,8 +589,7 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat"));
         let err = engine
             .rename_agent("s1", " ", crate::engine::BranchRename::AlsoTheBranch)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert_eq!(
             err.to_string(),
             branch_rename_refusal(&BranchRenameRejection::EmptyName)
@@ -717,8 +720,7 @@ mod tests {
                         crate::engine::BranchRename::NameOnly
                     },
                 )
-                .err()
-                .expect("refused");
+                .expect_err("refused");
             assert!(
                 err.to_string().contains("disk is full"),
                 "{rename_branch}: {err}"
@@ -750,8 +752,7 @@ mod tests {
         crate::engine::fail_next_worker_spawn();
         let err = engine
             .rename_agent("s1", "renamed", crate::engine::BranchRename::AlsoTheBranch)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert!(err.to_string().contains("reverted the agent name"), "{err}");
         assert_eq!(
             engine.live_status_keys.len(),
@@ -768,8 +769,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let err = engine
             .rename_agent("ghost", "x", crate::engine::BranchRename::NameOnly)
-            .err()
-            .expect("refused");
+            .expect_err("refused");
         assert_eq!(err.to_string(), "unknown session: ghost");
     }
 }

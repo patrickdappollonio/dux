@@ -36,6 +36,17 @@ pub struct CommandWorkerSpec {
     pub(crate) panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
+impl std::fmt::Debug for CommandWorkerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandWorkerSpec")
+            .field("label", &self.label)
+            .field("in_flight_key", &self.in_flight_key)
+            .field("busy_status", &self.busy_status)
+            .field("already_running_status", &self.already_running_status)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Whether a status op's completion has the surfaces read the changed-files
 /// listing again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +345,15 @@ pub struct BackgroundWorkerSpec {
     pub(crate) panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
+impl std::fmt::Debug for BackgroundWorkerSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackgroundWorkerSpec")
+            .field("label", &self.label)
+            .field("in_flight_key", &self.in_flight_key)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Engine {
     /// Spawn a one-shot background worker with panic safety and optional
     /// in-flight tracking. See `BackgroundWorkerSpec` for the per-site
@@ -444,6 +464,7 @@ impl Engine {
 /// Specification for a single long-running loop-worker spawn. Used by
 /// `Engine::spawn_loop_worker`, which owns the outer loop and per-iteration
 /// panic recovery; the body runs once per tick and decides whether to continue.
+#[derive(Debug)]
 pub struct LoopWorkerSpec {
     /// Short human-readable label. Used as a thread-name suffix, as the log
     /// prefix on any per-iteration panic, and as the status key the worker's
@@ -462,8 +483,11 @@ pub struct LoopWorkerSpec {
 
 /// Per-iteration return value for a `spawn_loop_worker` body. `Continue` runs
 /// another iteration; `Break` exits the loop.
+#[derive(Debug)]
 pub enum LoopControl {
+    /// Run another iteration.
     Continue,
+    /// Stop the loop.
     Break,
 }
 
@@ -555,7 +579,6 @@ impl Engine {
                                     clean_iterations = 0;
                                 }
                             }
-                            continue;
                         }
                         Ok(LoopControl::Break) => break,
                         Err(payload) => {

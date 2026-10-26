@@ -23,18 +23,25 @@ use crate::worker::{
 /// What the Engine should do. Variants carry their payload: the caller computes
 /// the context and supplies it, the Engine does the domain work and returns an
 /// `EventReaction` describing any view follow-up.
+#[derive(Debug)]
 pub enum Command {
     /// Complete a deletion that's already past its git step: the async
     /// `WorktreeRemoveCompleted` callback.
     FinishDeleteSession {
+        /// The agent being deleted.
         session_id: String,
+        /// What happened to its worktree, for the status the delete reports.
         removal: WorktreeRemoval,
+        /// Whether the finish reports a status; `false` when the caller keys
+        /// its own.
         update_status: bool,
     },
     /// Modal entrypoint: branches between async git-removal worker and
     /// inline finish.
     BeginDeleteSession {
+        /// The agent to delete.
         session_id: String,
+        /// Whether its worktree goes too.
         delete_worktree: bool,
         /// The delete dialog's "also delete the branch" answer. See
         /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
@@ -58,7 +65,9 @@ pub enum Command {
     /// `ProjectPersistenceOutcome`. `None` for callers that drive no
     /// handler-resolved status.
     PersistProject {
+        /// The change to save.
         action: Box<ProjectPersistenceAction>,
+        /// The op whose final the completion handler resolves, if any.
         status_op_id: Option<String>,
     },
 
@@ -71,11 +80,17 @@ pub enum Command {
     /// `add_existing` too, `path` is a folder that already holds a checkout of
     /// the repository, which becomes the project instead of a clone.
     CloneProject {
+        /// The address to clone from.
         url: String,
+        /// The folder to clone into, or to add with `add_existing`.
         path: String,
+        /// The agent's name, or `None` for a random one.
         agent_name: Option<String>,
+        /// Whether the New agent dialog asked for a random name.
         random_name: bool,
+        /// The pull request the agent is created from, if any.
         pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+        /// Add the existing checkout at `path` instead of cloning.
         add_existing: bool,
         /// With `pull_request`: the agreement to a review copy given before
         /// the clone or the add.
@@ -88,7 +103,9 @@ pub enum Command {
     /// delete is a no-op. The record and config removal run in the persistence
     /// worker.
     RemoveProject {
+        /// The project to remove.
         project_id: String,
+        /// Its display name, for the status.
         project_name: String,
     },
 
@@ -100,7 +117,9 @@ pub enum Command {
     /// project up front against an in-flight worktree removal or a launching
     /// tab, so a partial delete cannot report success while stranding a session.
     DeleteProject {
+        /// The project to delete.
         project_id: String,
+        /// Its display name, for the status.
         project_name: String,
     },
 
@@ -112,8 +131,11 @@ pub enum Command {
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold.
     DispatchCreateAgentRequest {
+        /// What to create.
         request: Box<CreateAgentRequest>,
+        /// The busy shown while the create runs.
         busy_message: crate::status_text::StatusText,
+        /// The caller's terminal size, as columns and rows.
         term_size: (u16, u16),
     },
 
@@ -123,20 +145,27 @@ pub enum Command {
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold.
-    DispatchAgentLaunch { request: Box<AgentLaunchRequest> },
+    DispatchAgentLaunch {
+        /// The launch to run.
+        request: Box<AgentLaunchRequest>,
+    },
 
     /// Stage a single file. Synchronous git call (microseconds for the
     /// typical case). Returns `EventReaction::Nothing` on success; an `Err`
     /// propagates to the App caller which surfaces it.
     StageFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
     /// Unstage a single file. Same shape as `StageFile`: synchronous git
     /// call, `EventReaction::Nothing` on success, `Err` on failure.
     UnstageFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
@@ -147,8 +176,11 @@ pub enum Command {
     /// once (the folder being removed, something living at the path) is an
     /// `Err`.
     DiscardFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
+        /// Whether the file is untracked, so the discard deletes it.
         is_untracked: bool,
         /// What the row the user confirmed was: the discard is refused when
         /// the path is no longer that (a file a folder has replaced, a folder
@@ -160,7 +192,9 @@ pub enum Command {
     /// against LIVE git status on the worker, right before the discard,
     /// rather than by the caller: the surface's thread never runs git for it.
     DiscardFileLive {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
@@ -171,23 +205,32 @@ pub enum Command {
     /// and nothing is committed. The caller pre-formats `success_message`
     /// because it depends on view-side bindings the engine cannot resolve.
     CommitChanges {
+        /// The worktree to commit in.
         worktree_path: PathBuf,
+        /// The commit message.
         message: String,
+        /// The line reported when the commit lands.
         success_message: String,
     },
 
     /// Spawn a `git push` worker. Returns `EventReaction::Status(Busy("Pushing
     /// to remote\u{2026}"))` immediately; completion is reported via
     /// `WorkerEvent::PushCompleted`.
-    Push { worktree_path: PathBuf },
+    Push {
+        /// The worktree whose branch is pushed.
+        worktree_path: PathBuf,
+    },
 
     /// Spawn a `git pull` worker for either a project's leading branch or the
     /// current session's branch. Returns the busy status when the in-flight
     /// guard accepts, or a warning when another pull is already running for the
     /// same repo path. Completion arrives as `WorkerEvent::PullCompleted`.
     Pull {
+        /// The repository to pull.
         repo_path: PathBuf,
+        /// What the pull is of.
         target: PullTarget,
+        /// The busy shown while the pull runs.
         busy_message: crate::status_text::StatusText,
         /// The refusal while a pull of the same worktree runs. A SESSION pull's
         /// only: a project pull shares the project folder's lock with "Check
@@ -200,27 +243,39 @@ pub enum Command {
     /// Open a filesystem path via the user's OS handler. Fire-and-forget
     /// spawn; result posts back as `WorkerEvent::OpenPathCompleted` which the
     /// existing reaction handler surfaces as a status message.
-    OpenPath { path: PathBuf, target: String },
+    OpenPath {
+        /// The path to open.
+        path: PathBuf,
+        /// What the path is, for the status line ("session worktree", say).
+        target: String,
+    },
 
     /// Toggle a session's `auto_reopen_enabled` flag. The caller passes the new
     /// value and the branch name, captured before the mutation. The engine
     /// upserts in place, falling back to `session_store.set_auto_reopen_enabled`
     /// when the session was removed in flight.
     ToggleAgentAutoReopen {
+        /// The agent changed.
         session_id: String,
+        /// The agent's name as the caller showed it, for the status.
         branch_name: String,
+        /// Whether the agent now reopens at startup.
         new_enabled: bool,
     },
 
     /// Remove a companion terminal from the engine (drops `PtyClient`, killing
     /// the child). Returns a typed view carrying the terminal's label so the
     /// App can format status + reconcile `active_terminal_id` (view field).
-    DeleteTerminal { terminal_id: String },
+    DeleteTerminal {
+        /// The terminal to close.
+        terminal_id: String,
+    },
 
     /// Persist the global `env` block to the user config file. The engine
     /// eager-saves through `Engine::config_writer` and reports the result
     /// synchronously, rolling the in-memory env back if the write fails.
     PersistGlobalEnv {
+        /// The new global environment.
         env: std::collections::BTreeMap<String, String>,
     },
 
@@ -233,7 +288,7 @@ pub enum Command {
     /// Write a canonical, fully-templated config to disk, overwriting the
     /// existing file, to restore a known-good config after a failed reload.
     /// Renders through `Engine::surface` and writes synchronously through
-    /// `config_write::write_config_secure`.
+    /// `config_write::replace_config_file`.
     RecoverConfig,
 
     /// Persist a custom display order for the agent sessions within a single
@@ -245,7 +300,9 @@ pub enum Command {
     /// reorders are high-frequency during a drag, so the refreshed view is the
     /// feedback.
     ReorderSessions {
+        /// The project whose agents are reordered.
         project_id: String,
+        /// Every agent of the project, in the new order.
         session_ids: Vec<String>,
     },
 
@@ -253,20 +310,29 @@ pub enum Command {
     /// exactly the full set of all session ids. On success it writes one global
     /// `sort_order` permutation and re-sorts `self.sessions` to match. Silent:
     /// the refreshed view is the feedback.
-    ReorderAgents { session_ids: Vec<String> },
+    ReorderAgents {
+        /// Every agent, in the new order.
+        session_ids: Vec<String>,
+    },
 
     /// Persist a custom display order for the workspace's projects.
     /// `project_ids` must be exactly the full set of known project ids, under
     /// the same strict validation as [`Command::ReorderSessions`]. On success it
     /// writes the order to storage and reorders `self.projects` to match.
-    ReorderProjects { project_ids: Vec<String> },
+    ReorderProjects {
+        /// Every project, in the new order.
+        project_ids: Vec<String>,
+    },
 
     /// Persist a global runtime order for every companion terminal, whatever its
     /// owner. `terminal_ids` must be exactly the full set of current terminal
     /// ids; each terminal's runtime `sort_order` is stamped to match, with no
     /// storage write, because terminals are runtime-only. Silent success: the
     /// refreshed view is the feedback.
-    ReorderTerminals { terminal_ids: Vec<String> },
+    ReorderTerminals {
+        /// Every terminal, in the new order.
+        terminal_ids: Vec<String>,
+    },
 
     /// Run a configured text macro against a live PTY target. `target_id` names
     /// either an agent session (surface `Agent`) or a companion terminal
@@ -274,7 +340,12 @@ pub enum Command {
     /// unknown macro name and a surface mismatch both return an error Status;
     /// otherwise the text is transformed by
     /// `dux_core::macros::macro_payload_bytes` and written to the target's PTY.
-    RunMacro { target_id: String, name: String },
+    RunMacro {
+        /// The agent tab or terminal the macro types into.
+        target_id: String,
+        /// The macro to run.
+        name: String,
+    },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
     /// into the running `config.macros` immediately, so the `ViewModel` refreshes
@@ -286,7 +357,10 @@ pub enum Command {
     /// pre-edit snapshot, so a save clobbers any hand-edit to the `[macros]`
     /// block made on disk in between. Acceptable under the single-operator
     /// model; a multi-writer setup would need read-modify-merge.
-    UpdateMacros { macros: crate::config::MacrosConfig },
+    UpdateMacros {
+        /// The whole new macro list.
+        macros: crate::config::MacrosConfig,
+    },
 
     /// A change to the macro list or the global environment, kept as asked so a
     /// change a reload deferred runs against the config as it is when it runs.
@@ -299,7 +373,10 @@ pub enum Command {
     /// unstaged lists and its `ChangedFilesReady` populates the pane on a later
     /// drain. Returns `EventReaction::Nothing`, because the refreshed `ViewModel`
     /// broadcast is the feedback rather than a toast on every selection.
-    WatchChangedFiles { session_id: Option<String> },
+    WatchChangedFiles {
+        /// The agent whose worktree is watched, or `None` to stop watching.
+        session_id: Option<String>,
+    },
 }
 
 /// The commit's refusal when its message is empty.
@@ -457,32 +534,57 @@ pub enum ConfigSetChange {
     /// Replace the whole list, refused with [`crate::wire::StaleSet::Macros`] when
     /// it has moved since the [`crate::wire::macros_version`] in `read_at`.
     ReplaceMacros {
+        /// The whole new list.
         macros: crate::config::MacrosConfig,
+        /// The list version the client read, or `None` to replace whatever is
+        /// there.
         read_at: Option<String>,
     },
     /// Add one macro, or replace it in place; every other macro stays as it is.
     SetMacro {
+        /// The macro's name.
         name: String,
+        /// What it types and where it is offered.
         entry: crate::config::MacroEntry,
     },
     /// Remove one macro; an unknown name is an error.
-    RemoveMacro { name: String },
+    RemoveMacro {
+        /// The macro to remove.
+        name: String,
+    },
     /// Replace the whole table, with the same `read_at` rule.
     ReplaceEnv {
+        /// The whole new table.
         env: std::collections::BTreeMap<String, String>,
+        /// The table version the client read, or `None` to replace whatever is
+        /// there.
         read_at: Option<String>,
     },
     /// Set one variable; every other stays as it is.
-    SetEnvVar { name: String, value: String },
+    SetEnvVar {
+        /// The variable's name.
+        name: String,
+        /// Its value.
+        value: String,
+    },
     /// Remove one variable; an unknown name is an error.
-    RemoveEnvVar { name: String },
+    RemoveEnvVar {
+        /// The variable to remove.
+        name: String,
+    },
 }
 
 impl Engine {
     /// Single dispatch point for every engine-affecting operation, whether the
     /// `Command` came from a key event or off the wire. Returns an
     /// `EventReaction` the caller routes through its view-applier.
-    #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is refused, because an open change
+    /// holds what it would change or somebody else is attached to what it would
+    /// end, or when carrying it out fails; the error is the sentence the
+    /// surfaces show.
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // Count every command taken, deferred ones included: the counter's
         // reader only asks whether anything happened this iteration. Counted at
@@ -526,6 +628,10 @@ impl Engine {
     }
 
     /// [`Self::apply`] once the command is admitted and guarded.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per Command variant, each handing the variant's fields to the code that carries it out"
+    )]
     fn apply_admitted(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands, so it re-applies against the fresh
@@ -617,453 +723,24 @@ impl Engine {
             } => Ok(self.delete_project_with_worktrees(&project_id, &project_name)),
 
             Command::DispatchCreateAgentRequest {
-                mut request,
+                request,
                 busy_message,
                 term_size,
-            } => {
-                // Pre-check the in-flight guard before minting the op, so a
-                // rejected dispatch cannot leak an unresolved op into
-                // `pending_create_ops`. `spawn_command_worker` applies the same
-                // guard only after consuming the spec, by which point the op
-                // would already exist.
-                if self.is_in_flight(&InFlightKey::CreateAgent) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        crate::operations::CREATE_IN_FLIGHT_REFUSAL,
-                    )));
-                }
-                // A project being deleted takes no new agents: the deletion
-                // has already decided which agents it removes.
-                if let Some(project_id) = request.project_id()
-                    && self.project_is_being_deleted(project_id)
-                {
-                    let name = self
-                        .projects
-                        .iter()
-                        .find(|project| project.id == project_id)
-                        .map_or_else(|| project_id.to_string(), |project| project.name.clone());
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        crate::status_text![
-                            "Project ",
-                            q(name),
-                            " is being deleted, so dux did not create an agent in it."
-                        ],
-                    )));
-                }
-                // An agent created on a folder that already exists (an
-                // existing worktree it adopts, or the user's own folder for a
-                // standalone agent) holds it from now until its launch lands,
-                // so a removal of that folder waits for it (or keeps it), and a
-                // folder already being removed is refused rather than adopted:
-                // dux never removes a folder a standalone agent runs in. A
-                // create that makes a NEW worktree holds its path from inside
-                // the job, the moment the path is known and before
-                // `git worktree add` runs.
-                let existing_worktree = match request.as_ref() {
-                    crate::worker::CreateAgentRequest::ExistingManagedWorktree {
-                        worktree_path,
-                        ..
-                    } => Some(worktree_path.clone()),
-                    crate::worker::CreateAgentRequest::Standalone { folder, .. } => {
-                        Some(folder.clone())
-                    }
-                    _ => None,
-                };
-                // A pull request create tells a branch an agent holds from one
-                // anything else holds, so it needs the project's agents as they
-                // are now. Every pull request create passes through here.
-                if let crate::worker::CreateAgentRequest::PullRequest {
-                    project, agents, ..
-                } = request.as_mut()
-                {
-                    *agents = self
-                        .sessions
-                        .iter()
-                        .filter(|session| session.project_id() == Some(project.id.as_str()))
-                        .filter_map(|session| {
-                            Some(crate::worker::AgentAtWorktree {
-                                name: session.display_label(),
-                                worktree_path: PathBuf::from(session.managed_worktree()?),
-                            })
-                        })
-                        .collect();
-                }
-                // Mint the shared create-agent `HandlerStatusOp`: its opaque id
-                // correlates the dispatch busy, every progress re-emit and the
-                // final the launch-ready and launch-failed handlers resolve from
-                // a `CreateLaunchOutcome`, so both surfaces word it identically.
-                // A clone's first agent: a create that fails says what the
-                // clone already did, which is on disk and in the workspace.
-                let cloned = match request.as_ref() {
-                    crate::worker::CreateAgentRequest::NewProject { cloned, .. }
-                    | crate::worker::CreateAgentRequest::PullRequest { cloned, .. } => {
-                        cloned.clone()
-                    }
-                    _ => None,
-                };
-                // `attempted` is the name the create had settled on when it
-                // failed, which a review copy of a pull request makes different
-                // from the name asked for.
-                let after_clone = {
-                    let cloned = cloned.clone();
-                    move |message: crate::status_text::StatusText, attempted: Option<&str>| {
-                        match &cloned {
-                            Some(cloned) => cloned.agent_missing_named(attempted, message),
-                            None => message,
-                        }
-                    }
-                };
-                let op = crate::engine::status_op(busy_message)
-                    .resolve_in_handler(move |o: &crate::engine::CreateLaunchOutcome| {
-                        use crate::engine::{CreateLaunchOutcome, Final};
-                        match o {
-                            CreateLaunchOutcome::Committed {
-                                status_message,
-                                quiet_on,
-                                warns,
-                            } => if *warns {
-                                Final::warning(status_message.clone())
-                            } else {
-                                Final::info(status_message.clone())
-                            }
-                            .quiet_on(*quiet_on),
-                            CreateLaunchOutcome::StartupFailed {
-                                branch_name,
-                                error,
-                                notes,
-                            } => {
-                                // Sticky: provisioning stopped part-way, so the
-                                // worktree is in an unknown state and the
-                                // message sends the user to the startup command
-                                // logs, an action outside the toast. The
-                                // failure leads; what the create's notes said
-                                // is still true and follows it.
-                                let failure = match &cloned {
-                                    // The agent exists, so this is not
-                                    // "didn't create": the clone's context
-                                    // leads and the agent follows.
-                                    Some(cloned) => cloned.startup_failed(branch_name, error),
-                                    None => crate::status_text![
-                                        "Startup command failed for agent ",
-                                        q(branch_name),
-                                        format!(
-                                            ": {}. \
-                                     Open the startup command logs for details.",
-                                            error
-                                        )
-                                    ],
-                                };
-                                Final::error(match notes {
-                                    Some(notes) => {
-                                        crate::status_text![failure, " ", notes.clone()]
-                                    }
-                                    None => failure,
-                                })
-                                .sticky()
-                            }
-                            CreateLaunchOutcome::PersistFailed {
-                                error,
-                                attempted_name,
-                            } => {
-                                // Sticky: the worktree exists but its session row
-                                // does not, so dux forgets it on restart and the
-                                // user is left the directory to clean up.
-                                Final::error(after_clone(
-                                    format!("Failed to persist session: {error}").into(),
-                                    attempted_name.as_deref(),
-                                ))
-                                .sticky()
-                            }
-                            CreateLaunchOutcome::Failed {
-                                message,
-                                attempted_name,
-                            } => Final::error(after_clone(
-                                message.clone(),
-                                attempted_name.as_deref(),
-                            )),
-                        }
-                    })
-                    // Stamp the originating connection so the busy, every progress
-                    // re-emit, and the eventual final reach only it (the followups
-                    // resolve in later ticks, after `current_origin` was reset).
-                    .with_scope(self.current_origin.clone());
-                let op_id = op.id().to_string();
-                // Checked and held in one step, under the registry's lock: a
-                // folder being removed, deleted or moved refuses the create,
-                // out loud, and nothing of it has started yet.
-                if let Some(path) = &existing_worktree
-                    && let Err(refused) = self.worktree_ops().hold_as(
-                        crate::worktree_ops::HoldOwner::CreateOp(op_id.clone()),
-                        path,
-                        crate::worktree_ops::WorktreeOpKind::CreateAgent,
-                    )
-                {
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        refused.sentence("create an agent there"),
-                    )));
-                }
-                // Surface this create's op id to a synchronous `apply_wire`
-                // caller, which reads `WireCommandOutcome.created_op_id` to
-                // correlate its own new session through `created_session_for_op`.
-                // Cleared at the top of every `apply_wire`, so it cannot leak
-                // into an unrelated command's outcome.
-                self.last_created_op_id = Some(op_id.clone());
-                let op_id_for_job = op_id.clone();
-                let op_id_panic = op_id.clone();
-                let pending = op.pending_status();
-                self.pending_create_ops.insert(op_id.clone(), op);
-                self.note_create_started(&op_id, request.project_id());
-                let paths = self.paths.clone();
-                let config = self.config.clone();
-                let identity = self.resolved_identity();
-                let registry = crate::agent_job::CreateJobRegistries {
-                    processes: self.process_registry.clone(),
-                    worktrees: self.worktree_ops().clone(),
-                    moves: self.checkout_move_guard(),
-                };
-                let reaction = self.spawn_command_worker(
-                    CommandWorkerSpec {
-                        label: "create-agent".into(),
-                        in_flight_key: Some(InFlightKey::CreateAgent),
-                        busy_status: Some(pending),
-                        already_running_status: Some(StatusUpdate::error(
-                            crate::operations::CREATE_IN_FLIGHT_REFUSAL,
-                        )),
-                        panic_event: Some(Box::new(move |reason| WorkerEvent::CreateAgentFailed {
-                            status_op_id: op_id_panic,
-                            attempted_name: None,
-                            message: format!("Agent-creation worker panicked: {reason}").into(),
-                        })),
-                    },
-                    move |tx| {
-                        crate::agent_job::run_create_agent_job(
-                            *request,
-                            paths,
-                            &config,
-                            &tx,
-                            term_size,
-                            op_id_for_job,
-                            identity,
-                            registry,
-                        );
-                    },
-                );
-                // A worker that never started cleared the in-flight key; the
-                // create's own bookkeeping goes with it.
-                if self.is_in_flight(&InFlightKey::CreateAgent) {
-                    self.operations.set_create_guard(&op_id);
-                } else {
-                    self.note_create_finished(&op_id);
-                }
-                Ok(reaction)
-            }
+            } => Ok(self.apply_dispatch_create_agent(request, busy_message, term_size)),
 
             Command::DispatchAgentLaunch { request } => {
-                let branch_name = request.session.display_label();
-                let session_id = request.session.id.clone();
-                // The in-flight launch lock is keyed by tab id, one per tab, so
-                // two tabs of one session can launch concurrently. The View
-                // keeps `session_id` for UI correlation.
-                let tab_id = request.tab_id.clone();
-                // The View is a surface payload, so it carries the id as a plain
-                // string; the engine-side decisions above keep the typed form.
-                let tab_id_view = tab_id.as_str().to_string();
-                // Guard the shared launch chokepoint against a session whose
-                // worktree is mid-removal. Every launch path funnels through
-                // this command, so checking once here covers them all, the
-                // residual window included where a transient
-                // `finish_delete_session` DB failure leaves the record in
-                // `closing_sessions` past the synchronous delete.
-                if self.closing_sessions.contains(&session_id) {
-                    // Log the refusal so it shows up in dux.log even when a
-                    // caller ignores the returned view's `launched` flag, as
-                    // dux-web's `launch_agent` does.
-                    crate::logger::warn(&format!(
-                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": session \"{session_id}\" is being deleted"
-                    ));
-                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(StatusUpdate::error(crate::status_text![
-                                "Agent ",
-                                q(branch_name),
-                                " is being deleted and cannot be launched."
-                            ])),
-                        },
-                    )));
-                }
-                // Nothing new may start in a folder a removal has claimed,
-                // whoever's it is: another agent sharing it, a standalone agent
-                // in it. The removal's last look relies on this.
-                if let Some(refused) = self
-                    .worktree_ops()
-                    .removal_refusal(request.session.directory())
-                {
-                    let refusal = refused.sentence("start this agent there");
-                    crate::logger::warn(&format!(
-                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": its folder is being removed"
-                    ));
-                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(StatusUpdate::error(refusal)),
-                        },
-                    )));
-                }
-                // A tab a working-copy recreate is about to start again is the
-                // restart's to start: its old process is still shutting down,
-                // and a launch now would race the restart for the conversation.
-                if let Some(refusal) = self.restart_launch_refusal(&tab_id) {
-                    crate::logger::info(&format!(
-                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": a working-copy recreate is restarting it"
-                    ));
-                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(StatusUpdate::info(refusal)),
-                        },
-                    )));
-                }
-                // Pre-check in-flight so the View carries the exact "already
-                // launching" message regardless of the primitive's generic
-                // already-running fallback.
-                if self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.clone())) {
-                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(StatusUpdate::info(crate::status_text![
-                                "Agent ",
-                                q(branch_name),
-                                " is already launching."
-                            ])),
-                        },
-                    )));
-                }
-                // A live process already holds this tab, and launching over it
-                // would replace the entry in `providers`, whose displaced client
-                // SIGKILLs the child it names on drop. Every legitimate relaunch
-                // path tears the runtime down before it dispatches, so reaching
-                // here with a live provider means the launch is redundant.
-                //
-                // `PtyClient::is_live` is the right question because it excludes
-                // both a child at end of input and one already reaped: each is
-                // waiting to be pruned, and refusing for either would refuse the
-                // relaunch of a tab that just died.
-                if let Some(client) = self.providers.get(&tab_id)
-                    && client.is_live()
-                {
-                    let pid = client
-                        .child_process_id()
-                        .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
-                    crate::logger::warn(&format!(
-                        "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": \
-                         process {pid} is already running in it"
-                    ));
-                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                        DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(StatusUpdate::info(crate::status_text![
-                                "This tab of agent ",
-                                q(branch_name),
-                                " is already running. Stop it before starting it again."
-                            ])),
-                        },
-                    )));
-                }
-                // The same provider of the same agent still shutting down (a
-                // tab closed or detached a moment ago, a restart): the new CLI
-                // waits for it rather than sharing the worktree and the
-                // conversation with it. Read from what each terminating entry
-                // recorded when it started, never from the tab table.
-                let predecessors = self.terminating_predecessors(&session_id, &request.provider);
-                // Clone for the panic event closure before the job closure
-                // consumes `request`, so panic recovery can take the same path
-                // as `process_agent_launch_failed`.
-                let panic_request = (*request).clone();
-                let gate = self.spawn_gate();
-                let reaction = self.spawn_command_worker(
-                    CommandWorkerSpec {
-                        label: format!("agent-launch:{tab_id}"),
-                        in_flight_key: Some(InFlightKey::AgentLaunch(tab_id.clone())),
-                        busy_status: None, // View variant carries the user-facing status
-                        already_running_status: None, // handled by the pre-check above
-                        panic_event: Some(Box::new(move |reason| {
-                            WorkerEvent::AgentLaunchFailed(Box::new(AgentLaunchFailedData {
-                                request: panic_request,
-                                message: format!("Agent-launch worker panicked: {reason}"),
-                            }))
-                        })),
-                    },
-                    move |tx| {
-                        if let Err(message) = wait_for_predecessors(&predecessors, &request, &tx) {
-                            let _ = tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
-                                AgentLaunchFailedData {
-                                    request: *request,
-                                    message,
-                                },
-                            )));
-                            return;
-                        }
-                        crate::agent_job::run_agent_launch_job(*request, &tx, &gate);
-                    },
-                );
-                // Wrap the primitive's return into the View variant so App
-                // callers keep a single pattern-match shape.
-                match reaction {
-                    EventReaction::Nothing => {
-                        // A launch is on its way, so the previous run's verdict
-                        // stops counting. Clearing it at the one chokepoint
-                        // every launch funnels through is what gets an explicit
-                        // start past the diagnosis card with no surface asking.
-                        // A refusal leaves the verdict standing: nothing ran.
-                        self.clear_tab_run_failure(&tab_id);
-                        Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                            DispatchAgentLaunchView {
-                                session_id,
-                                tab_id: tab_id_view.clone(),
-                                launched: true,
-                                status: None,
-                            },
-                        )))
-                    }
-                    EventReaction::Status(status) => Ok(EventReaction::DispatchAgentLaunchView(
-                        Box::new(DispatchAgentLaunchView {
-                            session_id,
-                            tab_id: tab_id_view,
-                            launched: false,
-                            status: Some(status),
-                        }),
-                    )),
-                    other => Ok(other),
-                }
+                Ok(self.apply_dispatch_agent_launch(request))
             }
 
             Command::StageFile {
                 worktree_path,
                 path,
-            } => {
-                let _hold = self.hold_for_git_change(&worktree_path, "stage the file")?;
-                crate::git::stage_file(&worktree_path, &path)?;
-                Ok(EventReaction::Nothing)
-            }
+            } => self.apply_stage_file(&worktree_path, &path),
 
             Command::UnstageFile {
                 worktree_path,
                 path,
-            } => {
-                let _hold = self.hold_for_git_change(&worktree_path, "unstage the file")?;
-                crate::git::unstage_file(&worktree_path, &path)?;
-                Ok(EventReaction::Nothing)
-            }
+            } => self.apply_unstage_file(&worktree_path, &path),
 
             Command::DiscardFileLive {
                 worktree_path,
@@ -1081,74 +758,9 @@ impl Engine {
                 worktree_path,
                 message,
                 success_message,
-            } => {
-                // Held for the commit's own duration, so a removal of this
-                // worktree that is already waiting sees it, and refused once a
-                // removal has begun.
-                let hold = match self
-                    .worktree_ops()
-                    .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Commit)
-                {
-                    Ok(hold) => hold,
-                    Err(refused) => {
-                        return Ok(EventReaction::Status(StatusUpdate::error(
-                            refused.sentence("commit in it"),
-                        )));
-                    }
-                };
-                let op = crate::engine::status_op("Committing the staged changes\u{2026}")
-                    .on_success(move |(): &()| crate::engine::Final::info(success_message.clone()))
-                    // Commit failures leave the index and typed message intact, so
-                    // recovery stays inside the UI and does not require a sticky
-                    // status.
-                    .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
-                Ok(self.spawn_changes_op(op, move || {
-                    let _hold = hold;
-                    match crate::git::commit_preflight(&worktree_path, &message) {
-                        crate::git::CommitPreflight::EmptyMessage => {
-                            return Err(COMMIT_EMPTY_MESSAGE.to_string());
-                        }
-                        crate::git::CommitPreflight::NothingStaged => {
-                            return Err(COMMIT_NOTHING_STAGED.to_string());
-                        }
-                        crate::git::CommitPreflight::Ready => {}
-                    }
-                    crate::git::commit(&worktree_path, &message)
-                        .map(|_| ())
-                        .map_err(|e| format!("Commit failed: {e}"))
-                }))
-            }
+            } => Ok(self.apply_commit_changes(worktree_path, message, success_message)),
 
-            Command::Push { worktree_path } => {
-                let op = crate::engine::status_op("Pushing to remote\u{2026}")
-                    .on_success(|(): &()| {
-                        crate::engine::Final::info(
-                            "Pushed to remote successfully. Your changes are now available to collaborators.",
-                        )
-                    })
-                    .on_failure(|e: &String| {
-                        crate::engine::Final::error(format!("Push to remote failed: {e}"))
-                    });
-                // The push holds its worktree until git is done with it, so a
-                // removal that begins meanwhile waits for it, and a worktree
-                // already being removed takes no push.
-                let hold = match self
-                    .worktree_ops()
-                    .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Push)
-                {
-                    Ok(hold) => hold,
-                    Err(refused) => {
-                        return Ok(EventReaction::Status(StatusUpdate::error(
-                            refused.sentence("push from it"),
-                        )));
-                    }
-                };
-                let wt = worktree_path.clone();
-                Ok(self.spawn_status_op(op, move || {
-                    let _hold = hold;
-                    crate::git::push(&wt).map(|_| ()).map_err(|e| e.to_string())
-                }))
-            }
+            Command::Push { worktree_path } => Ok(self.apply_push(&worktree_path)),
 
             Command::Pull {
                 repo_path,
@@ -1157,290 +769,53 @@ impl Engine {
                 already_running_message,
             } => Ok(self.dispatch_pull(repo_path, target, busy_message, already_running_message)),
 
-            Command::OpenPath { path, target } => {
-                let display = path.display().to_string();
-                let t_ok = target.clone();
-                let t_err = target.clone();
-                let op = crate::engine::status_op(crate::status_text![
-                    format!("Opening {}: ", target),
-                    n(display)
-                ])
-                .on_success(move |(): &()| crate::engine::Final::info(format!("Opened {t_ok}.")))
-                .on_failure(move |e: &String| {
-                    crate::engine::Final::error(format!("Could not open {t_err}: {e}"))
-                });
-                Ok(self.spawn_status_op(op, move || {
-                    crate::startup::open_path(&path).map_err(|err| format!("{err:#}"))
-                }))
-            }
+            Command::OpenPath { path, target } => Ok(self.apply_open_path(path, &target)),
 
             Command::ToggleAgentAutoReopen {
                 session_id,
                 branch_name,
                 new_enabled,
             } => {
-                if let Some(current) = self.sessions.iter_mut().find(|c| c.id == session_id) {
-                    // Persist first so a DB failure leaves in-memory state
-                    // untouched and the UI keeps showing the still-true value.
-                    let mut candidate = current.clone();
-                    candidate.auto_reopen_enabled = new_enabled;
-                    candidate.updated_at = chrono::Utc::now();
-                    self.session_store.upsert_session(&candidate)?;
-                    *current = candidate;
+                let reopen = if new_enabled {
+                    crate::model::AutoReopen::Enabled
                 } else {
-                    self.session_store.set_auto_reopen_enabled(
-                        &session_id,
-                        if new_enabled {
-                            crate::model::AutoReopen::Enabled
-                        } else {
-                            crate::model::AutoReopen::Disabled
-                        },
-                    )?;
-                }
-                Ok(EventReaction::Status(StatusUpdate::info(
-                    crate::status_text![
-                        format!(
-                            "Startup auto-reopen {} for agent ",
-                            if new_enabled { "enabled" } else { "disabled" }
-                        ),
-                        q(branch_name),
-                        "."
-                    ],
-                )))
-            }
-
-            Command::DeleteTerminal { terminal_id } => {
-                // Graceful close: SIGTERM the terminal and move it to the
-                // terminating set so the reaper force-kills it after the grace,
-                // rather than dropping it here for an immediate SIGKILL. The
-                // terminal leaves the UI now and the child winds down behind it.
-                let label = self.begin_close_companion_terminal(&terminal_id);
-                Ok(EventReaction::DeleteTerminalView(Box::new(
-                    DeleteTerminalView { terminal_id, label },
-                )))
-            }
-
-            Command::PersistGlobalEnv { env } => {
-                // Eager save through the queue, with rollback: swap the new env
-                // in, persist synchronously, and restore the previous env if the
-                // write fails so in-memory state never diverges from disk.
-                let previous = std::mem::replace(&mut self.config.env, env);
-                if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
-                    self.config.env = previous;
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Couldn't save global environment variables: {e}"
-                    ))));
-                }
-                let msg = if self.config.env.is_empty() {
-                    "Global environment variables cleared.".to_string()
-                } else {
-                    saved_global_env_message(self.config.env.len())
+                    crate::model::AutoReopen::Disabled
                 };
-                Ok(EventReaction::Status(StatusUpdate::info(msg)))
+                self.apply_toggle_agent_auto_reopen(&session_id, &branch_name, reopen)
             }
 
-            Command::ReloadConfig => {
-                // Reject a reentrant reload: a second one would drop the live
-                // `reload_guard`, resuming the writer mid-reload, and spawn a
-                // worker whose completion closes a barrier it never opened.
-                // A reload asked for DURING one (a second `dux config set`'s
-                // SIGUSR1, a second press) may be about a file that changed
-                // after the running reload read it, so it is never dropped:
-                // it joins the deferred commands and runs as soon as the
-                // current reload closes its barrier. Any number of them
-                // collapse into one follow-up, which reads the latest file.
-                self.reload_origin.reload_asked(if self.reloading {
-                    crate::engine::reload_origin::ReloadSlot::AfterTheRunningOne
-                } else {
-                    crate::engine::reload_origin::ReloadSlot::Now
-                });
-                if self.reloading {
-                    if !self
-                        .deferred_commands
-                        .iter()
-                        .any(|c| matches!(c, Command::ReloadConfig))
-                    {
-                        self.deferred_commands.push(Command::ReloadConfig);
-                        self.deferred_operations.push(None);
-                        self.deferred_policies.push(None);
-                    }
-                    // A client waiting on this one follows the reload that
-                    // reads the file after the one running.
-                    if let Some(id) = &self.operation_in_dispatch {
-                        self.operations
-                            .await_reload(id, crate::engine::ReloadSlot::AfterTheRunningOne);
-                    }
-                    return Ok(EventReaction::Status(StatusUpdate::info(
-                        "A config reload is already running; another runs right after it, so \
-                         the latest config.toml is the one that applies.",
-                    )));
-                }
-                // Open the reload barrier: quiesce the writer so no queued save
-                // races the reload, mark `reloading` so config-mutating commands
-                // defer, and start the surface's reload worker. The barrier
-                // closes when `ConfigReloadReady` lands.
-                //
-                // An unacknowledged pause means no barrier: a still-running
-                // writer could clobber the reload's config write, so abort and
-                // let the caller retry.
-                let guard = self.config_writer.quiesce();
-                if !guard.is_acknowledged() {
-                    // The reload that was to start never will, so the clients
-                    // waiting on it are told so.
-                    self.operations.fail_reload(
-                        "Config writer is busy; please retry.",
-                        std::time::Instant::now(),
-                    );
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        "Config writer is busy; please retry.",
-                    )));
-                }
-                self.reloading = true;
-                self.reload_guard = Some(guard);
-                if let Some(id) = &self.operation_in_dispatch {
-                    self.operations
-                        .await_reload(id, crate::engine::ReloadSlot::Now);
-                }
-                self.surface
-                    .reload(self.paths.clone(), self.worker_tx.clone());
-                Ok(EventReaction::Nothing)
-            }
+            Command::DeleteTerminal { terminal_id } => Ok(self.apply_delete_terminal(terminal_id)),
 
-            Command::RecoverConfig => {
-                // Reject recovery while a reload barrier is open: the reload
-                // holds the writer quiesce, and a second quiesce would resume
-                // the writer mid-reload when its guard dropped.
-                if self.reloading {
-                    return Ok(EventReaction::Status(StatusUpdate::info(
-                        "A config reload is in progress; try recovering again in a moment.",
-                    )));
-                }
-                // Overwrite a corrupt on-disk config with a fresh render of the
-                // in-memory config. Quiesce the writer for the duration of the
-                // direct write so a queued save can't clobber the recovery.
-                let guard = self.config_writer.quiesce();
-                if !guard.is_acknowledged() {
-                    // The writer never confirmed the pause (timeout or dead). Performing
-                    // the direct write would race a still-running writer. Abort and let
-                    // the caller retry once the writer is responsive.
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        "Config writer is busy; please retry.",
-                    )));
-                }
-                // The running config may be older than the file's [server.auth]
-                // (a `dux config set`, a ban since dux started), so the file's
-                // own section is kept whenever it reads. Only when it cannot be
-                // read is the running one written back, and the status says so.
-                // Read inside the config write lock, so a `dux config set` that
-                // lands meanwhile is part of what is kept.
-                let running = self.config.clone();
-                let surface = &self.surface;
-                let outcome =
-                    crate::config_write::replace_config_file(&self.paths.config_path, |current| {
-                        let mut recovered = running.clone();
-                        // A missing file holds no newer password than the
-                        // running one: nothing to explain.
-                        let auth_note = match current.map(crate::config::auth_section_of) {
-                            None => None,
-                            // The file has no password but the running dux has
-                            // one: recovering must not quietly turn the login
-                            // off, so the running password stays, beside the
-                            // file's other auth settings, and the status says so.
-                            Some(Ok(mut auth))
-                                if !auth.has_password() && running.server.auth.has_password() =>
-                            {
-                                auth.password_hash = running.server.auth.password_hash.clone();
-                                recovered.server.auth = auth;
-                                Some(Some(
-                                    "The file's [server.auth] had no password but the running \
-                                     dux has one, so the running password was kept. To remove \
-                                     it, run `dux config set server.auth.password_hash \"\"`."
-                                        .to_string(),
-                                ))
-                            }
-                            Some(Ok(auth)) => {
-                                recovered.server.auth = auth;
-                                Some(None)
-                            }
-                            Some(Err(problem)) => Some(Some(format!(
-                                "The file's [server.auth] could not be read, so the running \
-                                 dux's web password settings were written back ({}); check \
-                                 them with `dux config get server.auth`. What could not be \
-                                 read: {}",
-                                if recovered.server.auth.has_password() {
-                                    "a password is set"
-                                } else {
-                                    "no password is set"
-                                },
-                                problem.reason()
-                            ))),
-                        };
-                        Ok((surface.recover_render(&recovered), auth_note))
-                    });
-                match outcome {
-                    Ok(auth_note) => Ok(EventReaction::Status(match auth_note {
-                        None => StatusUpdate::info(
-                            "Restored the last working configuration to config.toml.",
-                        ),
-                        Some(None) => StatusUpdate::info(
-                            "Restored the last working configuration to config.toml. Its \
-                             [server.auth] was kept as the file had it.",
-                        ),
-                        Some(Some(note)) => StatusUpdate::warning(format!(
-                            "Restored the last working configuration to config.toml. {note}"
-                        )),
-                    })),
-                    Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Couldn't restore the last working configuration: {e:#}"
-                    )))),
-                }
-            }
+            Command::PersistGlobalEnv { env } => Ok(self.apply_persist_global_env(env)),
+
+            Command::ReloadConfig => Ok(self.apply_reload_config()),
+
+            Command::RecoverConfig => Ok(self.apply_recover_config()),
 
             Command::ReorderSessions {
                 project_id,
                 session_ids,
-            } => {
-                self.reorder_sessions(&project_id, &session_ids)?;
-                Ok(EventReaction::Nothing)
-            }
+            } => self
+                .reorder_sessions(&project_id, &session_ids)
+                .map(|()| EventReaction::Nothing),
 
-            Command::ReorderAgents { session_ids } => {
-                self.reorder_agents(&session_ids)?;
-                Ok(EventReaction::Nothing)
-            }
+            Command::ReorderAgents { session_ids } => self
+                .reorder_agents(&session_ids)
+                .map(|()| EventReaction::Nothing),
 
-            Command::ReorderProjects { project_ids } => {
-                self.reorder_projects(&project_ids)?;
-                Ok(EventReaction::Nothing)
-            }
+            Command::ReorderProjects { project_ids } => self
+                .reorder_projects(&project_ids)
+                .map(|()| EventReaction::Nothing),
 
-            Command::ReorderTerminals { terminal_ids } => {
-                self.reorder_terminals(&terminal_ids)?;
-                Ok(EventReaction::Nothing)
-            }
+            Command::ReorderTerminals { terminal_ids } => self
+                .reorder_terminals(&terminal_ids)
+                .map(|()| EventReaction::Nothing),
 
             Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
             Command::ChangeConfigSet(change) => self.apply_config_set_change(change),
 
-            Command::UpdateMacros { macros } => {
-                // Keep and report, never roll back: the new macros go live so
-                // the ViewModel reflects them, and a failed write is reported as
-                // a possibly stale file rather than reverting the user's change.
-                self.config.macros = macros;
-                let count = self.config.macros.entries.len();
-                if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                        "Macros updated this session, but saving to config failed: {e}"
-                    ))));
-                }
-                let msg = if count == 0 {
-                    "All macros removed. The macro list is now empty.".to_string()
-                } else {
-                    saved_macros_message(count)
-                };
-                Ok(EventReaction::Status(StatusUpdate::info(msg)))
-            }
+            Command::UpdateMacros { macros } => Ok(self.apply_update_macros(macros)),
 
             Command::WatchChangedFiles { session_id } => {
                 // Resolving and setting the watch runs no git, so it is cheap on
@@ -1453,6 +828,723 @@ impl Engine {
                 Ok(EventReaction::Nothing)
             }
         }
+    }
+
+    /// [`Command::ToggleAgentAutoReopen`]: persist the agent's auto-reopen
+    /// choice first, so a failed write leaves memory showing the still-true
+    /// value, then mirror it in memory.
+    fn apply_toggle_agent_auto_reopen(
+        &mut self,
+        session_id: &str,
+        branch_name: &str,
+        reopen: crate::model::AutoReopen,
+    ) -> anyhow::Result<EventReaction> {
+        let enabled = reopen == crate::model::AutoReopen::Enabled;
+        if let Some(current) = self.sessions.iter_mut().find(|c| c.id == session_id) {
+            // Persist first so a DB failure leaves in-memory state
+            // untouched and the UI keeps showing the still-true value.
+            let mut candidate = current.clone();
+            candidate.auto_reopen_enabled = enabled;
+            candidate.updated_at = chrono::Utc::now();
+            self.session_store.upsert_session(&candidate)?;
+            *current = candidate;
+        } else {
+            self.session_store
+                .set_auto_reopen_enabled(session_id, reopen)?;
+        }
+        Ok(EventReaction::Status(StatusUpdate::info(
+            crate::status_text![
+                format!(
+                    "Startup auto-reopen {} for agent ",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+                q(branch_name),
+                "."
+            ],
+        )))
+    }
+
+    /// [`Command::StageFile`]: stage one file, holding the worktree while git
+    /// runs.
+    fn apply_stage_file(
+        &self,
+        worktree_path: &std::path::Path,
+        path: &str,
+    ) -> anyhow::Result<EventReaction> {
+        let _hold = self.hold_for_git_change(worktree_path, "stage the file")?;
+        crate::git::stage_file(worktree_path, path)?;
+        Ok(EventReaction::Nothing)
+    }
+
+    /// [`Command::UnstageFile`]: unstage one file, holding the worktree while
+    /// git runs.
+    fn apply_unstage_file(
+        &self,
+        worktree_path: &std::path::Path,
+        path: &str,
+    ) -> anyhow::Result<EventReaction> {
+        let _hold = self.hold_for_git_change(worktree_path, "unstage the file")?;
+        crate::git::unstage_file(worktree_path, path)?;
+        Ok(EventReaction::Nothing)
+    }
+
+    /// [`Command::DeleteTerminal`]: close a terminal gracefully. It is sent
+    /// SIGTERM and moved to the terminating set, so the reaper force-kills it
+    /// after the grace rather than it being dropped here for an immediate
+    /// SIGKILL; the terminal leaves the UI now and the child winds down behind
+    /// it.
+    fn apply_delete_terminal(&mut self, terminal_id: String) -> EventReaction {
+        let label = self.begin_close_companion_terminal(&terminal_id);
+        EventReaction::DeleteTerminalView(Box::new(DeleteTerminalView { terminal_id, label }))
+    }
+
+    /// Why a create may not start, before anything of it is minted: another
+    /// create is running, or its project is being deleted.
+    fn create_agent_refusal(&self, request: &CreateAgentRequest) -> Option<StatusUpdate> {
+        // Pre-check the in-flight guard before minting the op, so a
+        // rejected dispatch cannot leak an unresolved op into
+        // `pending_create_ops`. `spawn_command_worker` applies the same
+        // guard only after consuming the spec, by which point the op
+        // would already exist.
+        if self.is_in_flight(&InFlightKey::CreateAgent) {
+            return Some(StatusUpdate::error(
+                crate::operations::CREATE_IN_FLIGHT_REFUSAL,
+            ));
+        }
+        // A project being deleted takes no new agents: the deletion
+        // has already decided which agents it removes.
+        let project_id = request.project_id()?;
+        if !self.project_is_being_deleted(project_id) {
+            return None;
+        }
+        let name = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map_or_else(|| project_id.to_string(), |project| project.name.clone());
+        Some(StatusUpdate::error(crate::status_text![
+            "Project ",
+            q(name),
+            " is being deleted, so dux did not create an agent in it."
+        ]))
+    }
+
+    /// A pull request create tells a branch an agent holds from one anything
+    /// else holds, so it is handed the project's agents as they are now.
+    fn fill_pull_request_agents(&self, request: &mut CreateAgentRequest) {
+        if let crate::worker::CreateAgentRequest::PullRequest {
+            project, agents, ..
+        } = request
+        {
+            *agents = self
+                .sessions
+                .iter()
+                .filter(|session| session.project_id() == Some(project.id.as_str()))
+                .filter_map(|session| {
+                    Some(crate::worker::AgentAtWorktree {
+                        name: session.display_label(),
+                        worktree_path: PathBuf::from(session.managed_worktree()?),
+                    })
+                })
+                .collect();
+        }
+    }
+
+    /// [`Command::DispatchCreateAgentRequest`]: mint the create op and start the
+    /// create worker, unless a create is already running.
+    fn apply_dispatch_create_agent(
+        &mut self,
+        mut request: Box<CreateAgentRequest>,
+        busy_message: crate::status_text::StatusText,
+        term_size: (u16, u16),
+    ) -> EventReaction {
+        if let Some(refusal) = self.create_agent_refusal(&request) {
+            return EventReaction::Status(refusal);
+        }
+        // An agent created on a folder that already exists (an
+        // existing worktree it adopts, or the user's own folder for a
+        // standalone agent) holds it from now until its launch lands,
+        // so a removal of that folder waits for it (or keeps it), and a
+        // folder already being removed is refused rather than adopted:
+        // dux never removes a folder a standalone agent runs in. A
+        // create that makes a NEW worktree holds its path from inside
+        // the job, the moment the path is known and before
+        // `git worktree add` runs.
+        let existing_worktree = match request.as_ref() {
+            crate::worker::CreateAgentRequest::ExistingManagedWorktree {
+                worktree_path, ..
+            } => Some(worktree_path.clone()),
+            crate::worker::CreateAgentRequest::Standalone { folder, .. } => Some(folder.clone()),
+            _ => None,
+        };
+        // A pull request create tells a branch an agent holds from one
+        // anything else holds, so it needs the project's agents as they
+        // are now. Every pull request create passes through here.
+        self.fill_pull_request_agents(&mut request);
+        // Mint the shared create-agent `HandlerStatusOp`: its opaque id
+        // correlates the dispatch busy, every progress re-emit and the
+        // final the launch-ready and launch-failed handlers resolve from
+        // a `CreateLaunchOutcome`, so both surfaces word it identically.
+        // A clone's first agent: a create that fails says what the
+        // clone already did, which is on disk and in the workspace.
+        let cloned = match request.as_ref() {
+            crate::worker::CreateAgentRequest::NewProject { cloned, .. }
+            | crate::worker::CreateAgentRequest::PullRequest { cloned, .. } => cloned.clone(),
+            _ => None,
+        };
+        let op = crate::engine::status_op(busy_message)
+            .resolve_in_handler(move |o: &crate::engine::CreateLaunchOutcome| {
+                create_launch_final(o, cloned.as_ref())
+            })
+            // Stamp the originating connection so the busy, every progress
+            // re-emit, and the eventual final reach only it (the followups
+            // resolve in later ticks, after `current_origin` was reset).
+            .with_scope(self.current_origin.clone());
+        let op_id = op.id().to_string();
+        // Checked and held in one step, under the registry's lock: a
+        // folder being removed, deleted or moved refuses the create,
+        // out loud, and nothing of it has started yet.
+        if let Some(path) = &existing_worktree
+            && let Err(refused) = self.worktree_ops().hold_as(
+                crate::worktree_ops::HoldOwner::CreateOp(op_id.clone()),
+                path,
+                crate::worktree_ops::WorktreeOpKind::CreateAgent,
+            )
+        {
+            return EventReaction::Status(StatusUpdate::error(
+                refused.sentence("create an agent there"),
+            ));
+        }
+        // Surface this create's op id to a synchronous `apply_wire`
+        // caller, which reads `WireCommandOutcome.created_op_id` to
+        // correlate its own new session through `created_session_for_op`.
+        // Cleared at the top of every `apply_wire`, so it cannot leak
+        // into an unrelated command's outcome.
+        self.last_created_op_id = Some(op_id.clone());
+        let op_id_for_job = op_id.clone();
+        let op_id_panic = op_id.clone();
+        let pending = op.pending_status();
+        self.pending_create_ops.insert(op_id.clone(), op);
+        self.note_create_started(&op_id, request.project_id());
+        let paths = self.paths.clone();
+        let config = self.config.clone();
+        let identity = self.resolved_identity();
+        let registry = crate::agent_job::CreateJobRegistries {
+            processes: self.process_registry.clone(),
+            worktrees: self.worktree_ops().clone(),
+            moves: self.checkout_move_guard(),
+        };
+        let reaction = self.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "create-agent".into(),
+                in_flight_key: Some(InFlightKey::CreateAgent),
+                busy_status: Some(pending),
+                already_running_status: Some(StatusUpdate::error(
+                    crate::operations::CREATE_IN_FLIGHT_REFUSAL,
+                )),
+                panic_event: Some(Box::new(move |reason| WorkerEvent::CreateAgentFailed {
+                    status_op_id: op_id_panic,
+                    attempted_name: None,
+                    message: format!("Agent-creation worker panicked: {reason}").into(),
+                })),
+            },
+            move |tx| {
+                crate::agent_job::run_create_agent_job(
+                    *request,
+                    paths,
+                    &config,
+                    &tx,
+                    term_size,
+                    op_id_for_job,
+                    identity,
+                    registry,
+                );
+            },
+        );
+        // A worker that never started cleared the in-flight key; the
+        // create's own bookkeeping goes with it.
+        if self.is_in_flight(&InFlightKey::CreateAgent) {
+            self.operations.set_create_guard(&op_id);
+        } else {
+            self.note_create_finished(&op_id);
+        }
+        reaction
+    }
+
+    /// Why a tab's launch may not start, logged where dux.log should show it:
+    /// the agent is being deleted, its folder is being removed, a working-copy
+    /// recreate is restarting the tab, or the tab is already launching or
+    /// running.
+    fn launch_refusal(&self, request: &AgentLaunchRequest) -> Option<StatusUpdate> {
+        let branch_name = request.session.display_label();
+        let session_id = request.session.id.as_str();
+        let tab_id = &request.tab_id;
+        // Guard the shared launch chokepoint against a session whose
+        // worktree is mid-removal. Every launch path funnels through
+        // this command, so checking once here covers them all, the
+        // residual window included where a transient
+        // `finish_delete_session` DB failure leaves the record in
+        // `closing_sessions` past the synchronous delete.
+        if self.closing_sessions.contains(session_id) {
+            // Log the refusal so it shows up in dux.log even when a
+            // caller ignores the returned view's `launched` flag, as
+            // dux-web's `launch_agent` does.
+            crate::logger::warn(&format!(
+                "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": session \"{session_id}\" is being deleted"
+            ));
+            return Some(StatusUpdate::error(crate::status_text![
+                "Agent ",
+                q(branch_name),
+                " is being deleted and cannot be launched."
+            ]));
+        }
+        // Nothing new may start in a folder a removal has claimed,
+        // whoever's it is: another agent sharing it, a standalone agent
+        // in it. The removal's last look relies on this.
+        if let Some(refused) = self
+            .worktree_ops()
+            .removal_refusal(request.session.directory())
+        {
+            let refusal = refused.sentence("start this agent there");
+            crate::logger::warn(&format!(
+                "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": its folder is being removed"
+            ));
+            return Some(StatusUpdate::error(refusal));
+        }
+        // A tab a working-copy recreate is about to start again is the
+        // restart's to start: its old process is still shutting down,
+        // and a launch now would race the restart for the conversation.
+        if let Some(refusal) = self.restart_launch_refusal(tab_id) {
+            crate::logger::info(&format!(
+                "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": a working-copy recreate is restarting it"
+            ));
+            return Some(StatusUpdate::info(refusal));
+        }
+        // Pre-check in-flight so the View carries the exact "already
+        // launching" message regardless of the primitive's generic
+        // already-running fallback.
+        if self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.clone())) {
+            return Some(StatusUpdate::info(crate::status_text![
+                "Agent ",
+                q(branch_name),
+                " is already launching."
+            ]));
+        }
+        // A live process already holds this tab, and launching over it
+        // would replace the entry in `providers`, whose displaced client
+        // SIGKILLs the child it names on drop. Every legitimate relaunch
+        // path tears the runtime down before it dispatches, so reaching
+        // here with a live provider means the launch is redundant.
+        //
+        // `PtyClient::is_live` is the right question because it excludes
+        // both a child at end of input and one already reaped: each is
+        // waiting to be pruned, and refusing for either would refuse the
+        // relaunch of a tab that just died.
+        if let Some(client) = self.providers.get(tab_id)
+            && client.is_live()
+        {
+            let pid = client
+                .child_process_id()
+                .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
+            crate::logger::warn(&format!(
+                "refused to launch tab \"{tab_id}\" for agent \"{branch_name}\": \
+                 process {pid} is already running in it"
+            ));
+            return Some(StatusUpdate::info(crate::status_text![
+                "This tab of agent ",
+                q(branch_name),
+                " is already running. Stop it before starting it again."
+            ]));
+        }
+        None
+    }
+
+    /// [`Command::DispatchAgentLaunch`]: start one tab's launch worker, refusing
+    /// an agent that is being deleted.
+    fn apply_dispatch_agent_launch(&mut self, request: Box<AgentLaunchRequest>) -> EventReaction {
+        let session_id = request.session.id.clone();
+        // The in-flight launch lock is keyed by tab id, one per tab, so
+        // two tabs of one session can launch concurrently. The View
+        // keeps `session_id` for UI correlation.
+        let tab_id = request.tab_id.clone();
+        // The View is a surface payload, so it carries the id as a plain
+        // string; the engine-side decisions above keep the typed form.
+        let tab_id_view = tab_id.as_str().to_string();
+        if let Some(status) = self.launch_refusal(&request) {
+            return EventReaction::DispatchAgentLaunchView(Box::new(DispatchAgentLaunchView {
+                session_id,
+                tab_id: tab_id_view,
+                launched: false,
+                status: Some(status),
+            }));
+        }
+        // The same provider of the same agent still shutting down (a
+        // tab closed or detached a moment ago, a restart): the new CLI
+        // waits for it rather than sharing the worktree and the
+        // conversation with it. Read from what each terminating entry
+        // recorded when it started, never from the tab table.
+        let predecessors = self.terminating_predecessors(&session_id, &request.provider);
+        // Clone for the panic event closure before the job closure
+        // consumes `request`, so panic recovery can take the same path
+        // as `process_agent_launch_failed`.
+        let panic_request = (*request).clone();
+        let gate = self.spawn_gate();
+        let reaction = self.spawn_command_worker(
+            CommandWorkerSpec {
+                label: format!("agent-launch:{tab_id}"),
+                in_flight_key: Some(InFlightKey::AgentLaunch(tab_id.clone())),
+                busy_status: None, // View variant carries the user-facing status
+                already_running_status: None, // handled by the pre-check above
+                panic_event: Some(Box::new(move |reason| {
+                    WorkerEvent::AgentLaunchFailed(Box::new(AgentLaunchFailedData {
+                        request: panic_request,
+                        message: format!("Agent-launch worker panicked: {reason}"),
+                    }))
+                })),
+            },
+            move |tx| {
+                if let Err(message) = wait_for_predecessors(&predecessors, &request, &tx) {
+                    let _ = tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                        AgentLaunchFailedData {
+                            request: *request,
+                            message,
+                        },
+                    )));
+                    return;
+                }
+                crate::agent_job::run_agent_launch_job(*request, &tx, &gate);
+            },
+        );
+        // Wrap the primitive's return into the View variant so App
+        // callers keep a single pattern-match shape.
+        match reaction {
+            EventReaction::Nothing => {
+                // A launch is on its way, so the previous run's verdict
+                // stops counting. Clearing it at the one chokepoint
+                // every launch funnels through is what gets an explicit
+                // start past the diagnosis card with no surface asking.
+                // A refusal leaves the verdict standing: nothing ran.
+                self.clear_tab_run_failure(&tab_id);
+                EventReaction::DispatchAgentLaunchView(Box::new(DispatchAgentLaunchView {
+                    session_id,
+                    tab_id: tab_id_view.clone(),
+                    launched: true,
+                    status: None,
+                }))
+            }
+            EventReaction::Status(status) => {
+                EventReaction::DispatchAgentLaunchView(Box::new(DispatchAgentLaunchView {
+                    session_id,
+                    tab_id: tab_id_view,
+                    launched: false,
+                    status: Some(status),
+                }))
+            }
+            other => other,
+        }
+    }
+
+    /// [`Command::CommitChanges`]: commit the staged changes off the engine
+    /// thread, holding the worktree for the commit's duration.
+    fn apply_commit_changes(
+        &mut self,
+        worktree_path: PathBuf,
+        message: String,
+        success_message: String,
+    ) -> EventReaction {
+        // Held for the commit's own duration, so a removal of this
+        // worktree that is already waiting sees it, and refused once a
+        // removal has begun.
+        let hold = match self
+            .worktree_ops()
+            .hold(&worktree_path, crate::worktree_ops::WorktreeOpKind::Commit)
+        {
+            Ok(hold) => hold,
+            Err(refused) => {
+                return EventReaction::Status(StatusUpdate::error(
+                    refused.sentence("commit in it"),
+                ));
+            }
+        };
+        let op = crate::engine::status_op("Committing the staged changes\u{2026}")
+            .on_success(move |(): &()| crate::engine::Final::info(success_message.clone()))
+            // Commit failures leave the index and typed message intact, so
+            // recovery stays inside the UI and does not require a sticky
+            // status.
+            .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
+        self.spawn_changes_op(op, move || {
+            let _hold = hold;
+            match crate::git::commit_preflight(&worktree_path, &message) {
+                crate::git::CommitPreflight::EmptyMessage => {
+                    return Err(COMMIT_EMPTY_MESSAGE.to_string());
+                }
+                crate::git::CommitPreflight::NothingStaged => {
+                    return Err(COMMIT_NOTHING_STAGED.to_string());
+                }
+                crate::git::CommitPreflight::Ready => {}
+            }
+            crate::git::commit(&worktree_path, &message)
+                .map(|_| ())
+                .map_err(|e| format!("Commit failed: {e}"))
+        })
+    }
+
+    /// [`Command::Push`]: push the worktree's branch off the engine thread.
+    fn apply_push(&mut self, worktree_path: &std::path::Path) -> EventReaction {
+        let op = crate::engine::status_op("Pushing to remote\u{2026}")
+            .on_success(|(): &()| {
+                crate::engine::Final::info(
+                    "Pushed to remote successfully. Your changes are now available to collaborators.",
+                )
+            })
+            .on_failure(|e: &String| {
+                crate::engine::Final::error(format!("Push to remote failed: {e}"))
+            });
+        // The push holds its worktree until git is done with it, so a
+        // removal that begins meanwhile waits for it, and a worktree
+        // already being removed takes no push.
+        let hold = match self
+            .worktree_ops()
+            .hold(worktree_path, crate::worktree_ops::WorktreeOpKind::Push)
+        {
+            Ok(hold) => hold,
+            Err(refused) => {
+                return EventReaction::Status(StatusUpdate::error(
+                    refused.sentence("push from it"),
+                ));
+            }
+        };
+        let wt = worktree_path.to_path_buf();
+        self.spawn_status_op(op, move || {
+            let _hold = hold;
+            crate::git::push(&wt).map(|_| ()).map_err(|e| e.to_string())
+        })
+    }
+
+    /// [`Command::OpenPath`]: open a path with the system opener off the engine
+    /// thread.
+    fn apply_open_path(&mut self, path: PathBuf, target: &str) -> EventReaction {
+        let display = path.display().to_string();
+        let t_ok = target.to_string();
+        let t_err = target.to_string();
+        let op = crate::engine::status_op(crate::status_text![
+            format!("Opening {}: ", target),
+            n(display)
+        ])
+        .on_success(move |(): &()| crate::engine::Final::info(format!("Opened {t_ok}.")))
+        .on_failure(move |e: &String| {
+            crate::engine::Final::error(format!("Could not open {t_err}: {e}"))
+        });
+        self.spawn_status_op(op, move || {
+            crate::startup::open_path(&path).map_err(|err| format!("{err:#}"))
+        })
+    }
+
+    /// [`Command::PersistGlobalEnv`]: save the global environment, restoring the
+    /// previous one when the write fails.
+    fn apply_persist_global_env(
+        &mut self,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> EventReaction {
+        // Eager save through the queue, with rollback: swap the new env
+        // in, persist synchronously, and restore the previous env if the
+        // write fails so in-memory state never diverges from disk.
+        let previous = std::mem::replace(&mut self.config.env, env);
+        if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
+            self.config.env = previous;
+            return EventReaction::Status(StatusUpdate::error(format!(
+                "Couldn't save global environment variables: {e}"
+            )));
+        }
+        let msg = if self.config.env.is_empty() {
+            "Global environment variables cleared.".to_string()
+        } else {
+            saved_global_env_message(self.config.env.len())
+        };
+        EventReaction::Status(StatusUpdate::info(msg))
+    }
+
+    /// [`Command::ReloadConfig`]: start a config reload, or queue one behind the
+    /// reload already running.
+    fn apply_reload_config(&mut self) -> EventReaction {
+        // Reject a reentrant reload: a second one would drop the live
+        // `reload_guard`, resuming the writer mid-reload, and spawn a
+        // worker whose completion closes a barrier it never opened.
+        // A reload asked for DURING one (a second `dux config set`'s
+        // SIGUSR1, a second press) may be about a file that changed
+        // after the running reload read it, so it is never dropped:
+        // it joins the deferred commands and runs as soon as the
+        // current reload closes its barrier. Any number of them
+        // collapse into one follow-up, which reads the latest file.
+        self.reload_origin.reload_asked(if self.reloading {
+            crate::engine::reload_origin::ReloadSlot::AfterTheRunningOne
+        } else {
+            crate::engine::reload_origin::ReloadSlot::Now
+        });
+        if self.reloading {
+            if !self
+                .deferred_commands
+                .iter()
+                .any(|c| matches!(c, Command::ReloadConfig))
+            {
+                self.deferred_commands.push(Command::ReloadConfig);
+                self.deferred_operations.push(None);
+                self.deferred_policies.push(None);
+            }
+            // A client waiting on this one follows the reload that
+            // reads the file after the one running.
+            if let Some(id) = &self.operation_in_dispatch {
+                self.operations
+                    .await_reload(id, crate::engine::ReloadSlot::AfterTheRunningOne);
+            }
+            return EventReaction::Status(StatusUpdate::info(
+                "A config reload is already running; another runs right after it, so \
+                 the latest config.toml is the one that applies.",
+            ));
+        }
+        // Open the reload barrier: quiesce the writer so no queued save
+        // races the reload, mark `reloading` so config-mutating commands
+        // defer, and start the surface's reload worker. The barrier
+        // closes when `ConfigReloadReady` lands.
+        //
+        // An unacknowledged pause means no barrier: a still-running
+        // writer could clobber the reload's config write, so abort and
+        // let the caller retry.
+        let guard = self.config_writer.quiesce();
+        if !guard.is_acknowledged() {
+            // The reload that was to start never will, so the clients
+            // waiting on it are told so.
+            self.operations.fail_reload(
+                "Config writer is busy; please retry.",
+                std::time::Instant::now(),
+            );
+            return EventReaction::Status(StatusUpdate::error(
+                "Config writer is busy; please retry.",
+            ));
+        }
+        self.reloading = true;
+        self.reload_guard = Some(guard);
+        if let Some(id) = &self.operation_in_dispatch {
+            self.operations
+                .await_reload(id, crate::engine::ReloadSlot::Now);
+        }
+        self.surface
+            .reload(self.paths.clone(), self.worker_tx.clone());
+        EventReaction::Nothing
+    }
+
+    /// [`Command::RecoverConfig`]: overwrite a corrupt config file with the
+    /// running config, keeping the file's own `[server.auth]` when it reads.
+    fn apply_recover_config(&mut self) -> EventReaction {
+        // Reject recovery while a reload barrier is open: the reload
+        // holds the writer quiesce, and a second quiesce would resume
+        // the writer mid-reload when its guard dropped.
+        if self.reloading {
+            return EventReaction::Status(StatusUpdate::info(
+                "A config reload is in progress; try recovering again in a moment.",
+            ));
+        }
+        // Overwrite a corrupt on-disk config with a fresh render of the
+        // in-memory config. Quiesce the writer for the duration of the
+        // direct write so a queued save can't clobber the recovery.
+        let guard = self.config_writer.quiesce();
+        if !guard.is_acknowledged() {
+            // The writer never confirmed the pause (timeout or dead). Performing
+            // the direct write would race a still-running writer. Abort and let
+            // the caller retry once the writer is responsive.
+            return EventReaction::Status(StatusUpdate::error(
+                "Config writer is busy; please retry.",
+            ));
+        }
+        // The running config may be older than the file's [server.auth]
+        // (a `dux config set`, a ban since dux started), so the file's
+        // own section is kept whenever it reads. Only when it cannot be
+        // read is the running one written back, and the status says so.
+        // Read inside the config write lock, so a `dux config set` that
+        // lands meanwhile is part of what is kept.
+        let running = self.config.clone();
+        let surface = &self.surface;
+        let outcome =
+            crate::config_write::replace_config_file(&self.paths.config_path, |current| {
+                let mut recovered = running.clone();
+                // A missing file holds no newer password than the
+                // running one: nothing to explain.
+                let auth_note = match current.map(crate::config::auth_section_of) {
+                    None => None,
+                    // The file has no password but the running dux has
+                    // one: recovering must not quietly turn the login
+                    // off, so the running password stays, beside the
+                    // file's other auth settings, and the status says so.
+                    Some(Ok(mut auth))
+                        if !auth.has_password() && running.server.auth.has_password() =>
+                    {
+                        auth.password_hash
+                            .clone_from(&running.server.auth.password_hash);
+                        recovered.server.auth = auth;
+                        Some(Some(
+                            "The file's [server.auth] had no password but the running \
+                             dux has one, so the running password was kept. To remove \
+                             it, run `dux config set server.auth.password_hash \"\"`."
+                                .to_string(),
+                        ))
+                    }
+                    Some(Ok(auth)) => {
+                        recovered.server.auth = auth;
+                        Some(None)
+                    }
+                    Some(Err(problem)) => Some(Some(format!(
+                        "The file's [server.auth] could not be read, so the running \
+                         dux's web password settings were written back ({}); check \
+                         them with `dux config get server.auth`. What could not be \
+                         read: {}",
+                        if recovered.server.auth.has_password() {
+                            "a password is set"
+                        } else {
+                            "no password is set"
+                        },
+                        problem.reason()
+                    ))),
+                };
+                Ok((surface.recover_render(&recovered), auth_note))
+            });
+        match outcome {
+            Ok(auth_note) => EventReaction::Status(match auth_note {
+                None => {
+                    StatusUpdate::info("Restored the last working configuration to config.toml.")
+                }
+                Some(None) => StatusUpdate::info(
+                    "Restored the last working configuration to config.toml. Its \
+                     [server.auth] was kept as the file had it.",
+                ),
+                Some(Some(note)) => StatusUpdate::warning(format!(
+                    "Restored the last working configuration to config.toml. {note}"
+                )),
+            }),
+            Err(e) => EventReaction::Status(StatusUpdate::error(format!(
+                "Couldn't restore the last working configuration: {e:#}"
+            ))),
+        }
+    }
+
+    /// [`Command::UpdateMacros`]: put the new macros live and save them, keeping
+    /// them even when the write fails.
+    fn apply_update_macros(&mut self, macros: crate::config::MacrosConfig) -> EventReaction {
+        // Keep and report, never roll back: the new macros go live so
+        // the ViewModel reflects them, and a failed write is reported as
+        // a possibly stale file rather than reverting the user's change.
+        self.config.macros = macros;
+        let count = self.config.macros.entries.len();
+        if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
+            return EventReaction::Status(StatusUpdate::error(format!(
+                "Macros updated this session, but saving to config failed: {e}"
+            )));
+        }
+        let msg = if count == 0 {
+            "All macros removed. The macro list is now empty.".to_string()
+        } else {
+            saved_macros_message(count)
+        };
+        EventReaction::Status(StatusUpdate::info(msg))
     }
 
     /// Resolve a [`ConfigSetChange`] against the config as it is now and save the
@@ -1977,7 +2069,8 @@ impl Engine {
 
         for (index, id) in terminal_ids.iter().enumerate() {
             if let Some(terminal) = self.companion_terminals.get_mut(id) {
-                terminal.sort_order = index as u64;
+                terminal.sort_order =
+                    u64::try_from(index).expect("a terminal list index fits in u64");
             }
         }
         Ok(())
@@ -2003,6 +2096,10 @@ impl Engine {
     /// sort action's chosen order survives a reload and matches every surface by
     /// construction. Does not re-sort the Vec, which is already in the desired
     /// order; it only writes each project's ordered id list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot store the order.
     pub fn persist_session_order(&self) -> anyhow::Result<()> {
         // Agents are one global list, so the in-memory Vec order is persisted
         // as a single global `sort_order` permutation rather than per project.
@@ -2237,6 +2334,84 @@ fn wait_for_predecessors(
     Ok(())
 }
 
+/// The final a create-agent op ends on, worded once for both surfaces.
+/// `cloned` is set for a clone's first agent, so a create that fails also says
+/// what the clone already did, which is on disk and in the workspace.
+fn create_launch_final(
+    outcome: &crate::engine::CreateLaunchOutcome,
+    cloned: Option<&crate::clone_project::ClonedFor>,
+) -> crate::engine::Final {
+    use crate::engine::{CreateLaunchOutcome, Final};
+    // `attempted` is the name the create had settled on when it failed, which
+    // a review copy of a pull request makes different from the name asked for.
+    let after_clone =
+        |message: crate::status_text::StatusText, attempted: Option<&str>| match cloned {
+            Some(cloned) => cloned.agent_missing_named(attempted, message),
+            None => message,
+        };
+    match outcome {
+        CreateLaunchOutcome::Committed {
+            status_message,
+            quiet_on,
+            warns,
+        } => if *warns {
+            Final::warning(status_message.clone())
+        } else {
+            Final::info(status_message.clone())
+        }
+        .quiet_on(*quiet_on),
+        CreateLaunchOutcome::StartupFailed {
+            branch_name,
+            error,
+            notes,
+        } => {
+            // Sticky: provisioning stopped part-way, so the
+            // worktree is in an unknown state and the
+            // message sends the user to the startup command
+            // logs, an action outside the toast. The
+            // failure leads; what the create's notes said
+            // is still true and follows it.
+            let failure = if let Some(cloned) = cloned {
+                cloned.startup_failed(branch_name, error)
+            } else {
+                crate::status_text![
+                    "Startup command failed for agent ",
+                    q(branch_name),
+                    format!(
+                        ": {}. \
+             Open the startup command logs for details.",
+                        error
+                    )
+                ]
+            };
+            Final::error(match notes {
+                Some(notes) => {
+                    crate::status_text![failure, " ", notes.clone()]
+                }
+                None => failure,
+            })
+            .sticky()
+        }
+        CreateLaunchOutcome::PersistFailed {
+            error,
+            attempted_name,
+        } => {
+            // Sticky: the worktree exists but its session row
+            // does not, so dux forgets it on restart and the
+            // user is left the directory to clean up.
+            Final::error(after_clone(
+                format!("Failed to persist session: {error}").into(),
+                attempted_name.as_deref(),
+            ))
+            .sticky()
+        }
+        CreateLaunchOutcome::Failed {
+            message,
+            attempted_name,
+        } => Final::error(after_clone(message.clone(), attempted_name.as_deref())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2281,9 +2456,8 @@ mod tests {
                 already_running_message: "A pull is already running.".to_string().into(),
             })
             .expect("apply succeeds");
-        let pull_busy = match engine.worker_rx.try_recv() {
-            Ok(WorkerEvent::CommandWorkerStarted(s)) => s,
-            _ => panic!("expected the pull busy ahead of anything the worker sends"),
+        let Ok(WorkerEvent::CommandWorkerStarted(pull_busy)) = engine.worker_rx.try_recv() else {
+            panic!("expected the pull busy ahead of anything the worker sends")
         };
         let pull_key = pull_busy.key.clone().expect("the pull busy is keyed");
         show(&mut status, &pull_busy);
@@ -2294,9 +2468,8 @@ mod tests {
                 worktree_path: tmp.path().to_path_buf(),
             })
             .expect("apply succeeds");
-        let push_busy = match reaction {
-            EventReaction::Status(s) => s,
-            _ => panic!("expected a pending busy from the push dispatch"),
+        let EventReaction::Status(push_busy) = reaction else {
+            panic!("expected a pending busy from the push dispatch")
         };
         let push_key = push_busy.key.clone().expect("the push busy is keyed");
         assert_eq!(push_busy.tone, StatusTone::Busy);
@@ -3112,7 +3285,7 @@ mod tests {
                     leading_branch: Some("main".to_string()),
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::default(),
                 })
                 .unwrap();
         }
@@ -4114,7 +4287,7 @@ mod tests {
             PullOutcome::Pulled { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
-            other => panic!("expected Pulled, got {other:?}"),
+            other @ PullOutcome::NoOrigin { .. } => panic!("expected Pulled, got {other:?}"),
         }
     }
 
@@ -4134,7 +4307,7 @@ mod tests {
             PullOutcome::NoOrigin { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
-            other => panic!("expected NoOrigin, got {other:?}"),
+            other @ PullOutcome::Pulled { .. } => panic!("expected NoOrigin, got {other:?}"),
         }
 
         // The op maps the no-origin outcome to an INFO final.
@@ -4145,7 +4318,9 @@ mod tests {
                 assert_eq!(tone, StatusTone::Info);
                 assert!(text.contains("no origin remote"), "got: {text}");
             }
-            other => panic!("expected a message final, got {other:?}"),
+            other @ crate::engine::Final::Clear => {
+                panic!("expected a message final, got {other:?}")
+            }
         }
     }
 
@@ -4177,7 +4352,9 @@ mod tests {
                     "got: {text}"
                 );
             }
-            other => panic!("expected a message final, got {other:?}"),
+            other @ crate::engine::Final::Clear => {
+                panic!("expected a message final, got {other:?}")
+            }
         }
     }
 

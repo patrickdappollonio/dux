@@ -98,8 +98,11 @@ fn a_plaintext_password_added_to_the_documented_file_is_found_and_never_printed(
             said.push_str(&String::from_utf8_lossy(&out));
             said.push_str(&String::from_utf8_lossy(&err));
         }
-        let preview =
-            crate::cli::restore_docs_preview(&body, &crate::config::render_default_config(), false);
+        let preview = crate::cli::restore_docs_preview(
+            &body,
+            &crate::config::render_default_config(),
+            dux_core::config_keys::HeldBack::Masked,
+        );
         let mut wrong = Vec::new();
         if dux_core::config::plaintext_password_problems(&body).is_empty() {
             wrong.push("the start check does not call it a plaintext password".to_string());

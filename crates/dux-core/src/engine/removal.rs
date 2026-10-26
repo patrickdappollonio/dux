@@ -43,17 +43,40 @@ pub struct RemovalCoordination {
     pub(crate) labels: HashMap<String, String>,
 }
 
+impl std::fmt::Debug for RemovalCoordination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalCoordination")
+            .field("ops", &self.ops)
+            .field("claims", &self.claims)
+            .field("cascade_members", &self.cascade_members)
+            .field("creating", &self.creating)
+            .field("labels", &self.labels)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a startup-command rerun holds while it runs: the agent's one run, and
 /// its hold on the worktree. Both are released when this drops.
 pub struct StartupRerunClaim {
+    /// The agent's one startup-command run.
     pub run: crate::process_sessions::StartupRunGuard,
+    /// The hold on the worktree.
     pub hold: crate::worktree_ops::WorktreeOpGuard,
 }
 
+impl std::fmt::Debug for StartupRerunClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartupRerunClaim")
+            .field("hold", &self.hold)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a project deletion reports when its last worktree removal lands.
+#[derive(Debug)]
 pub struct ProjectDeletionOutcome {
-    pub project_name: String,
-    pub agents: usize,
+    pub(crate) project_name: String,
+    pub(crate) agents: usize,
     /// Each worktree that could not be removed, and why.
     pub failures: Vec<(String, String)>,
     /// What could not be saved, and why, when something could not: the
@@ -171,6 +194,11 @@ impl Engine {
     /// Hold `worktree` for a git change made in it (stage, unstage, discard),
     /// for as long as the guard lives: a removal of the worktree waits for it,
     /// and one already under way refuses it with a sentence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal sentence when a removal of the worktree is already
+    /// under way.
     pub fn hold_for_git_change(
         &self,
         worktree: impl AsRef<Path>,
@@ -193,6 +221,11 @@ impl Engine {
     /// The two refusals cannot both apply to one request: the first is taken
     /// before the hold is asked for, and a refused hold gives the run claim
     /// back on the spot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sentence to show when the agent's startup command is already
+    /// running or a removal of its worktree is under way.
     pub fn claim_startup_rerun(
         &self,
         session_id: &str,
@@ -1336,14 +1369,14 @@ mod tests {
                     tab_id: tab,
                     provider: session.provider.clone(),
                     session,
-                    provider_config: Default::default(),
+                    provider_config: crate::config::ProviderCommandConfig::default(),
                     env: Vec::new(),
-                    identity: Default::default(),
+                    identity: crate::term_identity::TerminalIdentity::default(),
                     resume: false,
                     pty_size: (24, 80),
                     scrollback_lines: 100,
                     kind: crate::worker::AgentLaunchKind::Create {
-                        status_message: Default::default(),
+                        status_message: StatusText::default(),
                         status_warns: false,
                         status_notes: None,
                         pull_request_pin: None,

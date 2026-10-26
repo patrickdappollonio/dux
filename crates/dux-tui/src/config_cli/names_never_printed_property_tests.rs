@@ -118,14 +118,22 @@ fn printed(body: &str) -> Vec<(String, String)> {
             crate::cli::collect_config_changes(&config).join("\n"),
         ));
     }
-    said.extend(previews(body, false));
-    said.extend(listings(&paths, body, false));
+    said.extend(previews(body, dux_core::config_keys::HeldBack::Masked));
+    said.extend(listings(
+        &paths,
+        body,
+        dux_core::config_keys::HeldBack::Masked,
+    ));
     said
 }
 
 /// What `dux env ls`, `dux macros ls` and `dux providers ls` print about
-/// `body` with no dux running, `show` passed to `env ls`, in every shape.
-fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
+/// `body` with no dux running, `held_back` passed to `env ls`, in every shape.
+fn listings(
+    paths: &DuxPaths,
+    body: &str,
+    held_back: dux_core::config_keys::HeldBack,
+) -> Vec<(String, String)> {
     use dux_core::client::config_resources::{Source, env_ls, macros_ls, providers_ls};
     use dux_core::client::output::Shape;
     let mut said = Vec::new();
@@ -134,16 +142,8 @@ fn listings(paths: &DuxPaths, body: &str, show: bool) -> Vec<(String, String)> {
         let source = Source::File(paths);
         for (printer, result) in [
             (
-                format!("env ls (show {show})"),
-                env_ls(
-                    &source,
-                    if show {
-                        dux_core::config_keys::HeldBack::Shown
-                    } else {
-                        dux_core::config_keys::HeldBack::Masked
-                    },
-                    shape,
-                ),
+                format!("env ls (show {held_back:?})"),
+                env_ls(&source, held_back, shape),
             ),
             ("macros ls".to_string(), macros_ls(&source, shape)),
             ("providers ls".to_string(), providers_ls(&source, shape)),
@@ -233,10 +233,10 @@ fn env_ls_prints_a_value_only_with_show() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = paths_in(tmp.path());
     let body = "[env]\nAPI_TOKEN = \"zzSECRETvalue\"\n";
-    for (printer, text) in listings(&paths, body, false) {
+    for (printer, text) in listings(&paths, body, dux_core::config_keys::HeldBack::Masked) {
         assert!(!text.contains("zzSECRETvalue"), "{printer}: {text}");
     }
-    let shown: Vec<String> = listings(&paths, body, true)
+    let shown: Vec<String> = listings(&paths, body, dux_core::config_keys::HeldBack::Shown)
         .into_iter()
         .filter(|(printer, _)| printer.starts_with("env ls") && !printer.ends_with("Ids"))
         .map(|(_, text)| text)
@@ -267,16 +267,16 @@ fn documented_positions(line: &str) -> Vec<String> {
 }
 
 /// The previews of `dux config regenerate` and `dux config restore-docs`,
-/// with `show` as given, as each prints them.
-fn previews(body: &str, show: bool) -> Vec<(String, String)> {
+/// with `held_back` as given, as each prints them.
+fn previews(body: &str, held_back: dux_core::config_keys::HeldBack) -> Vec<(String, String)> {
     let mut said = vec![(
-        format!("regenerate preview (show {show})"),
-        crate::cli::regenerate_preview(body, &crate::config::render_default_config(), show),
+        format!("regenerate preview (show {held_back:?})"),
+        crate::cli::regenerate_preview(body, &crate::config::render_default_config(), held_back),
     )];
     if let Ok(restored) = crate::config::restore_documentation(body) {
         said.push((
-            format!("restore-docs preview (show {show})"),
-            crate::cli::restore_docs_preview(body, &restored.text, show),
+            format!("restore-docs preview (show {held_back:?})"),
+            crate::cli::restore_docs_preview(body, &restored.text, held_back),
         ));
     }
     said
@@ -296,7 +296,7 @@ fn a_name_that_is_not_a_setting_name_never_reaches_a_printer() {
             // `env ls --show` prints values, and still no name it hides.
             let tmp = tempfile::tempdir().expect("tempdir");
             let paths = paths_in(tmp.path());
-            let mut shown = listings(&paths, &body, true);
+            let mut shown = listings(&paths, &body, dux_core::config_keys::HeldBack::Shown);
             // The name typed on the command line, as the file has it.
             shown.extend(named(&paths, &body, &token));
             for (printer, text) in printed(&body).into_iter().chain(shown) {
@@ -499,10 +499,14 @@ fn a_project_value_reaches_no_printer() {
 /// it: every table `get` is asked for, the password itself, both previews,
 /// and `dux config diff --raw`.
 fn printed_with_show(body: &str) -> Vec<(String, String)> {
-    let mut said = previews(body, true);
+    let mut said = previews(body, dux_core::config_keys::HeldBack::Shown);
     let tmp = tempfile::tempdir().expect("tempdir");
     let paths = paths_in(tmp.path());
-    said.extend(listings(&paths, body, true));
+    said.extend(listings(
+        &paths,
+        body,
+        dux_core::config_keys::HeldBack::Shown,
+    ));
     let mut asks: Vec<Vec<&str>> = TABLES.iter().map(|table| vec![*table, "--show"]).collect();
     asks.push(vec!["server.auth.password"]);
     asks.push(vec!["server.auth.password", "--show"]);

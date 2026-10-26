@@ -23,6 +23,7 @@ use crate::wire::WireCommand;
 /// would end. Nothing was changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attached {
+    /// Who is attached to each thing the change would end.
     pub blockers: Vec<Blocker>,
 }
 
@@ -46,6 +47,7 @@ impl std::error::Error for Attached {}
 /// A reservation that ends when dropped, for a change with no operation record;
 /// one tied to a record ends with the record, and dropping this leaves it.
 #[must_use = "the reservation ends when this is dropped"]
+#[derive(Debug)]
 pub struct Reservation {
     held: Option<(Attachments, u64)>,
 }
@@ -135,7 +137,7 @@ impl Engine {
     pub fn pty_scope(pty_id: &str) -> Scope {
         Scope {
             ptys: [pty_id.to_string()].into(),
-            agents: Default::default(),
+            agents: std::collections::BTreeSet::default(),
         }
     }
 
@@ -261,7 +263,7 @@ impl Engine {
                 .into_iter()
                 .map(|(tab, _)| tab.as_str().to_string())
                 .collect(),
-            agents: Default::default(),
+            agents: std::collections::BTreeSet::default(),
         }
     }
 

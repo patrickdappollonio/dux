@@ -27,6 +27,7 @@ use super::modal::tests::every_prompt;
 use super::test_support::{default_bindings, test_app};
 use super::*;
 use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
+use crate::theme::FocusState;
 
 /// Three backgrounds nothing else uses, so a badge painted on the wrong one
 /// cannot pass by coincidence (in the bundled theme all three are one color).
@@ -53,20 +54,17 @@ fn distinct_colors(app: &mut App) {
 
 /// Every action bound to one key nobody would pick by default, all different.
 fn unusual_bindings() -> RuntimeBindings {
-    RuntimeBindings::new(
-        |action| {
-            let index = BINDING_DEFS
-                .iter()
-                .position(|def| def.action == action)
-                .expect("every action has a definition");
-            let f = u8::try_from(index + 1).expect("fewer than 256 actions");
-            vec![crokey::KeyCombination::new(
-                KeyCode::F(f),
-                KeyModifiers::CONTROL | KeyModifiers::ALT,
-            )]
-        },
-        true,
-    )
+    RuntimeBindings::new(|action| {
+        let index = BINDING_DEFS
+            .iter()
+            .position(|def| def.action == action)
+            .expect("every action has a definition");
+        let f = u8::try_from(index + 1).expect("fewer than 256 actions");
+        vec![crokey::KeyCombination::new(
+            KeyCode::F(f),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )]
+    })
 }
 
 /// Every label the rebound bindings can print.
@@ -434,8 +432,16 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
             &[],
         ),
         ("files", app.files_hint_line(200), &[]),
-        ("commit (unfocused)", app.commit_hint_line(false, 200), &[]),
-        ("commit (focused)", app.commit_hint_line(true, 200), &[]),
+        (
+            "commit (unfocused)",
+            app.commit_hint_line(FocusState::Unfocused, 200),
+            &[],
+        ),
+        (
+            "commit (focused)",
+            app.commit_hint_line(FocusState::Focused, 200),
+            &[],
+        ),
     ];
     for (name, line, fixed) in pane_lines {
         out.push(Painted {

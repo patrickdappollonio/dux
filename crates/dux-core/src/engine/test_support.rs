@@ -29,6 +29,10 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
 /// An engine over the state under `root`, as [`test_engine`] builds one: a
 /// second call on the same root, once the first engine is dropped, is the
 /// next start of dux on the same config directory.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one field initializer per Engine field, the test twin of the production constructor"
+)]
 pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
     let root = root.to_path_buf();
     let paths = DuxPaths {
@@ -64,7 +68,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         github_integration_enabled: false,
         single_instance_lock,
         surface_kind: crate::term_identity::SurfaceKind::Tui,
-        resource_collector: Default::default(),
+        resource_collector: Arc::default(),
         host_env: crate::term_identity::HostEnvProbe::default(),
         worker_tx,
         worker_rx,
@@ -74,14 +78,14 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
-        reload_origin: Default::default(),
+        reload_origin: crate::engine::reload_origin::ReloadOrigin::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         launched_drop_paste: HashMap::new(),
         companion_terminals: HashMap::new(),
         agent_tabs: HashMap::new(),
         terminating_ptys: Vec::new(),
-        process_registry: Default::default(),
+        process_registry: crate::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
@@ -101,29 +105,29 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         pr_suppressions: HashSet::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-        pr_sync: Arc::new(Default::default()),
+        pr_sync: Arc::new(crate::engine::PrSyncControl::default()),
         pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pr_inactive_sessions: Default::default(),
-        pr_inactive_sweep_at: Default::default(),
-        pr_return_checks_owed: Default::default(),
-        pr_branch_generations: Default::default(),
-        pr_branch_checks_owed: Default::default(),
+        pr_inactive_sessions: HashSet::default(),
+        pr_inactive_sweep_at: Arc::default(),
+        pr_return_checks_owed: HashSet::default(),
+        pr_branch_generations: HashMap::default(),
+        pr_branch_checks_owed: HashSet::default(),
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        branch_sync_wait: Arc::new(Default::default()),
+        branch_sync_wait: Arc::new(crate::engine::BranchSyncWait::default()),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         resume_fallback_candidates: HashMap::new(),
         resumed_tab_runs: HashSet::new(),
         pending_deletions: HashSet::new(),
         folder_repo_statuses: HashMap::new(),
-        changed_files_failures: Default::default(),
+        changed_files_failures: crate::changes_status::ChangedFilesFailures::default(),
         closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-        changed_files_refresh: Default::default(),
+        changed_files_refresh: Arc::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
-        serve_memory: Default::default(),
+        serve_memory: Arc::default(),
         current_origin: crate::statusline::StatusScope::All,
         in_flight: HashSet::new(),
         rename_expected: std::collections::HashMap::new(),
@@ -143,23 +147,23 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
-        clones: Default::default(),
+        clones: crate::clone_project::Clones::default(),
         pending_pr_attach_ops: HashMap::new(),
         pending_recreate_ops: HashMap::new(),
         pending_delete_ops_web: HashMap::new(),
         pending_delete_reports_web: HashMap::new(),
         pending_create_ops: HashMap::new(),
         pending_web_launch_ops: HashMap::new(),
-        live_status_keys: Default::default(),
+        live_status_keys: crate::statusline::LiveStatusKeys::default(),
         last_created_op_id: None,
-        operations: Default::default(),
+        operations: crate::operations::Operations::default(),
         operation_in_dispatch: None,
-        attachments: Default::default(),
+        attachments: crate::attachments::Attachments::default(),
         dispatch_policy: None,
         deferred_operations: Vec::new(),
         deferred_policies: Vec::new(),
         created_session_by_op: HashMap::new(),
-        removal_coordination: Default::default(),
+        removal_coordination: crate::engine::RemovalCoordination::default(),
     };
     // As the real start does: the process registry saved in this database.
     // Its prune is waited for, so a test registering sessions nothing runs in
@@ -317,6 +321,10 @@ pub(crate) struct PipelineDelete {
 /// worktree-removing delete the reaper and the removal worker driven until it
 /// reports. `Ok(None)` for an unknown agent; a refusal or a removal failure
 /// is an `Err` carrying the sentence the surfaces would show.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Err is the refusal or removal failure under test, while a vanished agent or a removal that never reports fails the test by panicking"
+)]
 pub(crate) fn delete_through_pipeline(
     engine: &mut Engine,
     session_id: &str,

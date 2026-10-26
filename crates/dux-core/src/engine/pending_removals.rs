@@ -114,7 +114,7 @@ impl Engine {
             process_snapshot: known,
             // Filled in below, and kept current from then on, by the registry's
             // one write path.
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         };
         if let Err(err) = self.session_store.insert_pending_worktree_removal(&row) {
             crate::logger::error(&format!(
@@ -839,6 +839,7 @@ impl Engine {
         )
     }
 
+    /// The guard every checkout move and folder removal coordinate through.
     pub fn checkout_move_guard(&self) -> crate::checkout_move::CheckoutMoveGuard {
         crate::checkout_move::CheckoutMoveGuard::new(
             self.process_registry.clone(),

@@ -302,9 +302,8 @@ mod tests {
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let first = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
-        app.confirm_delete_selected_session()
-            .expect("open the delete dialog");
-        app.resolve_confirm_delete_agent(true);
+        app.confirm_delete_selected_session();
+        app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
         assert_eq!(app.prompt.attached().len(), 1);
         if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
             *focus = DeleteAgentFocus::Delete;
@@ -429,8 +428,7 @@ mod tests {
         let _watch = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
         let recreating = dux_core::engine::InFlightKey::RecreateWorkingCopy(session_id.clone());
 
-        app.confirm_recreate_selected_working_copy()
-            .expect("open the recreate dialog");
+        app.confirm_recreate_selected_working_copy();
         let PromptState::ConfirmRecreateWorkingCopy {
             restart_offer,
             restart_tabs,
@@ -442,7 +440,7 @@ mod tests {
         assert_eq!(restart_offer, &vec!["codex".to_string()]);
         assert!(*restart_tabs, "ticked by default");
 
-        app.resolve_confirm_recreate_working_copy(true);
+        app.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm);
         let PromptState::ConfirmRecreateWorkingCopy {
             attached, focus, ..
         } = &app.prompt
@@ -453,7 +451,7 @@ mod tests {
         assert_eq!(*focus, RecreateWorkingCopyFocus::Cancel);
         assert!(!app.engine.is_in_flight(&recreating), "nothing checked out");
 
-        app.resolve_confirm_recreate_working_copy(true);
+        app.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.engine.is_in_flight(&recreating),
@@ -490,7 +488,7 @@ mod tests {
     fn land_a_browsers_create(app: &mut App, session: AgentSession) {
         let request = app.agent_launch_request(
             session,
-            false,
+            dux_core::model::ConversationStart::Fresh,
             dux_core::worker::AgentLaunchKind::Create {
                 status_message: "Created agent.".to_string().into(),
                 status_warns: false,
@@ -676,8 +674,7 @@ mod tests {
             .expect("standalone terminal");
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
-        app.open_terminal_from_terminal_list()
-            .expect("open the terminal");
+        app.open_terminal_from_terminal_list();
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         render(&mut app);
         assert_eq!(attached_here(&app), vec![terminal.clone()]);

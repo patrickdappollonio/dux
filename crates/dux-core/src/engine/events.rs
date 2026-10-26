@@ -67,6 +67,7 @@ pub(crate) fn branch_drift_log_line(
 /// Status-line update returned from the Engine for the App to apply.
 #[derive(Clone, Debug)]
 pub struct StatusUpdate {
+    /// How the message reads: busy, info, warning or error.
     pub tone: StatusTone,
     /// The plain sentence: what the terminal UI prints, byte for byte.
     pub message: String,
@@ -103,6 +104,7 @@ pub struct StatusUpdate {
 }
 
 impl StatusUpdate {
+    /// An info-toned status saying `message`.
     pub fn info(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -139,6 +141,7 @@ impl StatusUpdate {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A warning-toned status saying `message`.
     pub fn warning(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -154,6 +157,7 @@ impl StatusUpdate {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// An error-toned status saying `message`.
     pub fn error(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -234,6 +238,7 @@ pub(crate) const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
 /// `session_store`, sync entries, in-flight maps, env, etc.); anything that
 /// touches view state (status line, prompt, focus, `input_target`, derived caches
 /// like `left_items_cache` and `files_index`) is described here.
+#[derive(Debug)]
 pub enum EventReaction {
     /// Engine fully handled the event; no view follow-up needed.
     Nothing,
@@ -247,22 +252,33 @@ pub enum EventReaction {
     Multi(Vec<EventReaction>),
 
     // -- View-sync triggers (the App's derived cache lives in App state). --
+    /// Rebuild the sidebar rows from the engine's state.
     RebuildLeftItems,
+    /// Read the watched worktree's changed files again.
     ReloadChangedFiles,
+    /// Clamp the changed-files cursor to the list it now points into.
     ClampFilesCursor,
 
     // -- Agent launch (T2b: Engine performs all domain-state mutations and
     //    returns a typed view-only outcome the App applies). --
+    /// A provider launch came up; the engine has done its part.
     AgentLaunchReadyView(Box<AgentLaunchReadyOutcome>),
+    /// A provider launch failed; the engine has done its part.
     AgentLaunchFailedView(Box<AgentLaunchFailedOutcome>),
 
     // -- Picker/browser prompts. --
+    /// A folder browser listing arrived.
     BrowserEntriesArrived {
+        /// The directory listed.
         dir: std::path::PathBuf,
+        /// Its rows.
         entries: Vec<BrowserEntry>,
     },
+    /// A project's worktrees arrived for the adopt picker.
     ProjectWorktreesArrived {
+        /// The project listed.
         project_id: String,
+        /// The worktrees, or why they could not be listed.
         result: Result<Vec<ProjectWorktreeEntry>, String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler. `None` for the web/wire path.
@@ -272,13 +288,18 @@ pub enum EventReaction {
     /// The worktree manager's listing arrived (TUI only; the web reads the
     /// same core function through its REST route).
     ManageableWorktreesArrived {
+        /// The project listed.
         project_id: String,
+        /// The managed worktrees, or why they could not be listed.
         result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        /// The op whose final the handler resolves, if any.
         status_op_id: Option<String>,
     },
 
     // -- PR / refs follow-ups. --
+    /// A pull request resolved for a new agent: name the agent, or create it.
     OpenNewAgentPromptForPr {
+        /// The pull request resolved.
         pr: Box<ResolvedPullRequest>,
         /// Correlation id for a web PR-lookup `HandlerStatusOp`. `Some` on the web
         /// handoff path (the followup clears this op's busy once the create
@@ -287,25 +308,37 @@ pub enum EventReaction {
     },
 
     // -- Worktree delete follow-up. --
+    /// A deleted agent's worktree was removed.
     WorktreeRemoveSucceeded {
+        /// The agent deleted.
         session_id: String,
+        /// What happened to each branch.
         branches: RemovedBranches,
+        /// The busy this delete put on the status line, so only that one is
+        /// cleared.
         our_busy_message: Option<StatusText>,
     },
+    /// A deleted agent's worktree could not be removed; its record is kept.
     WorktreeRemoveFailed {
+        /// The agent being deleted.
         session_id: String,
+        /// Why the removal failed.
         message: String,
     },
     /// A deleted agent's worktree removal is waiting for operations still
     /// running in the worktree. Each surface re-emits its own delete op's busy
     /// with `message`, so the spinner says what it is waiting for.
     WorktreeRemoveWaiting {
+        /// The agent being deleted.
         session_id: String,
+        /// What the removal is waiting for.
         message: StatusText,
     },
 
     // -- Deletion `Command` view follow-ups (E4a). --
+    /// The engine half of a delete finished.
     FinishDeleteSessionView(Box<FinishDeleteSessionView>),
+    /// A delete began, inline or with its worktree removal deferred.
     BeginDeleteSessionView(Box<BeginDeleteSessionView>),
 
     // -- Resource monitor. --
@@ -314,10 +347,15 @@ pub enum EventReaction {
     ResourceStatsArrived(Vec<ResourceStats>, bool),
 
     // -- Add-project / branch-checkout follow-ups (App helpers). --
+    /// A checkout switched off a non-default branch: register the project.
     AddProjectAfterBranchCheckout {
+        /// The folder to register.
         path: String,
+        /// The project's display name.
         name: String,
+        /// The branch the checkout was switched to.
         target_branch: String,
+        /// The branch the project leads with.
         leading_branch: String,
         /// Correlation id for a web add-project `HandlerStatusOp`. `Some` on the
         /// web path, resolved in `drive_add_project_followup` after the inline
@@ -328,10 +366,13 @@ pub enum EventReaction {
     /// register the project on its now-born branch. Mirrors
     /// `AddProjectAfterBranchCheckout` but with no branch switch.
     AddProjectAfterInitialCommit {
+        /// The folder to register.
         path: String,
+        /// The project's display name.
         name: String,
         /// The branch the commit landed on (the repo's real current branch).
         branch: String,
+        /// The branch the project leads with.
         leading_branch: String,
         /// This add ran `git init` first (the adopt-a-folder flow).
         initialized_repo: bool,
@@ -349,12 +390,18 @@ pub enum EventReaction {
     AddProjectAfterClone(Box<crate::clone_project::ClonedProject>),
 
     // -- Branch inspection follow-ups (App helpers). --
+    /// A project checkout was read: open the New Agent prompt on it.
     ContinueCreateAgentAfterInspection {
+        /// The project inspected.
         project: Project,
+        /// What its checkout is on.
         inspection: CreateAgentBranchInspection,
     },
+    /// A project checkout is off its default branch: switch it.
     DispatchProjectDefaultBranchCheckout {
+        /// The project switched.
         project: Project,
+        /// The branch to switch to.
         default_branch: String,
         /// Correlation id for a web checkout `HandlerStatusOp`, forwarded by
         /// `drive_checkout_followup` into worker 2 so the eventual
@@ -364,7 +411,9 @@ pub enum EventReaction {
     },
 
     // -- Config reload (App helpers). --
+    /// A reloaded config is ready for the surface to apply.
     ApplyReloadedConfig(Box<Config>),
+    /// A config reload failed; say why and offer recovery.
     OpenConfigReloadFailedModal(String),
     /// The engine adopted a reloaded config it could not fully apply (its
     /// own apply of a coalesced reload failed): `engine.config` is the new
@@ -379,12 +428,16 @@ pub enum EventReaction {
     /// asks for the fresh answer a reload owes (see
     /// [`crate::engine::Engine::probe_gh_after_reload`]).
     ConfigAdopted {
+        /// The config the reload replaced.
         before: Box<Config>,
+        /// Whether the GitHub integration was on before the reload.
         github_was_enabled: bool,
+        /// Why the apply failed.
         error: String,
     },
 
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
+    /// A project change was saved; the engine has mirrored it in memory.
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
     // -- Startup command / log picker (App opens the overlay). --
@@ -392,13 +445,17 @@ pub enum EventReaction {
     /// emitted when the listing is NON-empty: an empty scope is reported by the
     /// load's keyed status and opens nothing.
     StartupLogsArrived {
+        /// Whose startup command runs were listed.
         scope_label: String,
+        /// The runs, newest first, with the newest one's contents.
         listing: StartupCommandLogListing,
     },
     /// A run the picker moved onto finished reading. The App applies it only if
     /// `path` is still the selected run.
     StartupLogContentArrived {
+        /// The run file that was read.
         path: std::path::PathBuf,
+        /// Its contents, or why it could not be read.
         result: Result<String, String>,
     },
 
@@ -423,7 +480,9 @@ pub enum EventReaction {
     /// which stashes `pending_server_flip` (on `Ok`) or surfaces the error, and
     /// shows the non-fatal `warning` when present.
     ServerFlipPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
         /// The pre-flight's warnings and Tailscale facts, for the flip's log.
         startup: crate::serve_log::StartupNotes,
@@ -433,14 +492,19 @@ pub enum EventReaction {
     /// and the engine has nothing to mutate. Distinct from it because the flip
     /// ends a TUI session and this starts a serve beside one.
     BackgroundServerPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
+        /// The pre-flight's warnings and Tailscale facts, for the serve's log.
         startup: crate::serve_log::StartupNotes,
     },
     /// The background web server finished applying a live `[server] tailscale`
     /// change. The terminal UI resolves its pending status op with it.
     TailscaleModeApplied {
+        /// The mode asked for.
         mode: crate::config::TailscaleMode,
+        /// What applying it did.
         outcome: crate::config::TailscaleModeOutcome,
     },
     /// Whether GitHub features work has CHANGED (a probe answered differently
@@ -452,6 +516,7 @@ pub enum EventReaction {
     /// fetched once at connect, so without a nudge it keeps hiding the
     /// pull-request entries until reloaded.
     GhAvailabilityChanged {
+        /// Whether GitHub features work now.
         available: bool,
     },
 }
@@ -461,7 +526,8 @@ pub enum EventReaction {
 /// messages.
 #[derive(Clone, Debug)]
 pub struct DetachedSession {
-    pub id: String,
+    pub(crate) id: String,
+    /// The detached agent's label, for the status.
     pub label: String,
 }
 
@@ -472,12 +538,16 @@ pub struct DetachedSession {
 /// portion of `detach_conflicting_worktree_session`). The App applies
 /// `last_pty_size`, clears the engine's `pty_activity` entry for any
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
+#[derive(Debug)]
 pub struct AgentLaunchReadyOutcome {
+    /// The agent the launched tab belongs to.
     pub session: AgentSession,
     /// The tab whose launch completed (the slot tab id for the session-slot tab). Lets a
     /// surface route an extra-tab ready to the correct pane without re-deriving.
     pub tab_id: String,
+    /// The terminal size the provider was spawned at, as rows and columns.
     pub pty_size: (u16, u16),
+    /// The agent detached because it held the same worktree's live PTY, if any.
     pub detached_session_id: Option<String>,
     /// Copied from `AgentLaunchRequest::wants_fullscreen`: the TUI lands this
     /// completion fullscreen when `true` and focused-but-minimized otherwise.
@@ -486,18 +556,26 @@ pub struct AgentLaunchReadyOutcome {
     /// Copied from `AgentLaunchRequest::status_quiet`: which surfaces withhold
     /// this launch's completion message. Each surface honours its own half.
     pub status_quiet: QuietSurfaces,
+    /// What the surface does with the launch.
     pub view: AgentLaunchReadyView,
 }
 
+/// What a surface does once a provider launch came up.
+#[derive(Debug)]
 pub enum AgentLaunchReadyView {
     /// Create-kind launch: `session_store.upsert_session` failed before the
     /// session could be committed. App surfaces the error; no view rebuild.
-    CreatePersistFailed { error: String },
+    CreatePersistFailed {
+        /// The store's error.
+        error: String,
+    },
     /// Create-kind launch committed. App rebuilds left items, selects the
     /// new session, reloads changed files, shows the agent surface, and
     /// surfaces either the startup-command error or the create status.
     CreateCommitted {
+        /// The create's success line.
         status_message: crate::status_text::StatusText,
+        /// The startup command's error, when it failed.
         startup_result_error: Option<String>,
     },
     /// Non-Create launch found the session vanished. App does nothing
@@ -505,12 +583,15 @@ pub enum AgentLaunchReadyView {
     SessionMissing,
     /// Reconnect / `ForceReconnect`: App shows the agent surface + sets info.
     Reconnect {
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
     /// `ResumeFallback`: App shows the agent surface only if `session_id` is
     /// the currently selected session, and always sets info.
     ResumeFallback {
+        /// The agent relaunched.
         session_id: String,
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
     /// `StartupAutoReopen`: App does nothing.
@@ -522,19 +603,23 @@ pub enum AgentLaunchReadyView {
 /// `InFlightKey::CreateAgent` for Create-kind failures, logged the
 /// `ResumeFallback` / `StartupAutoReopen` cases, and marked `ResumeFallback`
 /// sessions Detached. The App only formats the status message.
+#[derive(Debug)]
 pub enum AgentLaunchFailedOutcome {
+    /// A create's first launch failed.
     Create {
         /// The project the failed create belonged to, or `None` when it was a
         /// standalone agent, which belongs to no project. Carried as an option
         /// rather than an empty string so a consumer that keys work by project
         /// cannot silently key it under one that does not exist.
         project_id: Option<String>,
+        /// Why the launch failed.
         message: String,
     },
     /// Reconnect-family failure. `session_id` is the pre-existing session that
     /// was being relaunched, used by the wire layer to key the failure status
     /// so it replaces the corresponding "launching…" busy toast.
     Reconnect {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -542,11 +627,13 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// Force-reconnect failure. `session_id` carries the pre-existing session
     /// id for the same keying purpose as `Reconnect`.
     ForceReconnect {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -554,6 +641,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// Engine logged + marked Detached; App has nothing to do.
@@ -561,6 +649,7 @@ pub enum AgentLaunchFailedOutcome {
     /// Startup-auto-reopen failure. `session_id` carries the pre-existing
     /// session id for the same keying purpose as `Reconnect`.
     StartupAutoReopen {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -568,6 +657,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// A tab launch failed. `tab_id` keys the failure toast to the specific tab.
@@ -576,7 +666,9 @@ pub enum AgentLaunchFailedOutcome {
     /// a dormant relaunch, or for a tab a promotion put in the slot while the
     /// launch was in flight, the row is kept so the user can retry.
     Tab {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab whose launch failed.
         tab_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -584,6 +676,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// A launch failure for an extra tab whose row was deleted while the
@@ -599,8 +692,11 @@ pub enum AgentLaunchFailedOutcome {
 /// needs for its view follow-up. The Engine never calls
 /// `persist_config_projects_from_runtime` itself, because that helper uses
 /// binary-only `RuntimeBindings` and `save_config`.
+#[derive(Debug)]
 pub struct ProjectPersistenceOutcome {
+    /// The change that was saved, or failed to be.
     pub action: ProjectPersistenceAction,
+    /// What the surface reports.
     pub view: ProjectPersistenceView,
     /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in the
     /// completion handler (the post-worker config write is fallible, producing a
@@ -609,35 +705,60 @@ pub struct ProjectPersistenceOutcome {
     pub status_op_id: Option<String>,
 }
 
+/// What a surface reports once a project change was saved, or failed to be.
+#[derive(Debug)]
 pub enum ProjectPersistenceView {
+    /// The save failed.
     PersistenceFailed {
+        /// Why it failed.
         error: String,
     },
+    /// A project was registered.
     Added {
+        /// The project registered.
         project_id: String,
+        /// The line to report.
         status_message: crate::status_text::StatusText,
     },
+    /// A project was forgotten, its worktrees kept.
     Removed {
+        /// Its display name.
         project_name: String,
     },
+    /// A project and its worktrees were deleted.
     Deleted {
+        /// Its display name.
         project_name: String,
     },
+    /// A project's default provider changed.
     DefaultProviderUpdated {
+        /// Its display name.
         project_name: String,
+        /// The provider it now defaults to, or `None` to follow the global
+        /// default.
         provider: Option<ProviderKind>,
+        /// The global default, named when the project follows it.
         global_default: ProviderKind,
     },
+    /// Whether a project's agents reopen at startup changed.
     AutoReopenUpdated {
+        /// Its display name.
         project_name: String,
+        /// The project's choice, or `None` to follow the global setting.
         auto_reopen_agents: Option<bool>,
     },
+    /// A project's startup command changed.
     StartupCommandUpdated {
+        /// Its display name.
         project_name: String,
+        /// The command new agents run, or `None` for none.
         startup_command: Option<String>,
     },
+    /// A project's environment variables changed.
     EnvUpdated {
+        /// Its display name.
         project_name: String,
+        /// How many variables the project now sets.
         env_count: usize,
     },
 }
@@ -675,7 +796,7 @@ pub struct BranchDeleteInputs {
     pub branch_name: String,
     /// The branch the agent was born on, empty when it was never recorded.
     pub initial_branch: String,
-    pub branch_provenance: crate::model::BranchProvenance,
+    pub(crate) branch_provenance: crate::model::BranchProvenance,
 }
 
 impl BranchDeleteInputs {
@@ -841,38 +962,8 @@ pub(crate) fn perform_deferred_removal(
                 },
             )
         };
-        // The gate every delete applies: unasked, only branches dux
-        // created are dux's to delete, and the delete dialog's answer
-        // overrides that in either direction.
-        let delete_branches = managed
-            .branch_provenance
-            .resolve_branch_deletion(delete_branch);
         remove_after_last_look(look, || {
-            // A rename that landed while this removal waited moved the
-            // branch, so it is deleted by the name it has NOW.
-            let branch_name = leading.renamed(&managed.branch_name);
-            let initial_branch = leading.renamed(&managed.initial_branch);
-            if delete_branches {
-                crate::git::remove_worktree(
-                    std::path::Path::new(project_path),
-                    std::path::Path::new(&managed.worktree_path),
-                    &branch_name,
-                    // The BIRTH branch too; see `git::remove_worktree`.
-                    Some(initial_branch.as_str()),
-                )
-                .map(RemovedBranches::Deleted)
-            } else {
-                crate::git::remove_worktree_keep_branch(
-                    std::path::Path::new(project_path),
-                    std::path::Path::new(&managed.worktree_path),
-                )
-                .map(|()| {
-                    RemovedBranches::Kept(branch_kept_reason(
-                        managed.branch_provenance,
-                        delete_branch,
-                    ))
-                })
-            }
+            remove_by_current_names(project_path, managed, leading, delete_branch)
         })
     }))
     .unwrap_or_else(|payload| {
@@ -886,6 +977,44 @@ pub(crate) fn perform_deferred_removal(
         lease.finish(result.clone());
     }
     result
+}
+
+/// Let git remove the worktree, and the branches dux may delete. A rename
+/// that landed while the removal waited moved the branch, so each branch is
+/// deleted by the name it has NOW. `delete_branch` is the dialog's
+/// answer, which says why a kept branch was kept.
+fn remove_by_current_names(
+    project_path: &str,
+    managed: &crate::model::ManagedWorkspace,
+    leading: &crate::worktree_ops::RemovalLease,
+    delete_branch: Option<bool>,
+) -> anyhow::Result<RemovedBranches> {
+    // The gate every delete applies: unasked, only branches dux
+    // created are dux's to delete, and the delete dialog's answer
+    // overrides that in either direction.
+    let delete_branches = managed
+        .branch_provenance
+        .resolve_branch_deletion(delete_branch);
+    let branch_name = leading.renamed(&managed.branch_name);
+    let initial_branch = leading.renamed(&managed.initial_branch);
+    if delete_branches {
+        crate::git::remove_worktree(
+            std::path::Path::new(project_path),
+            std::path::Path::new(&managed.worktree_path),
+            &branch_name,
+            // The BIRTH branch too; see `git::remove_worktree`.
+            Some(initial_branch.as_str()),
+        )
+        .map(RemovedBranches::Deleted)
+    } else {
+        crate::git::remove_worktree_keep_branch(
+            std::path::Path::new(project_path),
+            std::path::Path::new(&managed.worktree_path),
+        )
+        .map(|()| {
+            RemovedBranches::Kept(branch_kept_reason(managed.branch_provenance, delete_branch))
+        })
+    }
 }
 
 /// The final when processes a standalone agent started are still running in
@@ -1333,14 +1462,20 @@ pub enum WorktreeRemoval {
     /// report for BOTH branches the removal targeted (the one the worktree was
     /// on and, when the agent drifted, the one it was born on), or that they
     /// were deliberately kept because they were not dux's to delete.
-    Performed { branches: RemovedBranches },
+    Performed {
+        /// What became of each branch the removal targeted.
+        branches: RemovedBranches,
+    },
     /// There was no worktree, because this was a STANDALONE agent: it ran in a
     /// folder the user already had, and deleting the agent removed dux's record
     /// of it and nothing else. Its own variant rather than one of the
     /// "preserved" ones above, because those all describe a worktree dux
     /// decided not to remove, and there was never one here to decide about.
     /// The folder is carried so the message can name it.
-    NothingToRemove { folder_label: String },
+    NothingToRemove {
+        /// The folder the agent ran in, home-shortened.
+        folder_label: String,
+    },
 }
 
 impl WorktreeRemoval {
@@ -1385,13 +1520,11 @@ impl WorktreeRemoval {
             (WorktreeOnDelete::Keep, WorktreeSharing::SharedWithAnotherAgent, None) => {
                 WorktreeRemoval::PreservedShared
             }
-            (WorktreeOnDelete::Keep, WorktreeSharing::Alone, None) => {
-                WorktreeRemoval::PreservedOrphan
-            }
-            // delete requested, no siblings, but git did not run: impossible by
-            // the caller's contract. Default to the most truthful preserved
+            // A kept worktree with no siblings is an orphan. A delete requested
+            // with no siblings where git did not run is impossible by the
+            // caller's contract; it defaults to the most truthful preserved
             // state rather than panicking.
-            (WorktreeOnDelete::Remove, WorktreeSharing::Alone, None) => {
+            (WorktreeOnDelete::Keep | WorktreeOnDelete::Remove, WorktreeSharing::Alone, None) => {
                 WorktreeRemoval::PreservedOrphan
             }
         }
@@ -1421,10 +1554,15 @@ enum WorktreeSharing {
 /// (`pty_activity` clear, `clear_companion_terminals_for_session`,
 /// `rebuild_left_items`, `selected_left` adjustment, `reload_changed_files`)
 /// and to format the 4-branch status message.
+#[derive(Debug)]
 pub struct FinishDeleteSessionOutcome {
+    /// The agent deleted.
     pub session: AgentSession,
+    /// Its project, when it had one dux still knows.
     pub project: Option<Project>,
+    /// Whether another agent still works in the same worktree.
     pub other_sessions_on_worktree: bool,
+    /// Whether the project still has agents.
     pub project_still_has_sessions: bool,
 }
 
@@ -1452,32 +1590,49 @@ pub enum BeginDeleteSessionOutcome {
     /// `busy_message`. Once the PTY is reaped, `reap_terminating_ptys` hands the
     /// removal to `dispatch_deferred_worktree_removal`, whose worker posts
     /// `WorktreeRemoveCompleted` and resolves that op.
-    AsyncStarted { busy_message: StatusText },
+    AsyncStarted {
+        /// The busy the caller shows while the removal waits.
+        busy_message: StatusText,
+    },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
     /// `finish_delete_session` wrapper to complete cleanup + emit status.
-    Inline { removal: WorktreeRemoval },
+    Inline {
+        /// What happened to the worktree.
+        removal: WorktreeRemoval,
+    },
     /// The caller asked to remove a directory dux may not remove: a standalone
     /// agent's folder. Nothing was deleted, not even the agent record, and the
     /// message says why. Distinct from every other arm because it is the one
     /// where the DELETE ITSELF did not happen.
-    Refused { message: StatusText },
+    Refused {
+        /// Why the delete was refused.
+        message: StatusText,
+    },
 }
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
 /// engine outcome with the App-context fields needed for status formatting.
+#[derive(Debug)]
 pub struct FinishDeleteSessionView {
+    /// The agent deleted.
     pub session_id: String,
+    /// What the engine removed.
     pub outcome: FinishDeleteSessionOutcome,
+    /// What happened to its worktree.
     pub removal: WorktreeRemoval,
+    /// Whether the surface reports a status; `false` when it keys its own.
     pub update_status: bool,
 }
 
 /// View follow-up data for a `Command::BeginDeleteSession`. Wraps the
 /// engine outcome with the App-context fields needed for status
 /// formatting and the inline cleanup follow-up.
+#[derive(Debug)]
 pub struct BeginDeleteSessionView {
+    /// The agent being deleted.
     pub session_id: String,
+    /// How the delete began.
     pub outcome: BeginDeleteSessionOutcome,
 }
 
@@ -1486,11 +1641,15 @@ pub struct BeginDeleteSessionView {
 /// site-specific follow-up. `status` is `Some` only on the already-in-flight
 /// path. `session_id` is populated on both branches, so an observer can
 /// correlate the dispatch with its session without re-deriving it.
+#[derive(Debug)]
 pub struct DispatchAgentLaunchView {
+    /// The agent the launch was for.
     pub session_id: String,
     /// The tab whose launch was dispatched (the slot tab id for the session-slot tab).
     pub tab_id: String,
+    /// Whether a launch worker was started.
     pub launched: bool,
+    /// The status to show when no launch started.
     pub status: Option<StatusUpdate>,
 }
 
@@ -1498,8 +1657,11 @@ pub struct DispatchAgentLaunchView {
 /// if the terminal existed; `None` if it was already gone. The App caller
 /// clears `active_terminal_id` if it matches and clamps the terminal
 /// cursor.
+#[derive(Debug)]
 pub struct DeleteTerminalView {
+    /// The terminal closed.
     pub terminal_id: String,
+    /// Its label, or `None` when no such terminal was open.
     pub label: Option<String>,
 }
 
@@ -1703,7 +1865,7 @@ impl Engine {
         LaunchedProviderInsert::Kept
     }
 
-    pub fn process_agent_launch_ready(
+    pub(crate) fn process_agent_launch_ready(
         &mut self,
         data: AgentLaunchReadyData,
     ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
@@ -1729,221 +1891,7 @@ impl Engine {
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
-            self.clear_in_flight(&InFlightKey::CreateAgent);
-            // The create keeps its folder held until this function returns,
-            // after the agent's row is written below: a removal re-checking
-            // the folder finds the hold or the row, never neither.
-            let _create_hold = self.note_create_finished_holding(&status_op_id);
-            // The defence behind the project deletion's wait: a create that
-            // outlasted it lands for a project that no longer exists. Nothing is
-            // committed; the process is stopped and what this launch made is
-            // taken back.
-            if let Some(project_id) = session.project_id()
-                && !self.projects.iter().any(|project| project.id == project_id)
-            {
-                let AgentLaunchKind::Create {
-                    repo_path,
-                    owns_worktree,
-                    ..
-                } = &request.kind
-                else {
-                    unreachable!("matched AgentLaunchKind::Create above")
-                };
-                let message = self.stop_create_for_deleted_project(
-                    &session,
-                    &tab_id,
-                    client,
-                    repo_path,
-                    if *owns_worktree {
-                        crate::agent_job::WorktreeOwnership::CreatedByThisJob
-                    } else {
-                        crate::agent_job::WorktreeOwnership::Preexisting
-                    },
-                );
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::Failed {
-                        message: message.clone(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                return (
-                    AgentLaunchReadyOutcome {
-                        session,
-                        tab_id: tab_id.as_str().to_string(),
-                        pty_size,
-                        detached_session_id: None,
-                        wants_fullscreen,
-                        status_quiet,
-                        view: AgentLaunchReadyView::CreatePersistFailed {
-                            error: message.to_string(),
-                        },
-                    },
-                    create_final,
-                );
-            }
-            // A brand-new agent's session row, its first tab's row and the
-            // pointer between them land in one transaction: a session whose slot
-            // tab is missing has a PTY address nothing resolves.
-            if let Err(err) = self.session_store.create_session(&session) {
-                logger::error(&format!(
-                    "session store upsert failed for {}: {err}",
-                    session.id,
-                ));
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::PersistFailed {
-                        error: err.to_string(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                return (
-                    AgentLaunchReadyOutcome {
-                        session,
-                        tab_id: tab_id.as_str().to_string(),
-                        pty_size,
-                        detached_session_id: None,
-                        wants_fullscreen,
-                        status_quiet,
-                        view: AgentLaunchReadyView::CreatePersistFailed {
-                            error: err.to_string(),
-                        },
-                    },
-                    create_final,
-                );
-            }
-            // The insert decides FIRST, and everything that speaks for the
-            // just-launched process is gated on it having actually joined the
-            // tab. See the non-create path below for the whole ordering rule; a
-            // create's tab is brand new, so its client is never the latecomer,
-            // and the two paths are written the same way so neither can be read
-            // as the exception.
-            let inserted = self.insert_launched_provider(&tab_id, client);
-            let detached = inserted
-                .kept()
-                .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
-                .flatten();
-            if inserted.kept() {
-                self.record_launched_drop_paste(
-                    &tab_id,
-                    &request.provider,
-                    &request.provider_config,
-                );
-            }
-            self.sessions.insert(0, session.clone());
-            // Correlate this create op with the session it just produced so a REST
-            // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
-            // resolves its exact session without a racy set-difference scan.
-            self.record_created_session(status_op_id.clone(), session.id.clone());
-            self.mark_session_provider_started(&session.id, &session.provider);
-            // A brand-new STANDALONE agent's folder is classified now, so its
-            // changes panel, its mutation gate and its upload seed all know the
-            // truth from the first frame instead of starting at "not looked
-            // yet" (which fails closed). A no-op for every other kind.
-            self.spawn_folder_repo_probe(&session.id);
-            if inserted.kept() && request.resume {
-                self.note_resume_launch(&tab_id);
-            }
-            self.update_branch_sync_sessions();
-            // The new agent joins the pull-request plan now. Nothing else is
-            // owed a rebuild by a create (its status is born Active, so the
-            // launch's status-change rebuild never fires for it), and an agent
-            // can push, open and merge a pull request long before an unrelated
-            // rebuild would have enrolled it.
-            self.update_pr_sync_sessions();
-
-            // Extract Create-kind payload for the view outcome.
-            let AgentLaunchKind::Create {
-                mut status_message,
-                mut status_warns,
-                mut status_notes,
-                pull_request_pin,
-                startup_result,
-                ..
-            } = request.kind
-            else {
-                unreachable!("matched AgentLaunchKind::Create above")
-            };
-            // A fresh copy of a pull request is pinned to it now that its row
-            // exists, exactly as a manual attach would pin it, and only here,
-            // where the pin is actually made, does the final say it is linked.
-            // The agent is committed either way: a pin that cannot be written
-            // is logged and told in the create's own final, which becomes a
-            // warning, and the user can still attach the pull request by hand.
-            if let Some(pin) = pull_request_pin {
-                let pr = format!("#{}", pin.number);
-                let told = match self.apply_pr_attach(
-                    &session.id,
-                    &pin.host,
-                    &pin.owner_repo,
-                    pin.number,
-                    &pin.title,
-                    &pin.state,
-                    "",
-                ) {
-                    Ok(_) => crate::status_text!["It is linked to PR ", n(pr), "."],
-                    Err(err) => {
-                        logger::error(&format!(
-                            "could not pin agent {} to PR #{} of {}: {err:#}",
-                            session.id, pin.number, pin.owner_repo
-                        ));
-                        status_warns = true;
-                        let reason = format!("{err:#}");
-                        crate::status_text![
-                            "dux could not link it to PR ",
-                            n(pr),
-                            format!(
-                                ": {}. Attach the pull request to the agent by hand.",
-                                reason.trim_end_matches('.')
-                            )
-                        ]
-                    }
-                };
-                status_message = crate::status_text![status_message, " ", told.clone()];
-                status_notes = Some(Box::new(match status_notes {
-                    Some(notes) => crate::status_text![*notes, " ", told],
-                    None => told,
-                }));
-            } else {
-                // An agent created on a branch that already existed may already
-                // have a pull request, so it is asked about once now rather
-                // than at the next poll. A pinned copy was resolved moments
-                // ago and needs no second look.
-                self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
-            }
-            let startup_result_error = startup_result.and_then(|r| r.status.err());
-
-            // Resolve the shared create op engine-side so both surfaces replace the
-            // create busy with the SAME final (success line or startup-failure).
-            let create_outcome = match &startup_result_error {
-                Some(error) => CreateLaunchOutcome::StartupFailed {
-                    branch_name: session.display_label(),
-                    error: error.clone(),
-                    notes: status_notes.map(|notes| *notes),
-                },
-                None => CreateLaunchOutcome::Committed {
-                    status_message: status_message.clone(),
-                    quiet_on: status_quiet,
-                    warns: status_warns,
-                },
-            };
-            let create_final = self.resolve_create_op(&status_op_id, &create_outcome);
-
-            return (
-                AgentLaunchReadyOutcome {
-                    session,
-                    tab_id: tab_id.as_str().to_string(),
-                    pty_size,
-                    detached_session_id: detached.map(|d| d.id),
-                    wants_fullscreen,
-                    status_quiet,
-                    view: AgentLaunchReadyView::CreateCommitted {
-                        status_message,
-                        startup_result_error,
-                    },
-                },
-                create_final,
-            );
+            return self.process_create_launch_ready(request, client, &status_op_id);
         }
 
         // Non-Create branches share the "drop on missing session" guard.
@@ -2042,7 +1990,11 @@ impl Engine {
 
         let view = match request.kind {
             AgentLaunchKind::Reconnect { status_message }
-            | AgentLaunchKind::ForceReconnect { status_message } => {
+            | AgentLaunchKind::ForceReconnect { status_message }
+            // An extra-tab ready behaves like a reconnect for the view (show the
+            // surface + info); it is never resumed and never moves the
+            // session-level running state.
+            | AgentLaunchKind::Tab { status_message, .. } => {
                 AgentLaunchReadyView::Reconnect { status_message }
             }
             AgentLaunchKind::ResumeFallback { status_message } => {
@@ -2052,12 +2004,6 @@ impl Engine {
                 }
             }
             AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
-            // An extra-tab ready behaves like a reconnect for the view (show the
-            // surface + info); it is never resumed and never moves the
-            // session-level running state.
-            AgentLaunchKind::Tab { status_message, .. } => {
-                AgentLaunchReadyView::Reconnect { status_message }
-            }
             AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
         };
 
@@ -2075,6 +2021,280 @@ impl Engine {
         )
     }
 
+    /// The create half of [`Self::process_agent_launch_ready`]: commit the new
+    /// agent's rows, take over its tab and resolve the create op, or take
+    /// back what the launch made when its project is gone or its rows cannot
+    /// be written. The create keeps its folder held until this returns.
+    fn process_create_launch_ready(
+        &mut self,
+        request: crate::worker::AgentLaunchRequest,
+        client: crate::pty::PtyClient,
+        status_op_id: &str,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        let pty_size = request.pty_size;
+        let tab_id = request.tab_id.clone();
+        let wants_fullscreen = request.wants_fullscreen;
+        let status_quiet = request.status_quiet;
+        self.clear_in_flight(&InFlightKey::CreateAgent);
+        // The create keeps its folder held until this function returns,
+        // after the agent's row is written below: a removal re-checking
+        // the folder finds the hold or the row, never neither.
+        let _create_hold = self.note_create_finished_holding(status_op_id);
+        // The defence behind the project deletion's wait: a create that
+        // outlasted it lands for a project that no longer exists. Nothing is
+        // committed; the process is stopped and what this launch made is
+        // taken back.
+        if let Some(project_id) = session.project_id()
+            && !self.projects.iter().any(|project| project.id == project_id)
+        {
+            return self.take_back_create_for_gone_project(&request, client, status_op_id);
+        }
+        // A brand-new agent's session row, its first tab's row and the
+        // pointer between them land in one transaction: a session whose slot
+        // tab is missing has a PTY address nothing resolves.
+        if let Err(err) = self.session_store.create_session(&session) {
+            return self.create_persist_failed(&request, status_op_id, &err);
+        }
+        // The insert decides FIRST, and everything that speaks for the
+        // just-launched process is gated on it having actually joined the
+        // tab. See the non-create path below for the whole ordering rule; a
+        // create's tab is brand new, so its client is never the latecomer,
+        // and the two paths are written the same way so neither can be read
+        // as the exception.
+        let inserted = self.insert_launched_provider(&tab_id, client);
+        let detached = inserted
+            .kept()
+            .then(|| self.detach_conflicting_worktree_session(session.directory(), &session.id))
+            .flatten();
+        if inserted.kept() {
+            self.record_launched_drop_paste(&tab_id, &request.provider, &request.provider_config);
+        }
+        self.sessions.insert(0, session.clone());
+        // Correlate this create op with the session it just produced so a REST
+        // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
+        // resolves its exact session without a racy set-difference scan.
+        self.record_created_session(status_op_id.to_string(), session.id.clone());
+        self.mark_session_provider_started(&session.id, &session.provider);
+        // A brand-new STANDALONE agent's folder is classified now, so its
+        // changes panel, its mutation gate and its upload seed all know the
+        // truth from the first frame instead of starting at "not looked
+        // yet" (which fails closed). A no-op for every other kind.
+        self.spawn_folder_repo_probe(&session.id);
+        if inserted.kept() && request.resume {
+            self.note_resume_launch(&tab_id);
+        }
+        self.update_branch_sync_sessions();
+        // The new agent joins the pull-request plan now. Nothing else is
+        // owed a rebuild by a create (its status is born Active, so the
+        // launch's status-change rebuild never fires for it), and an agent
+        // can push, open and merge a pull request long before an unrelated
+        // rebuild would have enrolled it.
+        self.update_pr_sync_sessions();
+
+        // Extract Create-kind payload for the view outcome.
+        let AgentLaunchKind::Create {
+            mut status_message,
+            mut status_warns,
+            mut status_notes,
+            pull_request_pin,
+            startup_result,
+            ..
+        } = request.kind
+        else {
+            unreachable!("matched AgentLaunchKind::Create above")
+        };
+        // A fresh copy of a pull request is pinned to it now that its row
+        // exists, exactly as a manual attach would pin it, and only here,
+        // where the pin is actually made, does the final say it is linked.
+        // The agent is committed either way: a pin that cannot be written
+        // is logged and told in the create's own final, which becomes a
+        // warning, and the user can still attach the pull request by hand.
+        if let Some(pin) = pull_request_pin {
+            let told = match self.link_created_pull_request(&session.id, &pin) {
+                Ok(told) => told,
+                Err(told) => {
+                    status_warns = true;
+                    told
+                }
+            };
+            status_message = crate::status_text![status_message, " ", told.clone()];
+            status_notes = Some(Box::new(match status_notes {
+                Some(notes) => crate::status_text![*notes, " ", told],
+                None => told,
+            }));
+        } else {
+            // An agent created on a branch that already existed may already
+            // have a pull request, so it is asked about once now rather
+            // than at the next poll. A pinned copy was resolved moments
+            // ago and needs no second look.
+            self.spawn_pr_check_for_session(&session.id, crate::engine::PR_CHECK_MIN_INTERVAL);
+        }
+        let startup_result_error = startup_result.and_then(|r| r.status.err());
+
+        // Resolve the shared create op engine-side so both surfaces replace the
+        // create busy with the SAME final (success line or startup-failure).
+        let create_outcome = match &startup_result_error {
+            Some(error) => CreateLaunchOutcome::StartupFailed {
+                branch_name: session.display_label(),
+                error: error.clone(),
+                notes: status_notes.map(|notes| *notes),
+            },
+            None => CreateLaunchOutcome::Committed {
+                status_message: status_message.clone(),
+                quiet_on: status_quiet,
+                warns: status_warns,
+            },
+        };
+        let create_final = self.resolve_create_op(status_op_id, &create_outcome);
+
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: tab_id.as_str().to_string(),
+                pty_size,
+                detached_session_id: detached.map(|d| d.id),
+                wants_fullscreen,
+                status_quiet,
+                view: AgentLaunchReadyView::CreateCommitted {
+                    status_message,
+                    startup_result_error,
+                },
+            },
+            create_final,
+        )
+    }
+
+    /// Pin a fresh copy of a pull request to it now that the agent's row
+    /// exists, exactly as a manual attach would. Answers the sentence the
+    /// create's final adds: `Ok` when linked, `Err` (logged, and the final
+    /// becomes a warning) when the pin could not be written, in which case the
+    /// user can still attach the pull request by hand.
+    fn link_created_pull_request(
+        &mut self,
+        session_id: &str,
+        pin: &crate::worker::PullRequestPin,
+    ) -> Result<StatusText, StatusText> {
+        let pr = format!("#{}", pin.number);
+        match self.apply_pr_attach(
+            session_id,
+            &pin.host,
+            &pin.owner_repo,
+            pin.number,
+            &pin.title,
+            &pin.state,
+            "",
+        ) {
+            Ok(_) => Ok(crate::status_text!["It is linked to PR ", n(pr), "."]),
+            Err(err) => {
+                logger::error(&format!(
+                    "could not pin agent {} to PR #{} of {}: {err:#}",
+                    session_id, pin.number, pin.owner_repo
+                ));
+                let reason = format!("{err:#}");
+                Err(crate::status_text![
+                    "dux could not link it to PR ",
+                    n(pr),
+                    format!(
+                        ": {}. Attach the pull request to the agent by hand.",
+                        reason.trim_end_matches('.')
+                    )
+                ])
+            }
+        }
+    }
+
+    /// A create whose session rows could not be written: the op fails with the
+    /// store's error, which the view reports too.
+    fn create_persist_failed(
+        &mut self,
+        request: &crate::worker::AgentLaunchRequest,
+        status_op_id: &str,
+        err: &anyhow::Error,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        logger::error(&format!(
+            "session store upsert failed for {}: {err}",
+            session.id,
+        ));
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::PersistFailed {
+                error: err.to_string(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: request.tab_id.as_str().to_string(),
+                pty_size: request.pty_size,
+                detached_session_id: None,
+                wants_fullscreen: request.wants_fullscreen,
+                status_quiet: request.status_quiet,
+                view: AgentLaunchReadyView::CreatePersistFailed {
+                    error: err.to_string(),
+                },
+            },
+            create_final,
+        )
+    }
+
+    /// A create that outlasted its project's deletion: nothing is committed,
+    /// the process is stopped and what this launch made is taken back.
+    fn take_back_create_for_gone_project(
+        &mut self,
+        request: &crate::worker::AgentLaunchRequest,
+        client: crate::pty::PtyClient,
+        status_op_id: &str,
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
+        let session = request.session.clone();
+        let tab_id = &request.tab_id;
+        let pty_size = request.pty_size;
+        let wants_fullscreen = request.wants_fullscreen;
+        let status_quiet = request.status_quiet;
+        let AgentLaunchKind::Create {
+            repo_path,
+            owns_worktree,
+            ..
+        } = &request.kind
+        else {
+            unreachable!("matched AgentLaunchKind::Create above")
+        };
+        let message = self.stop_create_for_deleted_project(
+            &session,
+            tab_id,
+            client,
+            repo_path,
+            if *owns_worktree {
+                crate::agent_job::WorktreeOwnership::CreatedByThisJob
+            } else {
+                crate::agent_job::WorktreeOwnership::Preexisting
+            },
+        );
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::Failed {
+                message: message.clone(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                tab_id: tab_id.as_str().to_string(),
+                pty_size,
+                detached_session_id: None,
+                wants_fullscreen,
+                status_quiet,
+                view: AgentLaunchReadyView::CreatePersistFailed {
+                    error: message.to_string(),
+                },
+            },
+            create_final,
+        )
+    }
+
     pub(crate) fn process_project_persistence_completed(
         &mut self,
         action: ProjectPersistenceAction,
@@ -2089,7 +2309,22 @@ impl Engine {
             };
         }
 
-        let view = match &action {
+        let view = self.apply_persisted_project_action(&action);
+
+        ProjectPersistenceOutcome {
+            action,
+            view,
+            status_op_id,
+        }
+    }
+
+    /// Mirror a saved project change in memory and answer the view that reports
+    /// it.
+    fn apply_persisted_project_action(
+        &mut self,
+        action: &ProjectPersistenceAction,
+    ) -> ProjectPersistenceView {
+        match action {
             ProjectPersistenceAction::Add {
                 project,
                 status_message,
@@ -2131,7 +2366,7 @@ impl Engine {
                 global_default,
             } => {
                 if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
-                    project.explicit_default_provider = provider.clone();
+                    project.explicit_default_provider.clone_from(provider);
                 }
                 self.refresh_project_defaults();
                 ProjectPersistenceView::DefaultProviderUpdated {
@@ -2159,7 +2394,7 @@ impl Engine {
                 startup_command,
             } => {
                 if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
-                    project.startup_command = startup_command.clone();
+                    project.startup_command.clone_from(startup_command);
                 }
                 ProjectPersistenceView::StartupCommandUpdated {
                     project_name: project_name.clone(),
@@ -2180,12 +2415,6 @@ impl Engine {
                     env_count,
                 }
             }
-        };
-
-        ProjectPersistenceOutcome {
-            action,
-            view,
-            status_op_id,
         }
     }
 
@@ -2287,6 +2516,11 @@ impl Engine {
     /// and the caller then does view-side cleanup. In the gap, view-only maps
     /// still hold entries for the deleted session id, so an engine helper called
     /// from inside here must not read them for that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot delete the session; the
+    /// in-memory state is then left as it was.
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -2914,24 +3148,7 @@ impl Engine {
 
         let outcome = match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
-                self.clear_in_flight(&InFlightKey::CreateAgent);
-                self.note_create_finished(&status_op_id);
-                // Resolve the shared create op to its keyed error final so both
-                // surfaces replace the create busy in place with the same message.
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::Failed {
-                        message: message.clone().into(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                (
-                    AgentLaunchFailedOutcome::Create {
-                        project_id: session.project_id().map(str::to_string),
-                        message,
-                    },
-                    create_final,
-                )
+                self.create_launch_failed(&status_op_id, &session, message)
             }
             AgentLaunchKind::Reconnect { .. } => (
                 AgentLaunchFailedOutcome::Reconnect {
@@ -2950,26 +3167,7 @@ impl Engine {
                 None,
             ),
             AgentLaunchKind::ResumeFallback { .. } => {
-                logger::error(&format!(
-                    "fallback PTY spawn failed for {}: {}",
-                    session.id, message,
-                ));
-                if self.mark_session_status(&session.id, SessionStatus::Detached) {
-                    self.update_pr_sync_sessions();
-                }
-                // Nothing reaches the screen, but a client following this
-                // tab is told its launch did not come up.
-                self.finish_launch_operations(
-                    &crate::operations::launch_binding_key(tab_id.as_str()),
-                    Some(tab_id.as_str()),
-                    crate::operations::LaunchEnded::Failed,
-                    &format!(
-                        "Agent {} could not resume its conversation, and starting it fresh \
-                         failed too: {message}",
-                        session.display_label()
-                    ),
-                    None,
-                );
+                self.resume_fallback_launch_failed(&session, &tab_id, &message);
                 (AgentLaunchFailedOutcome::ResumeFallback, None)
             }
             AgentLaunchKind::StartupAutoReopen => {
@@ -2998,19 +3196,7 @@ impl Engine {
                 // this launch raced.
                 let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
                 if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
-                    logger::info(&format!(
-                        "dropping launch-failed event for closed extra tab {tab_id} of session {}",
-                        session.id,
-                    ));
-                    // Nothing reaches the screen, but a client following this
-                    // tab is told its launch did not come up.
-                    self.finish_launch_operations(
-                        &crate::operations::launch_binding_key(tab_id.as_str()),
-                        Some(tab_id.as_str()),
-                        crate::operations::LaunchEnded::Failed,
-                        "",
-                        None,
-                    );
+                    self.drop_launch_failure_of_closed_tab(&session.id, &tab_id);
                     return (AgentLaunchFailedOutcome::Silent, None);
                 }
                 logger::error(&format!(
@@ -3086,6 +3272,78 @@ impl Engine {
             );
         }
         outcome
+    }
+
+    /// A launch failure for an extra tab closed while it was launching is not a
+    /// real failure: nothing reaches the screen, but a client following the
+    /// tab is told its launch did not come up.
+    fn drop_launch_failure_of_closed_tab(&mut self, session_id: &str, tab_id: &TabId) {
+        logger::info(&format!(
+            "dropping launch-failed event for closed extra tab {tab_id} of session {session_id}",
+        ));
+        self.finish_launch_operations(
+            &crate::operations::launch_binding_key(tab_id.as_str()),
+            Some(tab_id.as_str()),
+            crate::operations::LaunchEnded::Failed,
+            "",
+            None,
+        );
+    }
+
+    /// A create whose launch failed: the create op resolves to its keyed error
+    /// final, so both surfaces replace the create busy in place with the same
+    /// message.
+    fn create_launch_failed(
+        &mut self,
+        status_op_id: &str,
+        session: &AgentSession,
+        message: String,
+    ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
+        self.clear_in_flight(&InFlightKey::CreateAgent);
+        self.note_create_finished(status_op_id);
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::Failed {
+                message: message.clone().into(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchFailedOutcome::Create {
+                project_id: session.project_id().map(str::to_string),
+                message,
+            },
+            create_final,
+        )
+    }
+
+    /// A resume fallback's fresh launch failed too: the agent is left detached
+    /// and a client following the tab is told its launch did not come up,
+    /// while nothing reaches the screen.
+    fn resume_fallback_launch_failed(
+        &mut self,
+        session: &AgentSession,
+        tab_id: &TabId,
+        message: &str,
+    ) {
+        logger::error(&format!(
+            "fallback PTY spawn failed for {}: {}",
+            session.id, message,
+        ));
+        if self.mark_session_status(&session.id, SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
+        self.finish_launch_operations(
+            &crate::operations::launch_binding_key(tab_id.as_str()),
+            Some(tab_id.as_str()),
+            crate::operations::LaunchEnded::Failed,
+            &format!(
+                "Agent {} could not resume its conversation, and starting it fresh \
+                 failed too: {message}",
+                session.display_label()
+            ),
+            None,
+        );
     }
 
     /// Log a pull-request badge move for one session, if it moved.
@@ -3363,7 +3621,7 @@ impl Engine {
             && let Some(branch_name) = outcome.current_branch()
             && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
         {
-            existing.current_branch = branch_name.clone();
+            existing.current_branch.clone_from(branch_name);
             existing.branch_status =
                 if existing.leading_branch.as_deref() == Some(&existing.current_branch) {
                     ProjectBranchStatus::Leading
@@ -3519,29 +3777,7 @@ impl Engine {
     ) -> EventReaction {
         match &result {
             Ok(()) => {
-                // A rename moves a branch rather than switching to another one, so
-                // the branch dux minted is still the one dux minted under its new
-                // name, and the pull-request age guard must keep holding for it.
-                let renamed_from = self.minted_branch_rename(session_id);
-                let was_minted = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
-                    .is_some();
-                // A rename of any other branch is not the minted one moving, and
-                // a marker left from an earlier rename must not carry over to it.
-                let recorded = if was_minted {
-                    self.session_store
-                        .set_minted_branch_rename(session_id, new_branch)
-                } else {
-                    self.session_store.delete_minted_branch_rename(session_id)
-                };
-                if let Err(err) = recorded {
-                    logger::error(&format!(
-                        "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
-                    ));
-                }
+                self.record_minted_branch_rename(session_id, new_branch);
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                     let saved = session.clone();
                     let label = session.display_label();
@@ -3597,34 +3833,13 @@ impl Engine {
                 self.request_branch_pr_check(session_id);
             }
             Err(err) => {
-                logger::warn(&format!(
-                    "[{session_id}] agent rename to {new_branch} failed: {err}"
-                ));
-                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                    let saved = session.clone();
-                    session.title = previous_title;
-                    session.updated_at = Utc::now();
-                    if let Err(save_err) = self.session_store.upsert_session(session) {
-                        logger::error(&format!(
-                            "failed to persist branch-rename revert for {}: {save_err}",
-                            session.id,
-                        ));
-                        // The optimistic name is still what the database
-                        // holds, so it is what the agent keeps showing.
-                        *session = saved;
-                        status.outcome = crate::engine::Final::error(crate::status_text![
-                            "Could not rename the agent's git branch to ",
-                            q(new_branch),
-                            format!(
-                                ": {err}. dux could not put the agent's old name back either: \
-                                 {save_err:#}, so it keeps showing "
-                            ),
-                            q(new_branch),
-                            ". Rename it again once dux can write its database; check that \
-                             the disk has room, and see dux.log."
-                        ]);
-                    }
-                }
+                self.revert_failed_branch_rename(
+                    session_id,
+                    new_branch,
+                    previous_title,
+                    err,
+                    &mut status,
+                );
             }
         }
         // A removal of this worktree that began while the rename ran captured
@@ -3659,6 +3874,76 @@ impl Engine {
             EventReaction::RebuildLeftItems,
             status.into_reaction(),
         ])
+    }
+
+    /// Record whether the renamed branch is still the one dux minted. A rename
+    /// moves a branch rather than switching to another one, so the minted
+    /// branch stays minted under its new name; a failed write is logged.
+    fn record_minted_branch_rename(&self, session_id: &str, new_branch: &str) {
+        // A rename moves a branch rather than switching to another one, so
+        // the branch dux minted is still the one dux minted under its new
+        // name, and the pull-request age guard must keep holding for it.
+        let renamed_from = self.minted_branch_rename(session_id);
+        let was_minted = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
+            .is_some();
+        // A rename of any other branch is not the minted one moving, and
+        // a marker left from an earlier rename must not carry over to it.
+        let recorded = if was_minted {
+            self.session_store
+                .set_minted_branch_rename(session_id, new_branch)
+        } else {
+            self.session_store.delete_minted_branch_rename(session_id)
+        };
+        if let Err(err) = recorded {
+            logger::error(&format!(
+                "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
+            ));
+        }
+    }
+
+    /// A branch rename git refused: the optimistic title goes back to what it
+    /// was, and when even that cannot be saved, `status` says the agent keeps
+    /// showing the new name.
+    fn revert_failed_branch_rename(
+        &mut self,
+        session_id: &str,
+        new_branch: &str,
+        previous_title: Option<String>,
+        err: &str,
+        status: &mut ResolvedFinal,
+    ) {
+        logger::warn(&format!(
+            "[{session_id}] agent rename to {new_branch} failed: {err}"
+        ));
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            let saved = session.clone();
+            session.title = previous_title;
+            session.updated_at = Utc::now();
+            if let Err(save_err) = self.session_store.upsert_session(session) {
+                logger::error(&format!(
+                    "failed to persist branch-rename revert for {}: {save_err}",
+                    session.id,
+                ));
+                // The optimistic name is still what the database
+                // holds, so it is what the agent keeps showing.
+                *session = saved;
+                status.outcome = crate::engine::Final::error(crate::status_text![
+                    "Could not rename the agent's git branch to ",
+                    q(new_branch),
+                    format!(
+                        ": {err}. dux could not put the agent's old name back either: \
+                         {save_err:#}, so it keeps showing "
+                    ),
+                    q(new_branch),
+                    ". Rename it again once dux can write its database; check that \
+                     the disk has room, and see dux.log."
+                ]);
+            }
+        }
     }
 
     fn process_gh_status_checked(
@@ -3737,7 +4022,7 @@ impl Engine {
         match outcome {
             crate::gh::GhProbe::NotInstalled => {
                 self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
-                self.set_github_git_protocols(Default::default());
+                self.set_github_git_protocols(std::collections::BTreeMap::default());
                 (GhStatus::NotInstalled, None)
             }
             crate::gh::GhProbe::Transient(reason) => {
@@ -4043,7 +4328,9 @@ impl Engine {
             Ok(inspection) => {
                 if let Some(existing) = self.projects.iter_mut().find(|item| item.id == project.id)
                 {
-                    existing.current_branch = inspection.current_branch.clone();
+                    existing
+                        .current_branch
+                        .clone_from(&inspection.current_branch);
                     existing.leading_branch = Some(inspection.leading_branch.clone());
                     existing.branch_status = if existing.current_branch == inspection.leading_branch
                     {
@@ -4164,7 +4451,7 @@ impl Engine {
                     if let Some(existing) =
                         self.projects.iter_mut().find(|item| item.id == project.id)
                     {
-                        existing.current_branch = current_branch.clone();
+                        existing.current_branch.clone_from(&current_branch);
                         existing.branch_status = ProjectBranchStatus::Leading;
                     }
                     // The user asked for the default branch, and the folder is
@@ -4230,7 +4517,7 @@ impl Engine {
                     if let Some(existing) =
                         self.projects.iter_mut().find(|item| item.id == project.id)
                     {
-                        existing.current_branch = target_branch.clone();
+                        existing.current_branch.clone_from(&target_branch);
                         existing.branch_status = ProjectBranchStatus::Leading;
                     }
                     // Checking out the default branch means new worktrees
@@ -4295,6 +4582,11 @@ impl Engine {
     ///
     /// `project_path` is the folder (the project's `path`), `project_name` the
     /// name the refusal chips.
+    ///
+    /// # Errors
+    ///
+    /// Returns the warning to show when another operation already holds the
+    /// project folder.
     pub fn begin_project_folder_action(
         &mut self,
         project_path: &str,
@@ -4622,6 +4914,10 @@ impl Engine {
 
     /// Apply engine mutations for a worker event and return any view reaction.
     /// The engine never mutates view state directly.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per WorkerEvent variant, each handing the event's fields to the handler that applies it"
+    )]
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
             WorkerEvent::CommandWorkerStarted(status) | WorkerEvent::PollerStatus(status) => {
@@ -6164,7 +6460,9 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // A check for feat/a is running, dispatched 9.5 seconds ago.
         engine.mark_in_flight(InFlightKey::PrCheck("s1".to_string()));
-        let dispatched = Instant::now() - std::time::Duration::from_millis(9_500);
+        let dispatched = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(9_500))
+            .expect("the monotonic clock reads later than the rewind");
         engine.pr_last_checked.insert("s1".to_string(), dispatched);
         let asked_for_a = pr_status_ready(&engine, vec![("s1".to_string(), None)]);
 
@@ -6990,7 +7288,7 @@ mod tests {
         let (status, reason) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: true,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-            protocols: Default::default(),
+            protocols: BTreeMap::default(),
         });
         assert_eq!(status, GhStatus::Available);
         assert_eq!(reason, None);
@@ -7002,7 +7300,7 @@ mod tests {
         let (status, _) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: false,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-            protocols: Default::default(),
+            protocols: BTreeMap::default(),
         });
         assert_eq!(status, GhStatus::NotAuthenticated);
     }
@@ -7044,7 +7342,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7066,7 +7364,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7087,7 +7385,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: false,
                 policy: crate::gh::GithubHostPolicy::DenyAll,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7120,7 +7418,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7551,7 +7849,7 @@ mod tests {
                 state: "OPEN".into(),
                 head_ref_name: "feat".into(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
@@ -8605,7 +8903,9 @@ mod tests {
             "op-stale".to_string(),
             (
                 "s1".to_string(),
-                Instant::now() - (crate::engine::CREATED_SESSION_TTL + Duration::from_secs(1)),
+                Instant::now()
+                    .checked_sub(crate::engine::CREATED_SESSION_TTL + Duration::from_secs(1))
+                    .expect("the monotonic clock reads later than the rewind"),
             ),
         );
         assert_eq!(engine.created_session_for_op("op-stale"), None);
@@ -8686,18 +8986,6 @@ mod tests {
         assert_eq!(snap[0].tone, "error");
     }
 
-    // Sanity: the unused-import linter won't catch AgentLaunchFailedData
-    // because we reference it via a no-op assertion to prove the test module
-    // compiles against the same shape the dispatcher uses.
-    #[allow(dead_code)]
-    fn _agent_launch_failed_shape_compiles(req: AgentLaunchRequest, msg: String) {
-        let _boxed = Box::new(AgentLaunchFailedData {
-            request: req,
-            message: msg,
-        });
-        let _kind = AgentLaunchKind::StartupAutoReopen;
-    }
-
     // ── process_agent_launch_failed + detach_conflicting_worktree_session ──
 
     fn make_failed_data(
@@ -8714,7 +9002,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 1000,
@@ -8802,7 +9090,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 // The launch this drop is about is the one kind that arms a
                 // candidate; without it the test would pass on any code.
                 resume: true,
@@ -9035,7 +9323,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 1000,
@@ -9913,7 +10201,7 @@ mod tests {
             session,
             provider_config: ProviderCommandConfig::default(),
             env: Vec::new(),
-            identity: Default::default(),
+            identity: crate::term_identity::TerminalIdentity::default(),
             resume: false,
             pty_size: (24, 80),
             scrollback_lines: 1000,
@@ -10404,7 +10692,7 @@ mod tests {
     fn apply_reload_config_opens_barrier_and_invokes_surface() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(Arc::clone(&recorder)));
 
         let reaction = engine
             .apply(crate::engine::Command::ReloadConfig)
@@ -10448,6 +10736,10 @@ mod tests {
     /// during the first waits for the follow-up, not for the reload that was
     /// already reading.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
         use crate::operations::{OperationKind, OperationState};
         let (mut engine, _tmp) = test_engine();
@@ -11020,7 +11312,10 @@ mod tests {
         .unwrap();
         let loaded = crate::config::load_config(&engine.paths).unwrap();
         for (i, p) in loaded.projects.iter().enumerate() {
-            engine.session_store.upsert_project_at(p, i as i64).unwrap();
+            engine
+                .session_store
+                .upsert_project_at(p, i64::try_from(i).expect("project index fits in i64"))
+                .unwrap();
         }
         engine.apply_reloaded_config(loaded).expect("first apply");
         eprintln!(
@@ -11119,7 +11414,7 @@ mod tests {
     fn apply_recover_config_renders_via_surface_and_writes() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(Arc::clone(&recorder)));
 
         let reaction = engine
             .apply(crate::engine::Command::RecoverConfig)
@@ -11566,7 +11861,8 @@ mod tests {
         let (engine, _tmp) = test_engine();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_body = Arc::clone(&counter);
-        let clean = crate::poller_status::REARM_AFTER_SUCCESSES as usize;
+        let clean = usize::try_from(crate::poller_status::REARM_AFTER_SUCCESSES)
+            .expect("the re-arm count fits in usize");
         engine.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "rearm-loop-test".into(),

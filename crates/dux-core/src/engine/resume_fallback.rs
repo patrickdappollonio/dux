@@ -82,6 +82,7 @@ pub(crate) struct ResumedScreen {
 
 /// Outcome of an attempted resume-fallback retry. Three states because the
 /// caller must react differently to each: collapsing any two corrupts state.
+#[derive(Debug)]
 pub enum ResumeFallbackOutcome {
     /// Engine removed the candidate, provider and pin and dispatched a fresh
     /// `resume:false` launch. `reaction` is the `DispatchAgentLaunchView`
@@ -95,7 +96,10 @@ pub enum ResumeFallbackOutcome {
     ///
     /// `reaction` is boxed because `EventReaction` is large next to the unit
     /// variants beside it, and clippy's `large_enum_variant` is a CI gate.
-    Retried { reaction: Box<EventReaction> },
+    Retried {
+        /// The relaunch to apply.
+        reaction: Box<EventReaction>,
+    },
     /// A launch is already in flight for this session, so the engine left the
     /// candidate, provider and pin untouched. Treat the session as protected:
     /// skip the destructive exit cleanup and the post-exit UI and PR follow-ups
@@ -1120,6 +1124,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_failed_fallback_relaunch_leaves_no_tab_keyed_state_behind() {
         // The retry tears the stale attempt down BEFORE it dispatches the fresh
         // one, and the fresh one can fail (here: a provider binary that does not

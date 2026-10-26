@@ -12,6 +12,7 @@ thread_local! {
 }
 
 /// The engine thread is running a destructive command until this drops.
+#[derive(Debug)]
 pub struct EngineThreadMark {
     #[cfg(test)]
     previous: bool,

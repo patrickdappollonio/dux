@@ -88,13 +88,6 @@ fn review22_switch_removes_the_folder_a_dux_process_works_in() {
             Ok(())
         });
     }
-    struct Kill(std::process::Child);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
     let job = Kill(command.spawn().unwrap());
     let session = crate::process_sessions::ProcessSession::started_now(job.0.id());
     engine
@@ -192,13 +185,6 @@ fn a_pull_never_removes_the_folder_a_session_works_in() {
             Ok(())
         });
     }
-    struct Kill(std::process::Child);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
     let job = Kill(command.spawn().unwrap());
     // Started at the checkout's root, as an agent's own terminal is, and
     // `cd`'d into the folder since.
@@ -237,4 +223,14 @@ fn a_pull_that_leaves_a_folder_non_empty_goes_ahead() {
     );
     assert!(folder.join("notes.local").is_file());
     assert!(!folder.join("guide.md").exists());
+}
+
+/// Kills and reaps the child it holds when dropped, so a failing test leaves
+/// no process behind.
+struct Kill(std::process::Child);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

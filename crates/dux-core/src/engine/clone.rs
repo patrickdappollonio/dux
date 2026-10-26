@@ -22,6 +22,192 @@ pub enum CloneAskedBy {
     OtherSurface,
 }
 
+/// The repository a clone is of, as `host/owner/repo` lowercased, so two
+/// clones of it cannot run at once; `None` for an address that names no host
+/// and repository.
+fn clone_repository_key(
+    offer: Option<&crate::pr_reference::PullRequestCloneOffer>,
+    url: &str,
+) -> Option<String> {
+    let named = match offer {
+        Some(offer) => Some((offer.host.clone(), offer.owner_repo.clone())),
+        None => {
+            crate::git::parse_remote_address(url).map(|remote| (remote.host, remote.owner_repo))
+        }
+    };
+    named.map(|(host, owner_repo)| format!("{}/{}", host.to_lowercase(), owner_repo.to_lowercase()))
+}
+
+/// The busy a clone or add shows while it runs.
+fn clone_busy_message(
+    offer: Option<&crate::pr_reference::PullRequestCloneOffer>,
+    mode: CloneMode,
+    address: &str,
+    destination: &std::path::Path,
+) -> StatusText {
+    if let (Some(offer), CloneMode::AddExisting) = (offer, mode) {
+        crate::status_text![
+            "Adding ",
+            n(destination.display()),
+            " as a project for pull request ",
+            n(format!("#{}", offer.number)),
+            "..."
+        ]
+    } else {
+        crate::status_text![
+            "Cloning ",
+            n(address),
+            " into ",
+            n(destination.display()),
+            "..."
+        ]
+    }
+}
+
+/// What a clone or add says when its worker panicked.
+fn clone_panicked_message(mode: CloneMode, destination: &std::path::Path) -> StatusText {
+    match mode {
+        CloneMode::Clone => StatusText::from(
+            "The clone worker stopped unexpectedly, so the clone may not have \
+             finished. Nothing was added to the workspace.",
+        ),
+        CloneMode::AddExisting => crate::status_text![
+            "The worker adding ",
+            n(destination.display()),
+            " as a project stopped unexpectedly. Nothing was added to the \
+             workspace, and the folder was not changed."
+        ],
+    }
+}
+
+/// What a clone or add says when its folder could not be added as a project:
+/// what is still on disk, and that no agent was created.
+fn clone_not_added_message(
+    mode: CloneMode,
+    address: &str,
+    path: &str,
+    reason: &StatusText,
+) -> StatusText {
+    match mode {
+        CloneMode::Clone => crate::status_text![
+            "Cloned ",
+            n(address),
+            " into ",
+            n(path),
+            ", but couldn't add it as a project: ",
+            reason.clone(),
+            " The clone is still there, and no agent was created."
+        ],
+        CloneMode::AddExisting => crate::status_text![
+            "Couldn't add ",
+            n(path),
+            " as a project: ",
+            reason.clone(),
+            " The folder is untouched, and no agent was created."
+        ],
+    }
+}
+
+/// The create a ready clone hands its agent to, and that create's busy. A
+/// pull request's agent starts on the pull request's own code, under the rules
+/// every pull request create follows: the create decides about a branch of
+/// that name and about a review copy, which this request does not agree to.
+fn clone_agent_request(
+    done: &ClonedProject,
+    project: &crate::model::Project,
+    review_copy: crate::worker::ReviewCopyConsent,
+    cloned: &crate::clone_project::ClonedFor,
+) -> (CreateAgentRequest, StatusText) {
+    match &done.cloned.pull_request {
+        Some(pull_request) => (
+            CreateAgentRequest::PullRequest {
+                project: project.clone(),
+                host: pull_request.target.host.clone(),
+                owner_repo: pull_request.target.owner_repo.clone(),
+                number: pull_request.target.number,
+                title: pull_request.title.clone(),
+                state: pull_request.state.clone(),
+                head_branch: pull_request.head_branch.clone(),
+                custom_name: Some(done.agent_name.clone()),
+                use_existing_branch: false,
+                review_copy,
+                ask_id: None,
+                agents: Vec::new(),
+                cloned: Some(cloned.clone()),
+            },
+            crate::status_text![
+                "Creating a new agent worktree ",
+                q(&done.agent_name),
+                " from PR ",
+                n(format!("#{}", pull_request.target.number)),
+                " for project ",
+                q(project.name),
+                " and launching a fresh session..."
+            ],
+        ),
+        None => (
+            CreateAgentRequest::NewProject {
+                project: project.clone(),
+                custom_name: Some(done.agent_name.clone()),
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+                cloned: Some(cloned.clone()),
+            },
+            crate::status_text![
+                "Creating agent ",
+                q(&done.agent_name),
+                " in project ",
+                q(project.name),
+                " and launching a fresh session..."
+            ],
+        ),
+    }
+}
+
+/// The warning a pull request's clone owes when dux had to guess the branch
+/// its new project leads with, or `None` when it did not guess.
+fn leading_branch_guess_warning(
+    done: &ClonedProject,
+    project: &crate::model::Project,
+) -> Option<StatusUpdate> {
+    let (Some(guess), Some(pull_request)) =
+        (&done.cloned.leading_branch_guess, &done.cloned.pull_request)
+    else {
+        return None;
+    };
+    let repository = format!(
+        "{}/{}",
+        pull_request.target.host, pull_request.target.owner_repo
+    );
+    let why = match &guess.remote_default {
+        None => crate::status_text![
+            "dux could not learn the default branch of ",
+            n(repository),
+            " from its remote, so project "
+        ],
+        Some(default) => crate::status_text![
+            "dux learned that the default branch of ",
+            n(repository),
+            " is ",
+            q(default),
+            ", but the folder has no local branch of that name, so project "
+        ],
+    };
+    let tail = if guess.checked_out {
+        ", the branch the folder has checked out."
+    } else {
+        ", because the folder has no branch checked out."
+    };
+    Some(StatusUpdate::warning(crate::status_text![
+        why,
+        q(&project.name),
+        " leads with ",
+        q(&done.cloned.leading_branch),
+        tail
+    ]))
+}
+
 impl Engine {
     /// Start a clone: run the checks that need neither git nor the
     /// destination, take the destination's in-flight key and hold, and spawn
@@ -62,58 +248,18 @@ impl Engine {
         if !self.mark_in_flight(key.clone()) {
             // The refusal says what the folder's holder is doing, whatever
             // this request would have done.
-            return Err(
-                if let Some(CloneMode::AddExisting) = self.clone_running_into(&destination) {
-                    crate::status_text![
-                        "dux is already adding ",
-                        n(destination.display()),
-                        " as a project. Wait for it to finish, or pick another folder."
-                    ]
-                } else {
-                    crate::status_text![
-                        "dux is already cloning a repository into ",
-                        n(destination.display()),
-                        " or setting one up there. Wait for it to finish, or pick another \
-                 destination."
-                    ]
-                },
-            );
+            return Err(self.clone_destination_busy(&destination));
         }
         // One clone per repository at a time, held until the project exists,
         // so two quick requests into different folders (a plain clone and a
         // pull request's included) cannot make two projects. An address that
         // names no host and repository has nothing to hold.
-        let named = match &offer {
-            Some(offer) => Some((offer.host.clone(), offer.owner_repo.clone())),
-            None => crate::git::parse_remote_address(&prepared.url)
-                .map(|remote| (remote.host, remote.owner_repo)),
-        };
-        let repository_key = named.map(|(host, owner_repo)| {
-            format!("{}/{}", host.to_lowercase(), owner_repo.to_lowercase())
-        });
+        let repository_key = clone_repository_key(offer.as_ref(), &prepared.url);
         if let Some(repository) = &repository_key
             && !self.mark_in_flight(InFlightKey::CloneRepository(repository.clone()))
         {
             self.clear_in_flight(&key);
-            let holder = self
-                .clones
-                .pending
-                .values()
-                .find(|held| held.repository_key.as_deref() == Some(repository.as_str()))
-                .map(|held| held.mode);
-            return Err(if let Some(CloneMode::AddExisting) = holder {
-                crate::status_text![
-                    "dux is already adding a checkout of ",
-                    n(repository),
-                    " for a new agent. Wait for it to finish, then use New agent from PR again."
-                ]
-            } else {
-                crate::status_text![
-                    "dux is already cloning ",
-                    n(repository),
-                    " for a new agent. Wait for it to finish, then use New agent from PR again."
-                ]
-            });
+            return Err(self.clone_repository_busy(repository));
         }
         if let Err(refused) = self.hold_path_for_in_flight(
             &key,
@@ -125,23 +271,7 @@ impl Engine {
             return Err(refused.sentence("clone a repository there"));
         }
         let address = crate::clone_project::redact_remote_userinfo(&prepared.url);
-        let busy = if let (Some(offer), CloneMode::AddExisting) = (&offer, mode) {
-            crate::status_text![
-                "Adding ",
-                n(destination.display()),
-                " as a project for pull request ",
-                n(format!("#{}", offer.number)),
-                "..."
-            ]
-        } else {
-            crate::status_text![
-                "Cloning ",
-                n(address),
-                " into ",
-                n(destination.display()),
-                "..."
-            ]
-        };
+        let busy = clone_busy_message(offer.as_ref(), mode, &address, &destination);
         let op = crate::engine::status_op(busy)
             .resolve_in_handler(|outcome: &CloneOutcome| outcome.final_status())
             .with_scope(self.current_origin.clone());
@@ -186,18 +316,7 @@ impl Engine {
             }))
             .is_err();
             if panicked {
-                let said = match mode {
-                    CloneMode::Clone => StatusText::from(
-                        "The clone worker stopped unexpectedly, so the clone may not have \
-                         finished. Nothing was added to the workspace.",
-                    ),
-                    CloneMode::AddExisting => crate::status_text![
-                        "The worker adding ",
-                        n(destination.display()),
-                        " as a project stopped unexpectedly. Nothing was added to the \
-                         workspace, and the folder was not changed."
-                    ],
-                };
+                let said = clone_panicked_message(mode, &destination);
                 let _ = worker_tx.send(crate::worker::WorkerEvent::RepositoryCloned {
                     status_op_id: Some(op_id),
                     path: destination,
@@ -209,6 +328,49 @@ impl Engine {
             }
         });
         Ok(pending)
+    }
+
+    /// The refusal when another clone or add already holds `destination`, saying
+    /// what that holder is doing whatever this request would have done.
+    fn clone_destination_busy(&self, destination: &std::path::Path) -> StatusText {
+        if let Some(CloneMode::AddExisting) = self.clone_running_into(destination) {
+            crate::status_text![
+                "dux is already adding ",
+                n(destination.display()),
+                " as a project. Wait for it to finish, or pick another folder."
+            ]
+        } else {
+            crate::status_text![
+                "dux is already cloning a repository into ",
+                n(destination.display()),
+                " or setting one up there. Wait for it to finish, or pick another \
+                 destination."
+            ]
+        }
+    }
+
+    /// The refusal when a clone or add of the same repository is already
+    /// running, saying which of the two it is.
+    fn clone_repository_busy(&self, repository: &str) -> StatusText {
+        let holder = self
+            .clones
+            .pending
+            .values()
+            .find(|held| held.repository_key.as_deref() == Some(repository))
+            .map(|held| held.mode);
+        if let Some(CloneMode::AddExisting) = holder {
+            crate::status_text![
+                "dux is already adding a checkout of ",
+                n(repository),
+                " for a new agent. Wait for it to finish, then use New agent from PR again."
+            ]
+        } else {
+            crate::status_text![
+                "dux is already cloning ",
+                n(repository),
+                " for a new agent. Wait for it to finish, then use New agent from PR again."
+            ]
+        }
     }
 
     /// The offer a pull request clone is built from, from the engine's state
@@ -310,30 +472,25 @@ impl Engine {
             Err(outcome) => {
                 // No project follows this answer, so the repository is free.
                 self.release_repository_key(repository_key.as_deref());
-                match status_op_id
+                if let Some(pending) = status_op_id
                     .as_ref()
                     .and_then(|id| self.clones.pending.remove(id))
                 {
-                    Some(pending) => {
-                        self.release_repository_key(pending.repository_key.as_deref());
-                        pending.op.resolve(&outcome).into_reaction()
-                    }
-                    // The operation is gone, but its busy may still be on a
-                    // screen: the final carries its key so it replaces it.
-                    None => {
-                        let keyed = |update: StatusUpdate| match &status_op_id {
-                            Some(id) => update.with_key(id.clone()),
-                            None => update,
-                        };
-                        match outcome {
-                            CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
-                                EventReaction::Status(keyed(StatusUpdate::error(text)))
-                            }
-                            CloneOutcome::Kept(text) => {
-                                EventReaction::Status(keyed(StatusUpdate::warning(text).sticky()))
-                            }
-                            CloneOutcome::HandedOff => EventReaction::Nothing,
+                    self.release_repository_key(pending.repository_key.as_deref());
+                    pending.op.resolve(&outcome).into_reaction()
+                } else {
+                    let keyed = |update: StatusUpdate| match &status_op_id {
+                        Some(id) => update.with_key(id.clone()),
+                        None => update,
+                    };
+                    match outcome {
+                        CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
+                            EventReaction::Status(keyed(StatusUpdate::error(text)))
                         }
+                        CloneOutcome::Kept(text) => {
+                            EventReaction::Status(keyed(StatusUpdate::warning(text).sticky()))
+                        }
+                        CloneOutcome::HandedOff => EventReaction::Nothing,
                     }
                 }
             }
@@ -385,24 +542,7 @@ impl Engine {
             .and_then(|(id, _)| self.projects.iter().find(|p| &p.id == id).cloned())
         else {
             let reason = added.failure(&"the add did not say why.".into());
-            let kept = match done.mode {
-                CloneMode::Clone => crate::status_text![
-                    "Cloned ",
-                    n(address),
-                    " into ",
-                    n(path),
-                    ", but couldn't add it as a project: ",
-                    reason,
-                    " The clone is still there, and no agent was created."
-                ],
-                CloneMode::AddExisting => crate::status_text![
-                    "Couldn't add ",
-                    n(path),
-                    " as a project: ",
-                    reason,
-                    " The folder is untouched, and no agent was created."
-                ],
-            };
+            let kept = clone_not_added_message(done.mode, address, &path, &reason);
             return pending
                 .op
                 .resolve(&CloneOutcome::Kept(kept))
@@ -434,55 +574,8 @@ impl Engine {
                 pending.op.resolve(&kept).into_reaction(),
             ]);
         }
-        // A pull request's agent starts on the pull request's own code, under
-        // the rules every pull request create follows: the create decides
-        // about a branch of that name and about a review copy, which this
-        // request does not agree to.
-        let (request, busy_message) = match &done.cloned.pull_request {
-            Some(pull_request) => (
-                CreateAgentRequest::PullRequest {
-                    project: project.clone(),
-                    host: pull_request.target.host.clone(),
-                    owner_repo: pull_request.target.owner_repo.clone(),
-                    number: pull_request.target.number,
-                    title: pull_request.title.clone(),
-                    state: pull_request.state.clone(),
-                    head_branch: pull_request.head_branch.clone(),
-                    custom_name: Some(agent.clone()),
-                    use_existing_branch: false,
-                    review_copy: pending.review_copy.clone(),
-                    ask_id: None,
-                    agents: Vec::new(),
-                    cloned: Some(cloned.clone()),
-                },
-                crate::status_text![
-                    "Creating a new agent worktree ",
-                    q(agent),
-                    " from PR ",
-                    n(format!("#{}", pull_request.target.number)),
-                    " for project ",
-                    q(project.name),
-                    " and launching a fresh session..."
-                ],
-            ),
-            None => (
-                CreateAgentRequest::NewProject {
-                    project: project.clone(),
-                    custom_name: Some(agent.clone()),
-                    use_existing_branch: false,
-                    pull_before_create: false,
-                    copy_uncommitted_changes: false,
-                    cloned: Some(cloned.clone()),
-                },
-                crate::status_text![
-                    "Creating agent ",
-                    q(agent),
-                    " in project ",
-                    q(project.name),
-                    " and launching a fresh session..."
-                ],
-            ),
-        };
+        let (request, busy_message) =
+            clone_agent_request(done, &project, pending.review_copy.clone(), &cloned);
         // The create mints its busy from `current_origin`, so it reaches the
         // connection that asked for the clone.
         let scope = pending.op.scope().clone();
@@ -495,15 +588,39 @@ impl Engine {
         });
         self.current_origin = crate::statusline::StatusScope::All;
         let created = self.last_created_op_id.take();
-        let ending = match (created, dispatched) {
+        let ending =
+            self.end_clone_with_create(&op_id, pending, &project.id, created, dispatched, &cloned);
+        let mut reactions = vec![EventReaction::RebuildLeftItems, ending];
+        // Only after the project exists: a guess about a project that was not
+        // added is no use to anyone.
+        if let Some(warning) = leading_branch_guess_warning(done, &project) {
+            reactions.push(EventReaction::Status(warning.with_scope(scope)));
+        }
+        EventReaction::Multi(reactions)
+    }
+
+    /// End a clone's operation once its agent create was dispatched: handed
+    /// off to the create, whose record then follows the new project, or kept,
+    /// saying why the agent was not created.
+    fn end_clone_with_create(
+        &mut self,
+        op_id: &str,
+        pending: crate::clone_project::PendingClone,
+        project_id: &str,
+        created: Option<String>,
+        dispatched: anyhow::Result<EventReaction>,
+        cloned: &crate::clone_project::ClonedFor,
+    ) -> EventReaction {
+        let not_created = |reason: StatusText| CloneOutcome::Kept(cloned.agent_missing(reason));
+        match (created, dispatched) {
             (Some(create), Ok(reaction)) => {
                 // The record following the clone follows the create from here,
                 // holding the new project the way a create's own record does.
                 self.operations.hold(
-                    &op_id,
-                    &crate::operations::Hold::shared(InFlightKey::Project(project.id.clone())),
+                    op_id,
+                    &crate::operations::Hold::shared(InFlightKey::Project(project_id.to_string())),
                 );
-                self.operations.hand_off(&op_id, &create);
+                self.operations.hand_off(op_id, &create);
                 EventReaction::Multi(vec![
                     pending.op.resolve(&CloneOutcome::HandedOff).into_reaction(),
                     reaction,
@@ -523,47 +640,6 @@ impl Engine {
                 .op
                 .resolve(&not_created(format!("{error:#}").into()))
                 .into_reaction(),
-        };
-        let mut reactions = vec![EventReaction::RebuildLeftItems, ending];
-        // Only after the project exists: a guess about a project that was not
-        // added is no use to anyone.
-        if let (Some(guess), Some(pull_request)) =
-            (&done.cloned.leading_branch_guess, &done.cloned.pull_request)
-        {
-            let repository = format!(
-                "{}/{}",
-                pull_request.target.host, pull_request.target.owner_repo
-            );
-            let why = match &guess.remote_default {
-                None => crate::status_text![
-                    "dux could not learn the default branch of ",
-                    n(repository),
-                    " from its remote, so project "
-                ],
-                Some(default) => crate::status_text![
-                    "dux learned that the default branch of ",
-                    n(repository),
-                    " is ",
-                    q(default),
-                    ", but the folder has no local branch of that name, so project "
-                ],
-            };
-            let tail = if guess.checked_out {
-                ", the branch the folder has checked out."
-            } else {
-                ", because the folder has no branch checked out."
-            };
-            reactions.push(EventReaction::Status(
-                StatusUpdate::warning(crate::status_text![
-                    why,
-                    q(&project.name),
-                    " leads with ",
-                    q(&done.cloned.leading_branch),
-                    tail
-                ])
-                .with_scope(scope),
-            ));
         }
-        EventReaction::Multi(reactions)
     }
 }

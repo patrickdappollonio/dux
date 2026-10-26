@@ -32,6 +32,10 @@ fn head(dir: &Path) -> String {
     crate::git::head_commit(dir).unwrap()
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn pull(engine: &mut Engine, checkout: &Path) -> Result<crate::worker::PullOutcome, String> {
     let _ = engine.apply(Command::Pull {
         repo_path: checkout.to_path_buf(),
