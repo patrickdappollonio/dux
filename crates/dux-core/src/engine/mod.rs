@@ -3409,6 +3409,85 @@ fn report_missing_directory(
     });
 }
 
+/// Why a reconnect cannot start: the agent's directory is gone. A managed
+/// working copy can be recreated; a standalone agent's folder is the user's,
+/// so dux cannot.
+fn reconnect_directory_missing_message(session: &AgentSession) -> StatusText {
+    match &session.workspace {
+        crate::model::AgentWorkspace::Managed(managed) => crate::status_text![
+            "The working copy for agent ",
+            q(session.display_label()),
+            " at ",
+            n(crate::home_path::shorten_home(Path::new(
+                &managed.worktree_path
+            ))),
+            " no longer exists. Recreate the \
+             working copy to check its branch out there again, or delete this agent."
+        ],
+        crate::model::AgentWorkspace::Folder(folder) => crate::status_text![
+            "The folder agent ",
+            q(session.display_label()),
+            " runs in (",
+            n(crate::home_path::shorten_home(Path::new(
+                &folder.folder_path
+            ))),
+            ") no longer exists. Restore the folder, or delete this agent and create a new one pointing at the folder you want."
+        ],
+    }
+}
+
+/// Report, once each, the pull-request sync entries whose working copy has
+/// gone, so their agents drop out of the plan on its next rebuild. The lock is
+/// let go before anything is sent.
+fn report_missing_pr_sync_worktrees(
+    sessions: &Mutex<Vec<PrSyncEntry>>,
+    tx: &std::sync::mpsc::Sender<WorkerEvent>,
+) {
+    let Ok(guard) = sessions.lock() else {
+        return;
+    };
+    let gone: Vec<(String, std::path::PathBuf)> = guard
+        .iter()
+        .map(|entry| {
+            (
+                entry.session_id.clone(),
+                std::path::PathBuf::from(&entry.worktree_path),
+            )
+        })
+        .filter(|(_, path)| {
+            crate::git::directory_presence(path) == crate::git::DirectoryPresence::Missing
+        })
+        .collect();
+    drop(guard);
+    for (session_id, path) in gone {
+        report_missing_directory(tx, &session_id, &path);
+    }
+}
+
+/// Which agents this pull-request sync cycle covers: everything once the
+/// inactive tail's slower clock is due, the active half otherwise. An unset
+/// clock starts now rather than sweeping at once.
+fn pr_sync_scope(
+    last_inactive_sweep: &Mutex<Option<Instant>>,
+    inactive_interval_secs: u64,
+) -> crate::gh::SyncScope {
+    let mut swept_at = last_inactive_sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let since = if let Some(at) = *swept_at {
+        at.elapsed()
+    } else {
+        *swept_at = Some(Instant::now());
+        Duration::ZERO
+    };
+    if crate::gh::inactive_sweep_due(since, inactive_interval_secs) {
+        *swept_at = Some(Instant::now());
+        crate::gh::SyncScope::Everything
+    } else {
+        crate::gh::SyncScope::ActiveOnly
+    }
+}
+
 impl Engine {
     /// Whether the new-agent-from-PR flow is available: GitHub integration is
     /// enabled in config AND the `gh` CLI is installed and authenticated. Mirrors
@@ -4243,25 +4322,7 @@ impl Engine {
                 // rebuild. Without this, every question the sync asks runs git
                 // in a directory that is not there, once per cycle, for as long
                 // as nobody happens to look at the agent.
-                if let Ok(guard) = sessions.lock() {
-                    let gone: Vec<(String, std::path::PathBuf)> = guard
-                        .iter()
-                        .map(|entry| {
-                            (
-                                entry.session_id.clone(),
-                                std::path::PathBuf::from(&entry.worktree_path),
-                            )
-                        })
-                        .filter(|(_, path)| {
-                            crate::git::directory_presence(path)
-                                == crate::git::DirectoryPresence::Missing
-                        })
-                        .collect();
-                    drop(guard);
-                    for (session_id, path) in gone {
-                        report_missing_directory(tx, &session_id, &path);
-                    }
-                }
+                report_missing_pr_sync_worktrees(&sessions, tx);
                 // Backed-off hosts are skipped inside run_pr_sync via this
                 // snapshot (their sessions keep last-known PRs), so no global
                 // pause is needed here.
@@ -4277,26 +4338,10 @@ impl Engine {
                 // clock: nobody is working in it, nothing on screen is waiting
                 // on the answer, and its pull request moves rarely. Most cycles
                 // therefore cover the active half alone.
-                let scope = {
-                    let mut swept_at = last_inactive_sweep
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let since = if let Some(at) = *swept_at {
-                        at.elapsed()
-                    } else {
-                        *swept_at = Some(Instant::now());
-                        Duration::ZERO
-                    };
-                    if crate::gh::inactive_sweep_due(
-                        since,
-                        inactive_interval_secs.load(Ordering::Relaxed),
-                    ) {
-                        *swept_at = Some(Instant::now());
-                        crate::gh::SyncScope::Everything
-                    } else {
-                        crate::gh::SyncScope::ActiveOnly
-                    }
-                };
+                let scope = pr_sync_scope(
+                    &last_inactive_sweep,
+                    inactive_interval_secs.load(Ordering::Relaxed),
+                );
                 // The blind poll: nobody asked, so a dormant agent whose pull
                 // request is already closed is left alone until a one-shot
                 // trigger looks at it.
@@ -6002,28 +6047,9 @@ impl Engine {
         if crate::git::directory_presence(std::path::Path::new(session.directory()))
             == crate::git::DirectoryPresence::Missing
         {
-            let message = match &session.workspace {
-                crate::model::AgentWorkspace::Managed(managed) => crate::status_text![
-                    "The working copy for agent ",
-                    q(session.display_label()),
-                    " at ",
-                    n(crate::home_path::shorten_home(Path::new(
-                        &managed.worktree_path
-                    ))),
-                    " no longer exists. Recreate the \
-                     working copy to check its branch out there again, or delete this agent."
-                ],
-                crate::model::AgentWorkspace::Folder(folder) => crate::status_text![
-                    "The folder agent ",
-                    q(session.display_label()),
-                    " runs in (",
-                    n(crate::home_path::shorten_home(Path::new(
-                        &folder.folder_path
-                    ))),
-                    ") no longer exists. Restore the folder, or delete this agent and create a new one pointing at the folder you want."
-                ],
-            };
-            return Ok(ReconnectPlan::WorktreeMissing { message });
+            return Ok(ReconnectPlan::WorktreeMissing {
+                message: reconnect_directory_missing_message(&session),
+            });
         }
 
         if force {
@@ -6059,23 +6085,8 @@ impl Engine {
         }
         // A standalone agent has no project whose default provider it could
         // be diverging from, so the note is simply not written for one.
-        if let Some(project) = session
-            .project_id()
-            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))
-            && project.default_provider != session.provider
-        {
-            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
-                "current project provider"
-            } else {
-                "current global default provider"
-            };
-            msg.push(crate::status_text![
-                " Note: this agent uses ",
-                n(session.provider.as_str()),
-                format!(". Your {} is ", provider_label),
-                n(project.default_provider.as_str()),
-                "."
-            ]);
+        if let Some(note) = self.provider_divergence_note(&session) {
+            msg.push(note);
         }
 
         let branch_name = session.display_label();
@@ -6109,6 +6120,29 @@ impl Engine {
             resume: resume.is_resume(),
             detached_label,
         })
+    }
+
+    /// The note a reconnect adds when the agent's provider is not its project's
+    /// default, or `None` when they agree or the agent has no project.
+    fn provider_divergence_note(&self, session: &AgentSession) -> Option<StatusText> {
+        let project = session
+            .project_id()
+            .and_then(|project_id| self.projects.iter().find(|p| p.id == project_id))?;
+        if project.default_provider == session.provider {
+            return None;
+        }
+        let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+            "current project provider"
+        } else {
+            "current global default provider"
+        };
+        Some(crate::status_text![
+            " Note: this agent uses ",
+            n(session.provider.as_str()),
+            format!(". Your {} is ", provider_label),
+            n(project.default_provider.as_str()),
+            "."
+        ])
     }
 
     /// Provider currently driving the session's live PTY, if any. After an
