@@ -2371,6 +2371,15 @@ pub(crate) fn run_create_agent_branch_inspection_job(
 
 #[cfg(test)]
 mod tests {
+
+    /// What a test writes to `server.auth.disable_no_auth_warning`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum NoAuthWarning {
+        /// `true`: the warning is dismissed.
+        Dismissed,
+        /// `false`: it shows again.
+        Shown,
+    }
     use std::sync::mpsc;
 
     use chrono::Utc;
@@ -2501,10 +2510,14 @@ mod tests {
 
     /// dux writes the no-password warning's dismissal (`value`) to the file
     /// itself, as the route does, and asks for the reload it owes.
-    fn dismiss_and_reload(app: &mut App, value: bool) {
+    fn dismiss_and_reload(app: &mut App, warning: NoAuthWarning) {
         let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
-        dux_core::config_keys::set_plain(&app.engine.paths.config_path, &key, &value.to_string())
-            .expect("dux writes the file");
+        dux_core::config_keys::set_plain(
+            &app.engine.paths.config_path,
+            &key,
+            &(warning == NoAuthWarning::Dismissed).to_string(),
+        )
+        .expect("dux writes the file");
         app.engine
             .reload_after_own_config_write(|engine| {
                 engine.apply(dux_core::engine::Command::ReloadConfig)
@@ -2528,21 +2541,21 @@ mod tests {
         let read = next_reload_read(&app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
 
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         let read = next_reload_read(&app);
         assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // Two quick writes of dux's own, the second while the first one's
         // reload is still reading.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // Somebody asks while dux's own reload is reading.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
         ask_for_a_reload(&mut app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
@@ -2551,14 +2564,14 @@ mod tests {
         // Somebody's reload is reading when dux writes.
         ask_for_a_reload(&mut app);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // dux's write and somebody's request fold into one follow-up.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         ask_for_a_reload(&mut app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
@@ -2569,7 +2582,7 @@ mod tests {
             &mut app.engine.config_writer,
             dux_core::config_queue::ConfigWriteQueue::with_dead_writer(&paths.config_path),
         );
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         assert!(!app.engine.reloading, "the reload never started");
         app.engine.config_writer = writer;
         ask_for_a_reload(&mut app);

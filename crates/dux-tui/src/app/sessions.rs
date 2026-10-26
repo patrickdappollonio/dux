@@ -10137,7 +10137,7 @@ mod tests {
 
     /// Answer the non-default-branch dialog the way a person does: move focus
     /// to the checkbox, set it, then press the confirm button.
-    fn answer_branch_dialog(app: &mut App, check_out_default: bool) {
+    fn answer_branch_dialog(app: &mut App, checkout: dux_core::add_project_plan::DefaultCheckout) {
         let PromptState::ConfirmNonDefaultBranch {
             checkout_default, ..
         } = &app.prompt
@@ -10153,7 +10153,9 @@ mod tests {
             .unwrap();
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        if starts_checked != check_out_default {
+        if starts_checked
+            != (checkout == dux_core::add_project_plan::DefaultCheckout::CheckOutDefault)
+        {
             app.handle_key(key(KeyCode::Char(' '), KeyModifiers::NONE))
                 .unwrap();
         }
@@ -10371,7 +10373,10 @@ mod tests {
 
         app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
             .expect("add_project");
-        answer_branch_dialog(&mut app, false);
+        answer_branch_dialog(
+            &mut app,
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
+        );
         drain_until(&mut app, "the project", |app| {
             !app.engine.projects.is_empty() && stored_project_base(app).is_some()
         });
@@ -10400,7 +10405,10 @@ mod tests {
 
         app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
             .expect("add_project");
-        answer_branch_dialog(&mut app, true);
+        answer_branch_dialog(
+            &mut app,
+            dux_core::add_project_plan::DefaultCheckout::CheckOutDefault,
+        );
         drain_until(&mut app, "the project", |app| {
             !app.engine.projects.is_empty() && stored_project_base(app).is_some()
         });
@@ -10427,7 +10435,10 @@ mod tests {
         let mut app = journey_app();
         app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
             .expect("add_project");
-        answer_branch_dialog(&mut app, false);
+        answer_branch_dialog(
+            &mut app,
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
+        );
         drain_until(&mut app, "the project", |app| {
             !app.engine.projects.is_empty() && stored_project_base(app).is_some()
         });

@@ -14556,6 +14556,24 @@ fn bare_repositories_kept_line(
 
 #[cfg(test)]
 mod tests {
+
+    /// Whether a test's row drag has moved far enough to become a drag.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DragPromotion {
+        /// It is a drag.
+        Promoted,
+        /// It is still a press.
+        Pending,
+    }
+
+    /// How wide a test's startup log lines are.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LogLineWidth {
+        /// Exactly as wide as the content pane.
+        PaneWide,
+        /// Short numbered lines.
+        Short,
+    }
     use super::*;
 
     use crate::app::test_support::{
@@ -17061,7 +17079,7 @@ mod tests {
     fn render_with_row_drag(
         source: usize,
         hover: Option<usize>,
-        promoted: bool,
+        promotion: DragPromotion,
     ) -> (ratatui::buffer::Buffer, Rect, Vec<usize>) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -17086,7 +17104,7 @@ mod tests {
             source_id: format!("s{source}"),
             hover,
             hover_id: hover.map(|index| format!("s{index}")),
-            promoted,
+            promoted: promotion == DragPromotion::Promoted,
         });
 
         let backend = TestBackend::new(120, 40);
@@ -17173,7 +17191,8 @@ mod tests {
     #[test]
     fn the_insertion_rule_marks_the_gap_the_drop_would_land_in() {
         for (source, hover) in [(0usize, 2usize), (2, 0), (0, 1), (1, 0)] {
-            let (buf, area, map) = render_with_row_drag(source, Some(hover), true);
+            let (buf, area, map) =
+                render_with_row_drag(source, Some(hover), DragPromotion::Promoted);
             let boundary = crate::app::reorder::drop_marker_boundary(source, hover);
             let expected = if boundary == 0 {
                 area.y - 1
@@ -17288,7 +17307,7 @@ mod tests {
 
     #[test]
     fn an_unpromoted_gesture_paints_no_marker() {
-        let (buf, area, _map) = render_with_row_drag(0, None, false);
+        let (buf, area, _map) = render_with_row_drag(0, None, DragPromotion::Pending);
         assert_eq!(
             painted_marker_row(&buf, area),
             None,
@@ -24221,7 +24240,7 @@ mod tests {
         size: (u16, u16),
         rows: usize,
         scroll: u16,
-        long_line: bool,
+        width: LogLineWidth,
     ) -> (App, ratatui::buffer::Buffer) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -24229,7 +24248,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         let content = (0..rows)
             .map(|i| {
-                if long_line {
+                if width == LogLineWidth::PaneWide {
                     // Exactly as wide as the content pane, so every rendered row
                     // reaches its last content column: the marker must not eat it.
                     let pane = centered_rect(96, 94, Rect::new(0, 0, size.0, size.1));
@@ -24279,7 +24298,7 @@ mod tests {
         let frame = Rect::new(0, 0, 100, 30);
         let rows = 400;
 
-        let (app, buf) = startup_log_frame((100, 30), rows, 0, false);
+        let (app, buf) = startup_log_frame((100, 30), rows, 0, LogLineWidth::Short);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert!(
             rows > content.height as usize,
@@ -24289,14 +24308,14 @@ mod tests {
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
 
         let max = rows as u16 - content.height;
-        let (_, buf) = startup_log_frame((100, 30), rows, max / 2, false);
+        let (_, buf) = startup_log_frame((100, 30), rows, max / 2, LogLineWidth::Short);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
-        let (_, buf) = startup_log_frame((100, 30), rows, max, false);
+        let (_, buf) = startup_log_frame((100, 30), rows, max, LogLineWidth::Short);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
 
         for scroll in [0, max / 2, max] {
-            let (_, buf) = startup_log_frame((100, 30), rows, scroll, false);
+            let (_, buf) = startup_log_frame((100, 30), rows, scroll, LogLineWidth::Short);
             assert_eq!(
                 marker_in(&buf, content),
                 None,
@@ -24308,7 +24327,7 @@ mod tests {
     #[test]
     fn a_short_startup_log_gets_no_marker() {
         let frame = Rect::new(0, 0, 100, 30);
-        let (app, buf) = startup_log_frame((100, 30), 3, 0, false);
+        let (app, buf) = startup_log_frame((100, 30), 3, 0, LogLineWidth::Short);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert!(content.height > 3, "fixture must fit");
         assert_eq!(marker_in(&buf, border_column), None);
@@ -24320,7 +24339,7 @@ mod tests {
         // the pane occupies its LAST content column. The marker lives in the
         // modal's border column, one cell further out, so that character survives.
         let frame = Rect::new(0, 0, 100, 30);
-        let (app, buf) = startup_log_frame((100, 30), 400, 5, true);
+        let (app, buf) = startup_log_frame((100, 30), 400, 5, LogLineWidth::PaneWide);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
         let last_col = content.x + content.width - 1;
@@ -24339,7 +24358,7 @@ mod tests {
         // area, which includes the marker's row. It must not reach the border
         // column the marker uses.
         let frame = Rect::new(0, 0, 100, 30);
-        let (mut app, _) = startup_log_frame((100, 30), 400, 5, false);
+        let (mut app, _) = startup_log_frame((100, 30), 400, 5, LogLineWidth::Short);
         let (_, border_column) = startup_log_rects(&app, frame);
         if let Some(viewer) = &mut app.startup_log_viewer {
             viewer.searching = true;

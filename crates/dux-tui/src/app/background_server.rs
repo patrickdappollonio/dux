@@ -1423,7 +1423,7 @@ pub(crate) mod tests {
 
     /// A clone's op waiting for its worker, as a browser (`from_web`) or this
     /// surface would have left it.
-    fn a_clone_op(app: &mut App, from_web: bool) -> String {
+    fn a_clone_op(app: &mut App, asked_by: dux_core::engine::CloneAskedBy) -> String {
         let op = dux_core::engine::status_op("Cloning…".to_string()).resolve_in_handler(
             |outcome: &dux_core::clone_project::CloneOutcome| outcome.final_status(),
         );
@@ -1432,7 +1432,7 @@ pub(crate) mod tests {
             id.clone(),
             dux_core::clone_project::PendingClone {
                 op,
-                from_web,
+                from_web: asked_by == dux_core::engine::CloneAskedBy::Browser,
                 repository_key: None,
                 mode: dux_core::clone_project::CloneMode::Clone,
                 destination: std::path::PathBuf::new(),
@@ -2618,7 +2618,7 @@ pub(crate) mod tests {
         );
 
         let folder = tempfile::tempdir().unwrap();
-        let web_clone = a_clone_op(&mut app, true);
+        let web_clone = a_clone_op(&mut app, dux_core::engine::CloneAskedBy::Browser);
         app.engine
             .worker_tx
             .send(a_finished_clone(
@@ -2655,7 +2655,7 @@ pub(crate) mod tests {
         // One event the way the drain handles it, and no further: the create
         // this dispatches fails at once on a folder that is no repository, and
         // draining its failure would spend the flag this part checks.
-        let own_clone = a_clone_op(&mut app, false);
+        let own_clone = a_clone_op(&mut app, dux_core::engine::CloneAskedBy::OtherSurface);
         let reaction = app.engine.process_worker_event(a_finished_clone(
             own_clone,
             folder.path().join("own"),

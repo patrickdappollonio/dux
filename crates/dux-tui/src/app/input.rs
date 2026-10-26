@@ -12612,6 +12612,15 @@ fn killed_runtime_message(agents: usize, terminals: usize, already_gone: usize) 
 
 #[cfg(test)]
 mod tests {
+
+    /// A test's explicit `forward_scroll` setting for the agent's provider.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ForwardScroll {
+        /// Always forward scroll input to the child.
+        Always,
+        /// Never forward it.
+        Never,
+    }
     use dux_core::ids::{TabId, TabIdRef};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -22190,7 +22199,7 @@ not_a_real_action = ["x"]
     /// Point the selected agent's provider at a fixed `forward_scroll`, so a
     /// wheel test picks its branch instead of depending on whether the child
     /// happens to have raised the alt screen.
-    fn set_forward_scroll(app: &mut App, forward: bool) {
+    fn set_forward_scroll(app: &mut App, setting: ForwardScroll) {
         let provider = app.engine.sessions[0].provider.as_str().to_string();
         let entry = app
             .engine
@@ -22202,7 +22211,7 @@ not_a_real_action = ["x"]
                 command: provider,
                 ..Default::default()
             });
-        entry.forward_scroll = Some(forward);
+        entry.forward_scroll = Some(setting == ForwardScroll::Always);
     }
 
     /// Wheel-up over the PTY pane in interactive mode, as the host sends it
@@ -22218,7 +22227,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
         app.input_target = InputTarget::Agent;
 
         app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
@@ -22340,7 +22349,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         app.input_target = InputTarget::Agent;
 
         app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
@@ -30332,7 +30341,7 @@ cyan = "#00ffff"
     /// as the press that asked for it (`pressed`) or as the check on open.
     fn apply_pr_answer(
         app: &mut App,
-        pressed: bool,
+        purpose: crate::app::pr_clone::PrFolderCheck,
         result: Result<
             (
                 crate::app::PrFolder,
@@ -30343,11 +30352,7 @@ cyan = "#00ffff"
     ) {
         let (_, destination, name, _) = clone_prompt_fields(app);
         let edits = pr_form(app).edits;
-        pr_form_mut(app).check_purpose = if pressed {
-            crate::app::pr_clone::PrFolderCheck::Submit
-        } else {
-            crate::app::pr_clone::PrFolderCheck::Open
-        };
+        pr_form_mut(app).check_purpose = purpose;
         app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
             destination: destination.trim().to_string(),
             agent_name: name.trim().to_string(),
@@ -30749,7 +30754,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            true,
+            crate::app::pr_clone::PrFolderCheck::Submit,
             Ok((
                 held.clone(),
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30772,7 +30777,7 @@ cyan = "#00ffff"
         // The same answer again is what the press agreed to: it goes ahead.
         apply_pr_answer(
             &mut app,
-            true,
+            crate::app::pr_clone::PrFolderCheck::Submit,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -30780,7 +30785,11 @@ cyan = "#00ffff"
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         // A check that refuses the folder says why in the form and sends nothing.
-        apply_pr_answer(&mut app, true, Err("That folder is taken.".to_string()));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Err("That folder is taken.".to_string()),
+        );
         assert_eq!(
             pr_form(&app).error.as_deref(),
             Some("That folder is taken.")
@@ -30919,7 +30928,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -31149,7 +31158,7 @@ cyan = "#00ffff"
         type_text(&mut app, "w");
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -31205,7 +31214,11 @@ cyan = "#00ffff"
             }
         };
         name_is_empty(&mut app);
-        apply_pr_answer(&mut app, true, Ok((crate::app::PrFolder::Free, None)));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Ok((crate::app::PrFolder::Free, None)),
+        );
         assert_eq!(app.status.text(), "Type a name for the agent, or cancel.");
     }
 
@@ -31217,7 +31230,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NoFreeName {
@@ -31279,14 +31292,18 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held.clone(),
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
             )),
         );
         // Still a checkout, but now the copy is needed.
-        apply_pr_answer(&mut app, true, Ok((held, Some(needed_outlook()))));
+        apply_pr_answer(
+            &mut app,
+            crate::app::pr_clone::PrFolderCheck::Submit,
+            Ok((held, Some(needed_outlook()))),
+        );
         let said = app.status.text();
         assert!(
             said.starts_with("The review copy answer for that folder changed."),
@@ -31312,7 +31329,7 @@ cyan = "#00ffff"
         let held = checkout_of(&app);
         apply_pr_answer(
             &mut app,
-            false,
+            crate::app::pr_clone::PrFolderCheck::Open,
             Ok((
                 held,
                 Some(dux_core::status_text::ReviewCopyOutlook::NotNeeded),
@@ -32263,7 +32280,7 @@ cyan = "#00ffff"
         // Pin the local branch of every scroll path: with `forward_scroll`
         // unset these tests would depend on whether the child happened to raise
         // the alt screen, and a forwarded scroll never enters scroll mode.
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
 
         // Wait on the fact the test depends on (real history), not on a sleep.
         for _ in 0..200 {
@@ -33063,7 +33080,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         app.input_target = InputTarget::Agent;
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
@@ -33090,7 +33107,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         fill_and_select_l30(&mut app);
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
         app.handle_center_mouse_wheel(MouseEvent {
@@ -33818,7 +33835,7 @@ cyan = "#00ffff"
     fn pgup_minimized_forwards_to_a_page_owning_child() {
         let mut app = app_with_minimized_typeable_agent();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        set_forward_scroll(&mut app, true);
+        set_forward_scroll(&mut app, ForwardScroll::Always);
 
         tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
 
@@ -33840,7 +33857,7 @@ cyan = "#00ffff"
     fn pgup_minimized_scrolls_locally_for_a_normal_buffer_child() {
         let mut app = app_with_minimized_typeable_agent();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
-        set_forward_scroll(&mut app, false);
+        set_forward_scroll(&mut app, ForwardScroll::Never);
         let mut fill = String::new();
         for n in 0..40 {
             fill.push_str(&format!("L{n:02}\n"));
