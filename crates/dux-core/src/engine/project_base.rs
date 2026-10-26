@@ -5,8 +5,16 @@
 //! [`Engine::process_project_base_branch_changed`], which saves the base and
 //! resolves the op into the final both surfaces show.
 
-use super::*;
-use crate::model::ProjectBranchStatus;
+use std::path::Path;
+use std::thread;
+
+use super::{
+    ChangeBaseOutcome, Engine, EventReaction, ProjectFolderAction, ResolvedFinal, StatusUpdate,
+    change_base_branch_busy_message, change_base_branch_path_missing_message, change_base_final,
+    status_op,
+};
+use crate::model::{Project, ProjectBranchStatus};
+use crate::worker::WorkerEvent;
 
 impl Engine {
     /// Start changing the base branch of project `project_id` to `branch`.
