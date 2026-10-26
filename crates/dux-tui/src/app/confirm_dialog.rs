@@ -38,6 +38,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use super::components::ButtonState;
 use super::components::{
     BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, ScrollViewRender, button_row,
     button_state_for, render_scroll_view, shared_button_width, wrap_styled_lines,
@@ -46,6 +47,7 @@ use super::modal::{ModalFamily, modal_spec};
 use super::render::centered_rect_exact;
 use super::{App, PromptState};
 use crate::keybindings::{Action, BindingScope};
+use crate::theme::FocusState;
 
 /// The width every Confirm dialog asks for, border included. Narrower only on
 /// a narrower screen.
@@ -61,31 +63,43 @@ pub(crate) struct ConfirmButton<'a> {
     label: &'a str,
     kind: ButtonKind,
     target: ButtonPressedTarget,
-    focused: bool,
-    enabled: bool,
+    resting: ButtonState,
+}
+
+/// Whether a button can be pressed right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Availability {
+    /// It can.
+    Enabled,
+    /// It is drawn disabled and does nothing.
+    Disabled,
 }
 
 impl<'a> ConfirmButton<'a> {
-    /// A button the dialog's focus is (`focused`) or is not on. Press feedback
-    /// comes from the app's pressed-button state, keyed by `target`.
+    /// A button the dialog's focus is or is not on. Press feedback comes from
+    /// the app's pressed-button state, keyed by `target`.
     pub(crate) fn new(
         label: &'a str,
         kind: ButtonKind,
         target: ButtonPressedTarget,
-        focused: bool,
+        focus: FocusState,
     ) -> Self {
         Self {
             label,
             kind,
             target,
-            focused,
-            enabled: true,
+            resting: match focus {
+                FocusState::Focused => ButtonState::Focused,
+                FocusState::Unfocused => ButtonState::Normal,
+            },
         }
     }
 
-    /// Draw the button disabled when `enabled` is false.
-    pub(crate) fn enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
+    /// Draw the button disabled while it is not available.
+    pub(crate) fn availability(mut self, availability: Availability) -> Self {
+        if availability == Availability::Disabled {
+            self.resting = ButtonState::Disabled;
+        }
         self
     }
 }
@@ -347,8 +361,7 @@ impl App {
                 .state(button_state_for(
                     button.target,
                     self.pressed_button,
-                    button.focused,
-                    button.enabled,
+                    button.resting,
                 ))
                 .render(frame, rect, &self.theme);
         }

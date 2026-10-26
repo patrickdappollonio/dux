@@ -1,5 +1,6 @@
 use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
+use super::components::ButtonState;
 use super::components::CheckMark;
 use super::components::ellipsis::{
     ELLIPSIS, ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width,
@@ -1344,7 +1345,11 @@ fn delete_agent_cancel_button(focus: DeleteAgentFocus) -> ConfirmButton<'static>
         "Cancel",
         ButtonKind::Confirm,
         ButtonPressedTarget::ConfirmDeleteCancel,
-        focus == DeleteAgentFocus::Cancel,
+        if focus == DeleteAgentFocus::Cancel {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        },
     )
 }
 
@@ -1355,7 +1360,11 @@ fn delete_agent_delete_button(focus: DeleteAgentFocus, label: &str) -> ConfirmBu
         label,
         ButtonKind::Danger,
         ButtonPressedTarget::ConfirmDeleteConfirm,
-        focus == DeleteAgentFocus::Delete,
+        if focus == DeleteAgentFocus::Delete {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        },
     )
 }
 
@@ -1382,9 +1391,22 @@ fn confirm_focus_buttons(
             "Cancel",
             ButtonKind::Confirm,
             cancel_target,
-            !focus.is_confirm(),
+            if focus.is_confirm() {
+                FocusState::Unfocused
+            } else {
+                FocusState::Focused
+            },
         ),
-        ConfirmButton::new(label, kind, target, focus.is_confirm()),
+        ConfirmButton::new(
+            label,
+            kind,
+            target,
+            if focus.is_confirm() {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
+        ),
     )
 }
 
@@ -3540,8 +3562,11 @@ impl App {
                 state: button_state_for(
                     ButtonPressedTarget::DormantTabCard,
                     self.dormant_tab_press,
-                    self.focus == FocusPane::Center,
-                    true,
+                    if self.focus == FocusPane::Center {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    },
                 ),
             },
         ));
@@ -4334,8 +4359,11 @@ impl App {
         let state = button_state_for(
             ButtonPressedTarget::TakeOverCard,
             self.takeover_press,
-            self.focus == FocusPane::Center,
-            true,
+            if self.focus == FocusPane::Center {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            },
         );
         Button::new(label)
             .state(state)
@@ -7242,13 +7270,21 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                    prompt.focus == DeleteWorktreeFocus::Cancel,
+                    if prompt.focus == DeleteWorktreeFocus::Cancel {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 act: ConfirmButton::new(
                     "Delete worktree",
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                    prompt.focus == DeleteWorktreeFocus::Delete,
+                    if prompt.focus == DeleteWorktreeFocus::Delete {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 reserve_labels: &[],
             },
@@ -8061,8 +8097,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ProjectInfoClose,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, close_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::ProjectInfo {
@@ -8239,15 +8274,27 @@ impl App {
                 "Close",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedClose,
-                *focus == ConfigReloadFailedFocus::Close,
+                if *focus == ConfigReloadFailedFocus::Close {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
             ),
             ConfirmButton::new(
                 "Recover",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedApply,
-                *focus == ConfigReloadFailedFocus::Apply,
+                if *focus == ConfigReloadFailedFocus::Apply {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
             )
-            .enabled(*recover_old_config),
+            .availability(if *recover_old_config {
+                crate::app::confirm_dialog::Availability::Enabled
+            } else {
+                crate::app::confirm_dialog::Availability::Disabled
+            }),
             &[],
         );
 
@@ -8310,8 +8357,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::AddProjectFailedOk,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, ok_area, &self.theme);
 
@@ -8404,8 +8450,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::AgentInfoClose,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, close_area, &self.theme);
 
@@ -8769,13 +8814,21 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
-                    focus == RecreateWorkingCopyFocus::Cancel,
+                    if focus == RecreateWorkingCopyFocus::Cancel {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 act: ConfirmButton::new(
                     &confirm_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
-                    focus == RecreateWorkingCopyFocus::Recreate,
+                    if focus == RecreateWorkingCopyFocus::Recreate {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 reserve_labels: &[],
             },
@@ -8969,13 +9022,21 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     dialog.cancel_target,
-                    !dialog.confirm_focused,
+                    if dialog.confirm_focused {
+                        FocusState::Unfocused
+                    } else {
+                        FocusState::Focused
+                    },
                 ),
                 act: ConfirmButton::new(
                     dialog.confirm_label,
                     ButtonKind::Danger,
                     dialog.confirm_target,
-                    dialog.confirm_focused,
+                    if dialog.confirm_focused {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 reserve_labels: &[],
             },
@@ -9423,13 +9484,21 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                    *focus == ConfirmNonDefaultBranchFocus::Cancel,
+                    if *focus == ConfirmNonDefaultBranchFocus::Cancel {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 act: ConfirmButton::new(
                     add_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                    *focus == ConfirmNonDefaultBranchFocus::Add,
+                    if *focus == ConfirmNonDefaultBranchFocus::Add {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 // Sized for every label the act button can show, so toggling
                 // the checkbox never resizes the buttons.
@@ -10124,8 +10193,11 @@ impl App {
                 .state(button_state_for(
                     ButtonPressedTarget::CloneChooseExisting,
                     self.pressed_button,
-                    *focus == CloneProjectFocus::ChooseExisting,
-                    true,
+                    if *focus == CloneProjectFocus::ChooseExisting {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    },
                 ))
                 .render(frame, button, &self.theme);
             choose_button = Some(button);
@@ -10375,8 +10447,11 @@ impl App {
                 .state(button_state_for(
                     ButtonPressedTarget::PullRequestChooseProject,
                     self.pressed_button,
-                    !field_focused,
-                    true,
+                    if field_focused {
+                        ButtonState::Normal
+                    } else {
+                        ButtonState::Focused
+                    },
                 ))
                 .render(frame, button, &self.theme);
             choose_button = Some(button);
@@ -10740,8 +10815,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfigureFieldCancel,
                 self.pressed_button,
-                focus == ConfigureFieldFocus::Cancel,
-                true,
+                if focus == ConfigureFieldFocus::Cancel {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, cancel_button, &self.theme);
         Button::new("Save")
@@ -10749,8 +10827,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfigureFieldSave,
                 self.pressed_button,
-                focus == ConfigureFieldFocus::Save,
-                true,
+                if focus == ConfigureFieldFocus::Save {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, save_button, &self.theme);
 
@@ -11060,8 +11141,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::StartupCommandLogsClose,
                 self.pressed_button,
-                prompt.focus == StartupCommandLogFocus::Close,
-                true,
+                if prompt.focus == StartupCommandLogFocus::Close {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, close_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
@@ -11243,7 +11327,19 @@ impl App {
                 KillRunningFooterAction::Selected => ButtonPressedTarget::RuntimeKillSelected,
                 KillRunningFooterAction::Visible => ButtonPressedTarget::RuntimeKillVisible,
             };
-            let state = button_state_for(press_target, self.pressed_button, focused, enabled);
+            let state = button_state_for(
+                press_target,
+                self.pressed_button,
+                if enabled {
+                    if focused {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    }
+                } else {
+                    ButtonState::Disabled
+                },
+            );
             Button::new(action.button_label())
                 .kind(kind)
                 .state(state)
@@ -12382,8 +12478,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::EditMacroCancel,
                 self.pressed_button,
-                focus == MacroEditFocus::Cancel,
-                true,
+                if focus == MacroEditFocus::Cancel {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, cancel_button, &self.theme);
         Button::new("Save")
@@ -12391,8 +12490,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::EditMacroSave,
                 self.pressed_button,
-                focus == MacroEditFocus::Save,
-                true,
+                if focus == MacroEditFocus::Save {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, save_button, &self.theme);
         (cancel_button, save_button)

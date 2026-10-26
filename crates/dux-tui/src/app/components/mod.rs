@@ -19,7 +19,7 @@ pub(crate) mod scroll_view;
 pub(crate) mod wrap_lines;
 
 pub(crate) use button::{
-    BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, PressedButton, button_row,
+    BUTTON_HEIGHT, Button, ButtonKind, ButtonPressedTarget, ButtonState, PressedButton, button_row,
     button_state_for, button_width_for, shared_button_width,
 };
 pub(crate) use centered::render_centered_lines;
