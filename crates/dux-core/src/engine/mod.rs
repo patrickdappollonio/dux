@@ -1599,7 +1599,7 @@ pub enum WebPrLookupOutcome {
     /// is cleared with no message.
     HandedOff,
     /// The lookup failed; `message` is the already-formatted error line.
-    Failed { message: String },
+    Failed { message: StatusText },
 }
 
 /// Handler-computed outcome for a manual PR-attach op (both surfaces).
@@ -5413,7 +5413,7 @@ impl Engine {
                 let reason = crate::engine::format_panic_payload(payload);
                 crate::logger::error(&format!("pr-attach lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
-                    result: Err(format!("Worker panicked: {reason}")),
+                    result: Err(format!("Worker panicked: {reason}").into()),
                     purpose: crate::worker::PrLookupPurpose::Attach {
                         session_id: sid_panic,
                     },

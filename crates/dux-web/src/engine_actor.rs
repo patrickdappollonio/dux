@@ -22,6 +22,7 @@ use dux_core::ids::{TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
 use dux_core::operations::{OperationKind, OperationView};
 use dux_core::pty::{PtyClient, PtyViewerGuard};
+use dux_core::status_text::StatusText;
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, QuietSurfaces, StatusScope, StatusTone,
 };
@@ -630,61 +631,71 @@ fn server_restart_warning_copy(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
     surface: ServeSurface,
-) -> Option<String> {
+) -> Option<StatusText> {
     let background = surface == ServeSurface::Background;
-    let log_sentence: String;
-    let bind_sentence: String;
-    let mut sentences: Vec<&str> = Vec::new();
+    let mut sentences: Vec<StatusText> = Vec::new();
     let bind_names = server_bind_setting_names(prev, next);
     if !bind_names.is_empty() {
-        bind_sentence = format!(
-            "Server settings changed in config that are read only when a listener binds \
-             ({}); restart the server to apply them.",
-            bind_names.join(", ")
+        sentences.push(
+            format!(
+                "Server settings changed in config that are read only when a listener binds \
+                 ({}); restart the server to apply them.",
+                bind_names.join(", ")
+            )
+            .into(),
         );
-        sentences.push(&bind_sentence);
         if background {
-            sentences
-                .push("With the background server, stopping and starting it again is the restart.");
+            sentences.push(
+                "With the background server, stopping and starting it again is the restart.".into(),
+            );
         }
     }
     if prev.color != next.color {
-        sentences.push(
-            "The [server] color setting changed; the console that reads it is built by \
-             `dux server`, so it applies the next time you start `dux server`.",
-        );
+        sentences.push(dux_core::status_text![
+            "The [server] color setting changed; the console that reads it is built by ",
+            q("dux server"),
+            ", so it applies the next time you start ",
+            q("dux server"),
+            "."
+        ]);
     }
-    let socket_moved = dux_core::control_socket::moved_warning(prev, next);
-    if let Some(sentence) = &socket_moved {
-        sentences.push(sentence);
+    if let Some(sentence) = dux_core::control_socket::moved_warning(prev, next) {
+        sentences.push(sentence.into());
     }
     if surface == ServeSurface::Flip && server_log_viewer_settings_changed(prev, next) {
         sentences.push(
             "The [server] log_viewer_lines setting changed; the log viewer is sized when \
-             start-web-server starts, so it applies the next time you run it.",
+             start-web-server starts, so it applies the next time you run it."
+                .into(),
         );
     }
     if server_log_file_settings_changed(prev, next) {
         let changed = server_log_file_setting_names(prev, next);
-        log_sentence = format!(
-            "The [server] {} setting changed; server.log is opened when a server starts, \
-             so it applies the next time one starts.",
-            changed.join(", ")
+        sentences.push(
+            format!(
+                "The [server] {} setting changed; server.log is opened when a server starts, \
+                 so it applies the next time one starts.",
+                changed.join(", ")
+            )
+            .into(),
         );
-        sentences.push(&log_sentence);
     }
     // Not in background mode: that serve never draws QR codes.
     if prev.qr_codes != next.qr_codes && !background {
-        sentences.push(
-            "The [server] qr_codes setting changed; it is read when `dux server` or the \
-             start-web-server flip starts serving, so it applies the next time one of them \
-             starts.",
-        );
+        sentences.push(dux_core::status_text![
+            "The [server] qr_codes setting changed; it is read when ",
+            q("dux server"),
+            " or the start-web-server flip starts serving, so it applies the next time one of \
+             them starts."
+        ]);
     }
-    match sentences.is_empty() {
-        true => None,
-        false => Some(sentences.join(" ")),
+    let mut sentences = sentences.into_iter();
+    let mut joined = sentences.next()?;
+    for sentence in sentences {
+        joined.push(" ");
+        joined.push(sentence);
     }
+    Some(joined)
 }
 
 /// Bound on the engine request channel: a burst buffer, not a steady-state queue,
@@ -3129,7 +3140,9 @@ impl EngineService {
                 ));
             });
         }
-        restart_warning
+        // The operation record keeps the plain spelling, which the command line
+        // prints.
+        restart_warning.map(String::from)
     }
 
     /// Adopt the two live `[server]` limits from a config the drainer has already
@@ -4432,6 +4445,7 @@ impl std::fmt::Display for RawWriteError {
 }
 
 /// What the raw editor is told when the file moved under it.
+// backtick-ok: an HTTP refusal of the raw config editor's save, not a status.
 const RAW_CONFIG_CHANGED: &str = "config.toml changed on disk since you opened it (a `dux \
      config set`, a blocked address, or another editor), and saving would undo that change, \
      so nothing was saved. Reload the file to see it as it is now (your edits here are \
@@ -4895,6 +4909,7 @@ fn handle_request(
 
 /// Why the raw config editor refused an edit that sets, changes or clears the
 /// web password.
+// backtick-ok: an HTTP refusal of the raw config editor's save, not a status.
 const PASSWORD_EDIT_REFUSAL: &str = "The web password cannot be set, changed or removed \
      from the config editor, so nothing was written. Change it from Preferences, which asks \
      for the current password, or with `dux config set server.auth.password` on the machine \
@@ -7651,6 +7666,20 @@ mod tests {
             copy.contains("dux server"),
             "the console is built by that process alone: {copy}"
         );
+        // The command is a chip on the web and quoted on the status line,
+        // never between backticks, which neither renders.
+        assert!(!copy.contains('`'), "{copy}");
+        assert!(copy.contains("\"dux server\""), "{copy}");
+        let names: Vec<&str> = copy
+            .segments()
+            .expect("built from parts")
+            .iter()
+            .filter_map(|segment| match segment {
+                dux_core::prose::ProseSegment::Name { name, .. } => Some(name.as_str()),
+                dux_core::prose::ProseSegment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(names, ["dux server", "dux server"], "{copy}");
         assert!(
             !copy.contains("listener binds"),
             "nothing bound moved, so the bind sentence must stay away: {copy}"

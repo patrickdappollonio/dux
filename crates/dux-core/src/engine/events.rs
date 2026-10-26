@@ -4357,7 +4357,7 @@ impl Engine {
 
     fn process_pull_request_resolved(
         &mut self,
-        result: Result<ResolvedPullRequest, String>,
+        result: Result<ResolvedPullRequest, StatusText>,
         purpose: crate::worker::PrLookupPurpose,
         status_op_id: Option<String>,
     ) -> EventReaction {
@@ -4416,9 +4416,7 @@ impl Engine {
                                 },
                             }
                         }
-                        Err(message) => crate::engine::PrAttachOutcome::Failed {
-                            message: message.into(),
-                        },
+                        Err(message) => crate::engine::PrAttachOutcome::Failed { message },
                     }
                 };
                 let attached = matches!(outcome, crate::engine::PrAttachOutcome::Attached { .. });

@@ -3803,7 +3803,7 @@ impl Engine {
             .is_err()
             {
                 let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
-                    result: Err("the pull-request lookup worker panicked".to_string()),
+                    result: Err("the pull-request lookup worker panicked".into()),
                     purpose: crate::worker::PrLookupPurpose::CreateAgent,
                     status_op_id: Some(op_id_panic),
                 });
@@ -9606,7 +9606,7 @@ mod tests {
             .dispatch_attach_pull_request("s1", "#99")
             .expect("dispatch");
         engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
-            result: Err("no such pull request".to_string()),
+            result: Err("no such pull request".into()),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "s1".to_string(),
             },
@@ -9638,7 +9638,7 @@ mod tests {
             .expect("dispatch");
         engine.pending_pr_attach_ops.remove(&op_id);
         engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
-            result: Err("no such pull request".to_string()),
+            result: Err("no such pull request".into()),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "s1".to_string(),
             },
@@ -9800,7 +9800,7 @@ mod tests {
         // real worker forwards the id it was spawned with).
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
-                result: Err("gh pr view failed".to_string()),
+                result: Err("gh pr view failed".into()),
                 purpose: crate::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(busy_key.clone()),
             });

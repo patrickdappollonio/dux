@@ -96,7 +96,7 @@ impl ConfigFileLock {
         let file = fs::File::open(&lock_path).with_context(|| {
             format!(
                 "failed to open the config lock {}; it must be readable by you, its owner \
-                 (if another user owns it, `chown` it back or delete it)",
+                 (if another user owns it, give it back to you with chown or delete it)",
                 lock_path.display()
             )
         })?;

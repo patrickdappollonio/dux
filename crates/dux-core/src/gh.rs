@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::git;
 use crate::logger;
 use crate::model::{PrInfo, PrState, Project};
+use crate::status_text::StatusText;
 use crate::storage::StoredPr;
 use crate::worker::{
     PrLookupPurpose, PrStatusResult, PrSyncEntry, PullRequestLookup, ResolvedPullRequest,
@@ -1997,17 +1998,13 @@ pub fn parse_pull_request_lookup(
     selected_host: &str,
     selected_owner_repo: &str,
     policy: &GithubHostPolicy,
-) -> Result<PullRequestLookup, String> {
+) -> Result<PullRequestLookup, StatusText> {
     let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
 
     if let Some(host) = reference.host.as_deref()
         && !policy.allows(host)
     {
-        return Err(format!(
-            "dux cannot look up pull requests on {host}. Sign in to that host with \
-             `gh auth login --hostname {host}`, or paste a reference from a host you \
-             are already signed in to."
-        ));
+        return Err(host_not_signed_in(host));
     }
 
     if reference.owner_repo.is_some() && !reference.matches(selected_host, selected_owner_repo) {
@@ -2015,7 +2012,8 @@ pub fn parse_pull_request_lookup(
         return Err(format!(
             "PR belongs to {named}, but the selected project uses \
              {selected_host}/{selected_owner_repo}."
-        ));
+        )
+        .into());
     }
 
     let Some(number) = reference.number else {
@@ -2025,7 +2023,8 @@ pub fn parse_pull_request_lookup(
         return Err(format!(
             "That address names {named} but no pull request. Add the number, for example \
              {selected_owner_repo}#123."
-        ));
+        )
+        .into());
     };
 
     Ok(PullRequestLookup {
@@ -2062,7 +2061,8 @@ pub fn run_pull_request_lookup_job(
         None => Err(format!(
             "Project \"{}\" does not have a GitHub origin remote.",
             project.name
-        )),
+        )
+        .into()),
     };
     let lookup = match lookup {
         Ok(lookup) => lookup,
@@ -2076,9 +2076,11 @@ pub fn run_pull_request_lookup_job(
         }
     };
 
-    let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, custom_name, review_copy, ask_id)
-    });
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
+        .map_err(StatusText::from)
+        .map(|metadata| {
+            resolved_pull_request(metadata, project, &lookup, custom_name, review_copy, ask_id)
+        });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
         purpose: PrLookupPurpose::CreateAgent,
@@ -2110,7 +2112,7 @@ pub fn parse_attach_pull_request_lookup(
     resolution: &git::RemoteResolution,
     project_name: &str,
     policy: &GithubHostPolicy,
-) -> Result<PullRequestLookup, String> {
+) -> Result<PullRequestLookup, StatusText> {
     let reference = crate::pr_reference::parse_typed_reference(raw_input)?;
 
     if let Some(owner_repo) = reference.owner_repo.clone() {
@@ -2127,17 +2129,14 @@ pub fn parse_attach_pull_request_lookup(
         };
         let host = host.to_ascii_lowercase();
         if !policy.allows(&host) {
-            return Err(format!(
-                "dux cannot look up pull requests on {host}. Sign in to that host with \
-                 `gh auth login --hostname {host}`, or paste a reference from a host you \
-                 are already signed in to."
-            ));
+            return Err(host_not_signed_in(&host));
         }
         let Some(number) = reference.number else {
             return Err(format!(
                 "That address names {owner_repo} but no pull request. Add the number, \
                  for example {owner_repo}#123."
-            ));
+            )
+            .into());
         };
         return Ok(PullRequestLookup {
             host,
@@ -2151,8 +2150,8 @@ pub fn parse_attach_pull_request_lookup(
         // always a bare number), kept as a refusal rather than a panic.
         return Err(
             "Enter a pull request URL, owner/repo#123, or a PR number. A repository \
-             address works too."
-                .to_string(),
+                    address works too."
+                .into(),
         );
     };
     match resolution {
@@ -2161,17 +2160,31 @@ pub fn parse_attach_pull_request_lookup(
             owner_repo: remote.owner_repo.clone(),
             number,
         }),
-        git::RemoteResolution::Denied => Err(format!(
-            "Project \"{project_name}\"'s remote is on a host dux is not signed in to, so a \
-             bare PR number cannot be resolved. Sign in with `gh auth login --hostname \
-             <host>`, or paste the full PR URL instead."
-        )),
+        git::RemoteResolution::Denied => Err(crate::status_text![
+            "Project ",
+            q(project_name),
+            "'s remote is on a host dux is not signed in to, so a bare PR number cannot be \
+             resolved. Sign in with ",
+            q("gh auth login --hostname <host>"),
+            ", or paste the full PR URL instead."
+        ]),
         git::RemoteResolution::Unresolved => Err(format!(
             "Project \"{project_name}\" does not have a GitHub origin remote, so a bare PR \
              number cannot be resolved. Paste the full PR URL (or owner/repo#{number}) \
              instead."
-        )),
+        )
+        .into()),
     }
+}
+
+/// The refusal for a pull request on a host `gh` is not signed in to, naming
+/// the command that signs in as a chip.
+pub fn host_not_signed_in(host: &str) -> StatusText {
+    crate::status_text![
+        format!("dux cannot look up pull requests on {host}. Sign in to that host with "),
+        q(format!("gh auth login --hostname {host}")),
+        ", or paste a reference from a host you are already signed in to."
+    ]
 }
 
 /// Resolve a PR reference for a MANUAL ATTACH and post
@@ -2206,9 +2219,11 @@ pub fn run_attach_pull_request_lookup_job(
             }
         };
 
-    let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, None, Default::default(), None)
-    });
+    let result = look_up_pull_request(OsStr::new("gh"), &lookup)
+        .map_err(StatusText::from)
+        .map(|metadata| {
+            resolved_pull_request(metadata, project, &lookup, None, Default::default(), None)
+        });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
         purpose,
@@ -5587,7 +5602,26 @@ mod tests {
         )
         .expect_err("a typed host the policy denies is refused");
         assert!(err.contains("git.company.example"), "got {err}");
-        assert!(err.contains("gh auth login"), "got {err}");
+        // The sign-in command is a chip, quoted in the plain spelling, never
+        // between backticks, which no status surface renders.
+        assert!(!err.contains('`'), "got {err}");
+        assert!(
+            err.segments()
+                .is_some_and(|parts| parts.contains(&crate::prose::ProseSegment::Name {
+                    name: "gh auth login --hostname git.company.example".to_string(),
+                    quoted: true,
+                })),
+            "got {err:?}"
+        );
+
+        let err =
+            parse_attach_pull_request_lookup("42", &git::RemoteResolution::Denied, "proj", &policy)
+                .expect_err("a denied remote host cannot resolve a bare number");
+        assert!(!err.contains('`'), "got {err}");
+        assert!(
+            err.contains("\"gh auth login --hostname <host>\""),
+            "got {err}"
+        );
 
         let err = parse_attach_pull_request_lookup(
             "https://github.com/forker/Hello-World",

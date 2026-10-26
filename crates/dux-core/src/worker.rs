@@ -730,7 +730,9 @@ pub enum WorkerEvent {
         status_op_id: Option<String>,
     },
     PullRequestResolved {
-        result: Result<ResolvedPullRequest, String>,
+        /// The refusal or failure is a status sentence, so a name in it (the
+        /// command that signs in to a host, say) reaches the web as a chip.
+        result: Result<ResolvedPullRequest, crate::status_text::StatusText>,
         /// Why the lookup ran. A create-flow resolution opens the name prompt
         /// (TUI) or hands off to the create dispatch (web); an attach-flow
         /// resolution is applied ENGINE-SIDE (`apply_pr_attach`) after

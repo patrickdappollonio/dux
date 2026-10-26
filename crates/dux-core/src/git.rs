@@ -3430,7 +3430,7 @@ fn classify_uncommitted_record(record: &[u8], plan: &mut UncommittedCopyPlan) ->
     let worktree_status = record[1] as char;
     if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
         return Err(anyhow!(
-            "rename/copy detection produced a two-path record despite `-c status.renames=false`; this needs git >= 2.18"
+            "rename/copy detection produced a two-path record despite -c status.renames=false; this needs git >= 2.18"
         ));
     }
     let path_bytes = &record[3..];

@@ -242,7 +242,7 @@ fn the_kept_message_names_the_terminal_standing_in_the_worktree() {
     assert!(worktree.exists(), "kept");
     assert!(alive, "the terminal was not ended to make way");
     assert!(message.contains("project terminal"), "{message}");
-    assert!(message.contains("cd"), "{message}");
+    assert!(message.contains("leave that folder"), "{message}");
 }
 
 /// A folder that is, or holds, a dux project's repository is never deleted

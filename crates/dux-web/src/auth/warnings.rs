@@ -18,6 +18,7 @@
 use std::net::IpAddr;
 
 use dux_core::engine::StatusUpdate;
+use dux_core::status_text::StatusText;
 use dux_core::statusline::{QuietSurfaces, StatusTone};
 
 use super::AuthState;
@@ -64,11 +65,13 @@ impl Speaker {
         Self { console, engine }
     }
 
-    fn say(&self, loudness: Loudness, key: &str, message: &str, quiet_web: bool) {
+    /// The log and the console read the plain spelling; the status carries the
+    /// parts too, so the web draws each command as a chip.
+    fn say(&self, loudness: Loudness, key: &str, message: StatusText, quiet_web: bool) {
         dux_core::logger::warn(&format!("[server] {message}"));
         match loudness {
-            Loudness::Warning => self.console.warn(message),
-            Loudness::Alarm => self.console.error(message),
+            Loudness::Warning => self.console.warn(&message),
+            Loudness::Alarm => self.console.error(&message),
         }
         if let Some(engine) = &self.engine {
             let mut update = StatusUpdate::keyed(key, StatusTone::Warning, message);
@@ -86,18 +89,18 @@ impl Speaker {
     }
 
     pub(crate) fn proxy_warning(&self) {
-        self.say(Loudness::Warning, PROXY_KEY, &proxy_sentence(), false);
+        self.say(Loudness::Warning, PROXY_KEY, proxy_sentence().into(), false);
     }
 
     pub(crate) fn weak_password(&self) {
-        self.say(Loudness::Warning, WEAK_KEY, &weak_sentence(), false);
+        self.say(Loudness::Warning, WEAK_KEY, weak_sentence(), false);
     }
 
     pub(crate) fn blocked(&self, entry: &str, failures: u32, path: &str, kept: BanKept) {
         self.say(
             Loudness::Warning,
             BLOCKED_KEY,
-            &blocked_sentence(entry, failures, path, &kept),
+            blocked_sentence(entry, failures, path, &kept),
             false,
         );
     }
@@ -108,7 +111,7 @@ impl Speaker {
         self.say(
             Loudness::Warning,
             BLOCKED_KEY,
-            &unverified_limit_sentence(ip, why, failures, path),
+            unverified_limit_sentence(ip, why, failures, path),
             false,
         );
     }
@@ -119,14 +122,14 @@ impl Speaker {
         self.say(
             Loudness::Warning,
             OWN_ENTRY_KEY,
-            &own_entry_sentence(entry, ip),
+            own_entry_sentence(entry, ip).into(),
             false,
         );
     }
 
     /// A raw TCP forward onto dux's port appeared.
     pub(crate) fn forward_known(&self) {
-        self.say(Loudness::Warning, FORWARD_KEY, &forward_sentence(), false);
+        self.say(Loudness::Warning, FORWARD_KEY, forward_sentence(), false);
     }
 
     /// The forward is gone.
@@ -138,14 +141,14 @@ impl Speaker {
         self.say(
             Loudness::Alarm,
             EXPOSED_KEY,
-            &exposed_sentence(reach, funnel),
+            exposed_sentence(reach, funnel),
             true,
         );
     }
 }
 
 /// The alarm for a dux reachable beyond this machine with no password.
-pub(crate) fn exposed_sentence(reach: &[String], funnel: bool) -> String {
+pub(crate) fn exposed_sentence(reach: &[String], funnel: bool) -> StatusText {
     let mut ways: Vec<String> = Vec::new();
     if !reach.is_empty() {
         ways.push(format!("it listens on {}", reach.join(", ")));
@@ -160,11 +163,14 @@ pub(crate) fn exposed_sentence(reach: &[String], funnel: bool) -> String {
     } else {
         format!(" ({})", ways.join("; "))
     };
-    format!(
-        "No password is set and dux is reachable beyond this machine{how}: anyone who can reach \
-         it controls your agents and terminals. Set one with `dux config set \
-         server.auth.password`."
-    )
+    dux_core::status_text![
+        format!(
+            "No password is set and dux is reachable beyond this machine{how}: anyone who can \
+             reach it controls your agents and terminals. Set one with "
+        ),
+        q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+        "."
+    ]
 }
 
 fn proxy_sentence() -> String {
@@ -176,14 +182,17 @@ fn proxy_sentence() -> String {
         .to_string()
 }
 
-fn weak_sentence() -> String {
-    "Someone signed in to the web UI with a password below the minimums in [server.auth] \
-     (minimum_password_length and minimum_password_score). It still works, but change it with \
-     `dux config set server.auth.password` or from the web UI's Preferences."
-        .to_string()
+fn weak_sentence() -> StatusText {
+    dux_core::status_text![
+        "Someone signed in to the web UI with a password below the minimums in [server.auth] \
+         (minimum_password_length and minimum_password_score). It still works, but change it \
+         with ",
+        q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+        " or from the web UI's Preferences."
+    ]
 }
 
-fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> String {
+fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> StatusText {
     // A range is the IPv6 /64 the failures came from, written whole rather
     // than one address at a time.
     let why = if entry.contains('/') {
@@ -195,20 +204,27 @@ fn blocked_sentence(entry: &str, failures: u32, path: &str, kept: &BanKept) -> S
         format!("dux blocked {entry} after {failures} failed sign-ins.")
     };
     match kept {
-        BanKept::InConfig => format!(
-            "{why} It is in blocked_addresses in the [server.auth] section of {path}; if it was \
-             you, remove it there and reload the config (the web UI's Reload config, \
-             `kill -USR1` on dux, or any `dux config set`)."
-        ),
+        BanKept::InConfig => dux_core::status_text![
+            format!(
+                "{why} It is in blocked_addresses in the [server.auth] section of {path}; if it \
+                 was you, remove it there and reload the config (the web UI's Reload config, "
+            ),
+            q("kill -USR1"),
+            " on dux, or any ",
+            q("dux config set"),
+            ")."
+        ],
         BanKept::ListFull { max } => format!(
             "{why} blocked_addresses in {path} already has {max} entries \
              (max_blocked_addresses), so the block was not written there: it holds until dux \
              restarts."
-        ),
+        )
+        .into(),
         BanKept::WriteFailed { error } => format!(
             "{why} Writing it to blocked_addresses in {path} failed ({error}), so it holds only \
              until dux restarts."
-        ),
+        )
+        .into(),
     }
 }
 
@@ -244,35 +260,58 @@ impl Unverified {
     }
 }
 
-fn unverified_limit_sentence(ip: IpAddr, why: Unverified, failures: u32, path: &str) -> String {
+fn unverified_limit_sentence(ip: IpAddr, why: Unverified, failures: u32, path: &str) -> StatusText {
     let ip = dux_core::config_auth::canonical(ip);
-    let (came, because, trust) = match why {
+    let (came, because, trust): (&str, StatusText, &str) = match why {
         Unverified::Funnel => (
-            "through a Tailscale Funnel".to_string(),
+            "through a Tailscale Funnel",
             "Funnel traffic comes from the internet, and dux cannot confirm the address it \
              names"
-                .to_string(),
+                .into(),
             "If you are sure of it",
         ),
         Unverified::ExposureUnconfirmed(cause) => (
-            "through what looked like tailscale serve".to_string(),
-            format!("{cause}, so it cannot vouch for that route"),
+            "through what looked like tailscale serve",
+            dux_core::status_text![marked(cause), ", so it cannot vouch for that route"],
             "If you are sure of it",
         ),
         Unverified::UnconfirmedProxy => (
-            "through a proxy".to_string(),
+            "through a proxy",
             "the proxy is not a confirmed tailscale serve route, so the client may have \
              chosen it"
-                .to_string(),
+                .into(),
             "If you trust the proxy",
         ),
     };
-    format!(
-        "{failures} failed sign-ins came {came} claiming to be {ip}. dux did not add it to \
-         blocked_addresses because it could not verify that address ({because}); it keeps \
-         slowing those sign-ins down. {trust}, add {ip} to blocked_addresses in the \
-         [server.auth] section of {path} by hand and reload the config."
-    )
+    dux_core::status_text![
+        format!(
+            "{failures} failed sign-ins came {came} claiming to be {ip}. dux did not add it to \
+             blocked_addresses because it could not verify that address ("
+        ),
+        because,
+        format!(
+            "); it keeps slowing those sign-ins down. {trust}, add {ip} to blocked_addresses \
+             in the [server.auth] section of {path} by hand and reload the config."
+        )
+    ]
+}
+
+/// A reason the exposure gate or the provenance check gives, as prose. Those
+/// reasons are dux's own constants, written with their setting and command
+/// names between backticks because the sign-in page renders them through the
+/// browser's inline-code chips (`required_reason`); here each such span is a
+/// name, so a status draws it as a chip too and its plain spelling quotes it.
+/// Only a `&'static str` is read this way, so no text from outside dux is.
+fn marked(reason: &'static str) -> dux_core::prose::Prose {
+    let mut prose = dux_core::prose::Prose::new();
+    for (n, part) in reason.split('`').enumerate() {
+        if n % 2 == 1 {
+            prose.push_quoted(part);
+        } else {
+            prose.push_text(part);
+        }
+    }
+    prose
 }
 
 /// The entries of `blocked_addresses` that cover loopback or one of `own`
@@ -307,13 +346,16 @@ fn own_entry_sentence(entry: &str, ip: IpAddr) -> String {
 /// What dux says when a raw TCP forward onto its port appears. The shared
 /// slow-down is the one limit the per-route buckets cannot lift (decided,
 /// after review), so it is said here rather than left for someone to find.
-fn forward_sentence() -> String {
-    "A tailscale serve TCP forward reaches dux's port. Whoever comes in through it arrives \
-     over plain loopback with nothing to tell them apart from this machine, so dux counts every \
-     such request as the network (with a password set, someone on this machine signs in too), \
-     and their failed sign-ins slow down sign-ins on this machine over loopback as well. \
-     Remove the forward (`tailscale serve status` lists it) to separate them."
-        .to_string()
+fn forward_sentence() -> StatusText {
+    dux_core::status_text![
+        "A tailscale serve TCP forward reaches dux's port. Whoever comes in through it arrives \
+         over plain loopback with nothing to tell them apart from this machine, so dux counts \
+         every such request as the network (with a password set, someone on this machine signs \
+         in too), and their failed sign-ins slow down sign-ins on this machine over loopback as \
+         well. Remove the forward (",
+        q("tailscale serve status"),
+        " lists it) to separate them."
+    ]
 }
 
 /// Follows whether the no-password alarm is due, saying it when it becomes
@@ -340,6 +382,52 @@ impl ExposedWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names a sentence carries as chips.
+    fn names(text: &StatusText) -> Vec<String> {
+        text.segments()
+            .expect("built from parts")
+            .iter()
+            .filter_map(|segment| match segment {
+                dux_core::prose::ProseSegment::Name { name, .. } => Some(name.clone()),
+                dux_core::prose::ProseSegment::Text(_) => None,
+            })
+            .collect()
+    }
+
+    /// A command reaches the web as a chip and the status line in quotes,
+    /// never between backticks, which neither surface renders.
+    #[test]
+    fn every_command_a_warning_names_is_a_chip() {
+        let set = "dux config set server.auth.password";
+        for (text, commands) in [
+            (
+                exposed_sentence(&["192.0.2.1".to_string()], false),
+                vec![set],
+            ),
+            (weak_sentence(), vec![set]),
+            (
+                blocked_sentence("203.0.113.7", 5, "/x/config.toml", &BanKept::InConfig),
+                vec!["kill -USR1", "dux config set"],
+            ),
+            (forward_sentence(), vec!["tailscale serve status"]),
+            (
+                unverified_limit_sentence(
+                    "203.0.113.9".parse().unwrap(),
+                    Unverified::ExposureUnconfirmed("`[server] tailscale` is `no`"),
+                    10,
+                    "/x/config.toml",
+                ),
+                vec!["[server] tailscale", "no"],
+            ),
+        ] {
+            assert!(!text.contains('`'), "{text}");
+            assert_eq!(names(&text), commands, "{text}");
+            for command in commands {
+                assert!(text.contains(&format!("\"{command}\"")), "{text}");
+            }
+        }
+    }
 
     #[test]
     fn entries_covering_loopback_or_an_own_address_are_found_and_named() {

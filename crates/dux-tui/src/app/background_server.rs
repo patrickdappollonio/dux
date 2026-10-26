@@ -10,6 +10,7 @@
 //! out for the server. These commands keep both up at once.
 
 use dux_core::engine::EventReaction;
+use dux_core::status_text::StatusText;
 
 use super::*;
 
@@ -366,13 +367,17 @@ impl App {
                     // never sees.
                     BackgroundServerStart::ConfigAtStartup => {
                         let trust = match warning {
-                            Some(warning) => warning.clone(),
-                            None => trust.to_string(),
+                            Some(warning) => StatusText::from(warning),
+                            None => trust.clone(),
                         };
-                        dux_core::engine::Final::warning(format!(
-                            "The background web server was already on and is listening on \
-                             {where_at}. {trust} Use stop-background-server to stop it."
-                        ))
+                        dux_core::engine::Final::warning(dux_core::status_text![
+                            format!(
+                                "The background web server was already on and is listening on \
+                                 {where_at}. "
+                            ),
+                            trust,
+                            " Use stop-background-server to stop it."
+                        ])
                     }
                     BackgroundServerStart::UserRequest => match warning {
                         Some(warning) => dux_core::engine::Final::warning(format!(
@@ -380,11 +385,14 @@ impl App {
                              agents keep running here. {warning} Use stop-background-server to \
                              stop serving."
                         )),
-                        None => dux_core::engine::Final::info(format!(
-                            "The web UI is serving in the background on {where_at}, and your \
-                             agents keep running here. {trust} Use stop-background-server to \
-                             stop serving."
-                        )),
+                        None => dux_core::engine::Final::info(dux_core::status_text![
+                            format!(
+                                "The web UI is serving in the background on {where_at}, and \
+                                 your agents keep running here. "
+                            ),
+                            &trust,
+                            " Use stop-background-server to stop serving."
+                        ]),
                     },
                 }
             }
@@ -1043,12 +1051,16 @@ fn join_urls(urls: &[String]) -> String {
 
 /// What a background serve's start says about who gets in: the password when
 /// one is set, the risk when none is.
-fn trust_sentence(password_set: bool) -> &'static str {
+fn trust_sentence(password_set: bool) -> StatusText {
     if password_set {
         "Browsers sign in with the web password ([server.auth] require decides who is asked)."
+            .into()
     } else {
-        "No password is set, so anyone who can reach it drives your agents; set one with \
-         `dux config set server.auth.password`, or keep it on a network you trust."
+        dux_core::status_text![
+            "No password is set, so anyone who can reach it drives your agents; set one with ",
+            q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+            ", or keep it on a network you trust."
+        ]
     }
 }
 
@@ -1059,7 +1071,23 @@ pub(crate) mod tests {
     fn the_trust_sentence_names_the_password_or_its_absence() {
         assert!(super::trust_sentence(true).contains("sign in with the web password"));
         let open = super::trust_sentence(false);
-        assert!(open.contains("No password is set") && open.contains("server.auth.password"));
+        assert!(open.contains("No password is set"), "{open}");
+        // The command is quoted on the status line and a chip on the web,
+        // never between backticks, which neither renders.
+        assert!(!open.contains('`'), "{open}");
+        assert!(
+            open.contains("\"dux config set server.auth.password\""),
+            "{open}"
+        );
+        assert!(
+            open.segments().expect("built from parts").contains(
+                &dux_core::prose::ProseSegment::Name {
+                    name: "dux config set server.auth.password".to_string(),
+                    quoted: true,
+                }
+            ),
+            "{open:?}"
+        );
     }
     use std::sync::{Arc, Mutex};
 
@@ -1639,7 +1667,7 @@ pub(crate) mod tests {
         app.engine
             .worker_tx
             .send(dux_core::worker::WorkerEvent::PullRequestResolved {
-                result: Err("Failed to resolve PR #48 from o/r: no such pull request.".to_string()),
+                result: Err("Failed to resolve PR #48 from o/r: no such pull request.".into()),
                 purpose: dux_core::worker::PrLookupPurpose::Attach {
                     session_id: "s1".to_string(),
                 },
@@ -2285,7 +2313,7 @@ pub(crate) mod tests {
             message,
             "The background web server was already on and is listening on \
              http://127.0.0.1:8080. No password is set, so anyone who can reach it drives your agents; set one \
-             with `dux config set server.auth.password`, or keep it on a network you trust. \
+             with \"dux config set server.auth.password\", or keep it on a network you trust. \
              Use stop-background-server to stop it.",
         );
 
@@ -2346,7 +2374,7 @@ pub(crate) mod tests {
             message,
             "The web UI is serving in the background on http://127.0.0.1:8080, and your agents \
              keep running here. No password is set, so anyone who can reach it drives your agents; set one \
-             with `dux config set server.auth.password`, or keep it on a network you trust. \
+             with \"dux config set server.auth.password\", or keep it on a network you trust. \
              Use \
              stop-background-server to stop serving.",
         );
@@ -2405,7 +2433,7 @@ pub(crate) mod tests {
             message,
             "The web UI is serving in the background on http://127.0.0.1:8080, and your agents \
              keep running here. No password is set, so anyone who can reach it drives your agents; set one \
-             with `dux config set server.auth.password`, or keep it on a network you trust. \
+             with \"dux config set server.auth.password\", or keep it on a network you trust. \
              Use \
              stop-background-server to stop serving.",
         );

@@ -24451,7 +24451,7 @@ not_a_real_action = ["x"]
         app.engine
             .worker_tx
             .send(WorkerEvent::PullRequestResolved {
-                result: Err("gh pr view failed".to_string()),
+                result: Err("gh pr view failed".into()),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                 status_op_id: Some(op_id.clone()),
             })

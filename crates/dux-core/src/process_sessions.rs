@@ -1607,8 +1607,8 @@ impl AgentProcessRegistry {
                 CwdVerdict::Clear => {}
                 CwdVerdict::Inside(row) => {
                     return Some(format!(
-                        "{} is working in it ({} (pid {}) has it as its current folder); `cd` \
-                         out of it or close it first",
+                        "{} is working in it ({} (pid {}) has it as its current folder); make it \
+                         leave that folder or close it first",
                         who(),
                         row.name,
                         row.pid
