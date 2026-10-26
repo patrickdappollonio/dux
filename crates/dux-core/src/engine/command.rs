@@ -288,7 +288,7 @@ pub enum Command {
     /// Write a canonical, fully-templated config to disk, overwriting the
     /// existing file, to restore a known-good config after a failed reload.
     /// Renders through `Engine::surface` and writes synchronously through
-    /// `config_write::write_config_secure`.
+    /// `config_write::replace_config_file`.
     RecoverConfig,
 
     /// Persist a custom display order for the agent sessions within a single
