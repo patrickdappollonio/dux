@@ -151,6 +151,10 @@ fn branch_name_from_head_ref(stdout: &[u8]) -> String {
 
 /// The branch the checkout at `repo_path` is on; an `Err` for a detached HEAD
 /// as for any failure.
+///
+/// # Errors
+///
+/// Fails when git cannot be run, the path is not a repository, or HEAD is detached.
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let output = symbolic_head(repo_path)?;
     if !output.status.success() {
@@ -167,6 +171,10 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
 /// is not a symbolic ref (`symbolic-ref` exit code 1, `--quiet` suppressing the
 /// message), and `Err` for any real failure (exit 128 = not a repo, git
 /// missing). For inspection sites that must not treat a detached HEAD as fatal.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or the path is not a repository.
 pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
     let output = symbolic_head(repo_path)?;
     if output.status.success() {
@@ -588,6 +596,10 @@ pub fn repo_path_kind(path: &Path) -> RepoPathKind {
 /// honors the user's `init.defaultBranch` (no `-b` override). `git init` runs
 /// no hooks; the initial-commit step already pins `core.hooksPath=/dev/null`,
 /// which also neutralizes hook scripts an `init.templateDir` might copy in.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git init` fails, with git's own reason.
 pub fn init_repo(path: &Path) -> Result<()> {
     let out = Command::new("git")
         .arg("-C")
@@ -775,6 +787,11 @@ fn commit_tree(
 /// may want in the first commit), when git's state cannot be determined, on a
 /// detached HEAD, and on a genuine git failure, surfaced verbatim. The CAS is
 /// the cross-process backstop behind the engine's own in-flight gate.
+///
+/// # Errors
+///
+/// Fails when the index holds staged changes, git's state cannot be determined, HEAD is detached,
+/// another writer created the first commit meanwhile, or a git step fails.
 pub fn create_initial_commit(path: &Path) -> Result<String> {
     let repo = path.to_string_lossy();
     // Fail closed on commit state: only bootstrap a confirmed-unborn repo. A
@@ -1418,6 +1435,10 @@ pub(crate) const PUSHED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration
 /// by comparing whole refnames here, because its own patterns also match every
 /// ref below a slash (`feat` would match `feat/x`), and against the remotes
 /// this clone has, because a remote's name may hold a slash as well.
+///
+/// # Errors
+///
+/// Fails when git cannot be run, fails, or does not answer within [`PUSHED_PROBE_TIMEOUT`].
 pub fn branch_is_pushed(repo_path: &Path, name: &str) -> Result<bool> {
     branch_is_pushed_within(repo_path, name, PUSHED_PROBE_TIMEOUT)
 }
@@ -1559,6 +1580,10 @@ pub struct BranchChoice {
 /// Reads `for-each-ref` (plumbing) with NUL-separated fields, so a worktree
 /// path with any byte in it cannot break the parse. It shells out, so callers
 /// run it in a background worker.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `for-each-ref` fails.
 pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchChoice>> {
     let output = Command::new("git")
         .args([
@@ -1803,6 +1828,10 @@ pub(crate) fn has_remote_tracking_refs(repo_path: &Path) -> bool {
 /// one integer, each branch is passed fully qualified as `refs/heads/<name>`,
 /// which cannot begin with a dash, and the trailing `--` pins the pathspec
 /// boundary so nothing after the revision list is read as a path.
+///
+/// # Errors
+///
+/// Fails when git cannot be run, `rev-list` fails, or it prints something other than a count.
 pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<UnpushedCommits> {
     // No branches means nothing would be deleted, so nothing is at risk. Git
     // would refuse an empty revision list, and an error here would read to the
@@ -2386,6 +2415,10 @@ pub(crate) fn managed_worktree_path(
 ///
 /// When the branch exists only as a remote tracking ref, git automatically
 /// creates a local branch that tracks the remote.
+///
+/// # Errors
+///
+/// Fails when the worktree's folder cannot be created or `git worktree add` fails.
 pub fn create_worktree_existing_branch(
     repo_path: &Path,
     worktrees_root: &Path,
@@ -2729,6 +2762,11 @@ pub(crate) fn create_worktree_from_start_point_claimed(
 /// made the branch or failed because one was there. Every `worktree add` after
 /// it, a retry included, only attaches, and a failed one leaves a branch this
 /// call is entitled to remove.
+///
+/// # Errors
+///
+/// Fails when the parent folder cannot be created, the branch name is invalid or taken, the start
+/// point names nothing, or `git worktree add` fails (the branch it made is then removed again).
 pub fn add_worktree_new_branch_at(
     repo_path: &Path,
     worktree_path: &Path,
@@ -3437,6 +3475,11 @@ struct UncommittedCopyPlan {
 /// PRECONDITION: both worktrees are at the SAME HEAD commit; callers enforce
 /// this with the HEAD-equality guard (`agent_job.rs`), because status deltas
 /// are relative to the HEAD commit's tree.
+///
+/// # Errors
+///
+/// Fails when either worktree cannot be resolved, the two are the same folder, git status cannot be
+/// read, or a copy or deletion fails part way.
 pub fn copy_uncommitted_changes(
     source: &Path,
     destination: &Path,
@@ -3863,6 +3906,11 @@ fn branch_still_exists(repo_path: &Path, branch_name: &str) -> bool {
 /// caller retries, and only after looking at the folder again, because a
 /// retry made on the strength of the first look could delete something that
 /// walked in since.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git worktree remove` fails; a failure worth a second try is a
+/// [`RemovalWorthRetrying`].
 pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let output = run_worktree_remove(repo_path, worktree_path)?;
     if output.status.success() {
@@ -4107,6 +4155,10 @@ pub(crate) fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
 /// Both deletions are BEST EFFORT: a branch git will not delete is reported in
 /// the [`RemoveResult`] for the status message, never as an error. Only the
 /// worktree removal itself can fail this call.
+///
+/// # Errors
+///
+/// Fails when the worktree removal fails, or git cannot be run to delete a branch.
 pub fn remove_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -4175,6 +4227,10 @@ pub struct WorktreeFileList {
 /// This feeds the web editor's file-SEARCH index, not its tree ([`list_dir`]
 /// backs that). Returns at most `max_files` entries and sets `truncated` if more
 /// exist; `max_files == 0` disables the cap entirely.
+///
+/// # Errors
+///
+/// Never fails today: entries the walk cannot read are skipped.
 pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
     Ok(walk_files(worktree_path, max_files, DotDirectories::Walked))
 }
@@ -4194,6 +4250,10 @@ pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<Worktree
 /// `[server] search_index_max_files` cap every other walk gets, plus the
 /// single-tenant trusted-access model: a client that reaches this can already
 /// browse the filesystem.
+///
+/// # Errors
+///
+/// Never fails today: entries the walk cannot read are skipped.
 pub fn rooted_files(root: &Path, max_files: usize) -> Result<WorktreeFileList> {
     Ok(walk_files(root, max_files, DotDirectories::Pruned))
 }
@@ -4301,6 +4361,10 @@ pub struct DirEntryInfo {
 /// relative; `""` lists the worktree root. Containment reuses the
 /// read-permissive resolver (`.git/` is listable; traversal, absolute paths,
 /// and symlinks that escape the worktree are refused).
+///
+/// # Errors
+///
+/// Fails when `rel_dir` escapes the worktree or the directory cannot be read.
 pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
     let abs_dir = if rel_dir.is_empty() {
         worktree.to_path_buf()
@@ -4406,6 +4470,10 @@ fn rename_source(status: char, source: Option<&String>) -> Option<String> {
 /// repository's `.gitmodules` or config says to ignore is left out, as `git
 /// status` leaves it out. For rendering only; anything that decides from the
 /// listing asks [`changed_files_for_decisions`].
+///
+/// # Errors
+///
+/// Fails when git cannot be run or its status or numstat cannot be read.
 pub fn changed_files_for_display(
     worktree_path: &Path,
 ) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
@@ -4416,6 +4484,10 @@ pub fn changed_files_for_display(
 /// preflight, which paths a stage, unstage or discard may touch): every
 /// submodule change, whatever `.gitmodules` or the config says to ignore, so
 /// the decision agrees with what git itself would act on.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or its status or numstat cannot be read.
 pub fn changed_files_for_decisions(
     worktree_path: &Path,
 ) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
@@ -5320,6 +5392,11 @@ where
 ///
 /// An empty slice is refused: git reads "no pathspec" as "the whole index",
 /// which for [`unstage_files`] means unstaging everything and exiting 0.
+///
+/// # Errors
+///
+/// Fails when a path may not be staged (with the sentence that says why), the slice is empty, or
+/// `git add` fails.
 pub fn stage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
     stage_with_report(worktree_path, file_paths).map(|_| ())
 }
@@ -5350,6 +5427,11 @@ impl StageReport {
 /// out with an `exclude` pathspec. A path that is itself a repository keeps its
 /// old behavior (git records it as a link, and the surfaces say so), except a
 /// worktree of this repository, which is refused.
+///
+/// # Errors
+///
+/// Fails when a path may not be staged (with the sentence that says why), the slice is empty, or
+/// `git add` fails.
 pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<StageReport> {
     let plan = plan_stage(worktree_path, file_paths)?;
     // One path is the whole request: a path that must not be staged refuses
@@ -5377,6 +5459,10 @@ pub struct StagePartition {
 /// batch: a folder holding nothing but repositories, or a worktree of this
 /// repository, is refused on its own with its sentence rather than failing
 /// the paths around it. Nothing is staged when every path is refused.
+///
+/// # Errors
+///
+/// Fails when the stage cannot be planned (git cannot be asked about the paths) or `git add` fails.
 pub fn stage_partitioned(worktree_path: &Path, file_paths: &[String]) -> Result<StagePartition> {
     let plan = plan_stage(worktree_path, file_paths)?;
     if !plan.staged.is_empty() {
@@ -5528,6 +5614,10 @@ fn stages_anything(worktree_path: &Path, path: &str, excludes: &[Vec<u8>]) -> Re
 
 /// Unstage every named path in one git call. See [`stage_files`] for why the
 /// paths travel on stdin and why an empty slice is refused.
+///
+/// # Errors
+///
+/// Fails when the slice is empty, git cannot be run, or `git reset` fails.
 pub fn unstage_files(worktree_path: &Path, file_paths: &[String]) -> Result<()> {
     // No explicit `HEAD`: `git reset` defaults to it, and only that default
     // copes with a repository that has no commit yet. Named, it is an unknown
@@ -5870,6 +5960,11 @@ pub(crate) fn discard_file(
 /// has been confirmed to be what the user agreed to delete, right before
 /// anything goes, and a refusal comes back as a
 /// [`crate::destructive::Refused`] error.
+///
+/// # Errors
+///
+/// Fails when the path is not plain, resolves to the worktree or into `.git`, is not what the user
+/// confirmed, the clearance is refused, or the removal or checkout fails.
 pub fn discard_confirmed<'c>(
     worktree_path: &Path,
     file_path: &str,
@@ -6094,6 +6189,11 @@ pub fn discard_confirmed<'c>(
 /// to offer the discard and when the user confirms it. A file that is currently
 /// STAGED cannot be discarded (unstage it first), and a file with no working-tree
 /// change has nothing to discard; both are reported as an error.
+///
+/// # Errors
+///
+/// Fails when the path is not plain, git status cannot be read, the file is staged, or it has no
+/// working-tree change.
 pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
     refuse_unplain_path(path, "discard")?;
     let (staged, unstaged) = changed_files_for_decisions(worktree_path)?;
@@ -6151,6 +6251,10 @@ pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
 
 /// Return the text of `git diff --cached` for the given worktree.
 /// Uses `-c color.diff=false` to strip ANSI escapes regardless of user config.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git diff --cached` fails.
 pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
@@ -6369,6 +6473,10 @@ pub fn push(worktree_path: &Path) -> Result<String> {
 /// Return the contents of a file as raw bytes as it exists at HEAD, or `None`
 /// for new (untracked) files. Uses the plumbing command `cat-file` which is
 /// immune to user configuration.
+///
+/// # Errors
+///
+/// Fails when git cannot be run; a path absent at HEAD is `Ok(None)`.
 pub fn file_bytes_at_head(worktree_path: &Path, path: &str) -> Result<Option<Vec<u8>>> {
     let output = Command::new("git")
         .args([
@@ -6490,6 +6598,10 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 /// Used by every surface that reads or writes a file from a client path (the
 /// diff engine, the web editor endpoints) so the escape check lives in one
 /// tested place and cannot drift between call sites.
+///
+/// # Errors
+///
+/// Fails when the path is malformed, escapes the worktree, or reaches into the git directory.
 pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
     let rp = Path::new(rel_path);
     if rp.as_os_str().is_empty()
@@ -6685,6 +6797,11 @@ fn wait_child_or_kill(
 /// Rename a git branch inside a worktree. Runs `git branch -m <old> <new>`
 /// from within the worktree directory, bounded by [`RENAME_BRANCH_TIMEOUT`]
 /// so a wedged git invocation can't strand the rename worker forever.
+///
+/// # Errors
+///
+/// Fails when git cannot be started, does not finish within [`RENAME_BRANCH_TIMEOUT`], or `git
+/// branch -m` fails.
 pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
     let mut child = Command::new("git")
         .args([
@@ -6791,6 +6908,11 @@ pub fn invalid_agent_name_refusal(name: &str) -> String {
 }
 
 /// A random two-word name joined by a dash, as a new agent's default name.
+///
+/// # Panics
+///
+/// Never in practice: the built-in word lists are not empty, which is the only way generating a
+/// name can fail.
 pub fn docker_style_name() -> String {
     petname::petname(2, "-").expect("petname generation should not fail")
 }

@@ -756,6 +756,10 @@ pub enum UntrackedDirectoryKind {
 /// The live answer for one untracked directory: asks `ls-files --others` about
 /// it, the very question the listing's batched call answers for every folded
 /// folder, and then tells a linked worktree apart by reading files only.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `ls-files --others` fails.
 pub fn untracked_directory_kind(worktree: &Path, rel: &str) -> Result<UntrackedDirectoryKind> {
     let raw = untracked_records(worktree, Some(rel.trim_end_matches('/')))?;
     let itself = format!("{}/", rel.trim_end_matches('/'));
@@ -1089,6 +1093,10 @@ pub(crate) fn common_dir_of(worktree: &Path) -> Option<PathBuf> {
 /// cannot be asked about both at once: measured on git 2.53,
 /// `ls-files --others -- a/repo/z a/repo` prints nothing at all, though
 /// `-- a/repo` alone prints `a/repo/`.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `ls-files` fails.
 pub fn rows_answering(
     worktree: &Path,
     files: &[ChangedFile],
@@ -1184,6 +1192,10 @@ pub fn rows_answering(
 ///
 /// Runs git and reads files, so it belongs on a worker like every other read of
 /// the worktree.
+///
+/// # Errors
+///
+/// Fails when no folder is named, or git cannot list its contents.
 pub fn changed_dir_children(
     worktree: &Path,
     dir: &str,

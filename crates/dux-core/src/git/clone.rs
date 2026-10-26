@@ -171,6 +171,11 @@ pub(crate) fn remote_default_branch_from_remote(
 /// time limit, because a big repository is slow rather than stuck; a clone
 /// that prints nothing for `stall` (its progress keeps stderr moving) is
 /// stopped. `processes` records it, so quitting dux stops it too.
+///
+/// # Errors
+///
+/// Fails when git cannot be started, the clone fails or would have to prompt, or it stalls for
+/// `stall`.
 pub fn clone_repository(
     url: &str,
     dest: &Path,
