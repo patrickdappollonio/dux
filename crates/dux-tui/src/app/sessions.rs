@@ -1685,7 +1685,7 @@ impl App {
     /// that, a launch started while the fullscreen relaunch screen is up keeps
     /// the user fullscreen rather than dropping them to the 3-pane layout.
     pub(crate) fn launch_seeks_fullscreen(&self, view: LaunchView) -> bool {
-        (view == LaunchView::Fullscreen)
+        view == LaunchView::Fullscreen
             || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
@@ -1776,19 +1776,11 @@ impl App {
     pub(crate) fn agent_launch_request(
         &self,
         session: AgentSession,
-        resume: bool,
+        start: dux_core::model::ConversationStart,
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
-        self.engine.build_agent_launch_request(
-            session,
-            if resume {
-                dux_core::model::ConversationStart::Resume
-            } else {
-                dux_core::model::ConversationStart::Fresh
-            },
-            self.pty_size_for_launch(),
-            kind,
-        )
+        self.engine
+            .build_agent_launch_request(session, start, self.pty_size_for_launch(), kind)
     }
 
     /// Build the keyed status op for a reconnect or fresh-restart launch. The
@@ -8050,7 +8042,11 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
         let live_before = app.engine.live_status_keys.len();
         dux_core::engine::fail_next_worker_spawn();
-        app.apply_rename_session("s1", "renamed-agent".to_string(), true);
+        app.apply_rename_session(
+            "s1",
+            "renamed-agent".to_string(),
+            dux_core::engine::BranchRename::AlsoTheBranch,
+        );
         assert_eq!(
             app.engine.live_status_keys.len(),
             live_before,
@@ -9382,7 +9378,7 @@ mod tests {
         app.set_info("cleared");
         let request = app.agent_launch_request(
             app.engine.sessions[0].clone(),
-            false,
+            dux_core::model::ConversationStart::Fresh,
             AgentLaunchKind::Reconnect {
                 status_message: "Starting".into(),
             },
@@ -9426,7 +9422,7 @@ mod tests {
 
         let request = app.agent_launch_request(
             app.engine.sessions[0].clone(),
-            true,
+            dux_core::model::ConversationStart::Resume,
             AgentLaunchKind::Reconnect {
                 status_message: "Starting".into(),
             },

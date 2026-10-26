@@ -1634,7 +1634,7 @@ pub(crate) fn center_typing_owns_key(key: &KeyEvent, tab_key: TabKey) -> bool {
         // modifier turns it back into a dux-side chord.
         return key.code == KeyCode::Char('c') && mods == KeyModifiers::CONTROL;
     }
-    if (tab_key == TabKey::ReachesAgent) && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+    if tab_key == TabKey::ReachesAgent && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         return true;
     }
     matches!(
@@ -1985,7 +1985,7 @@ impl RuntimeBindings {
     /// moves focus off the pane. A user who rebinds both to Tab alone lands
     /// here, and the surfaces answer with [`NO_PANE_CHORD_ADVICE`].
     pub(crate) fn typeable_center_traps_focus(&self, tab_key: TabKey) -> bool {
-        (tab_key == TabKey::ReachesAgent)
+        tab_key == TabKey::ReachesAgent
             && self
                 .label_for_typeable_center(Action::FocusNext, TabKey::ReachesAgent)
                 .is_none()

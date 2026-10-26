@@ -490,7 +490,7 @@ mod tests {
     fn land_a_browsers_create(app: &mut App, session: AgentSession) {
         let request = app.agent_launch_request(
             session,
-            false,
+            dux_core::model::ConversationStart::Fresh,
             dux_core::worker::AgentLaunchKind::Create {
                 status_message: "Created agent.".to_string().into(),
                 status_warns: false,

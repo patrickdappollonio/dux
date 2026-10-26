@@ -373,7 +373,7 @@ fn stopping(problems: &[StartProblem], surface: Surface, read: ConfigRead) -> Ve
         .iter()
         .filter(|problem| problem.stops(surface))
         .filter(|problem| {
-            !((read == ConfigRead::Reload)
+            !(read == ConfigRead::Reload
                 && surface == Surface::DuxServer
                 && problem.dux_server_override.is_some())
         })

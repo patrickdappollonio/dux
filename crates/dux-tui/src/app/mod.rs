@@ -2544,7 +2544,7 @@ impl DeleteAgentTarget {
         &self,
         worktree: dux_core::engine::WorktreeOnDelete,
     ) -> bool {
-        (worktree == dux_core::engine::WorktreeOnDelete::Remove) && self.offers_worktree_checkbox()
+        worktree == dux_core::engine::WorktreeOnDelete::Remove && self.offers_worktree_checkbox()
     }
 
     /// The branch answer this dialog sends with its delete request, given the
@@ -5268,8 +5268,11 @@ impl App {
     /// server's startup pass); only the TUI-side launch dispatch lives here.
     fn auto_reopen_eligible_sessions(&mut self) {
         for session in self.engine.auto_reopen_candidates() {
-            let request =
-                self.agent_launch_request(session, true, AgentLaunchKind::StartupAutoReopen);
+            let request = self.agent_launch_request(
+                session,
+                dux_core::model::ConversationStart::Resume,
+                AgentLaunchKind::StartupAutoReopen,
+            );
             self.dispatch_agent_launch(request);
         }
     }
@@ -6312,7 +6315,11 @@ impl App {
 
     fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
         let theme_warning = self.take_reload_view_state(&config);
-        let github_was_enabled = self.engine.github_integration_enabled;
+        let github_was_enabled = if self.engine.github_integration_enabled {
+            dux_core::engine::GithubIntegration::Enabled
+        } else {
+            dux_core::engine::GithubIntegration::Disabled
+        };
         self.engine.github_integration_enabled = config.ui.github_integration;
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
@@ -6344,12 +6351,12 @@ impl App {
     /// else on this surface. Runs after a successful apply and after one
     /// that failed but adopted the config anyway, so neither claims a
     /// setting that is not in force.
-    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
-        self.engine.probe_gh_after_reload(if github_was_enabled {
-            dux_core::engine::GithubIntegration::Enabled
-        } else {
-            dux_core::engine::GithubIntegration::Disabled
-        });
+    pub(crate) fn run_config_swap_effects(
+        &mut self,
+        before: &Config,
+        github: dux_core::engine::GithubIntegration,
+    ) {
+        self.engine.probe_gh_after_reload(github);
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -6360,12 +6367,7 @@ impl App {
         // filter may have moved.
         self.rebuild_left_items();
         self.engine.update_branch_sync_sessions();
-        self.engine
-            .retune_pr_sync_after_reload(if github_was_enabled {
-                dux_core::engine::GithubIntegration::Enabled
-            } else {
-                dux_core::engine::GithubIntegration::Disabled
-            });
+        self.engine.retune_pr_sync_after_reload(github);
         self.reload_changed_files();
         self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live
@@ -7388,19 +7390,11 @@ impl App {
         &mut self,
         session_id: &str,
         new_name: String,
-        rename_branch: bool,
+        rename: dux_core::engine::BranchRename,
     ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
-        match self.engine.rename_agent(
-            session_id,
-            &new_name,
-            if rename_branch {
-                dux_core::engine::BranchRename::AlsoTheBranch
-            } else {
-                dux_core::engine::BranchRename::NameOnly
-            },
-        ) {
+        match self.engine.rename_agent(session_id, &new_name, rename) {
             Ok(reaction) => {
                 self.apply_reaction(reaction);
                 true

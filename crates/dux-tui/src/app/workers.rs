@@ -269,7 +269,7 @@ impl App {
         }
         if self.input_target == InputTarget::Agent
             && self.session_surface == SessionSurface::Agent
-            && (tab_focus == FocusState::Focused)
+            && tab_focus == FocusState::Focused
         {
             self.reset_raw_input_state();
         }
@@ -591,7 +591,7 @@ impl App {
     }
 
     fn resolve_checkout_inspect_completion(&mut self, id: String, follow_up: InspectFollowUp) {
-        if (follow_up == InspectFollowUp::Done)
+        if follow_up == InspectFollowUp::Done
             && let Some(op) = self.pending_checkout_inspect_ops.remove(&id)
         {
             self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
@@ -887,7 +887,15 @@ impl App {
                 before,
                 github_was_enabled,
                 error,
-            } => self.apply_config_adopted(*before, github_was_enabled, error),
+            } => self.apply_config_adopted(
+                *before,
+                if github_was_enabled {
+                    dux_core::engine::GithubIntegration::Enabled
+                } else {
+                    dux_core::engine::GithubIntegration::Disabled
+                },
+                error,
+            ),
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
                 self.apply_project_persistence_outcome(*boxed);
@@ -1046,7 +1054,11 @@ impl App {
 
     pub(crate) fn apply_reloaded_config_reaction(&mut self, config: Config) {
         let before = self.engine.config.clone();
-        let github_was_enabled = self.engine.github_integration_enabled;
+        let github_was_enabled = if self.engine.github_integration_enabled {
+            dux_core::engine::GithubIntegration::Enabled
+        } else {
+            dux_core::engine::GithubIntegration::Disabled
+        };
         let fallback = config.clone();
         let mut apply_error = None;
         let outcome = match self.apply_reloaded_config(config) {
@@ -1094,12 +1106,17 @@ impl App {
     /// terminal UI's own failed apply gives. `github_was_enabled` is the
     /// engine's own state before the reload; its apply asked `gh` for
     /// nothing, so this surface asks where a reload owes it.
-    fn apply_config_adopted(&mut self, before: Config, github_was_enabled: bool, error: String) {
+    fn apply_config_adopted(
+        &mut self,
+        before: Config,
+        github: dux_core::engine::GithubIntegration,
+        error: String,
+    ) {
         let adopted = self.engine.config.clone();
         // The failure is the message, so the theme's own warning is left to
         // the next reload.
         let _ = self.take_reload_view_state(&adopted);
-        self.run_config_swap_effects(&before, github_was_enabled);
+        self.run_config_swap_effects(&before, github);
         self.note_config_adopted(&before);
         let outcome = TuiConfigReloadOutcome::ApplyFailed(error.clone());
         if let Some(op) = self.pending_config_reload_op.take() {
@@ -2195,7 +2212,11 @@ fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
     }
     agent_exit_status_message(
         pty.exit_success,
-        pty.is_minimal,
+        if pty.is_minimal {
+            ExitScreen::Minimal
+        } else {
+            ExitScreen::Full
+        },
         &pty.output_excerpt,
         pty.read_error.as_deref(),
         reconnect_key,
@@ -2209,9 +2230,18 @@ fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
 /// one a child that was merely slow to be reaped gets, and the user is told the
 /// agent exited when what actually happened is that dux stopped being able to
 /// read the terminal and killed a process that may have been perfectly healthy.
+/// How much an exited agent left on its screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitScreen {
+    /// Little enough to quote in the status line.
+    Minimal,
+    /// A full screen, which the pane itself shows.
+    Full,
+}
+
 fn agent_exit_status_message(
     exit_success: Option<bool>,
-    is_minimal: bool,
+    screen: ExitScreen,
     excerpt: &str,
     read_error: Option<&str>,
     reconnect_key: &str,
@@ -2226,7 +2256,7 @@ fn agent_exit_status_message(
         .join(" ");
     // What the provider left on screen, when there is a short enough run of it
     // to be worth quoting. Built once so the read-error message can carry it too.
-    let output_clause = if is_minimal && !output.is_empty() {
+    let output_clause = if screen == ExitScreen::Minimal && !output.is_empty() {
         let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
         let more = if output.truncated {
             " Full output was written to the logs."
@@ -3690,7 +3720,8 @@ mod tests {
     fn agent_exit_status_message_caps_long_provider_output() {
         let long_output = "x".repeat(200);
 
-        let message = agent_exit_status_message(Some(false), true, &long_output, None, "r");
+        let message =
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, &long_output, None, "r");
 
         assert!(message.contains("Output: "));
         assert!(message.contains("…"));
@@ -3703,7 +3734,8 @@ mod tests {
 
     #[test]
     fn agent_exit_status_message_concats_short_provider_output() {
-        let message = agent_exit_status_message(Some(false), true, "first\nsecond", None, "r");
+        let message =
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, "first\nsecond", None, "r");
 
         assert!(message.contains("Output: first second."));
         assert!(!message.contains('|'));
@@ -3716,8 +3748,13 @@ mod tests {
     /// dux stopped being able to read the terminal and killed it.
     #[test]
     fn agent_exit_status_message_says_a_read_error_ended_the_run() {
-        let message =
-            agent_exit_status_message(None, true, "boot\nfailed", Some("bad file descriptor"), "r");
+        let message = agent_exit_status_message(
+            None,
+            ExitScreen::Minimal,
+            "boot\nfailed",
+            Some("bad file descriptor"),
+            "r",
+        );
 
         assert!(
             message.contains("read error"),
@@ -3733,7 +3770,8 @@ mod tests {
         );
         assert!(message.contains("to relaunch"));
 
-        let ordinary = agent_exit_status_message(None, true, "boot\nfailed", None, "r");
+        let ordinary =
+            agent_exit_status_message(None, ExitScreen::Minimal, "boot\nfailed", None, "r");
         assert!(
             !ordinary.contains("read error"),
             "an ordinary end of input must not gain a read-error clause: {ordinary}"
@@ -3788,7 +3826,7 @@ mod tests {
         let message = pruned_agent_exit_message(&pruned_agent("feat/x"), "Ctrl-r");
         assert_eq!(
             message,
-            agent_exit_status_message(Some(false), true, "boom", None, "Ctrl-r"),
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, "boom", None, "Ctrl-r"),
             "with no refusal recorded the line is the ordinary exit message"
         );
         assert!(!message.contains("could not resume"));

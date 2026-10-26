@@ -2605,7 +2605,7 @@ impl App {
     ) -> bool {
         let left_items = self.left_items();
         let projects_focused =
-            if (focused == FocusState::Focused) && self.left_section == LeftSection::Projects {
+            if focused == FocusState::Focused && self.left_section == LeftSection::Projects {
                 FocusState::Focused
             } else {
                 FocusState::Unfocused
@@ -2710,7 +2710,7 @@ impl App {
         body_will_dim: bool,
     ) {
         let terminals_focused =
-            if (focused == FocusState::Focused) && self.left_section == LeftSection::Terminals {
+            if focused == FocusState::Focused && self.left_section == LeftSection::Terminals {
                 FocusState::Focused
             } else {
                 FocusState::Unfocused
@@ -4673,7 +4673,7 @@ impl App {
 
         // Ratatui cannot detect damage to the physical terminal outside its
         // previous-frame buffer, so resend the vulnerable focused edge.
-        if (focused == FocusState::Focused)
+        if focused == FocusState::Focused
             && self.session_surface == SessionSurface::Agent
             && area.width > 0
             && area.height > 2
@@ -5232,8 +5232,8 @@ impl App {
         pane_focused: FocusState,
     ) {
         self.mouse_layout.commit_area = Some(area);
-        let is_active_section = (pane_focused == FocusState::Focused)
-            && self.right_section == RightSection::CommitInput;
+        let is_active_section =
+            pane_focused == FocusState::Focused && self.right_section == RightSection::CommitInput;
         let focused = self.input_target == InputTarget::CommitMessage;
 
         let block = self.themed_block(

@@ -5470,7 +5470,15 @@ impl App {
                     return Some(false);
                 }
                 // Any other refusal keeps it up too, with the name as typed.
-                if self.apply_rename_session(&id, new_name, also_rename_branch) {
+                if self.apply_rename_session(
+                    &id,
+                    new_name,
+                    if also_rename_branch {
+                        dux_core::engine::BranchRename::AlsoTheBranch
+                    } else {
+                        dux_core::engine::BranchRename::NameOnly
+                    },
+                ) {
                     self.prompt = PromptState::None;
                 }
             }
@@ -8402,7 +8410,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if (answer == ConfirmAnswer::Confirm)
+        if answer == ConfirmAnswer::Confirm
             && let Some(refused) =
                 self.guarded_by(&asked, |app| app.do_delete_terminal(&terminal_id))
         {
@@ -8603,7 +8611,7 @@ impl App {
             ),
             _ => return false,
         };
-        if (answer == ConfirmAnswer::Confirm)
+        if answer == ConfirmAnswer::Confirm
             && self.ask_again_if_project_grew(
                 &project_id,
                 &project_name,
@@ -8693,7 +8701,7 @@ impl App {
         };
         // A real project's removal needs no re-ask: `run_remove_project` refuses
         // one that has gained any agent at all.
-        if (answer == ConfirmAnswer::Confirm)
+        if answer == ConfirmAnswer::Confirm
             && orphaned
             && self.ask_again_if_project_grew(
                 &project_id,
@@ -8943,7 +8951,7 @@ impl App {
         self.prompt = PromptState::None;
         // A folder is deleted whole on a worker, which re-checks live status
         // before it removes anything (see `changes_tree`).
-        if (answer == ConfirmAnswer::Confirm) && kind != dux_core::model::ChangedFileKind::File {
+        if answer == ConfirmAnswer::Confirm && kind != dux_core::model::ChangedFileKind::File {
             let folder = ChangedFile {
                 status: "?".to_string(),
                 path: file_path,
@@ -8960,7 +8968,7 @@ impl App {
         // Discard is the most destructive of the changes actions, so the
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
-        if (answer == ConfirmAnswer::Confirm)
+        if answer == ConfirmAnswer::Confirm
             && let Some(worktree) = self.changes_worktree_for_selection()
         {
             // Classified against LIVE git status on the discard's worker, right
@@ -10401,12 +10409,12 @@ impl App {
                 ..
             }
         );
-        if (answer == ConfirmAnswer::Confirm) && !recover {
+        if answer == ConfirmAnswer::Confirm && !recover {
             self.set_info("Check \"Recover last working config\" before restoring config.toml.");
             return false;
         }
         self.prompt = PromptState::None;
-        if (answer == ConfirmAnswer::Confirm) && recover {
+        if answer == ConfirmAnswer::Confirm && recover {
             // RecoverConfig now writes synchronously and returns a FINAL status
             // (restored / failed); surface that and do NOT set a trailing Busy,
             // which would never clear (the recovery already completed).
@@ -15473,7 +15481,11 @@ not_a_real_action = ["x"]
             .expect("managed test session")
             .to_string();
 
-        app.apply_rename_session("session-1", "new-title".to_string(), false);
+        app.apply_rename_session(
+            "session-1",
+            "new-title".to_string(),
+            dux_core::engine::BranchRename::NameOnly,
+        );
 
         assert_eq!(
             app.engine.sessions[0].title.as_deref(),
@@ -15983,7 +15995,11 @@ not_a_real_action = ["x"]
         app.engine
             .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid.clone()));
 
-        app.apply_rename_session(&sid, "brand-new-name".to_string(), true);
+        app.apply_rename_session(
+            &sid,
+            "brand-new-name".to_string(),
+            dux_core::engine::BranchRename::AlsoTheBranch,
+        );
 
         assert_eq!(
             app.engine.sessions[0].title, original_title,
@@ -16014,7 +16030,11 @@ not_a_real_action = ["x"]
             )
             .unwrap();
 
-        app.apply_rename_session(&sid, "brand-new-name".to_string(), false);
+        app.apply_rename_session(
+            &sid,
+            "brand-new-name".to_string(),
+            dux_core::engine::BranchRename::NameOnly,
+        );
 
         assert_eq!(app.engine.sessions[0].title, original_title);
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -18043,7 +18063,7 @@ not_a_real_action = ["x"]
 
         let request = app.agent_launch_request(
             session.clone(),
-            true,
+            dux_core::model::ConversationStart::Resume,
             AgentLaunchKind::Create {
                 status_message: "imported".to_string().into(),
                 status_warns: false,

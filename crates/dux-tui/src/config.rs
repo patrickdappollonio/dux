@@ -49,7 +49,7 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
         }
         .into());
     }
-    if (purpose == ConfigRead::Start) && !paths.config_path.exists() {
+    if purpose == ConfigRead::Start && !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -68,8 +68,7 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
         |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
             let raw = read.map_err(|error| {
                 load_error(
-                    if (purpose == ConfigRead::Reload)
-                        && error.kind() == std::io::ErrorKind::NotFound
+                    if purpose == ConfigRead::Reload && error.kind() == std::io::ErrorKind::NotFound
                     {
                         dux_core::config::ConfigLoadProblem::Missing
                     } else {
@@ -77,7 +76,7 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
                     },
                 )
             })?;
-            if (purpose == ConfigRead::Reload) && raw.trim().is_empty() {
+            if purpose == ConfigRead::Reload && raw.trim().is_empty() {
                 return Err(load_error(dux_core::config::ConfigLoadProblem::Empty).into());
             }
             dux_core::config::auth_section_of(&raw).map_err(load_error)?;
