@@ -5063,7 +5063,12 @@ fn untracked_file_stat(path: &Path) -> DiffStat {
                 return DiffStat::Binary;
             }
         }
-        lines += chunk.iter().filter(|byte| **byte == b'\n').count();
+        #[expect(
+            clippy::naive_bytecount,
+            reason = "counting the newlines of one read buffer needs no extra dependency"
+        )]
+        let newlines = chunk.iter().filter(|byte| **byte == b'\n').count();
+        lines += newlines;
         last_byte = chunk.last().copied();
         read_so_far = read_so_far.saturating_add(filled);
     }
@@ -6926,6 +6931,10 @@ pub fn docker_style_name() -> String {
 /// Two names git takes are refused on purpose: `@`, which git commands also
 /// read as `HEAD`, and any name carrying a bidirectional control, which would
 /// make the name draw as something it does not say ([`crate::bidi`]).
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "git refuses a ref component ending in exactly `.lock`, a case-sensitive rule"
+)]
 pub fn is_valid_agent_name(name: &str) -> bool {
     // The branch form's own refusals, on top of the ref name rules below.
     if name.is_empty() || name.starts_with('-') || name == "HEAD" || name == "@" {

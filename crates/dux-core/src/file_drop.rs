@@ -1607,7 +1607,7 @@ impl WorkingDirectory {
                         match probe(pid) {
                             CwdProbe::Pinned(dir) => return Ok(dir),
                             CwdProbe::Failed(e) => return Err(e),
-                            CwdProbe::Gone => continue,
+                            CwdProbe::Gone => {}
                         }
                     }
                     if !complete {
@@ -1968,6 +1968,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the extension must survive byte for byte, case included"
+    )]
     fn a_slug_that_grows_past_the_limit_is_cut_keeping_the_extension() {
         // Transliteration spells each glyph out, so 80 three-byte glyphs (240
         // bytes, under the limit) become far more than 255 bytes of letters.
@@ -2120,6 +2124,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the extension must survive byte for byte, case included"
+    )]
     fn a_name_at_the_limit_still_gets_a_usable_collision_name() {
         // The case the design calls out by name: a name that PASSES validation
         // and would exceed the limit once a suffix is appended. Room is

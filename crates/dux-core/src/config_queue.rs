@@ -1144,7 +1144,7 @@ mod tests {
 
         match done_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(()) => h.join().unwrap(),
-            Err(_) => {
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 // On a real regression drop(q) is genuinely deadlocked, so the spawned
                 // thread cannot be joined (that would re-hang); we abandon it and fail.
                 panic!("ConfigWriteQueue::drop deadlocked while a QuiesceGuard was still alive")

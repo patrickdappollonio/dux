@@ -363,6 +363,10 @@ pub enum Action {
 
 impl Action {
     /// The `snake_case` config key for this action.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per Action in an exhaustive match, so a new action does not compile until it is answered here"
+    )]
     pub fn config_name(self) -> &'static str {
         match self {
             Action::MoveDown => "move_down",
@@ -511,6 +515,10 @@ impl Action {
     }
 
     /// Human description used as a TOML comment in the config file.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per Action in an exhaustive match, so a new action does not compile until it is answered here"
+    )]
     pub fn config_description(self) -> &'static str {
         match self {
             Action::MoveDown => "Navigate down through projects, sessions, files, and lists.",
@@ -786,6 +794,10 @@ impl Action {
     }
 
     /// Help section name for the help overlay.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per Action in an exhaustive match, so a new action does not compile until it is answered here"
+    )]
     pub fn help_section(self) -> Option<&'static str> {
         match self {
             Action::MoveDown

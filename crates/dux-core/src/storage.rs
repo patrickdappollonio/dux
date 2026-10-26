@@ -114,6 +114,16 @@ pub(crate) struct PendingWorktreeRemoval {
     pub(crate) process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
 }
 
+/// Whether `agent_sessions.initial_branch` appeared in this open, which is when
+/// the one-time title freeze runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialBranchColumn {
+    /// The column was just added.
+    JustAdded,
+    /// The column was already there.
+    AlreadyThere,
+}
+
 impl SessionStore {
     /// Opens the database at `path`, tightens its files to owner-only, and brings its schema up to
     /// date.
@@ -158,6 +168,24 @@ impl SessionStore {
     }
 
     fn migrate(&self) -> Result<()> {
+        self.migrate_projects_and_sessions_tables()?;
+        self.migrate_session_identity_columns()?;
+        self.migrate_session_state_columns()?;
+        self.migrate_pull_request_tables()?;
+        self.migrate_housekeeping_tables()?;
+        // The slot-tab passes run last: they write `agent_tabs` rows, so the
+        // table has to exist, and a failure in any of them aborts the open. A
+        // workspace whose first tabs are unaddressable is worse than a startup
+        // that says why it stopped.
+        self.sweep_orphan_agent_tabs()?;
+        self.sweep_orphan_minted_branch_renames()?;
+        self.backfill_slot_tabs()?;
+        self.heal_slot_tab_pointers()?;
+        Ok(())
+    }
+
+    /// The `agent_sessions` and `projects` tables, and the project columns added since.
+    fn migrate_projects_and_sessions_tables(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
             create table if not exists agent_sessions (
@@ -218,6 +246,13 @@ impl SessionStore {
             "updated_at",
             "text not null default ''",
         )?;
+        Ok(())
+    }
+
+    /// The agent columns that say what an agent is: its name, its birth branch, where
+    /// its branch came from and which kind of workspace it has, with the one-time
+    /// backfills they need.
+    fn migrate_session_identity_columns(&self) -> Result<()> {
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         // The immutable branch an agent was created on. Additive column with a
         // '' default so old rows and inserts by an older binary still succeed.
@@ -282,66 +317,81 @@ impl SessionStore {
         // Capture the one-time freeze count and log it ONLY after the commit
         // succeeds, so the success line can never claim a migration that a commit
         // failure actually rolled back.
-        let frozen_titles = {
-            let tx = immediate_tx(&self.conn)?;
-            // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
-            // that still lacks one. The WHERE clause is self-limiting, since new
-            // rows always record a genuine `initial_branch` at creation, so this
-            // is a no-op once healed and still repairs rows stranded by a crash
-            // mid-migration or a downgrade-then-upgrade window. The true original
-            // may already be lost to prior drift, so the current branch is frozen
-            // as the recorded initial.
-            //
-            // Gated on the KIND column: a standalone row has an empty
-            // `initial_branch` and an empty `branch_name` permanently by design,
-            // so the assignment would be a no-op today. The gate keeps it from
-            // ever starting to matter for folder rows, which have no branch
-            // identity to heal.
-            tx.execute(
-                "update agent_sessions set initial_branch = branch_name \
-                 where workspace_kind = 'managed' \
-                   and (initial_branch = '' or initial_branch is null)",
-                [],
-            )?;
-            // ONE-TIME backfill, gated on the FIRST appearance of the
-            // `initial_branch` column so it runs exactly once, mirroring the gated
-            // `sort_order` backfill below. `migrate()` runs on every `open()`,
-            // which happens on every startup and every background
-            // project-persistence or config-reload, and an unconditional `title`
-            // backfill would re-freeze the intentionally-NULL `title` of every
-            // auto-named agent on each open, pinning it so the display can no
-            // longer track the branch. `title IS NULL` is a legitimate ongoing
-            // state for auto-named agents, so this must never re-run.
-            //
-            // The asymmetry is deliberate: legacy pet-named agents present at the
-            // one-time upgrade get their current name frozen into `title` here, so
-            // their display never drifts with the branch again, while agents
-            // auto-named afterwards keep `title` NULL and track `branch_name`,
-            // with drift shown through `initial_branch`.
-            let frozen = if initial_branch_added {
-                //
-                // Gated on the kind column for the same reason as the backfill
-                // above: freezing a standalone row's empty branch name into its
-                // title would leave the row with no label at all. A standalone
-                // agent always has a title anyway (creation enforces one), so
-                // this arm has nothing to do for one.
-                Some(tx.execute(
-                    "update agent_sessions set title = branch_name \
-                     where workspace_kind = 'managed' and title is null",
-                    [],
-                )?)
-            } else {
-                None
-            };
-            tx.commit()?;
-            frozen
-        };
+        let frozen_titles = self.backfill_initial_branches(if initial_branch_added {
+            InitialBranchColumn::JustAdded
+        } else {
+            InitialBranchColumn::AlreadyThere
+        })?;
         if let Some(frozen) = frozen_titles {
             crate::logger::info(&format!(
                 "one-time migration: froze the title of {}",
                 count_of(frozen, "legacy session")
             ));
         }
+        Ok(())
+    }
+
+    /// Freeze the birth branch of every managed row still lacking one and, the first
+    /// time `initial_branch` appears, the title of every legacy auto-named agent, in
+    /// one transaction. Answers how many titles were frozen, when that ran.
+    fn backfill_initial_branches(&self, column: InitialBranchColumn) -> Result<Option<usize>> {
+        let tx = immediate_tx(&self.conn)?;
+        // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
+        // that still lacks one. The WHERE clause is self-limiting, since new
+        // rows always record a genuine `initial_branch` at creation, so this
+        // is a no-op once healed and still repairs rows stranded by a crash
+        // mid-migration or a downgrade-then-upgrade window. The true original
+        // may already be lost to prior drift, so the current branch is frozen
+        // as the recorded initial.
+        //
+        // Gated on the KIND column: a standalone row has an empty
+        // `initial_branch` and an empty `branch_name` permanently by design,
+        // so the assignment would be a no-op today. The gate keeps it from
+        // ever starting to matter for folder rows, which have no branch
+        // identity to heal.
+        tx.execute(
+            "update agent_sessions set initial_branch = branch_name \
+             where workspace_kind = 'managed' \
+               and (initial_branch = '' or initial_branch is null)",
+            [],
+        )?;
+        // ONE-TIME backfill, gated on the FIRST appearance of the
+        // `initial_branch` column so it runs exactly once, mirroring the gated
+        // `sort_order` backfill below. `migrate()` runs on every `open()`,
+        // which happens on every startup and every background
+        // project-persistence or config-reload, and an unconditional `title`
+        // backfill would re-freeze the intentionally-NULL `title` of every
+        // auto-named agent on each open, pinning it so the display can no
+        // longer track the branch. `title IS NULL` is a legitimate ongoing
+        // state for auto-named agents, so this must never re-run.
+        //
+        // The asymmetry is deliberate: legacy pet-named agents present at the
+        // one-time upgrade get their current name frozen into `title` here, so
+        // their display never drifts with the branch again, while agents
+        // auto-named afterwards keep `title` NULL and track `branch_name`,
+        // with drift shown through `initial_branch`.
+        let frozen = if column == InitialBranchColumn::JustAdded {
+            //
+            // Gated on the kind column for the same reason as the backfill
+            // above: freezing a standalone row's empty branch name into its
+            // title would leave the row with no label at all. A standalone
+            // agent always has a title anyway (creation enforces one), so
+            // this arm has nothing to do for one.
+            Some(tx.execute(
+                "update agent_sessions set title = branch_name \
+                 where workspace_kind = 'managed' and title is null",
+                [],
+            )?)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(frozen)
+    }
+
+    /// The agent columns for its runtime state: started providers, auto-reopen,
+    /// display order, the remembered tab and the session-slot pointer.
+    fn migrate_session_state_columns(&self) -> Result<()> {
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
             &self.conn,
@@ -402,6 +452,11 @@ impl SessionStore {
         // Both passes run after `create table if not exists agent_tabs` further
         // down, because they write rows into it.
         ensure_column(&self.conn, "agent_sessions", "slot_tab_id", "text")?;
+        Ok(())
+    }
+
+    /// The pull request tables: detected, pinned and suppressed, and branch renames.
+    fn migrate_pull_request_tables(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
             create table if not exists session_prs (
@@ -486,6 +541,11 @@ impl SessionStore {
             );
             ",
         )?;
+        Ok(())
+    }
+
+    /// The housekeeping tables: the changes revision, tabs, app state, pending removals and the process registry.
+    fn migrate_housekeeping_tables(&self) -> Result<()> {
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
         // chokepoint that hands out a strictly-increasing `rev` per session,
@@ -585,14 +645,6 @@ impl SessionStore {
             );
             ",
         )?;
-        // The slot-tab passes run last: they write `agent_tabs` rows, so the
-        // table has to exist, and a failure in any of them aborts the open. A
-        // workspace whose first tabs are unaddressable is worse than a startup
-        // that says why it stopped.
-        self.sweep_orphan_agent_tabs()?;
-        self.sweep_orphan_minted_branch_renames()?;
-        self.backfill_slot_tabs()?;
-        self.heal_slot_tab_pointers()?;
         Ok(())
     }
 

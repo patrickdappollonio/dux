@@ -11,6 +11,7 @@
 //! at once; with no dux running it edits the file.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -153,14 +154,20 @@ pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
         let hidden = listed - items.len();
         match hidden {
             0 => {}
-            1 => eprintln!(
-                "Left out 1 macro whose name is not shown, so it has no id to use; \"dux \
-                 macros ls\" lists it."
-            ),
-            _ => eprintln!(
-                "Left out {hidden} macros whose names are not shown, so they have no id to \
-                 use; \"dux macros ls\" lists them."
-            ),
+            1 => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Left out 1 macro whose name is not shown, so it has no id to use; \"dux \
+                     macros ls\" lists it."
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Left out {hidden} macros whose names are not shown, so they have no id to \
+                     use; \"dux macros ls\" lists them."
+                );
+            }
         }
     }
     let rows = items

@@ -1261,6 +1261,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "three exact 1.0s sum to exactly 3.0")]
     fn aggregate_proc_tree_counts_processes_not_threads() {
         // Root (100) with 3 threads, one real child (200) with 2 threads, and a
         // grandchild (300) under the child, a descendant reached THROUGH a

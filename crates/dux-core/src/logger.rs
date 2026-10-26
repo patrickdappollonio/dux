@@ -366,7 +366,7 @@ impl RotatingLog {
             match state.file.write(&bytes[written..]) {
                 Ok(0) => break,
                 Ok(n) => written += n,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }

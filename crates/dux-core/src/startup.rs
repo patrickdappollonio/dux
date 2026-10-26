@@ -531,7 +531,7 @@ fn wait_for_exit_unreaped(pid: u32) {
             rustix::process::WaitId::Pid(pid),
             rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
         ) {
-            Err(rustix::io::Errno::INTR) => continue,
+            Err(rustix::io::Errno::INTR) => {}
             _ => return,
         }
     }
@@ -1705,7 +1705,7 @@ mod review16_tests {
         );
         // The drain reads on: a writer never blocks, well past a pipe's buffer.
         let writer = std::thread::spawn(move || {
-            let chunk = [b'x'; 65536];
+            let chunk = vec![b'x'; 65536];
             for _ in 0..32 {
                 rustix::io::write(&write_end, &chunk).unwrap();
             }
@@ -1745,7 +1745,7 @@ mod review16_tests {
             "no drain process started"
         );
         let writer = std::thread::spawn(move || {
-            let chunk = [b'x'; 65536];
+            let chunk = vec![b'x'; 65536];
             for _ in 0..32 {
                 rustix::io::write(&write_end, &chunk).unwrap();
             }
@@ -1761,7 +1761,7 @@ mod review16_tests {
     /// Runs only when the parent test asks for it, in a process of its own:
     /// it stands in for a dux that runs a startup command and then quits.
     #[test]
-    #[ignore]
+    #[ignore = "a helper the parent test runs in a process of its own"]
     fn review16_helper_run_startup_command_then_quit() {
         let Ok(dir) = std::env::var("DUX_REVIEW16_DIR") else {
             return;

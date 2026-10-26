@@ -13,6 +13,7 @@
 //! directory; a plain `tempfile::tempdir()` is fine where nothing outlives the
 //! test's own statements.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -139,7 +140,8 @@ fn remove_all_by(mut pending: Vec<PathBuf>, deadline: Instant) {
         }
         if Instant::now() >= deadline {
             for (path, err) in pending.iter().zip(last_errors) {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr().lock(),
                     "test scratch directory {} was left behind: {err}",
                     path.display()
                 );

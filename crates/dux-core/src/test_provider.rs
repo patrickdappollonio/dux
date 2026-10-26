@@ -32,6 +32,7 @@
 //! `dux-tui` and `dux-web` enable as a dev-dependency, so none of it ships.
 
 use crate::config::{Config, ProviderCommandConfig, default_provider_commands};
+use std::io::Write as _;
 
 /// The file names of the only programs a test may spawn through a PTY. Matched
 /// exactly against the command's file name, so `/bin/sh` is allowed and `Claude`
@@ -99,7 +100,7 @@ pub(crate) fn refuse_unlisted_spawn(command: &str) -> anyhow::Result<()> {
              a harmless helper the test genuinely needs, add its file name to \
              dux_core::test_provider::ALLOWED_TEST_COMMANDS."
         );
-        eprintln!("{message}");
+        let _ = writeln!(std::io::stderr().lock(), "{message}");
         anyhow::bail!(message);
     }
     Ok(())
@@ -122,7 +123,7 @@ pub(crate) fn refuse_unlisted_launch(what: &str, command: &str) -> anyhow::Resul
              a harmless helper the test genuinely needs, add its file name to \
              dux_core::test_provider::ALLOWED_TEST_COMMANDS."
         );
-        eprintln!("{message}");
+        let _ = writeln!(std::io::stderr().lock(), "{message}");
         anyhow::bail!(message);
     }
     Ok(())

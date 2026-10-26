@@ -265,7 +265,7 @@ fn sync_config_authoritative_project_field<T>(
             *stored_value = Some(config.clone());
         }
         None => {
-            config_value.clone_from(&stored_value);
+            config_value.clone_from(stored_value);
         }
     }
 }

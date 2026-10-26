@@ -1323,8 +1323,7 @@ impl Engine {
                 .map(|s| {
                     let extras = extras_by_session
                         .get(s.id.as_str())
-                        .map(std::vec::Vec::as_slice)
-                        .unwrap_or(&[]);
+                        .map_or(&[][..], std::vec::Vec::as_slice);
                     self.project_session(s, extras)
                 })
                 .collect(),

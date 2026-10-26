@@ -15,7 +15,7 @@ where
 {
     loop {
         match op() {
-            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
             result => return result,
         }
     }
@@ -32,7 +32,7 @@ where
 {
     loop {
         match op() {
-            Err(rustix::io::Errno::INTR) => continue,
+            Err(rustix::io::Errno::INTR) => {}
             result => return result,
         }
     }

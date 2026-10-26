@@ -1893,6 +1893,19 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_root_u16(doc, "removal_wait_seconds", config.removal_wait_seconds);
 
+    patch_defaults_env_and_logging(doc, config);
+    patch_ui_layout(doc, config);
+    patch_ui_timing_and_github(doc, config);
+    patch_ui_web_and_attention(doc, config);
+    patch_capabilities_editor_cli_and_git(doc, config);
+    patch_server_listener(doc, config);
+    patch_server_connection_caps(doc, config);
+    patch_server_timeouts_and_concurrency(doc, config);
+    patch_terminals_keys_and_lists(doc, config);
+}
+
+/// The `[defaults]`, `[env]` and `[logging]` tables.
+fn patch_defaults_env_and_logging(doc: &mut DocumentMut, config: &Config) {
     // --- [defaults] ---
     patch_table_str(doc, "defaults", "provider", &config.defaults.provider);
     patch_table_opt_str(
@@ -1933,7 +1946,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_u64(doc, "logging", "max_bytes", config.logging.max_bytes);
     patch_table_u32(doc, "logging", "keep", config.logging.keep);
     patch_table_value(doc, "logging", "compress", config.logging.compress);
+}
 
+/// `[ui]`'s pane sizes and scrollback.
+fn patch_ui_layout(doc: &mut DocumentMut, config: &Config) {
     // --- [ui] ---
     patch_table_u16(doc, "ui", "left_width_pct", config.ui.left_width_pct);
     patch_table_u16(doc, "ui", "right_width_pct", config.ui.right_width_pct);
@@ -1968,6 +1984,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.agent_scrollback_lines,
     );
     patch_table_u16(doc, "ui", "agent_tabs_max", config.ui.agent_tabs_max);
+}
+
+/// `[ui]`'s status, branch sync, diff and GitHub settings.
+fn patch_ui_timing_and_github(doc: &mut DocumentMut, config: &Config) {
     patch_table_u16(
         doc,
         "ui",
@@ -2012,6 +2032,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.github_probe_interval_secs,
     );
     patch_table_value(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+}
+
+/// `[ui]`'s web terminal, attention, tab, upload and first-load settings.
+fn patch_ui_web_and_attention(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(
         doc,
         "ui",
@@ -2092,7 +2116,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "ui", "agent_sort", &config.ui.agent_sort);
     patch_table_str(doc, "ui", "theme", &config.ui.theme);
     patch_table_value(doc, "ui", "nerd_font_icons", config.ui.nerd_font_icons);
+}
 
+/// The `[capabilities]`, `[editor]`, `[cli]` and `[git]` tables.
+fn patch_capabilities_editor_cli_and_git(doc: &mut DocumentMut, config: &Config) {
     // --- [capabilities] ---
     patch_table_str(
         doc,
@@ -2143,7 +2170,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "clone_stall_seconds",
         config.git.clone_stall_seconds,
     );
+}
 
+/// `[server]`'s listener, log viewer, background serving and control socket.
+fn patch_server_listener(doc: &mut DocumentMut, config: &Config) {
     // --- [server] ---
     // The deprecated `bind` field is migrated away on load and is never
     // re-emitted here, so a patch/recover/plain write produces the new
@@ -2182,6 +2212,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "control_socket",
         &config.server.control_socket,
     );
+}
+
+/// `[server]`'s connection caps, shutdown wait and search index cap.
+fn patch_server_connection_caps(doc: &mut DocumentMut, config: &Config) {
     // The single WebSocket cap was split into three per-class caps; drop the
     // obsolete key from any existing config block on every save so saves stop
     // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when
@@ -2194,7 +2228,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
             Set those per-class caps instead; a value of 0 still means disable \
             (refuse all new connections of that class until restart).";
         crate::logger::warn(msg);
-        eprintln!("dux config migration warning: {msg}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "dux config migration warning: {msg}"
+        );
     }
     patch_table_u32(
         doc,
@@ -2240,6 +2277,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "search_index_max_files",
         config.server.search_index_max_files,
     );
+}
+
+/// `[server]`'s reconnect, heartbeat, operation and concurrency settings.
+fn patch_server_timeouts_and_concurrency(doc: &mut DocumentMut, config: &Config) {
     patch_table_u32(
         doc,
         "server",
@@ -2332,7 +2373,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
 
     // [server.auth] is deliberately absent: see `render_auth_section`.
+}
 
+/// The `[terminal]`, `[startup_command_terminal]` and `[keys]` tables, then providers, projects and macros.
+fn patch_terminals_keys_and_lists(doc: &mut DocumentMut, config: &Config) {
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(doc, "terminal", "args", &config.terminal.args);

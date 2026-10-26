@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -778,7 +779,10 @@ fn retry_after_other_create(
         )
     };
     let Some(other) = refused.operation.as_deref() else {
-        eprintln!("Another agent was being created, so this one waited for it.");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Another agent was being created, so this one waited for it."
+        );
         let mut last = refused.error;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -795,7 +799,10 @@ fn retry_after_other_create(
             }
         }
     };
-    eprintln!("Another agent was being created (operation {other}), so this one waited for it.");
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "Another agent was being created (operation {other}), so this one waited for it."
+    );
     // Time running out on somebody else's creation leaves this one never started:
     // refused, not of unknown outcome.
     match client.wait_for_other(other, deadline) {

@@ -1430,7 +1430,7 @@ impl PtyClient {
             match rustix::process::waitid(rustix::process::WaitId::Pid(pid), options) {
                 Ok(Some(_)) => return Some(true),
                 Ok(None) => return Some(false),
-                Err(rustix::io::Errno::INTR) => continue,
+                Err(rustix::io::Errno::INTR) => {}
                 Err(_) => return None,
             }
         }
