@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use anyhow::Result;
-use dux_core::background_serve::ServiceOutcome;
+use dux_core::background_serve::{ServeClaims, ServiceOutcome};
 use dux_core::engine::{Engine, EventReaction};
 
 use crate::console::Console;
@@ -70,16 +70,16 @@ impl BackgroundServer {
     /// Start serving `engine` on `listeners`, which the caller already bound: a
     /// bind failure is then a status line message, not a half-torn-down process.
     ///
-    /// With `claim_before_serving`, every running pty nobody drives is claimed
-    /// for the terminal UI before any listener accepts a connection, and the
-    /// claims are announced once the serve is up. See
+    /// With [`ServeClaims::UndrivenPtys`], every running pty nobody drives is
+    /// claimed for the terminal UI before any listener accepts a connection, and
+    /// the claims are announced once the serve is up. See
     /// [`dux_core::background_serve::BackgroundServeCompanion::start`].
     pub fn start(
         engine: &mut Engine,
         listeners: Vec<std::net::TcpListener>,
         urls: Vec<String>,
-        claim_before_serving: bool,
-        startup: dux_core::serve_log::StartupNotes,
+        claims: ServeClaims,
+        startup: &dux_core::serve_log::StartupNotes,
     ) -> Result<Self> {
         crate::warn_if_ui_not_built();
         // Prints nothing over the terminal UI's frame, but writes `server.log`
@@ -136,10 +136,9 @@ impl BackgroundServer {
         // so no browser tab that is already reconnecting can win a plain-attach
         // claim first, and every handshake reads the terminal UI as the owner.
         // Announced once the serve is up and its publisher exists.
-        let seeded_claims = if claim_before_serving {
-            ownership.claim_every_running_pty(engine)
-        } else {
-            Vec::new()
+        let seeded_claims = match claims {
+            ServeClaims::UndrivenPtys => ownership.claim_every_running_pty(engine),
+            ServeClaims::Nothing => Vec::new(),
         };
         let publisher = Arc::new(std::sync::OnceLock::new());
         let browsers = Arc::new(AtomicUsize::new(0));
@@ -606,8 +605,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            Default::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &Default::default(),
         )
         .expect("the serve starts");
         assert!(!engine.config.server.auth.has_password());
@@ -657,8 +656,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec!["http://stale.example:1".to_string()],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("the serve starts");
 
@@ -769,8 +768,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{first_addr}")],
-            false,
-            dux_core::serve_log::StartupNotes {
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes {
                 warnings: vec!["Tailscale not detected (test).".to_string()],
                 ..Default::default()
             },
@@ -837,8 +836,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{second_addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("the second serve starts");
         let status = healthz(second_addr).expect("the second serve answers");
@@ -901,8 +900,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         let flag = std::sync::Arc::clone(&server.shutdown_flag);
@@ -928,8 +927,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         assert!(
@@ -955,8 +954,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("serve starts");
         assert!(
@@ -978,8 +977,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("first serve");
         let first = crate::pty_owners::PtySizeOwners::default().next_conn_id();
@@ -990,8 +989,8 @@ mod tests {
             &mut engine,
             vec![listener],
             vec![format!("http://{addr}")],
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("second serve");
         let second = crate::pty_owners::PtySizeOwners::default().next_conn_id();

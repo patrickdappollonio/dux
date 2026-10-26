@@ -160,7 +160,6 @@ fn serve(
     engine: &mut Engine,
     claims: dux_core::background_serve::ServeClaims,
 ) -> (BackgroundServer, std::net::SocketAddr) {
-    let claim_before_serving = claims == dux_core::background_serve::ServeClaims::UndrivenPtys;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
     let addr = listener.local_addr().expect("bound address");
     // Not a test about Tailscale: on any other mode every request waits on the
@@ -170,8 +169,8 @@ fn serve(
         engine,
         vec![listener],
         vec![format!("http://{addr}")],
-        claim_before_serving,
-        dux_core::serve_log::StartupNotes::default(),
+        claims,
+        &dux_core::serve_log::StartupNotes::default(),
     )
     .expect("the serve starts");
     (server, addr)

@@ -200,7 +200,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
             engine,
             vec![listener],
             dux_core::activity::ActivityRing::default(),
-            dux_core::serve_log::StartupNotes::default(),
+            &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
@@ -363,7 +363,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
             engine,
             vec![listener],
             dux_core::activity::ActivityRing::default(),
-            dux_core::serve_log::StartupNotes::default(),
+            &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
             || {
                 if quit_for_thread.load(Ordering::SeqCst) {
@@ -442,7 +442,7 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
             engine,
             vec![listener],
             dux_core::activity::ActivityRing::default(),
-            dux_core::serve_log::StartupNotes::default(),
+            &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
             || ServerTick::QuitProcess,
             |_message| {},
@@ -505,7 +505,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
             engine,
             vec![listener],
             dux_core::activity::ActivityRing::default(),
-            dux_core::serve_log::StartupNotes::default(),
+            &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
             || {
                 if stop_for_thread.load(Ordering::SeqCst) {
@@ -622,7 +622,7 @@ async fn the_flip_logs_what_dux_server_prints() {
             engine,
             vec![listener],
             ring_for_thread,
-            startup,
+            &startup,
             dux_web::FlipHooks::default(),
             || {
                 if quit_for_thread.load(Ordering::SeqCst) {
@@ -791,7 +791,7 @@ async fn a_second_ctrl_c_during_the_shutdown_wait_forces_the_exit() {
             engine,
             vec![listener],
             ring_for_thread,
-            dux_core::serve_log::StartupNotes::default(),
+            &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
             || ServerTick::QuitProcess,
             |_message| {},

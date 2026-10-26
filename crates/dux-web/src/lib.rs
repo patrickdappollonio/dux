@@ -110,12 +110,12 @@ use dux_core::tailscale::TailscaleIdentity;
 /// lines of the log, before any address is bound, so they are on screen even if
 /// a bind then fails.
 pub fn run_server(
-    paths: DuxPaths,
+    paths: &DuxPaths,
     plan: ServerPlan,
     version: String,
-    startup_warnings: Vec<StartupWarning>,
+    startup_warnings: &[StartupWarning],
 ) -> Result<()> {
-    run_plain_http(&paths, plan, version, &startup_warnings)
+    run_plain_http(paths, plan, version, startup_warnings)
 }
 
 /// A warning `dux server` raised before anything was loaded, for the head of
@@ -2852,7 +2852,7 @@ pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
     activity: dux_core::activity::ActivityRing,
-    startup: StartupNotes,
+    startup: &StartupNotes,
     hooks: FlipHooks,
     mut on_tick: impl FnMut() -> ServerTick,
     mut on_shutdown_status: impl FnMut(&str),
@@ -6913,8 +6913,8 @@ mod auth_warning_mode_tests {
             &mut engine,
             vec![listener],
             Vec::new(),
-            false,
-            dux_core::serve_log::StartupNotes::default(),
+            dux_core::background_serve::ServeClaims::Nothing,
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .unwrap();
         *server.tailscale_mode_control().bound_leg().lock().unwrap() =

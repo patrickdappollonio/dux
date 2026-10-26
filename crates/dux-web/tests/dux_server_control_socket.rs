@@ -60,9 +60,8 @@ fn dux_server_answers_on_its_control_socket_and_removes_it_on_exit() {
         forced_no: false,
     };
     let lock_path = paths.lock_path.clone();
-    let serve = std::thread::spawn(move || {
-        dux_web::run_server(paths, plan, "test".to_string(), Vec::new())
-    });
+    let serve =
+        std::thread::spawn(move || dux_web::run_server(&paths, plan, "test".to_string(), &[]));
 
     let socket = root.join("ctl.sock");
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -92,7 +92,7 @@ pub(crate) fn serve(root: &Path) -> u16 {
     // `dux keys ls` through the API reads the terminal UI's bindings, which
     // the dux binary installs before it serves.
     dux_tui::install_canonical_renderer();
-    std::thread::spawn(move || dux_web::run_server(paths, plan, "test".to_string(), Vec::new()));
+    std::thread::spawn(move || dux_web::run_server(&paths, plan, "test".to_string(), &[]));
     let lock_path = root.join("dux.lock");
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
