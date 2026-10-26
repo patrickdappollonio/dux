@@ -19,7 +19,10 @@
 //! not with a close, since a swallowed click teaches the user nothing.
 
 use super::input::contains_point;
-use super::*;
+use super::{App, ConfirmAnswer, PromptState, RefusalBlink};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use std::time::Instant;
 
 /// What an outside click should do to the prompt that is currently open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,12 +113,11 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ChangeTheme(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::ConfigReloadFailed { .. }
-        | PromptState::Command { .. } => Cancel,
-
+        | PromptState::Command { .. }
         // Confirmations. Dismissal IS cancel here, and every one of these
         // already defaults its focus to Cancel, so an outside click resolves
         // them the same way the safe default button does.
-        PromptState::ConfirmDeleteAgent { .. }
+        | PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
         | PromptState::ConfirmStopTab { .. }
@@ -134,8 +136,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfirmUseExistingBranch { .. }
         // The worktree-removal confirm cancels back to the manager it was
         // raised from, exactly as its Esc arm does.
-        | PromptState::ConfirmDeleteWorktree(_) => Cancel,
-
+        | PromptState::ConfirmDeleteWorktree(_)
         // `EditMacros` is three modals in one variant, so it answers three
         // ways. Its nested delete-confirm is a confirmation like any other and
         // dismisses. Its LIST is a Picker over saved rows, holding no unsaved
@@ -143,7 +144,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         // other picker above; the blink justification ("unsaved free text, or a
         // multi-step selection") is true of the EDITOR and not of the list. The
         // editor itself, below, is the half that really does hold unsaved text.
-        PromptState::EditMacros {
+        | PromptState::EditMacros {
             pending_delete: Some(_),
             ..
         }
@@ -226,6 +227,10 @@ impl App {
     /// announces some dismissals, and firing that on every stray click would be
     /// noise for something the user just watched happen. Helpers that own a
     /// message keep theirs, since parity with Esc is the point.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per prompt kind, so a new modal must decide how it cancels"
+    )]
     pub(crate) fn cancel_prompt(&mut self) -> bool {
         // A press cannot outlive the modal it was made in.
         self.pressed_button = None;
@@ -236,8 +241,6 @@ impl App {
         self.clear_prompt_hint();
 
         match &self.prompt {
-            PromptState::None => return false,
-
             // Plain closes: these match their Esc arms exactly.
             PromptState::AgentInfo(_)
             | PromptState::ResourceMonitor { .. }
@@ -249,7 +252,15 @@ impl App {
             | PromptState::ChangeDefaultProvider(_)
             | PromptState::SetTailscaleMode(_)
             | PromptState::Command { .. }
-            | PromptState::ConfirmNonDefaultBranch { .. } => {
+            | PromptState::ConfirmNonDefaultBranch { .. }
+            // The macro LIST closes the overlay, exactly as its close binding
+            // does. Nothing is saved and nothing is lost: the rows on screen
+            // are the ones already in config.
+            | PromptState::EditMacros {
+                editing: None,
+                pending_delete: None,
+                ..
+            } => {
                 self.prompt = PromptState::None;
             }
 
@@ -367,25 +378,16 @@ impl App {
                 self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel);
             }
 
-            // The macro LIST closes the overlay, exactly as its close binding
-            // does. Nothing is saved and nothing is lost: the rows on screen
-            // are the ones already in config.
-            PromptState::EditMacros {
-                editing: None,
-                pending_delete: None,
-                ..
-            } => {
-                self.prompt = PromptState::None;
-            }
-
             // Not dismissible by an outside click (see `outside_click_policy`);
             // reached only if a caller ignores the policy, so it is a no-op
             // rather than a surprise close. The macro editor cannot join the
             // "matches its Esc arm" contract above: its Esc is state-dependent
             // (in the engaged body it leaves edit mode, in the editor it cancels
             // back to the list), so there is no single statement to mirror. A
-            // stray click gets the blink instead.
-            PromptState::EditMacros { .. }
+            // stray click gets the blink instead. With nothing open there is
+            // nothing to close either.
+            PromptState::None
+            | PromptState::EditMacros { .. }
             | PromptState::BrowseProjects { .. }
             | PromptState::ConfigureStartupCommand { .. }
             | PromptState::ConfigureProjectEnv { .. }
@@ -428,11 +430,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::first_load::FirstLoadPrompt;
     use crate::app::render::centered_rect_exact;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::text_input::TextInput;
+    use crate::app::{
+        AgentInfoPrompt, AgentInfoTone, CenterMode, ConfigReloadFailedFocus, ConfigureFieldFocus,
+        ConfirmFocus, ConfirmKillRunningPrompt, FullscreenOverlay, KillRunningAction,
+        KillRunningFocus, KillRunningPrompt, NameNewAgentFocus, OverlayMouseLayout,
+        PendingMacroDelete, RenameSessionFocus, SearchableList, StartupCommandLogFocus,
+        StartupCommandLogPrompt,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::worker::CreateAgentRequest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     const TERM: (u16, u16) = (120, 40);
 
@@ -784,7 +798,11 @@ mod tests {
                 baseline,
                 "{name} armed a cue that renders nothing"
             );
-            advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+            advance_blink(
+                &mut app,
+                u64::try_from(REFUSAL_BLINK_MS)
+                    .expect("a frame period in milliseconds fits in a u64"),
+            );
             assert_eq!(
                 render_to_buffer(&mut app),
                 baseline,
@@ -814,7 +832,10 @@ mod tests {
 
         // Past the cue's duration the modal must be indistinguishable from one
         // that was never clicked: no frozen-bright, no frozen-dim.
-        advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+        advance_blink(
+            &mut app,
+            u64::try_from(REFUSAL_BLINK_MS).expect("a frame period in milliseconds fits in a u64"),
+        );
         assert_eq!(
             render_to_buffer(&mut app),
             baseline,

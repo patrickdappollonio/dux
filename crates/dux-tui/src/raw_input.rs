@@ -168,7 +168,7 @@ pub(crate) fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
 
     let is_release = final_byte == b'm';
     let is_motion = cb & 32 != 0;
-    let button_bits = cb & 0b11000011; // mask out motion bit (bit 5) and modifier bits (4,3)
+    let button_bits = cb & 0b1100_0011; // mask out motion bit (bit 5) and modifier bits (4,3)
 
     let modifiers = sgr_modifiers(cb);
 
@@ -228,7 +228,7 @@ pub(crate) fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) 
         return None;
     }
 
-    Some(format!("\x1b[<{cb};{tx};{ty}{}", final_byte as char).into_bytes())
+    Some(format!("\x1b[<{cb};{tx};{ty}{}", char::from(final_byte)).into_bytes())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

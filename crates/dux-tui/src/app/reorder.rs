@@ -4,7 +4,7 @@
 //! math; the `impl App` handlers apply it to the live agent/terminal order,
 //! switch the sort to manual, persist, and keep the selection on the moved item.
 
-use super::*;
+use super::{AgentSortMode, App, LeftItem};
 use dux_core::engine::Command;
 
 /// Direction for a manual reorder move in the sidebar.

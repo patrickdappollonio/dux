@@ -30,11 +30,13 @@ fn child_runs_a_preview() {
             &paths,
             ConfigRewrite::Preview,
             dux_core::config_keys::HeldBack::Masked,
+            &mut std::io::stdout(),
         ),
         "restore-docs" => run_restore_docs(
             &paths,
             ConfigRewrite::Preview,
             dux_core::config_keys::HeldBack::Masked,
+            &mut std::io::stdout(),
         ),
         _ => unreachable!(),
     };

@@ -1,6 +1,45 @@
-use super::*;
+use super::text_input::TextInput;
+use super::{
+    App, BrowsePurpose, CenterMode, ChangeAgentProviderMode, ChangeAgentProviderOption,
+    ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
+    ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
+    CloneDraft, CloneProjectFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt,
+    ConfirmNonDefaultBranchFocus, DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, FocusPane,
+    FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus, KillRunningPrompt,
+    KillableRuntime, KillableRuntimeKind, LaunchView, LeftItem, NameNewAgentFocus, PendingDiff,
+    PersistFinalOutcome, PickProjectWorktreePrompt, PrLookupFinalOutcome, ProjectAction,
+    ProjectActionsPrompt, ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent,
+    PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus, ReviewCopyQuestion,
+    RuntimeTargetId, SLOW_DIFF_READ, SearchableList, StartupCommandLogPrompt, StartupLogViewer,
+    TuiCheckoutInspectOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, UnpushedCountAnswer,
+    WorktreesFinalOutcome, diff_read_busy, kill_running_matches, pick_project_matches,
+    preflight_server_listeners,
+};
+use crate::config::provider_config;
 use crate::editor;
+use crate::keybindings::Action;
+use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind, SessionSurface};
+use crate::statusline::StatusTone;
+use crate::{git, logger};
+use anyhow::Result;
+use dux_core::clone_project::UpfrontReviewCopy;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
+use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
+use dux_core::model::CompanionTerminal;
+use dux_core::model::TerminalOwner;
+use dux_core::project_browser::leading_branch_for_project;
+use dux_core::worker::ReviewCopyConsent;
+use dux_core::worker::{
+    AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, CreateAgentBranchInspection,
+    CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget, WorkerEvent,
+};
+use std::collections::HashSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Instant;
+use uuid::Uuid;
 
 /// Where a clone of `address` goes by default: the repository's folder name
 /// inside `start_folder`, or the start folder itself (with its trailing
@@ -140,6 +179,7 @@ impl App {
     }
 
     pub(crate) fn add_project(&mut self, raw_path: &str, name: String) -> Result<()> {
+        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
         let path = match self.engine.validate_project_add_path(raw_path) {
             Ok(path) => path,
             Err(message) => {
@@ -169,7 +209,6 @@ impl App {
         };
         let plan = dux_core::add_project_plan::add_project_plan(&inspection);
 
-        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
         if matches!(plan.action, AddProjectAction::NeedsInitialCommit) {
             self.prompt = PromptState::ConfirmCreateInitialCommit {
                 path: path.to_string_lossy().to_string(),
@@ -892,9 +931,10 @@ impl App {
                     ),
                 };
                 if let Some(unavailable) = clone_unavailable {
-                    sentence.push_str(&format!(
+                    let _ = write!(
+                        sentence,
                         " dux could not look the pull request up to offer a clone: {unavailable}"
-                    ));
+                    );
                 }
                 self.set_warning(sentence);
                 {
@@ -958,7 +998,7 @@ impl App {
                     project,
                     &raw_input,
                     None,
-                    Default::default(),
+                    ReviewCopyConsent::default(),
                     None,
                     &worker_tx,
                     Some(op_id),
@@ -1000,7 +1040,7 @@ impl App {
                     .map(str::to_string)
             }),
         };
-        let randomize_name = initial_name.is_none()
+        let wants_random_name = initial_name.is_none()
             && self
                 .engine
                 .config
@@ -1010,7 +1050,7 @@ impl App {
         let mut randomized_name = None;
         if let Some(name) = initial_name {
             input.set_text(name);
-        } else if randomize_name {
+        } else if wants_random_name {
             let name = crate::git::docker_style_name();
             input.set_text(name.clone());
             randomized_name = Some(name);
@@ -1021,7 +1061,7 @@ impl App {
         self.prompt = PromptState::NameNewAgent {
             request,
             input,
-            randomize_name,
+            randomize_name: wants_random_name,
             randomized_name,
             copy_changes: self
                 .engine
@@ -1092,13 +1132,13 @@ impl App {
             return;
         }
         let start_folder = dux_core::project_browser::resolve_start_dir(&self.engine.config);
-        let randomize_name = self
+        let wants_random_name = self
             .engine
             .config
             .defaults
             .enable_randomized_pet_name_by_default;
         let mut randomized_name = None;
-        if randomize_name {
+        if wants_random_name {
             let name = crate::git::docker_style_name();
             agent_name.set_text(name.clone());
             randomized_name = Some(name);
@@ -1109,7 +1149,7 @@ impl App {
             destination_edited: false,
             start_folder,
             agent_name,
-            randomize_name,
+            randomize_name: wants_random_name,
             randomized_name,
             focus: CloneProjectFocus::Address,
             pull_request: None,
@@ -1165,7 +1205,7 @@ impl App {
             random_name: *randomize_name,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: UpfrontReviewCopy::default(),
         };
         match self.engine.apply(command) {
             Ok(reaction) => {
@@ -2402,6 +2442,10 @@ impl App {
     /// delete's removal (if any) has reported. A failure the status line
     /// reports as an error comes back as `Err` with that sentence.
     #[cfg(test)]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a test helper: a delete that never finishes must fail the test, not read as the delete's own error"
+    )]
     pub(crate) fn do_delete_session(
         &mut self,
         session_id: &str,
@@ -3845,7 +3889,7 @@ impl App {
             }
         };
         let previous = self.engine.config.ui.theme.clone();
-        self.engine.config.ui.theme = selected.id.clone();
+        self.engine.config.ui.theme.clone_from(&selected.id);
         if let Err(err) = self
             .engine
             .config_writer
@@ -4196,7 +4240,7 @@ impl App {
                 scroll,
                 ..
             } => (worktree_path.clone(), rel_path.clone(), *scroll),
-            _ => return,
+            CenterMode::Agent => return,
         };
         self.begin_diff_computation(worktree_path, rel_path, scroll);
     }
@@ -4216,7 +4260,7 @@ impl App {
             seq: self.diff_request_seq,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::diff::spawn_diff_job(key.clone(), self.theme, Arc::clone(&self.syntax_cache), tx);
+        crate::diff::spawn_diff_job(key.clone(), &self.theme, Arc::clone(&self.syntax_cache), tx);
         self.pending_diff = Some(PendingDiff {
             key,
             rx,
@@ -4574,6 +4618,56 @@ impl App {
     pub(crate) fn running_runtime_snapshot(&self) -> Vec<KillableRuntime> {
         let mut runtimes = Vec::new();
 
+        self.push_agent_runtimes(&mut runtimes);
+
+        // The UNFILTERED list: the kill overlay is its own surface with its own
+        // filter row, so a query typed into the sidebar must not decide which
+        // processes it offers to stop.
+        for (terminal_id, terminal) in self.sorted_terminal_items() {
+            let context_owner = self.terminal_runtime_context(terminal);
+            // Normalize the foreground through the shared core rule (trim + strip
+            // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
+            // and the web all agree on the app name. None (idle shell) reads
+            // "shell" in this list.
+            let label = dux_core::terminal_title::terminal_foreground_display(
+                terminal.foreground_cmd.as_deref(),
+            )
+            .unwrap_or_else(|| "shell".to_string());
+            let context = context_owner;
+            let search_text = format!(
+                "{} {} {} {}",
+                label,
+                context,
+                terminal.label,
+                KillableRuntimeKind::Terminal.noun()
+            );
+            runtimes.push(KillableRuntime {
+                id: RuntimeTargetId::Terminal(terminal_id.clone()),
+                kind: KillableRuntimeKind::Terminal,
+                label,
+                context,
+                search_text,
+            });
+        }
+
+        runtimes.sort_by(|a, b| {
+            (
+                a.context.to_lowercase(),
+                a.kind.noun(),
+                a.label.to_lowercase(),
+            )
+                .cmp(&(
+                    b.context.to_lowercase(),
+                    b.kind.noun(),
+                    b.label.to_lowercase(),
+                ))
+        });
+        runtimes
+    }
+
+    /// Every live provider process the kill overlay can stop: each agent's slot
+    /// tab and each running extra tab.
+    fn push_agent_runtimes(&self, runtimes: &mut Vec<KillableRuntime>) {
         for session in &self.engine.sessions {
             let main_running = self.engine.providers.contains_key(session.slot_tab_id());
             let has_live_support = self
@@ -4641,83 +4735,45 @@ impl App {
                 });
             }
         }
+    }
 
-        // The UNFILTERED list: the kill overlay is its own surface with its own
-        // filter row, so a query typed into the sidebar must not decide which
-        // processes it offers to stop.
-        for (terminal_id, terminal) in self.sorted_terminal_items() {
-            let context_owner = match &terminal.owner {
-                TerminalOwner::Session(session_id) => {
-                    let (project_name, session_label) = self
-                        .engine
-                        .sessions
-                        .iter()
-                        .find(|session| session.id == *session_id)
-                        .map_or_else(
-                            || ("unknown".to_string(), session_id.clone()),
-                            |session| {
-                                (
-                                    self.engine.project_name_for_session(session),
-                                    session.display_label(),
-                                )
-                            },
-                        );
-                    format!("on agent \"{session_label}\" under project \"{project_name}\"")
-                }
-                TerminalOwner::Project(project_id) => {
-                    let project_name = self
-                        .engine
-                        .projects
-                        .iter()
-                        .find(|project| project.id == *project_id)
-                        .map_or_else(|| project_id.clone(), |project| project.name.clone());
-                    format!("at the repo root of project \"{project_name}\"")
-                }
-                // No owner to name, so the kill overlay says where it is instead,
-                // which is the same thing its sidebar row says.
-                TerminalOwner::Standalone => format!(
-                    "standalone, in {}",
-                    dux_core::home_path::shorten_home(terminal.client.spawn_dir())
-                ),
-            };
-            // Normalize the foreground through the shared core rule (trim + strip
-            // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
-            // and the web all agree on the app name. None (idle shell) reads
-            // "shell" in this list.
-            let label = dux_core::terminal_title::terminal_foreground_display(
-                terminal.foreground_cmd.as_deref(),
-            )
-            .unwrap_or_else(|| "shell".to_string());
-            let context = context_owner;
-            let search_text = format!(
-                "{} {} {} {}",
-                label,
-                context,
-                terminal.label,
-                KillableRuntimeKind::Terminal.noun()
-            );
-            runtimes.push(KillableRuntime {
-                id: RuntimeTargetId::Terminal(terminal_id.clone()),
-                kind: KillableRuntimeKind::Terminal,
-                label,
-                context,
-                search_text,
-            });
+    /// Where a terminal in the kill overlay lives, in the words its sidebar row
+    /// uses.
+    fn terminal_runtime_context(&self, terminal: &CompanionTerminal) -> String {
+        match &terminal.owner {
+            TerminalOwner::Session(session_id) => {
+                let (project_name, session_label) = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+                    .map_or_else(
+                        || ("unknown".to_string(), session_id.clone()),
+                        |session| {
+                            (
+                                self.engine.project_name_for_session(session),
+                                session.display_label(),
+                            )
+                        },
+                    );
+                format!("on agent \"{session_label}\" under project \"{project_name}\"")
+            }
+            TerminalOwner::Project(project_id) => {
+                let project_name = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|project| project.id == *project_id)
+                    .map_or_else(|| project_id.clone(), |project| project.name.clone());
+                format!("at the repo root of project \"{project_name}\"")
+            }
+            // No owner to name, so the kill overlay says where it is instead,
+            // which is the same thing its sidebar row says.
+            TerminalOwner::Standalone => format!(
+                "standalone, in {}",
+                dux_core::home_path::shorten_home(terminal.client.spawn_dir())
+            ),
         }
-
-        runtimes.sort_by(|a, b| {
-            (
-                a.context.to_lowercase(),
-                a.kind.noun(),
-                a.label.to_lowercase(),
-            )
-                .cmp(&(
-                    b.context.to_lowercase(),
-                    b.kind.noun(),
-                    b.label.to_lowercase(),
-                ))
-        });
-        runtimes
     }
 
     pub(crate) fn visible_kill_running_indices(prompt: &KillRunningPrompt) -> Vec<usize> {
@@ -5010,15 +5066,42 @@ pub(super) fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ChangesTreeState;
+    use crate::app::background_server::ReloadListenerChanges;
+    use crate::app::redraw::RedrawGate;
+    use crate::app::{
+        ConfirmAnswer, InactiveTailState, LeftRowsState, MouseLayoutState, OneShotNotes,
+        OverlayMouseLayout, OverlayMouseLayoutState, PaletteOpenedOver, PaneFlags, RawPaste,
+        RightSection, ServingFlags, ViewPrefs, WelcomeLogo, default_url_opener,
+    };
+    use crate::clipboard::Clipboard;
     use crate::config::DuxPaths;
     use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
     use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+    use crate::statusline::LiveStatusKeys;
+    use crate::statusline::StatusScope;
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::attachments::Attachments;
+    use dux_core::changes_status::ChangedFilesFailures;
+    use dux_core::clone_project::Clones;
+    use dux_core::config_sync::portable_project_path;
+    use dux_core::engine::BranchSyncWait;
+    use dux_core::engine::GhProbeState;
+    use dux_core::engine::PrSyncControl;
+    use dux_core::engine::RemovalCoordination;
     use dux_core::engine::{ProjectPersistenceOutcome, ProjectPersistenceView};
+    use dux_core::model::CompanionTerminal;
+    use dux_core::operations::Operations;
+    use dux_core::process_sessions::AgentProcessRegistry;
+    use dux_core::serve_log::StartupNotes;
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn test_bindings() -> RuntimeBindings {
@@ -5031,6 +5114,10 @@ mod tests {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field initializer per App field, the test twin of the production constructor"
+    )]
     fn test_app_with_sessions(sessions: Vec<AgentSession>, projects: Vec<Project>) -> App {
         let tmp = tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
@@ -5064,7 +5151,7 @@ mod tests {
             github_integration_enabled: false,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
@@ -5074,49 +5161,53 @@ mod tests {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
             pr_overrides: std::collections::HashMap::new(),
             pr_suppressions: std::collections::HashSet::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync: Arc::new(Default::default()),
+            pr_sync: Arc::new(PrSyncControl::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: std::collections::HashMap::new(),
             resumed_tab_runs: std::collections::HashSet::new(),
             pending_deletions: std::collections::HashSet::new(),
             folder_repo_statuses: std::collections::HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
-            current_origin: Default::default(),
+            current_origin: StatusScope::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             in_flight: std::collections::HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -5135,23 +5226,23 @@ mod tests {
             pending_change_base_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_recreate_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_delete_reports_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
-            live_status_keys: Default::default(),
+            live_status_keys: LiveStatusKeys::default(),
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         let app_live_status_keys = engine.live_status_keys.clone();
         let mut app = App {
@@ -5215,7 +5306,7 @@ mod tests {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
-            tui_launched_ptys: Default::default(),
+            tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -5258,7 +5349,7 @@ mod tests {
             welcome_tip_selection: usize::MAX,
             syntax_cache: Arc::new(crate::diff::SyntaxCache::new()),
             pending_diff: None,
-            changes_tree: Default::default(),
+            changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -5274,10 +5365,10 @@ mod tests {
             companion: None,
             left_rows: Vec::new(),
             terminal_cursor: None,
-            tui_fallback_tabs: Default::default(),
+            tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
-            reload_listener_changes: Default::default(),
+            reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
@@ -5417,6 +5508,10 @@ mod tests {
     /// An engine over a scratch config root, returned with the root's guard:
     /// the caller holds it for as long as the engine runs, and dropping it
     /// removes the directory.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field initializer per Engine field, the test twin of the production constructor"
+    )]
     fn test_engine_with_sessions(
         sessions: Vec<AgentSession>,
         projects: Vec<Project>,
@@ -5455,7 +5550,7 @@ mod tests {
             github_integration_enabled: false,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
@@ -5465,49 +5560,53 @@ mod tests {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
             pr_overrides: std::collections::HashMap::new(),
             pr_suppressions: std::collections::HashSet::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync: Arc::new(Default::default()),
+            pr_sync: Arc::new(PrSyncControl::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: std::collections::HashMap::new(),
             resumed_tab_runs: std::collections::HashSet::new(),
             pending_deletions: std::collections::HashSet::new(),
             folder_repo_statuses: std::collections::HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
-            current_origin: Default::default(),
+            current_origin: StatusScope::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             in_flight: std::collections::HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -5526,23 +5625,23 @@ mod tests {
             pending_change_base_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_recreate_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_delete_reports_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
-            live_status_keys: Default::default(),
+            live_status_keys: LiveStatusKeys::default(),
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         (engine, tmp)
     }
@@ -5703,7 +5802,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(
             !app.serving.flip_preflight_pending,
@@ -5716,7 +5815,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url])),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(app.pending_server_flip.is_some());
         app.start_web_server();
@@ -5763,7 +5862,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
 
         let flip = app
@@ -5817,7 +5916,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: Some("Tailscale not detected, serving on loopback only.".to_string()),
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(app.pending_server_flip.is_some());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
@@ -5840,7 +5939,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(
             app.pending_server_flip.is_none(),
@@ -6740,7 +6839,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -6865,7 +6964,8 @@ mod tests {
             .expect("pending read")
             .announce_at
             .expect("a selection read owes a late spinner")
-            - crate::app::SLOW_CHANGED_FILES_READ;
+            .checked_sub(crate::app::SLOW_CHANGED_FILES_READ)
+            .expect("the monotonic clock reads past the offset a test steps back");
 
         app.announce_slow_changed_files_read(started + Duration::from_millis(100));
         assert!(
@@ -7573,7 +7673,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -9020,11 +9120,15 @@ mod tests {
         // term-b activity is the most recent (smallest elapsed), term-a the oldest.
         app.engine.pty_activity.insert(
             "term-a".to_string(),
-            std::time::Instant::now() - std::time::Duration::from_secs(30),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(30))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.engine.pty_activity.insert(
             "term-c".to_string(),
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(15))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.engine
             .pty_activity
@@ -9558,6 +9662,10 @@ mod tests {
     /// Run a project palette command with no agent selected: the project list
     /// opens, and the highlighted project (the only one, in these journeys) is
     /// picked the way a person picks it.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a test helper: the wrong prompt must fail the test, not read as the command's own error"
+    )]
     fn run_via_project_list(app: &mut App, command: &str) -> Result<()> {
         app.execute_command(command)?;
         assert!(
@@ -10780,6 +10888,10 @@ mod tests {
     /// the project the list was opened on, never for whatever agent happens to
     /// be selected.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn every_project_action_row_runs_its_flow_for_the_picked_project() {
         let (_root, _repo, mut app) = project_based_on_develop();
         // A project terminal is a plain PTY; `cat` stands in for the shell.
@@ -11076,6 +11188,10 @@ mod tests {
     /// origin has; the held branch cannot be picked, and the origin-only one is
     /// created locally, checked out in the folder and saved as the base.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn changing_the_base_branch_runs_end_to_end_including_an_origin_only_branch() {
         let (root, mut app, _worktree) = project_with_a_real_agent();
         let id = app.engine.projects[0].id.clone();

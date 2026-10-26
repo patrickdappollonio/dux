@@ -58,13 +58,6 @@ fn a_path_holding_more_than_a_setting_name_is_never_repeated() {
         "server.auth.password hunter2",
         "server.auth.password:hunter2=x",
     ] {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let error =
-            run_get(&[path.to_string()], &paths, &mut out, &mut err).expect_err("not a setting");
-        let message = format!("{error:#}");
-        assert!(!message.contains("hunter2"), "{message}");
-        assert!(message.contains("not a setting name"), "{message}");
-
         struct NoSecrets;
         impl SecretSource for NoSecrets {
             fn read_stdin(&mut self) -> Result<Password> {
@@ -78,6 +71,13 @@ fn a_path_holding_more_than_a_setting_name_is_never_repeated() {
                 Ok(None)
             }
         }
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let error =
+            run_get(&[path.to_string()], &paths, &mut out, &mut err).expect_err("not a setting");
+        let message = format!("{error:#}");
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(message.contains("not a setting name"), "{message}");
+
         let mut said = Vec::new();
         let error = run_set(&[path.to_string()], &paths, &mut NoSecrets, &mut said)
             .expect_err("not a setting");

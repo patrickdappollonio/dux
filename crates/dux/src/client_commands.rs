@@ -7,6 +7,7 @@ use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
 use dux_core::client::{CliError, Exit, server_inspect, sign_in, wait, workspace};
 use dux_core::config::DuxPaths;
+use dux_tui::SecretInput;
 use std::fmt::Write as _;
 use std::io::Write;
 
@@ -241,7 +242,12 @@ pub(crate) fn remote(
             if let Some(warning) = remotes::insecure_login_warning(&name, &remote) {
                 note(err, &warning);
             }
-            let password = dux_tui::read_sign_in_password(stdin, &format!("Password for {name}"))
+            let input = if stdin {
+                SecretInput::Stdin
+            } else {
+                SecretInput::Prompt
+            };
+            let password = dux_tui::read_sign_in_password(input, &format!("Password for {name}"))
                 .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
             let signed_in = sign_in::login(&name, &remote, password.expose())?;
             // The dux that answered the sign-in is the one the remote means now.
@@ -549,17 +555,18 @@ pub(crate) fn env(command: EnvSub, selection: &Selection) -> Result<String, CliE
             // A name that is no variable name is refused before anything is
             // asked or sent, so it never reaches a dux or its access log.
             resources::check_env_name(&name)?;
+            let (input, answer_stdin) = if stdin {
+                (SecretInput::Stdin, Stdin::CarriesValue)
+            } else {
+                (SecretInput::Prompt, Stdin::Free)
+            };
             change_with(
                 selection,
                 &change,
                 &resources::set_env_question(&name),
-                if stdin {
-                    Stdin::CarriesValue
-                } else {
-                    Stdin::Free
-                },
+                answer_stdin,
                 |writer| {
-                    let value = dux_tui::read_env_value(stdin, &name)
+                    let value = dux_tui::read_env_value(input, &name)
                         .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
                     resources::set_env(writer, &name, value.expose())
                 },

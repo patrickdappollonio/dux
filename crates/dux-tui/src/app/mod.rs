@@ -1,4 +1,8 @@
+use crate::app::background_server::ReloadListenerChanges;
+use crate::numeric::u128_to_usize_wrapping;
+use crate::numeric::usize_to_i64;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::io::{Write as _, stdout};
 use std::path::{Path, PathBuf};
@@ -15,19 +19,11 @@ use crossterm::event::{
     MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::prelude::{Color, Modifier, Style};
-use ratatui::symbols::border;
+use ratatui::layout::Rect;
+use ratatui::prelude::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
-};
-use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
-#[allow(deprecated)]
-// importing the deprecated TUI save_config for use in the blessed sync-direct project-sync helpers
 use crate::config::{
     Config, DuxPaths, MacroSurface, ensure_config, provider_config, validate_keys,
 };
@@ -35,16 +31,13 @@ use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
-    Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
-    text_field_owns_key,
+    Action, BindingScope, InteractiveBytePatterns, RuntimeBindings, text_field_owns_key,
 };
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
-    SessionSurface,
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionSurface,
 };
-use crate::theme::FocusState;
 use components::FocusStep;
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
@@ -62,21 +55,27 @@ use crate::pty::TerminalSnapshot;
 use crate::statusline::{BUSY_TIMEOUT, KeyedStatusController, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
+use dux_core::attachments::Attachments;
+use dux_core::changes_status::ChangedFilesFailures;
+use dux_core::clone_project::Clones;
+use dux_core::engine::{BranchSyncWait, GhProbeState, PrSyncControl, RemovalCoordination};
 use dux_core::engine::{Command, Engine};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 pub(crate) use dux_core::model::CompanionTerminal;
 pub(crate) use dux_core::model::{TerminalOwner, TerminalOwnerRef};
+use dux_core::operations::Operations;
+use dux_core::process_sessions::AgentProcessRegistry;
 
 use text_input::TextInput;
 
 pub(crate) use dux_core::worker::{
-    AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
-    CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceKind, ResourceStats,
-    WorkerEvent,
+    AgentLaunchKind, BranchWarningKind, BrowserEntry, CreateAgentRequest, NonDefaultBranchAction,
+    ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
 };
 #[cfg(test)]
-pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
+pub(crate) use dux_core::worker::{
+    AgentLaunchReadyData, CreateAgentBranchInspection, ProcessInfo, ResourceKind,
+};
 
 /// Status key shared by every hint that describes what the interface is doing
 /// right now (a chrome toggle's new state, the palette opening, a redraw). One
@@ -716,7 +715,7 @@ pub(crate) struct App {
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
-    pub(crate) mouse_drag: Option<ResizeDragState>,
+    pub(crate) mouse_drag: Option<DraggedDivider>,
     /// The live drag-to-reorder gesture over a sidebar row (an agent's or a
     /// terminal's), or `None` when no row is being dragged. Armed by a left press
     /// on a reorderable row and retired on release, on a host resize, on focus
@@ -1491,9 +1490,8 @@ impl RightSection {
     pub(crate) fn next(self, staged: StagedFiles) -> Option<Self> {
         match self {
             Self::Unstaged if (staged == StagedFiles::Present) => Some(Self::Staged),
-            Self::Unstaged => None,
+            Self::Unstaged | Self::CommitInput => None,
             Self::Staged => Some(Self::CommitInput),
-            Self::CommitInput => None,
         }
     }
 
@@ -1796,9 +1794,8 @@ pub(crate) use dux_core::agent_tabs::branch_drifted;
 /// get swallowed.
 pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
     match elapsed_ms % 2000 {
-        200..=399 => false, // blink 1: hide
-        600..=799 => false, // blink 2: hide
-        _ => true,          // leading show, the gap between blinks, and the hold
+        200..=399 | 600..=799 => false, // blinks 1 and 2: hide
+        _ => true,                      // leading show, the gap between blinks, and the hold
     }
 }
 
@@ -3382,8 +3379,6 @@ pub(crate) enum CpuWindow {
     Full,
 }
 
-pub(crate) use dux_core::project_browser::leading_branch_for_project;
-
 #[derive(Clone, Debug)]
 pub(crate) enum VisualRow {
     /// Index into the `ResourceStats` rows vec.
@@ -3851,9 +3846,11 @@ impl TerminalSelection {
     /// copy on its own. Copying it back is out of scope; the snapshot carries no
     /// scrollback.
     pub(crate) fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
-        let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
-        let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
-        let origin_row = live_row as i64 - offset_delta + total_delta;
+        let offset_delta =
+            usize_to_i64(now.scrollback_offset) - usize_to_i64(self.origin.scrollback_offset);
+        let total_delta =
+            usize_to_i64(now.scrollback_total) - usize_to_i64(self.origin.scrollback_total);
+        let origin_row = i64::from(live_row) - offset_delta + total_delta;
         u16::try_from(origin_row).ok()
     }
 
@@ -4273,14 +4270,14 @@ pub(crate) enum OverlayMouseLayout {
     },
 }
 
+/// The pane divider a mouse drag is resizing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::enum_variant_names)]
-pub(crate) enum ResizeDragState {
-    LeftDivider,
-    RightDivider,
-    TerminalDivider,
-    StagedDivider,
-    CommitDivider,
+pub(crate) enum DraggedDivider {
+    Left,
+    Right,
+    Terminal,
+    Staged,
+    Commit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4548,7 +4545,7 @@ pub(crate) fn build_left_items(
 
 mod attachment_presence;
 mod background_server;
-pub(crate) use background_server::{BackgroundServerStart, CompanionRouting};
+pub(crate) use background_server::BackgroundServerStart;
 // `pub(crate)` for its width helpers alone: the diff wrapper has to measure a
 // CJK glyph exactly as the pane's own wrapper does, and two functions that
 // disagree about that produce rows too wide for the box they were measured for.
@@ -4560,9 +4557,9 @@ mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
 mod pr_clone;
-pub(crate) use pr_clone::{
-    PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PrFolder, PrReviewQuestion, PullRequestClone,
-};
+pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequestClone};
+#[cfg(test)]
+pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
 mod project_actions;
 mod pty_ownership;
 mod redraw;
@@ -4636,6 +4633,10 @@ impl App {
     /// created its directories, and acquired the single-instance lock.
     /// This ensures the lock covers every entrypoint (TUI + config
     /// subcommands) and that a losing process never touches shared state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the boot steps in the order they must run, then one field initializer per Engine field"
+    )]
     pub(crate) fn bootstrap_with_lock(
         paths: DuxPaths,
         mut single_instance_lock: SingleInstanceLock,
@@ -4647,10 +4648,10 @@ impl App {
 
         // Validate and build runtime keybindings from config.
         if let Err(msg) = validate_keys(&config.keys) {
-            eprintln!(
+            crate::line_to_stderr(format_args!(
                 "Configuration error in {}: {msg}",
                 paths.config_path.display()
-            );
+            ));
             std::process::exit(1);
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
@@ -4688,7 +4689,7 @@ impl App {
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
         let pr_sync_sessions = Arc::new(Mutex::new(Vec::new()));
-        let pr_sync: Arc<dux_core::engine::PrSyncControl> = Arc::new(Default::default());
+        let pr_sync: Arc<dux_core::engine::PrSyncControl> = Arc::new(PrSyncControl::default());
         let has_active_processes = Arc::new(AtomicBool::new(false));
         let initial_status = format!(
             "Press {} to add a project, {} to create an agent, {} for help.",
@@ -4699,7 +4700,7 @@ impl App {
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
         let status = boot_status(
-            Duration::from_secs(config.ui.status_clear_seconds as u64),
+            Duration::from_secs(u64::from(config.ui.status_clear_seconds)),
             live_status_keys.clone(),
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
@@ -4725,7 +4726,7 @@ impl App {
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::from_env(),
             worker_tx,
             worker_rx,
@@ -4735,23 +4736,27 @@ impl App {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: HashMap::new(),
             agent_tabs: agent_tabs
                 .into_iter()
                 .map(|t| (TabId::new(t.id.clone()), t))
                 .collect(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: HashMap::new(),
             pr_overrides: HashMap::new(),
             pr_suppressions: HashSet::new(),
@@ -4760,26 +4765,26 @@ impl App {
             pr_sync,
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: HashMap::new(),
             resumed_tab_runs: HashSet::new(),
             pending_deletions: HashSet::new(),
             folder_repo_statuses: HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
             has_active_processes,
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
@@ -4799,7 +4804,7 @@ impl App {
             pending_change_base_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: HashMap::new(),
             pending_recreate_ops: HashMap::new(),
             pending_delete_ops_web: HashMap::new(),
@@ -4808,14 +4813,14 @@ impl App {
             pending_web_launch_ops: HashMap::new(),
             live_status_keys,
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         Ok(Self::assemble(
             engine,
@@ -4823,7 +4828,7 @@ impl App {
             interactive_patterns,
             signals,
             status,
-            theme,
+            &theme,
             &SessionRestore::Restore,
         ))
     }
@@ -4836,13 +4841,14 @@ impl App {
     /// share one body. `restore` gates whether prior sessions are relaunched:
     /// first boot restores them; resume skips restoration because the providers
     /// handed back from the web server are already live.
+    #[expect(clippy::too_many_lines, reason = "one field initializer per App field")]
     fn assemble(
         engine: Engine,
         bindings: RuntimeBindings,
         interactive_patterns: InteractiveBytePatterns,
         signals: SignalHandles,
         status: KeyedStatusController,
-        theme: Theme,
+        theme: &Theme,
         restore: &SessionRestore,
     ) -> App {
         let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
@@ -4913,7 +4919,7 @@ impl App {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
-            tui_launched_ptys: Default::default(),
+            tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -4924,7 +4930,7 @@ impl App {
             last_diff_height: 0,
             last_diff_visual_lines: 0,
             diff_rows: None,
-            theme,
+            theme: *theme,
             tick_count: 0,
             start_time: Instant::now(),
             refusal_blink: None,
@@ -4952,11 +4958,11 @@ impl App {
             redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as usize),
+                .map_or(0, |d| u128_to_usize_wrapping(d.as_millis())),
             welcome_tip_selection: usize::MAX,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
-            changes_tree: Default::default(),
+            changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -4972,10 +4978,10 @@ impl App {
             companion: None,
             left_rows: Vec::new(),
             terminal_cursor: None,
-            tui_fallback_tabs: Default::default(),
+            tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
-            reload_listener_changes: Default::default(),
+            reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
@@ -5066,7 +5072,7 @@ impl App {
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
         let status = boot_status(
-            Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
+            Duration::from_secs(u64::from(engine.config.ui.status_clear_seconds)),
             engine.live_status_keys.clone(),
             "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
@@ -5079,7 +5085,7 @@ impl App {
             interactive_patterns,
             signals,
             status,
-            theme,
+            &theme,
             &SessionRestore::Skip,
         ))
     }
@@ -5381,10 +5387,10 @@ impl App {
             return;
         }
         let grace = dux_core::config::shutdown_grace(self.engine.config.shutdown_timeout_seconds);
-        eprintln!(
+        crate::line_to_stderr(format_args!(
             "{}",
             dux_core::engine::format_shutdown_start(agents, terminals, grace)
-        );
+        ));
         // Consume the signal that may have triggered this quit, then watch for a
         // fresh one during the wait.
         self.shutdown_flag
@@ -5392,7 +5398,10 @@ impl App {
         let report = self
             .engine
             .shutdown_ptys_interruptible(grace, Some(&self.shutdown_flag));
-        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+        crate::line_to_stderr(format_args!(
+            "{}",
+            dux_core::engine::format_shutdown_result(&report)
+        ));
     }
 
     fn should_poll_raw_input(&self) -> bool {
@@ -5597,8 +5606,9 @@ impl App {
     /// (`SPINNER_FRAME_MS` per frame). Unlike `tick_count`, this stays
     /// constant-speed regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
-        ((self.start_time.elapsed().as_millis() / crate::theme::SPINNER_FRAME_MS) as usize)
-            % crate::theme::SPINNER_FRAMES.len()
+        u128_to_usize_wrapping(
+            self.start_time.elapsed().as_millis() / crate::theme::SPINNER_FRAME_MS,
+        ) % crate::theme::SPINNER_FRAMES.len()
     }
 
     /// Whether the sidebar attention glyph is visible at this point of its
@@ -5857,7 +5867,7 @@ impl App {
                     let p = self.engine.projects.iter().find(|p| p.id == project_id)?;
                     p.path_missing.then(|| p.path.clone())
                 }
-                _ => None,
+                LeftItem::InactiveToggle => None,
             });
         if let Some(path) = missing_path {
             self.missing_project_warning_gen =
@@ -6039,7 +6049,7 @@ impl App {
             if stored_project != Some(project_config) {
                 self.engine
                     .session_store
-                    .upsert_project_at(project_config, index as i64)?;
+                    .upsert_project_at(project_config, usize_to_i64(index))?;
             }
         }
         if self.engine.config.projects != config_project_configs {
@@ -6065,6 +6075,10 @@ impl App {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per palette command, each handing the command to the method that carries it out"
+    )]
     pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
         match command {
@@ -6347,22 +6361,7 @@ impl App {
                 Ok(())
             }
             "toggle-diff-line-numbers" => {
-                self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
-                self.engine.config.ui.show_diff_line_numbers =
-                    self.view_prefs.show_diff_line_numbers;
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                self.refresh_current_diff();
-                let state = if self.view_prefs.show_diff_line_numbers {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
-                ));
+                self.toggle_diff_line_numbers();
                 Ok(())
             }
             "recheck-github" => {
@@ -6372,78 +6371,15 @@ impl App {
                 Ok(())
             }
             "toggle-github-integration" => {
-                self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
-                self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
-                if self.engine.github_integration_enabled {
-                    // Off-to-on: re-ask `gh` which hosts it can serve, and do
-                    // nothing else. The status held right now is the answer from
-                    // boot, which predates the login that enabled the
-                    // integration; the probe's completion arms the follow-up
-                    // work, exactly once.
-                    self.engine.spawn_gh_status_check();
-                } else {
-                    self.engine.pr_statuses.clear();
-                    self.engine.disarm_pr_sync();
-                    self.rebuild_left_items();
-                }
-                let state = if self.engine.github_integration_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    self.set_error(format!(
-                        "GitHub integration toggled this session, but saving to config failed: {err}"
-                    ));
-                } else {
-                    self.set_info(format!("GitHub integration {state}."));
-                }
+                self.toggle_github_integration();
                 Ok(())
             }
             "toggle-randomized-pet-name-default" => {
-                self.engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default = !self
-                    .engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default;
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                let state = if self
-                    .engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default
-                {
-                    "enabled: new agent prompts start with a random pet name"
-                } else {
-                    "disabled: new agent prompts start empty"
-                };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Random pet-name defaults {state}. Press {palette_key} to toggle back."
-                ));
+                self.toggle_randomized_pet_name_default();
                 Ok(())
             }
             "toggle-pr-banner-position" => {
-                self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
-                let pos = if self.view_prefs.pr_banner_at_bottom {
-                    "bottom"
-                } else {
-                    "top"
-                };
-                self.engine.config.ui.pr_banner_position = pos.to_string();
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                self.set_info(format!("PR banner moved to {pos} of agent pane."));
+                self.toggle_pr_banner_position();
                 Ok(())
             }
             "force-redraw" => {
@@ -6457,6 +6393,103 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    /// Show or hide the diff line numbers, save it, and redraw the diff.
+    fn toggle_diff_line_numbers(&mut self) {
+        self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
+        self.engine.config.ui.show_diff_line_numbers = self.view_prefs.show_diff_line_numbers;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        self.refresh_current_diff();
+        let state = if self.view_prefs.show_diff_line_numbers {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        self.set_info(format!(
+            "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
+        ));
+    }
+
+    /// Turn the GitHub integration on or off for this session and in the config.
+    fn toggle_github_integration(&mut self) {
+        self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
+        self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
+        if self.engine.github_integration_enabled {
+            // Off-to-on: re-ask `gh` which hosts it can serve, and do
+            // nothing else. The status held right now is the answer from
+            // boot, which predates the login that enabled the
+            // integration; the probe's completion arms the follow-up
+            // work, exactly once.
+            self.engine.spawn_gh_status_check();
+        } else {
+            self.engine.pr_statuses.clear();
+            self.engine.disarm_pr_sync();
+            self.rebuild_left_items();
+        }
+        let state = if self.engine.github_integration_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
+            self.set_error(format!(
+                "GitHub integration toggled this session, but saving to config failed: {err}"
+            ));
+        } else {
+            self.set_info(format!("GitHub integration {state}."));
+        }
+    }
+
+    /// Flip whether a new agent prompt starts with a random pet name, and save it.
+    fn toggle_randomized_pet_name_default(&mut self) {
+        self.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = !self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        let state = if self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default
+        {
+            "enabled: new agent prompts start with a random pet name"
+        } else {
+            "disabled: new agent prompts start empty"
+        };
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        self.set_info(format!(
+            "Random pet-name defaults {state}. Press {palette_key} to toggle back."
+        ));
+    }
+
+    /// Move the PR banner between the top and the bottom of the agent pane, and save it.
+    fn toggle_pr_banner_position(&mut self) {
+        self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
+        let pos = if self.view_prefs.pr_banner_at_bottom {
+            "bottom"
+        } else {
+            "top"
+        };
+        self.engine.config.ui.pr_banner_position = pos.to_string();
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        self.set_info(format!("PR banner moved to {pos} of agent pane."));
     }
 
     /// Run the ordinary config reload when a SIGUSR1 has arrived since the
@@ -7717,7 +7750,7 @@ impl App {
     /// a browser, and without a serve there are none.
     pub(crate) fn remote_browser_count(&self, session_id: &str) -> usize {
         let scope = dux_core::attachments::Scope {
-            ptys: Default::default(),
+            ptys: BTreeSet::default(),
             agents: [session_id.to_string()].into(),
         };
         self.engine
@@ -7730,7 +7763,7 @@ impl App {
     pub(crate) fn pty_browser_count(&self, pty_id: &str) -> usize {
         let scope = dux_core::attachments::Scope {
             ptys: [pty_id.to_string()].into(),
-            agents: Default::default(),
+            agents: BTreeSet::default(),
         };
         self.engine
             .attachments
@@ -8298,10 +8331,6 @@ impl App {
     }
 }
 
-// Disambiguated tab labels are the core-owned `dux_core::agent_tabs::tab_labels`
-// (cross-language twin of the web's `tabLabels`, pinned by shared vectors).
-pub(crate) use dux_core::agent_tabs::tab_labels;
-
 pub(crate) use dux_core::project_browser::load_projects;
 
 // Sync-direct by design: bootstrap/reload-worker project-sync runs before/outside the queue.
@@ -8332,7 +8361,7 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
             stored.id == project_config.id || same_expanded_project_path(stored, project_config)
         });
         if stored_project != Some(project_config) {
-            session_store.upsert_project_at(project_config, index as i64)?;
+            session_store.upsert_project_at(project_config, usize_to_i64(index))?;
         }
     }
 
@@ -8563,6 +8592,7 @@ pub(crate) fn runtime_project_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// A changed-files read whose worker never starts still gets its keyed
     /// busy a final: the engine answers for the worker.
@@ -9950,7 +9980,7 @@ leading_branch = "main"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: Some("npm install".to_string()),
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -9999,7 +10029,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -10060,7 +10090,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -10121,7 +10151,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         // `dux config set server.port 4444` from another process.
@@ -10169,7 +10199,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         let key = dux_core::config_keys::lookup("ui.left_width_pct").unwrap();
@@ -10228,7 +10258,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         // Deleted by hand after dux read the file, before the sync wrote.
@@ -10292,7 +10322,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: Some("pnpm install".to_string()),
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -11053,6 +11083,9 @@ leading_branch = "main"
         let after_resume = Arc::new(AtomicBool::new(false));
         let resume_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&after_resume))
             .expect("re-register SIGURG after a flip");
+        // SAFETY: SIGURG is ignored by default, and the only handler installed for
+        // it is signal-hook's, which sets an atomic flag; raising it on this
+        // thread runs nothing else.
         unsafe { libc::raise(libc::SIGURG) };
         assert!(
             after_resume.load(Ordering::SeqCst),
@@ -11069,11 +11102,16 @@ leading_branch = "main"
         let pre_reset_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&pre_reset))
             .expect("register SIGURG before reset");
         signal_hook::low_level::unregister(pre_reset_id);
+        // SAFETY: restoring SIGURG's default disposition (ignore) installs no
+        // handler, so nothing runs in signal context.
         unsafe { libc::signal(libc::SIGURG, libc::SIG_DFL) };
 
         let dormant = Arc::new(AtomicBool::new(false));
         let dormant_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&dormant))
             .expect("re-register SIGURG after a SIG_DFL reset");
+        // SAFETY: SIGURG is ignored by default, and the only handler installed for
+        // it is signal-hook's, which sets an atomic flag; raising it on this
+        // thread runs nothing else.
         unsafe { libc::raise(libc::SIGURG) };
         assert!(
             !dormant.load(Ordering::SeqCst),
@@ -11088,6 +11126,7 @@ leading_branch = "main"
 #[cfg(test)]
 mod pinned_warning_tests {
     use super::*;
+    use crate::statusline::LiveStatusKeys;
     use std::time::{Duration, Instant};
 
     const WINDOW: Duration = Duration::from_secs(6);
@@ -11295,7 +11334,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             None,
@@ -11314,7 +11353,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             Some("Theme 'nope' could not be loaded.".to_string()),
@@ -11335,7 +11374,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             None,

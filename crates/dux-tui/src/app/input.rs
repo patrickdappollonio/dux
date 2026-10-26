@@ -2,6 +2,7 @@ use super::components::wrap_lines::cluster_width;
 use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
+use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
@@ -13,6 +14,13 @@ use ratatui::buffer::CellWidth;
 /// mouse-tracking app is never over-scrolled. Keyboard scrolling is unaffected.
 /// Must match xterm's `scrollSensitivity` in the web's TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
+
+/// [`MOUSE_WHEEL_LINES`] as the integer type a scroll call takes.
+fn wheel_lines<T: TryFrom<usize>>() -> T {
+    T::try_from(MOUSE_WHEEL_LINES)
+        .ok()
+        .expect("three lines fit in every integer type")
+}
 
 /// What a successful commit says, and whether it points at the push key.
 ///
@@ -310,6 +318,10 @@ impl ButtonPressedTarget {
     /// Returns `None` for non-button targets (text inputs, list rows,
     /// checkboxes) so the press machinery cannot accidentally arm them:
     /// those targets keep their existing on-Down behavior.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt mouse target, naming the button it presses"
+    )]
     fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
         match target {
             PromptMouseTarget::PullRequestChooseProject => {
@@ -590,16 +602,17 @@ struct LocalScroll {
 
 fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
     match action {
-        RawSeqAction::Forward(_) => true,
         RawSeqAction::Intercept(
             Action::OpenMacroBar
             | Action::ToggleFullscreen
             | Action::OpenPalette
-            | Action::FocusAgent,
+            | Action::FocusAgent
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown,
             _,
             _,
-        ) => false,
-        RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
+        )
+        | RawSeqAction::Mouse(..) => false,
         RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
             !(*scroll == RawScroll::WhenScrolledBack
                 && local.has_scrollback
@@ -608,8 +621,7 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
         RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, _) => {
             !(*scroll == RawScroll::WhenScrolledBack && local.has_scrollback)
         }
-        RawSeqAction::Intercept(..) => true,
-        RawSeqAction::Mouse(..) => false,
+        RawSeqAction::Forward(_) | RawSeqAction::Intercept(..) => true,
     }
 }
 
@@ -773,7 +785,19 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
         return 0;
     }
 
-    (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
+    u32_to_u16_wrapping(
+        ((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width),
+    )
+}
+
+/// A filterable list overlay's published geometry: its search field, when it
+/// has one, its list, how many rows the list holds and how far it is scrolled.
+#[derive(Clone, Copy)]
+struct SearchableOverlay {
+    input: Option<Rect>,
+    list: Rect,
+    items: usize,
+    offset: usize,
 }
 
 /// What one mouse press over the embedded terminal grid means, once the OSC 8
@@ -963,7 +987,7 @@ fn scroll_startup_command_log(
     if delta >= 0 {
         prompt.scroll_offset = prompt
             .scroll_offset
-            .saturating_add(delta as u16)
+            .saturating_add(delta.cast_unsigned())
             .min(startup_command_log_max_scroll(&prompt.content, body));
     } else {
         prompt.scroll_offset = prompt.scroll_offset.saturating_sub(delta.unsigned_abs());
@@ -1147,7 +1171,7 @@ impl App {
         let pane_scope = match self.focus {
             FocusPane::Center => Some(BindingScope::Center),
             FocusPane::Files => Some(BindingScope::Files),
-            _ => None,
+            FocusPane::Left => None,
         };
         pane_scope.is_some_and(|scope| self.bindings.lookup(key, scope).is_some())
     }
@@ -1687,7 +1711,7 @@ impl App {
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+            self.scroll_pty(ScrollDirection::Up, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -1701,7 +1725,7 @@ impl App {
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+            self.scroll_pty(ScrollDirection::Down, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -1939,13 +1963,15 @@ impl App {
     /// reset). Exhaustive over `PromptState` with no `_` arm, like
     /// `modal::prompt_text_inputs`, so a new modal that grows a text field
     /// cannot silently become unpasteable.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt kind, each pasting into that prompt's own field"
+    )]
     fn handle_prompt_paste(&mut self, text: &str) {
         // Follow-ups that need `&mut self` after the prompt borrow ends.
         let mut refresh_path_completions = false;
         let mut select_startup_log: Option<usize> = None;
         match &mut self.prompt {
-            PromptState::None => {}
-
             // Type-immediately: the palette query.
             PromptState::Command { input, selected } => {
                 input.insert_str(text);
@@ -2047,12 +2073,13 @@ impl App {
                     state.name_input.insert_str(text);
                 }
             }
-            // The macro list, and the nested delete-confirm, own no text.
-            PromptState::EditMacros { .. } => {}
-
             // Report, confirm, and picker modals hold no text field; the
             // paste is dropped, as their key handlers drop plain characters.
-            PromptState::AgentInfo(_)
+            // The macro list and the nested delete-confirm own no text either,
+            // and with nothing open there is nothing to paste into.
+            PromptState::None
+            | PromptState::EditMacros { .. }
+            | PromptState::AgentInfo(_)
             | PromptState::AddProjectFailed { .. }
             | PromptState::FirstLoad(_)
             | PromptState::DebugInput { .. }
@@ -2135,9 +2162,8 @@ impl App {
     }
 
     fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
-        let provider = match self.selected_terminal_surface_client() {
-            Some(provider) => provider,
-            None => return,
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return;
         };
         provider.scroll(direction, amount);
         self.note_user_scroll();
@@ -2346,7 +2372,7 @@ impl App {
         if delta >= 0 {
             viewer.scroll_offset = viewer
                 .scroll_offset
-                .saturating_add(delta as u16)
+                .saturating_add(delta.cast_unsigned())
                 .min(max_scroll);
         } else {
             viewer.scroll_offset = viewer.scroll_offset.saturating_sub(delta.unsigned_abs());
@@ -2537,11 +2563,11 @@ impl App {
             }
             Some(Action::ScrollPageDown) => {
                 let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
-                self.scroll_startup_log_viewer(page.max(1) as i16);
+                self.scroll_startup_log_viewer(page.max(1).cast_signed());
             }
             Some(Action::ScrollPageUp) => {
                 let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
-                self.scroll_startup_log_viewer(-(page.max(1) as i16));
+                self.scroll_startup_log_viewer(-page.max(1).cast_signed());
             }
             Some(Action::ScrollLineDown | Action::MoveDown) => {
                 self.scroll_startup_log_viewer(1);
@@ -3145,7 +3171,7 @@ impl App {
         let poll_ms = 100u64.min(self.max_poll_ms());
         let timeout = rustix::time::Timespec {
             tv_sec: 0,
-            tv_nsec: (poll_ms * 1_000_000) as i64,
+            tv_nsec: (poll_ms * 1_000_000).cast_signed(),
         };
         let stdin_borrow = stdin_handle.as_fd();
         let ready = crate::io_retry::retry_on_interrupt_errno(|| {
@@ -3498,7 +3524,7 @@ impl App {
                 dispatch.forwarded.note(raw);
             }
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(direction, self.last_pty_size.0 as usize);
+            self.scroll_pty(direction, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -3934,12 +3960,12 @@ impl App {
             // literal because no dialog or palette actions represent them.
             if matches!(action, Some(Action::MoveUp)) {
                 *selected_row = selected_row.saturating_sub(1);
-                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
                 return Some(false);
             }
             if matches!(action, Some(Action::MoveDown)) {
                 *selected_row = (*selected_row + 1).min(max_row);
-                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
                 return Some(false);
             }
             match key.code {
@@ -3972,7 +3998,7 @@ impl App {
                 }
                 _ => {}
             }
-            *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+            *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
             return Some(false);
         }
 
@@ -4025,7 +4051,7 @@ impl App {
                 Span::raw(" │ "),
                 Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
             ]));
-            *scroll_offset = lines.len() as u16;
+            *scroll_offset = usize_to_u16_wrapping(lines.len());
 
             return Some(false);
         }
@@ -4660,7 +4686,7 @@ impl App {
             OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => Some(body),
             _ => None,
         };
-        let page = body.map_or(10, |body| body.height.max(1)) as i16;
+        let page = body.map_or(10, |body| body.height.max(1)).cast_signed();
 
         // Search owns text and caret keys; unconsumed navigation continues
         // through the picker ladder below against the filtered entries.
@@ -6708,7 +6734,7 @@ impl App {
         *editing = None;
         if let Some(old_name) = old_id {
             if let Some(existing) = entries.iter_mut().find(|(n, _, _)| *n == old_name) {
-                existing.0 = name.clone();
+                existing.0.clone_from(&name);
                 existing.1 = text;
                 existing.2 = surface;
             } else {
@@ -6869,21 +6895,21 @@ impl App {
         .item_at(rows_per_item, column, row)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn searchable_overlay_target(
-        input: Option<Rect>,
-        list: Rect,
-        items: usize,
-        offset: usize,
+        overlay: SearchableOverlay,
         input_target: PromptMouseTarget,
         item_target: fn(usize) -> PromptMouseTarget,
         column: u16,
         row: u16,
     ) -> Option<PromptMouseTarget> {
-        if input.is_some_and(|rect| contains_point(rect, column, row)) {
+        if overlay
+            .input
+            .is_some_and(|rect| contains_point(rect, column, row))
+        {
             Some(input_target)
         } else {
-            Self::overlay_row_at(list, offset, items, column, row).map(item_target)
+            Self::overlay_row_at(overlay.list, overlay.offset, overlay.items, column, row)
+                .map(item_target)
         }
     }
 
@@ -6947,12 +6973,8 @@ impl App {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn kill_running_target(
-        input: Option<Rect>,
-        list: Rect,
-        items: usize,
-        offset: usize,
+        overlay: SearchableOverlay,
         cancel_button: Rect,
         hovered_button: Rect,
         selected_button: Rect,
@@ -6961,10 +6983,7 @@ impl App {
         row: u16,
     ) -> Option<PromptMouseTarget> {
         if let Some(target) = Self::searchable_overlay_target(
-            input,
-            list,
-            items,
-            offset,
+            overlay,
             PromptMouseTarget::RuntimeKillInput,
             PromptMouseTarget::RuntimeKillItem,
             column,
@@ -7011,9 +7030,12 @@ impl App {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per published overlay layout, each handing its rects to that layout's hit test"
+    )]
     fn prompt_mouse_target(&self, column: u16, row: u16) -> Option<PromptMouseTarget> {
         match self.overlay_layout.active {
-            OverlayMouseLayout::None | OverlayMouseLayout::Help => None,
             OverlayMouseLayout::Command {
                 input,
                 list,
@@ -7021,10 +7043,12 @@ impl App {
                 offset,
                 ..
             } => Self::searchable_overlay_target(
-                Some(input),
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input: Some(input),
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::CommandInput,
                 PromptMouseTarget::CommandItem,
                 column,
@@ -7037,10 +7061,12 @@ impl App {
                 offset,
                 ..
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::BrowseProjectInput,
                 PromptMouseTarget::BrowseProjectItem,
                 column,
@@ -7092,16 +7118,20 @@ impl App {
                 items,
                 offset,
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::PickProjectInput,
                 PromptMouseTarget::PickProjectItem,
                 column,
                 row,
             ),
-            OverlayMouseLayout::ResourceMonitor { .. } => None,
+            OverlayMouseLayout::None
+            | OverlayMouseLayout::Help
+            | OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::StartupCommandLogs {
                 input,
                 list,
@@ -7193,10 +7223,12 @@ impl App {
                 selected_button,
                 visible_button,
             } => Self::kill_running_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 cancel_button,
                 hovered_button,
                 selected_button,
@@ -7306,10 +7338,12 @@ impl App {
                 items,
                 offset,
             } => Self::searchable_overlay_target(
-                input,
-                list,
-                items,
-                offset,
+                SearchableOverlay {
+                    input,
+                    list,
+                    items,
+                    offset,
+                },
                 PromptMouseTarget::ChangeBaseBranchInput,
                 PromptMouseTarget::ChangeBaseBranchItem,
                 column,
@@ -7673,7 +7707,7 @@ impl App {
         contains_point(self.mouse_layout.center, column, row).then_some(MouseTarget::Center)
     }
 
-    fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<ResizeDragState> {
+    fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<DraggedDivider> {
         let body = self.mouse_layout.body;
         if !contains_point(body, column, row) {
             return None;
@@ -7686,11 +7720,11 @@ impl App {
         let right_left = self.mouse_layout.right.x;
 
         if !self.panes.left_collapsed && (column == left_edge || column == center_left) {
-            return Some(ResizeDragState::LeftDivider);
+            return Some(DraggedDivider::Left);
         }
 
         if !self.panes.right_hidden && (column == center_right || column == right_left) {
-            return Some(ResizeDragState::RightDivider);
+            return Some(DraggedDivider::Right);
         }
 
         // Horizontal divider between Projects and Terminals sections.
@@ -7699,7 +7733,7 @@ impl App {
             let left = self.mouse_layout.left;
             let divider_row = tl.y.saturating_sub(1);
             if row == divider_row && column >= left.x && column < left.x + left.width {
-                return Some(ResizeDragState::TerminalDivider);
+                return Some(DraggedDivider::Terminal);
             }
         }
 
@@ -7723,7 +7757,7 @@ impl App {
                 && column >= right.x
                 && column < right.x + right.width
             {
-                return Some(ResizeDragState::StagedDivider);
+                return Some(DraggedDivider::Staged);
             }
         }
 
@@ -7740,7 +7774,7 @@ impl App {
                 && column >= right.x
                 && column < right.x + right.width
             {
-                return Some(ResizeDragState::CommitDivider);
+                return Some(DraggedDivider::Commit);
             }
         }
 
@@ -7827,9 +7861,11 @@ impl App {
     }
 
     fn set_command_palette_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::Command { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::Command {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::Command { input, .. } = &mut self.prompt {
             let prefix_width = 2; // "> "
@@ -7849,7 +7885,10 @@ impl App {
         } = &self.prompt
         {
             if let Some(binding) = self.palette_command_at(&input.text, *selected) {
-                binding.palette_name.unwrap().to_string()
+                binding
+                    .palette_name
+                    .expect("the palette lists only bindings that carry a palette name")
+                    .to_string()
             } else {
                 input.text.trim().to_string()
             }
@@ -7893,11 +7932,12 @@ impl App {
     }
 
     fn set_browser_input_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::BrowseProjects {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::BrowseProjects {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::BrowseProjects {
             filter,
@@ -7931,11 +7971,12 @@ impl App {
     /// Land the caret in the project chooser's `/`-search field. The renderer
     /// pads it with the two-cell `"/ "` prefix.
     fn set_pick_project_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::PickProject {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::PickProject {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::PickProject { list, .. } = &mut self.prompt {
             list.filter.cursor = cursor_from_single_line_click(
@@ -7952,11 +7993,12 @@ impl App {
     /// Land the caret in the Change base branch picker's `/`-search field. The
     /// renderer pads it with the two-cell `"/ "` prefix, like the project list.
     fn set_change_base_branch_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::ChangeBaseBranch {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::ChangeBaseBranch {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
             prompt.list.filter.cursor = cursor_from_single_line_click(
@@ -7972,11 +8014,12 @@ impl App {
 
     /// Land the caret in the startup-log filter. Its field carries no prefix.
     fn set_startup_command_logs_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::StartupCommandLogs {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::StartupCommandLogs {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
             prompt.filter.cursor = cursor_from_single_line_click(
@@ -8007,11 +8050,12 @@ impl App {
     }
 
     fn set_kill_running_search_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::KillRunning {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::KillRunning {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
             prompt.list.filter.cursor = cursor_from_single_line_click(
@@ -8117,7 +8161,9 @@ impl App {
                 if direction == FocusStep::Forward {
                     KillRunningFocus::Footer(enabled[0])
                 } else {
-                    KillRunningFocus::Footer(*enabled.last().unwrap())
+                    KillRunningFocus::Footer(
+                        *enabled.last().expect("an empty footer returned above"),
+                    )
                 }
             }
             Some(current) => {
@@ -8125,7 +8171,9 @@ impl App {
                     return if direction == FocusStep::Forward {
                         KillRunningFocus::Footer(enabled[0])
                     } else {
-                        KillRunningFocus::Footer(*enabled.last().unwrap())
+                        KillRunningFocus::Footer(
+                            *enabled.last().expect("an empty footer returned above"),
+                        )
                     };
                 };
                 if direction == FocusStep::Forward {
@@ -8157,7 +8205,7 @@ impl App {
             && let Some(entry) = visible.get(*selected)
         {
             let new_dir = entry.path.clone();
-            *current_dir = new_dir.clone();
+            current_dir.clone_from(&new_dir);
             entries.clear();
             *loading = true;
             *selected = 0;
@@ -8302,15 +8350,15 @@ impl App {
         let max = self
             .last_error_dialog_lines
             .saturating_sub(self.last_error_dialog_height.max(1));
-        let scroll = match &mut self.prompt {
-            PromptState::ConfigReloadFailed { scroll, .. }
-            | PromptState::AddProjectFailed { scroll, .. } => scroll,
-            _ => return,
+        let (PromptState::ConfigReloadFailed { scroll, .. }
+        | PromptState::AddProjectFailed { scroll, .. }) = &mut self.prompt
+        else {
+            return;
         };
         let next = if delta >= 0 {
-            scroll.saturating_add(delta as u16)
+            scroll.saturating_add(u32_to_u16_wrapping(delta.unsigned_abs()))
         } else {
-            scroll.saturating_sub(delta.unsigned_abs() as u16)
+            scroll.saturating_sub(u32_to_u16_wrapping(delta.unsigned_abs()))
         };
         *scroll = next.min(max);
     }
@@ -9327,9 +9375,11 @@ impl App {
     }
 
     fn set_rename_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::RenameSession { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::RenameSession {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9340,9 +9390,11 @@ impl App {
     }
 
     fn set_pull_request_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::PullRequestInput { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::PullRequestInput {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::PullRequestInput { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9355,9 +9407,10 @@ impl App {
     }
 
     fn set_attach_pull_request_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::AttachPullRequestInput { input } => input,
-            _ => return,
+        let OverlayMouseLayout::AttachPullRequestInput { input: input_area } =
+            self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
@@ -9368,9 +9421,10 @@ impl App {
     }
 
     fn set_standalone_name_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::NameStandaloneAgent { input } => input,
-            _ => return,
+        let OverlayMouseLayout::NameStandaloneAgent { input: input_area } =
+            self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
@@ -9381,9 +9435,11 @@ impl App {
     }
 
     fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::NameNewAgent { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::NameNewAgent {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9424,9 +9480,11 @@ impl App {
     }
 
     fn set_startup_command_cursor_from_mouse(&mut self, column: u16, row: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::ConfigureStartupCommand { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::ConfigureStartupCommand {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
             let display_row = usize::from(row.saturating_sub(input_area.y));
@@ -9763,11 +9821,11 @@ impl App {
         }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.scroll_first_load(MOUSE_WHEEL_LINES as i32);
+                self.scroll_first_load(wheel_lines::<i32>());
                 Some(false)
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_first_load(-(MOUSE_WHEEL_LINES as i32));
+                self.scroll_first_load(-wheel_lines::<i32>());
                 Some(false)
             }
             _ => None,
@@ -9825,7 +9883,7 @@ impl App {
             }
             _ => {}
         }
-        *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+        *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
         Some(false)
     }
 
@@ -9847,7 +9905,7 @@ impl App {
                 return Some(false);
             }
             MouseEventKind::ScrollDown => {
-                *scroll_offset = (*scroll_offset + 3).min(lines.len() as u16);
+                *scroll_offset = (*scroll_offset + 3).min(usize_to_u16_wrapping(lines.len()));
                 return Some(false);
             }
             _ => {}
@@ -9873,7 +9931,7 @@ impl App {
                 Style::default().add_modifier(Modifier::DIM),
             ),
         ]));
-        *scroll_offset = lines.len() as u16;
+        *scroll_offset = usize_to_u16_wrapping(lines.len());
         Some(false)
     }
 
@@ -9899,13 +9957,13 @@ impl App {
             }
             MouseEventKind::ScrollUp if contains_point(body, mouse.column, mouse.row) => {
                 if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                    scroll_startup_command_log(prompt, Some(body), -(MOUSE_WHEEL_LINES as i16));
+                    scroll_startup_command_log(prompt, Some(body), -wheel_lines::<i16>());
                 }
                 Some(false)
             }
             MouseEventKind::ScrollDown if contains_point(body, mouse.column, mouse.row) => {
                 if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                    scroll_startup_command_log(prompt, Some(body), MOUSE_WHEEL_LINES as i16);
+                    scroll_startup_command_log(prompt, Some(body), wheel_lines::<i16>());
                 }
                 Some(false)
             }
@@ -10162,6 +10220,10 @@ impl App {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt mouse target, each handing it to the method that acts on it"
+    )]
     fn dispatch_prompt_target_action(
         &mut self,
         target: PromptMouseTarget,
@@ -10357,6 +10419,10 @@ impl App {
     /// Fire the action for a button that was both pressed and released
     /// over its own bounds. Mirrors the previous on-Down dispatch
     /// arms one-for-one; only the trigger event differs.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per button, each handing it to the method that acts on it"
+    )]
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
             // The take-over card is not a modal and never rides
@@ -10521,7 +10587,8 @@ impl App {
             ButtonPressedTarget::ConfirmInitRepoConfirm => {
                 self.resolve_confirm_init_repo(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
+            ButtonPressedTarget::ConfirmNonDefaultBranchCancel
+            | ButtonPressedTarget::AgentInfoClose => {
                 self.prompt = PromptState::None;
                 false
             }
@@ -10544,10 +10611,6 @@ impl App {
                 self.resolve_config_reload_failed(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
-            ButtonPressedTarget::AgentInfoClose => {
-                self.prompt = PromptState::None;
-                false
-            }
             // The clicked button takes focus first, so a click and the focused
             // confirm key are the same act reaching the same place.
             ButtonPressedTarget::StartupCommandLogsClose => {
@@ -10787,9 +10850,9 @@ impl App {
 
     fn scroll_commit_input(&mut self, direction: ScrollDirection) {
         let delta = if direction == ScrollDirection::Down {
-            MOUSE_WHEEL_LINES as isize
+            wheel_lines::<isize>()
         } else {
-            -(MOUSE_WHEEL_LINES as isize)
+            -wheel_lines::<isize>()
         };
         self.commit_input.scroll_by(delta);
     }
@@ -10835,7 +10898,7 @@ impl App {
     fn handle_center_mouse_wheel(&mut self, mouse: MouseEvent) {
         self.focus = FocusPane::Center;
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let delta = MOUSE_WHEEL_LINES as u16;
+            let delta = wheel_lines::<u16>();
             if matches!(mouse.kind, MouseEventKind::ScrollDown) {
                 let max_scroll = self
                     .last_diff_visual_lines
@@ -10940,7 +11003,7 @@ impl App {
         let index = cell.link?;
         self.snapshot_buf
             .links
-            .get(index as usize)
+            .get(usize::from(index))
             .map(String::as_str)
     }
 
@@ -11259,7 +11322,7 @@ impl App {
             "\x1b[<{cb};{};{}{}",
             column + 1,
             row + 1,
-            final_byte as char
+            char::from(final_byte)
         )
         .into_bytes();
         let Some(translated) =
@@ -11307,18 +11370,18 @@ impl App {
 
         let body_right = body.x + body.width;
         match self.mouse_drag {
-            Some(ResizeDragState::LeftDivider) => {
+            Some(DraggedDivider::Left) => {
                 let columns = column
                     .saturating_sub(body.x)
                     .saturating_add(1)
                     .clamp(1, body.width);
                 self.set_left_width_pct(pct_from_columns(columns, body.width));
             }
-            Some(ResizeDragState::RightDivider) => {
+            Some(DraggedDivider::Right) => {
                 let columns = body_right.saturating_sub(column).clamp(1, body.width);
                 self.set_right_width_pct(pct_from_columns(columns, body.width));
             }
-            Some(ResizeDragState::TerminalDivider) => {
+            Some(DraggedDivider::Terminal) => {
                 let left = self.mouse_layout.left;
                 if left.height > 0 {
                     // Terminal height = distance from mouse row to bottom of left pane.
@@ -11329,7 +11392,7 @@ impl App {
                         dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
-            Some(ResizeDragState::StagedDivider) => {
+            Some(DraggedDivider::Staged) => {
                 let right = self.mouse_layout.right;
                 if right.height > 0 {
                     // Staged height = distance from mouse row to bottom of right pane.
@@ -11340,7 +11403,7 @@ impl App {
                         dux_core::config_effective::effective_pane_height_pct(pct);
                 }
             }
-            Some(ResizeDragState::CommitDivider) => {
+            Some(DraggedDivider::Commit) => {
                 // The commit divider resizes the split between "Staged Changes"
                 // and "Commit Message".  We compute relative to the staged
                 // sub-area of the right pane.  The sub-area spans from where
@@ -11512,9 +11575,9 @@ impl App {
             .saturating_sub(self.last_help_height.max(1));
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help);
+                *scroll = (*scroll + wheel_lines::<u16>()).min(max_help);
             }
-            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16),
+            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(wheel_lines::<u16>()),
             _ => {}
         }
         true
@@ -11545,11 +11608,11 @@ impl App {
             }
             MouseEventKind::ScrollDown if inside_log => {
                 self.terminal_selection = None;
-                self.scroll_startup_log_viewer(MOUSE_WHEEL_LINES as i16);
+                self.scroll_startup_log_viewer(wheel_lines::<i16>());
             }
             MouseEventKind::ScrollUp if inside_log => {
                 self.terminal_selection = None;
-                self.scroll_startup_log_viewer(-(MOUSE_WHEEL_LINES as i16));
+                self.scroll_startup_log_viewer(-wheel_lines::<i16>());
             }
             _ => {}
         }
@@ -11795,8 +11858,8 @@ impl App {
     /// rect and not about whether a drop there would mean anything.
     fn row_drag_target_row(&self, list: RowDragList, mouse: MouseEvent) -> Option<usize> {
         match (list, self.mouse_target(mouse.column, mouse.row)) {
-            (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
-            (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
+            (RowDragList::Agents, Some(MouseTarget::LeftRow(index)))
+            | (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
             _ => None,
         }
     }
@@ -12236,9 +12299,8 @@ impl App {
         // been judged unfollowable.
         self.refresh_snapshot_buf();
         self.drop_drifted_selection();
-        let sel = match self.terminal_selection.clone() {
-            Some(s) => s,
-            None => return String::new(),
+        let Some(sel) = self.terminal_selection.clone() else {
+            return String::new();
         };
         let (start, end) = sel.ordered();
 
@@ -12375,7 +12437,7 @@ impl App {
         let (start, end) = sel.ordered();
         let mut selected = Vec::new();
         for row in start.row..=end.row {
-            let Some(line) = lines.get(row as usize) else {
+            let Some(line) = lines.get(usize::from(row)) else {
                 continue;
             };
             let start_col = if row == start.row { start.col } else { 0 };
@@ -12604,11 +12666,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{DOUBLE_CLICK_THRESHOLD, MOUSE_WHEEL_LINES, MouseTarget, PromptMouseTarget};
+    use super::{DOUBLE_CLICK_THRESHOLD, MouseTarget, PromptMouseTarget, wheel_lines};
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
-    use crate::app::ResizeDragState;
+    use crate::app::DraggedDivider;
     use crate::app::SelectionOrigin;
     use crate::app::input::{
         assemble_selection_text, commit_success_message, configure_focus,
@@ -12616,6 +12678,10 @@ mod tests {
         startup_command_log_visual_lines,
     };
     use crate::app::{ConfirmAnswer, ConfirmFocus};
+    use crate::numeric::usize_to_u16_wrapping;
+    use dux_core::worker::ReviewCopyConsent;
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
 
     /// The commit success message advertises the push key only where pushing can
     /// succeed. A standalone agent has no branch, so the key it used to name
@@ -12838,7 +12904,7 @@ mod tests {
 
     /// The screen row carrying agent-list item `index` under the identity map.
     fn left_row_y(app: &App, index: usize) -> u16 {
-        app.mouse_layout.left_list.y + index as u16
+        app.mouse_layout.left_list.y + usize_to_u16_wrapping(index)
     }
 
     #[test]
@@ -13275,7 +13341,7 @@ mod tests {
                     label: id.to_string(),
                     foreground_cmd: None,
                     client,
-                    sort_order: index as u64,
+                    sort_order: u64::try_from(index).expect("a test index fits in a u64"),
                     created_at: now,
                 },
             );
@@ -13287,7 +13353,7 @@ mod tests {
 
     /// The screen row carrying terminal `index` under the identity map.
     fn terminal_row_y(app: &App, index: usize) -> u16 {
-        app.mouse_layout.terminal_list.y + index as u16
+        app.mouse_layout.terminal_list.y + usize_to_u16_wrapping(index)
     }
 
     #[test]
@@ -16644,7 +16710,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["alpha", "bravo", "charlie"]);
@@ -16705,7 +16771,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect()
     }
@@ -16786,7 +16852,7 @@ not_a_real_action = ["x"]
             .iter()
             .filter_map(|item| match item {
                 LeftItem::Session(i) => Some(app.engine.sessions[*i].id.clone()),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(ids, vec!["s-web".to_string()]);
@@ -17049,7 +17115,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["charlie", "alpha", "bravo"]);
@@ -17462,7 +17528,7 @@ not_a_real_action = ["x"]
                 custom_name: Some("feature/pr-42".to_string()),
                 use_existing_branch: false,
                 agents: Vec::new(),
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
                 ask_id: None,
                 cloned: None,
             },
@@ -17693,7 +17759,7 @@ not_a_real_action = ["x"]
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -17758,7 +17824,7 @@ not_a_real_action = ["x"]
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -19465,6 +19531,31 @@ not_a_real_action = ["x"]
 
     #[test]
     fn inactive_rule_shows_only_when_the_toggle_is_unselected() {
+        // The rule keeps the right padding: its last column stops a gutter short
+        // of the pane edge, so the rightmost cell of the label row stays blank.
+        fn toggle_rule_right_pad_is_blank(app: &mut App) -> bool {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let toggle_idx = app
+                .left_items()
+                .iter()
+                .position(|i| matches!(i, LeftItem::InactiveToggle))
+                .expect("toggle");
+            let rel = app
+                .mouse_layout
+                .left_row_to_item
+                .iter()
+                .rposition(|&i| i == toggle_idx)
+                .expect("toggle row");
+            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
+            let lx = app.mouse_layout.left_list.x;
+            let lw = app.mouse_layout.left_list.width;
+            let buf = terminal.backend().buffer();
+            buf[(lx + lw - 1, y)].symbol() == " "
+        }
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -19487,7 +19578,7 @@ not_a_real_action = ["x"]
                 .rposition(|&i| i == toggle_idx)
                 .expect("toggle row");
             // The toggle ends with a trailing spacer; its label is one row up.
-            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
+            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
             let lx = app.mouse_layout.left_list.x;
             let lw = app.mouse_layout.left_list.width;
             let buf = terminal.backend().buffer();
@@ -19512,32 +19603,6 @@ not_a_real_action = ["x"]
             .iter()
             .position(|i| matches!(i, LeftItem::InactiveToggle))
             .expect("toggle");
-
-        // The rule keeps the right padding: its last column stops a gutter short
-        // of the pane edge, so the rightmost cell of the label row stays blank.
-        fn toggle_rule_right_pad_is_blank(app: &mut App) -> bool {
-            let backend = TestBackend::new(120, 30);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            terminal
-                .draw(|frame| app.render(frame))
-                .expect("render frame");
-            let toggle_idx = app
-                .left_items()
-                .iter()
-                .position(|i| matches!(i, LeftItem::InactiveToggle))
-                .expect("toggle");
-            let rel = app
-                .mouse_layout
-                .left_row_to_item
-                .iter()
-                .rposition(|&i| i == toggle_idx)
-                .expect("toggle row");
-            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
-            let lx = app.mouse_layout.left_list.x;
-            let lw = app.mouse_layout.left_list.width;
-            let buf = terminal.backend().buffer();
-            buf[(lx + lw - 1, y)].symbol() == " "
-        }
 
         // Selection on the active agent (not the toggle): the rule shows.
         app.selected_left = app
@@ -19609,7 +19674,7 @@ not_a_real_action = ["x"]
         assert!(rel_start > 0, "inactive agent is not the first row");
         // The selected inactive agent gets the tinted selection band on its name
         // row like any other agent, with no accent bar.
-        let y = app.mouse_layout.left_list.y + rel_start as u16;
+        let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel_start);
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x;
         assert_ne!(
@@ -21417,7 +21482,7 @@ not_a_real_action = ["x"]
 
         assert_eq!(
             app.mouse_drag,
-            Some(ResizeDragState::LeftDivider),
+            Some(DraggedDivider::Left),
             "the divider grab must win"
         );
         assert_eq!(app.center_mouse_forward, None);
@@ -21856,7 +21921,7 @@ not_a_real_action = ["x"]
         install_feedable_pty(app);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         // 41 lines (40 fed plus the READY sentinel) through a 24-row grid,
         // with the trailing newline pushing the cursor onto a 42nd row, leaves
@@ -22014,7 +22079,7 @@ not_a_real_action = ["x"]
         install_feedable_pty_with_scrollback(&mut app, 5);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_row_present(&mut app, &fill, "L39");
         app.refresh_snapshot_buf();
@@ -22954,7 +23019,7 @@ not_a_real_action = ["x"]
 
         match app.center_mode {
             CenterMode::Diff { scroll, .. } => assert_eq!(scroll, 3),
-            _ => panic!("expected diff mode"),
+            CenterMode::Agent => panic!("expected diff mode"),
         }
     }
 
@@ -22984,7 +23049,7 @@ not_a_real_action = ["x"]
                 .unwrap();
             match app.center_mode {
                 CenterMode::Diff { scroll, .. } => assert_eq!(scroll, expected),
-                _ => panic!("expected diff mode"),
+                CenterMode::Agent => panic!("expected diff mode"),
             }
         }
     }
@@ -23192,8 +23257,11 @@ not_a_real_action = ["x"]
         app.active_terminal_id = None;
         // Backdate the regain so the (default 3 s) grace has fully elapsed.
         app.terminal_focus.on_focus_lost();
-        app.terminal_focus
-            .on_focus_gained(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        app.terminal_focus.on_focus_gained(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(4))
+                .expect("the monotonic clock reads past the offset a test steps back"),
+        );
 
         app.note_focused_agent_viewed();
 
@@ -23327,9 +23395,11 @@ not_a_real_action = ["x"]
     fn mouse_wheel_commit_text_scrolls_commit_viewport() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input =
-            TextInput::with_text((0..20).map(|i| format!("line {i}\n")).collect::<String>())
-                .with_multiline(4);
+        app.commit_input = TextInput::with_text((0..20).fold(String::new(), |mut text, i| {
+            let _ = writeln!(text, "line {i}");
+            text
+        }))
+        .with_multiline(4);
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, 80, 15));
 
@@ -24568,7 +24638,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -24620,7 +24690,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: crafted.to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -24688,7 +24758,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -24896,7 +24966,7 @@ cyan = "#00ffff"
             other => panic!("expected change theme prompt, got {other:?}"),
         };
 
-        let row = 9 + target_index as u16;
+        let row = 9 + usize_to_u16_wrapping(target_index);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, row));
 
         match &app.prompt {
@@ -25112,7 +25182,7 @@ cyan = "#00ffff"
         let PromptState::FirstLoad(prompt) = &app.prompt else {
             panic!("expected first-load prompt");
         };
-        assert_eq!(prompt.scroll, MOUSE_WHEEL_LINES as u16);
+        assert_eq!(prompt.scroll, wheel_lines::<u16>());
         assert_eq!(prompt.focus, FirstLoadButton::Primary);
 
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, 20, 8));
@@ -25666,7 +25736,7 @@ cyan = "#00ffff"
             offset: 0,
         };
 
-        let y = 5 + held_row as u16;
+        let y = 5 + usize_to_u16_wrapping(held_row);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
 
@@ -26604,7 +26674,7 @@ cyan = "#00ffff"
         // Fill enough history that scrolling back 20 rows is possible.
         let mut fill = String::new();
         for i in 0..60 {
-            fill.push_str(&format!("line {i}\n"));
+            let _ = writeln!(fill, "line {i}");
         }
         client.write_bytes(fill.as_bytes()).expect("write fill");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -26942,7 +27012,7 @@ cyan = "#00ffff"
             match app.engine.worker_rx.recv_timeout(remaining) {
                 Ok(WorkerEvent::AgentLaunchFailed(data)) => return data.request,
                 Ok(WorkerEvent::AgentLaunchReady(data)) => return data.request,
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(err) => panic!("no dispatched launch event arrived: {err}"),
             }
         }
@@ -28348,7 +28418,7 @@ cyan = "#00ffff"
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
 
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28366,7 +28436,7 @@ cyan = "#00ffff"
             .foreground_cmd = Some("zsh".to_string());
         app.engine
             .companion_terminals
-            .get_mut(&session_tid)
+            .get_mut(&companion_tid)
             .unwrap()
             .foreground_cmd = Some("ash".to_string());
 
@@ -28385,7 +28455,7 @@ cyan = "#00ffff"
                 .map(|(id, _)| id.as_str())
                 .collect();
             assert!(
-                ids.contains(&standalone_tid.as_str()) && ids.contains(&session_tid.as_str()),
+                ids.contains(&standalone_tid.as_str()) && ids.contains(&companion_tid.as_str()),
                 "both terminals must be listed under sort mode {mode}; got {ids:?}"
             );
         }
@@ -28397,7 +28467,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str(), standalone_tid.as_str()],
+            vec![companion_tid.as_str(), standalone_tid.as_str()],
         );
         // Name ascending puts "ash" before "zsh"; descending flips it, which is
         // only meaningful because the standalone row takes part in the compare.
@@ -28407,7 +28477,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![standalone_tid.as_str(), session_tid.as_str()],
+            vec![standalone_tid.as_str(), companion_tid.as_str()],
         );
     }
 
@@ -28430,7 +28500,7 @@ cyan = "#00ffff"
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28452,7 +28522,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str()],
+            vec![companion_tid.as_str()],
         );
         assert_eq!(
             app.selected_terminal_index, 0,
@@ -28494,7 +28564,7 @@ cyan = "#00ffff"
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
         let session_id = app.engine.sessions[0].id.clone();
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28585,7 +28655,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str(), standalone_tid.as_str()],
+            vec![companion_tid.as_str(), standalone_tid.as_str()],
             "the full list is back",
         );
         assert_eq!(
@@ -29952,7 +30022,7 @@ cyan = "#00ffff"
             startup_command_log_visual_lines(
                 &app.startup_log_viewer.as_ref().expect("viewer").content,
                 20
-            )[narrow_offset as usize],
+            )[usize::from(narrow_offset)],
             "needle line",
             "test premise: the recorded offset names the match at this width"
         );
@@ -29984,7 +30054,8 @@ cyan = "#00ffff"
             "test premise: the match sits at a different visual row once rewrapped"
         );
         assert_eq!(
-            startup_command_log_visual_lines(&viewer.content, 80)[viewer.scroll_offset as usize],
+            startup_command_log_visual_lines(&viewer.content, 80)
+                [usize::from(viewer.scroll_offset)],
             "needle line",
             "the search offset must still name the match, not the text that \
              rewrapped into its old row"
@@ -30034,7 +30105,7 @@ cyan = "#00ffff"
             startup_command_log_visual_lines(
                 &app.startup_log_viewer.as_ref().expect("viewer").content,
                 20
-            )[search_offset as usize],
+            )[usize::from(search_offset)],
             "needle line",
             "test premise: the search must have parked the view on the match"
         );
@@ -30063,7 +30134,8 @@ cyan = "#00ffff"
             .position(|line| line == "needle line")
             .expect("match at the wide width");
         assert_ne!(
-            viewer.scroll_offset as usize, wide_match,
+            usize::from(viewer.scroll_offset),
+            wide_match,
             "test premise: the clamped offset must differ from the match's row \
              or this proves nothing"
         );
@@ -30492,6 +30564,10 @@ cyan = "#00ffff"
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn clone_form_enter_dispatches_and_closes_a_refusal_keeps_it_open_and_a_failed_clone_hands_it_back()
      {
         let start = tempdir().expect("start folder");
@@ -30616,7 +30692,7 @@ cyan = "#00ffff"
                     };
                 }
                 Ok(other) => app.engine.worker_tx.send(other).unwrap(),
-                Err(_) => panic!("the clone never answered"),
+                Err(err) => panic!("the clone never answered: {err}"),
             }
         };
         app.engine.worker_tx.send(succeeded).unwrap();
@@ -31309,6 +31385,10 @@ cyan = "#00ffff"
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
@@ -31342,11 +31422,15 @@ cyan = "#00ffff"
         let drawn_at = |text: &str| -> (u16, u16) {
             let cells: Vec<String> = text.chars().map(String::from).collect();
             for y in 0..buf.area.height {
-                for x in 0..buf.area.width.saturating_sub(cells.len() as u16) {
+                for x in 0..buf
+                    .area
+                    .width
+                    .saturating_sub(usize_to_u16_wrapping(cells.len()))
+                {
                     if cells
                         .iter()
                         .enumerate()
-                        .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c)
+                        .all(|(i, c)| buf[(x + usize_to_u16_wrapping(i), y)].symbol() == c)
                     {
                         return (x, y);
                     }
@@ -32068,7 +32152,9 @@ cyan = "#00ffff"
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine.resume_fallback_candidates.insert(
             TabId::new(slot_tab.clone()),
-            std::time::Instant::now() - std::time::Duration::from_millis(20),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(20))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -33676,7 +33762,7 @@ cyan = "#00ffff"
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         enter_scroll_mode(&mut app, 3);
@@ -33712,7 +33798,7 @@ cyan = "#00ffff"
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         enter_scroll_mode(&mut app, 3);
@@ -33781,7 +33867,7 @@ cyan = "#00ffff"
         set_forward_scroll(&mut app, ForwardScroll::Never);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         app.last_pty_size = (24, 80);
@@ -34469,14 +34555,19 @@ cyan = "#00ffff"
         );
         // When the incoming chunk alone exceeds the cap, prior prefix is
         // discarded and only the trailing window of the new chunk remains.
-        let expected_tail: Vec<u8> = (200 - super::LOADING_INPUT_BUF_MAX as u8..200u8).collect();
+        let expected_tail: Vec<u8> =
+            (200 - u8::try_from(super::LOADING_INPUT_BUF_MAX)
+                .expect("the loading buffer cap fits in a byte")..200u8)
+                .collect();
         assert_eq!(buf, expected_tail);
     }
 
     #[test]
     fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
         // Fill exactly to cap with distinct leading bytes.
-        let mut buf: Vec<u8> = (0..super::LOADING_INPUT_BUF_MAX as u8).collect();
+        let mut buf: Vec<u8> = (0..u8::try_from(super::LOADING_INPUT_BUF_MAX)
+            .expect("the loading buffer cap fits in a byte"))
+            .collect();
         // Append 5 more bytes: should drop the first 5.
         super::append_capped(
             &mut buf,
@@ -36861,7 +36952,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -37023,7 +37114,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -37884,7 +37975,7 @@ cyan = "#00ffff"
                 head_branch: "pr-head".to_string(),
                 custom_name: Some("pr-head".to_string()),
                 use_existing_branch: false,
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
                 ask_id: None,
                 agents: Vec::new(),
                 cloned: None,
@@ -37981,7 +38072,7 @@ cyan = "#00ffff"
             head_branch: "pr-head".to_string(),
             custom_name: Some(name.to_string()),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -40152,6 +40243,10 @@ cyan = "#00ffff"
     /// just written: flipping the REAL `begin_quit` site to
     /// `ConfirmFocus::Confirm` (Enter on the quit dialog would then kill every
     /// running agent) left the whole suite green.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per confirmation, each opening it through its production path"
+    )]
     fn open_two_button_confirmation(which: &str) -> App {
         let mut app = test_app(default_bindings());
         match which {

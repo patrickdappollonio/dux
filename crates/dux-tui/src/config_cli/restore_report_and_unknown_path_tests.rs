@@ -28,8 +28,8 @@ fn paths_in(dir: &std::path::Path) -> DuxPaths {
 
 #[test]
 fn restore_docs_never_prints_a_token_pasted_as_a_key_under_an_array_of_tables() {
-    crate::config::install_canonical_renderer();
     const TOKEN: &str = "sk-proj-AbCdEf0123456789";
+    crate::config::install_canonical_renderer();
     let mut leaked = Vec::new();
     for text in [
         format!("[[projects]]\nid = \"a\"\npath = \"/tmp/a\"\n\"{TOKEN} x\" = \"1\"\n"),

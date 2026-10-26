@@ -10,11 +10,19 @@
 //! request, the form says so up front and holds the button until it is ticked.
 
 use super::components::{FocusStep, next_focus};
-use super::*;
+use super::text_input::TextInput;
+use super::{
+    App, CloneDraft, CloneProjectFocus, FullscreenOverlay, InputTarget, ProjectChooserIntent,
+    PromptState,
+};
 use crate::git::{agent_name_char_map, is_valid_agent_name};
+use crate::keybindings::Action;
+use crate::statusline::StatusTone;
+use anyhow::Result;
 use dux_core::clone_project::{
     FolderReviewCopyQuery, PrDestination, UpfrontReviewCopy, check_pr_destination,
 };
+use dux_core::engine::Command;
 use dux_core::engine::EventReaction;
 use dux_core::pr_reference::{
     PullRequestCloneFacts, PullRequestCloneTarget, pr_add_existing_offer_prose,
@@ -22,6 +30,11 @@ use dux_core::pr_reference::{
 };
 use dux_core::prose::{Prose, ProseSegment};
 use dux_core::status_text::{ReviewCopyAsk, ReviewCopyOutlook};
+use dux_core::worker::CreateAgentRequest;
+use dux_core::worker::ReviewCopyConsent;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// What the folder the form would clone into holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -463,16 +476,7 @@ impl App {
         if folder_changed || outlook_changed {
             form.review_copy_agreed = false;
         }
-        let asks_now = match &outlook_after {
-            ReviewCopyOutlook::Needed { .. } => Some(
-                "Tick Create a review copy, or type another name, then press the confirm key \
-                 again.",
-            ),
-            ReviewCopyOutlook::NoFreeName { .. } => {
-                Some("Every name a review copy could take is taken. Type another name.")
-            }
-            ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => None,
-        };
+        let asks_now = review_copy_ask(&outlook_after);
         let repository = form.repository();
         let overtaken = answer.edits != form.edits;
         let go_ahead = was_pressed && !overtaken && !folder_changed && !outlook_changed;
@@ -484,17 +488,7 @@ impl App {
                  Press {confirm_key} again."
             ))
         } else if folder_changed {
-            let lead = if matches!(form.folder, PrFolder::Checkout { .. }) {
-                format!(
-                    "That folder already holds a checkout of {repository}, so the form now adds \
-                     it as a project instead of cloning."
-                )
-            } else {
-                format!(
-                    "That folder holds nothing of {repository} now, so the form now clones into \
-                     it."
-                )
-            };
+            let lead = folder_change_lead(&form.folder, &repository);
             Some(match asks_now {
                 Some(ask) => format!("{lead} {}", ask.replace("the confirm key", &confirm_key)),
                 None => format!("{lead} Press {confirm_key} again to go ahead."),
@@ -837,7 +831,7 @@ impl App {
                 typed_name
             }),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -890,5 +884,31 @@ impl App {
             focus: CloneProjectFocus::ReviewCopyCheckbox,
             pull_request: Some(Box::new(form)),
         };
+    }
+}
+
+/// The question a review-copy answer leaves for the user, worded with "the
+/// confirm key" for the caller to name; `None` when it asks nothing.
+fn review_copy_ask(outlook: &ReviewCopyOutlook) -> Option<&'static str> {
+    match outlook {
+        ReviewCopyOutlook::Needed { .. } => Some(
+            "Tick Create a review copy, or type another name, then press the confirm key again.",
+        ),
+        ReviewCopyOutlook::NoFreeName { .. } => {
+            Some("Every name a review copy could take is taken. Type another name.")
+        }
+        ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => None,
+    }
+}
+
+/// What the form now does with the folder the check just classified.
+fn folder_change_lead(folder: &PrFolder, repository: &str) -> String {
+    if matches!(folder, PrFolder::Checkout { .. }) {
+        format!(
+            "That folder already holds a checkout of {repository}, so the form now adds it as a \
+             project instead of cloning."
+        )
+    } else {
+        format!("That folder holds nothing of {repository} now, so the form now clones into it.")
     }
 }

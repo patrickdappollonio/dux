@@ -7,8 +7,37 @@ use dux_core::engine::{
     EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
     PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval, closed_tab_exit_notice,
 };
+use dux_core::worker::ReviewCopyConsent;
 
-use super::*;
+use super::background_server::CompanionRouting;
+use super::text_input::TextInput;
+use super::{
+    App, CenterMode, ChangedFilesAnswer, CpuWindow, DeleteReport, DrainedEventMetadata, FocusPane,
+    FullscreenOverlay, InputTarget, LaunchView, LeftItem, LeftSection, PersistFinalOutcome,
+    PrLookupFinalOutcome, PrReferenceResolutionAnswer, PromptState, PruneViewContext,
+    StartupCommandLogFocus, StartupCommandLogPrompt, TuiCheckoutInspectOutcome,
+    TuiConfigReloadOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
+    build_visual_rows, removable_worktree_indices, selectable_project_worktree_indices,
+};
+use crate::config::Config;
+use crate::keybindings::Action;
+use crate::model::{Project, ProviderKind, SessionSurface};
+use crate::statusline::StatusTone;
+use crate::theme::FocusState;
+use crate::{git, logger};
+use anyhow::Result;
+use dux_core::engine::Engine;
+use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
+use dux_core::model::{TerminalOwner, TerminalOwnerRef};
+use dux_core::project_browser::leading_branch_for_project;
+use dux_core::worker::{
+    AgentLaunchKind, BrowserEntry, CreateAgentBranchInspection, CreateAgentRequest,
+    NonDefaultBranchAction, ProjectPersistenceAction, ProjectWorktreeEntry, ResourceStats,
+    WorkerEvent,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 impl PruneViewContext {
     fn capture(app: &App) -> Self {
@@ -608,6 +637,10 @@ impl App {
         self.apply_routed_reaction(reaction, &routing);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per EventReaction variant, each handing its fields to the method that applies them"
+    )]
     pub(super) fn apply_routed_reaction(
         &mut self,
         reaction: EventReaction,
@@ -631,92 +664,13 @@ impl App {
             return;
         }
         match reaction {
-            EventReaction::Nothing => {}
+            EventReaction::Nothing
             // The terminal UI reads `Engine::gh_status` live every time it gates
             // a pull-request command, so the flip is already visible here and
             // the accompanying keyed status carries the explanation. The arm
             // exists so a surface that DOES need to react cannot forget to.
-            EventReaction::GhAvailabilityChanged { .. } => {}
-            EventReaction::Status(StatusUpdate {
-                tone,
-                message,
-                key,
-                quiet_on,
-                ask,
-                ..
-            }) => {
-                // A final ends whatever a change of this surface's still holds
-                // under its key, shown or not.
-                if tone != StatusTone::Busy
-                    && let Some(key) = &key
-                {
-                    self.engine.attachments.finish_key(key);
-                }
-                // A clone or add this surface started that stopped short of the
-                // agent for want of that agreement leaves its project behind. The
-                // name prompt for it opens with the question, and the sentence
-                // still goes on the status line below.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask {
-                    self.reopen_pull_request_after_clone(question);
-                }
-                // A refused create that asks for agreement to a review copy is
-                // answered in the name prompt, not on the status line, and the
-                // create's spinner is retired by it. One this surface did not
-                // dispatch has no request to reopen, and shows its sentence
-                // like any other refusal.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
-                    && let Some(key) = &key
-                    && self
-                        .pull_request_create
-                        .as_ref()
-                        .is_some_and(|(pending, _)| pending == key)
-                    && let Some((_, request)) = self.pull_request_create.take()
-                {
-                    self.status.clear(key, None);
-                    self.reopen_name_prompt_for_review_copy(
-                        request,
-                        question.warned,
-                        question.warning,
-                    );
-                    return;
-                }
-                // Only an INFO may be withheld: a warning, an error and a
-                // spinner all report something the screen cannot be standing in
-                // for, whatever the site asked for.
-                if quiet_on.tui && tone == StatusTone::Info {
-                    // A keyed final still has a spinner to take down: the
-                    // sentence goes, the busy must not be stranded behind it.
-                    // A sticky busy refuses to go, and there the sentence is
-                    // shown instead, because a spinner nothing retires is worse
-                    // than a line nobody needed.
-                    let stranded = match &key {
-                        Some(key) => !self.status.clear(key, None),
-                        None => false,
-                    };
-                    if !stranded {
-                        return;
-                    }
-                }
-                // A commit's final: a landed commit clears the typed message, a
-                // refused one leaves it for another try.
-                if tone != StatusTone::Busy
-                    && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
-                    && key == pending
-                {
-                    // Only the message that was committed is cleared: one typed
-                    // since, for the next commit, stays.
-                    if tone == StatusTone::Info && self.commit_input.text == *committed {
-                        self.commit_input.clear();
-                    }
-                    self.pending_commit = None;
-                }
-                // When a `StatusUpdate` carries a key (keyed operation), write it
-                // into the named slot so `most_recent_tui` can pick it up.
-                // Unkeyed updates (`key == None`) write the anonymous slot.
-                // Info entries auto-clear after `clear_after`; Busy persists until
-                // replaced; Warning/Error persist until the next status.
-                self.status.set(Instant::now(), key, tone, message);
-            }
+            | EventReaction::GhAvailabilityChanged { .. } => {}
+            EventReaction::Status(update) => self.apply_status_update(update),
             EventReaction::ClearStatus(key) => {
                 // The `Final::Clear` outcome of a StatusOp: dismiss the keyed
                 // entry with no replacement message.
@@ -942,6 +896,86 @@ impl App {
                 self.apply_background_server_preflight(result, warning, startup);
             }
         }
+    }
+
+    /// Show one status the engine raised, after the side effects its key or its
+    /// ask owes this surface first.
+    fn apply_status_update(&mut self, update: StatusUpdate) {
+        let StatusUpdate {
+            tone,
+            message,
+            key,
+            quiet_on,
+            ask,
+            ..
+        } = update;
+        // A final ends whatever a change of this surface's still holds
+        // under its key, shown or not.
+        if tone != StatusTone::Busy
+            && let Some(key) = &key
+        {
+            self.engine.attachments.finish_key(key);
+        }
+        // A clone or add this surface started that stopped short of the
+        // agent for want of that agreement leaves its project behind. The
+        // name prompt for it opens with the question, and the sentence
+        // still goes on the status line below.
+        if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask {
+            self.reopen_pull_request_after_clone(question);
+        }
+        // A refused create that asks for agreement to a review copy is
+        // answered in the name prompt, not on the status line, and the
+        // create's spinner is retired by it. One this surface did not
+        // dispatch has no request to reopen, and shows its sentence
+        // like any other refusal.
+        if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
+            && let Some(key) = &key
+            && self
+                .pull_request_create
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == key)
+            && let Some((_, request)) = self.pull_request_create.take()
+        {
+            self.status.clear(key, None);
+            self.reopen_name_prompt_for_review_copy(request, question.warned, question.warning);
+            return;
+        }
+        // Only an INFO may be withheld: a warning, an error and a
+        // spinner all report something the screen cannot be standing in
+        // for, whatever the site asked for.
+        if quiet_on.tui && tone == StatusTone::Info {
+            // A keyed final still has a spinner to take down: the
+            // sentence goes, the busy must not be stranded behind it.
+            // A sticky busy refuses to go, and there the sentence is
+            // shown instead, because a spinner nothing retires is worse
+            // than a line nobody needed.
+            let stranded = match &key {
+                Some(key) => !self.status.clear(key, None),
+                None => false,
+            };
+            if !stranded {
+                return;
+            }
+        }
+        // A commit's final: a landed commit clears the typed message, a
+        // refused one leaves it for another try.
+        if tone != StatusTone::Busy
+            && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
+            && key == pending
+        {
+            // Only the message that was committed is cleared: one typed
+            // since, for the next commit, stays.
+            if tone == StatusTone::Info && self.commit_input.text == *committed {
+                self.commit_input.clear();
+            }
+            self.pending_commit = None;
+        }
+        // When a `StatusUpdate` carries a key (keyed operation), write it
+        // into the named slot so `most_recent_tui` can pick it up.
+        // Unkeyed updates (`key == None`) write the anonymous slot.
+        // Info entries auto-clear after `clear_after`; Busy persists until
+        // replaced; Warning/Error persist until the next status.
+        self.status.set(Instant::now(), key, tone, message);
     }
 
     fn apply_add_project_after_branch_checkout(
@@ -1510,7 +1544,7 @@ impl App {
             head_branch: pr.head_ref_name.clone(),
             custom_name: Some(dux_core::bidi::strip_bidi_controls(&pr.head_ref_name)),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -1789,8 +1823,9 @@ impl App {
         }
     }
 
-    pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
-        self.last_pty_size = outcome.pty_size;
+    /// Whether this surface started the launch that just became ready, spending
+    /// the marks that said so, and claiming the pty it produced when it did.
+    fn note_launch_origin(&mut self, outcome: &AgentLaunchReadyOutcome) -> bool {
         // This arm runs on both surfaces (see `owner_of_reaction`), so a child
         // this surface started has to be recognised rather than assumed: an id
         // armed at dispatch for every ordinary launch, and the create flag for a
@@ -1813,11 +1848,6 @@ impl App {
             matches!(&outcome.view, AgentLaunchReadyView::ResumeFallback { .. })
                 && self.tui_fallback_tabs.remove(&outcome.tab_id);
         let started_here = armed || created_here || fell_back_from_here;
-        let view = if outcome.wants_fullscreen {
-            LaunchView::Fullscreen
-        } else {
-            LaunchView::Minimized
-        };
         if started_here
             && self
                 .engine
@@ -1840,15 +1870,21 @@ impl App {
         {
             self.claim_launched_pty(&outcome.tab_id);
         }
+        started_here
+    }
+
+    pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
+        self.last_pty_size = outcome.pty_size;
+        let started_here = self.note_launch_origin(&outcome);
+        let view = if outcome.wants_fullscreen {
+            LaunchView::Fullscreen
+        } else {
+            LaunchView::Minimized
+        };
         // The engine's `detach_conflicting_worktree_session` already cleared every
         // runtime map (incl. pty_activity/pty_input) for the detached agent's
         // tabs, so no follow-up clear is needed here.
         match outcome.view {
-            AgentLaunchReadyView::CreatePersistFailed { .. } => {
-                // The create op's keyed error final is resolved ENGINE-SIDE and
-                // arrives alongside this View as a sibling `Status` in the same
-                // `Multi`, so there is no status to set here.
-            }
             AgentLaunchReadyView::CreateCommitted { .. } if !started_here => {
                 self.rebuild_left_items();
             }
@@ -1958,7 +1994,11 @@ impl App {
                 // Same re-partition as Reconnect: the resumed agent is Active now.
                 self.rebuild_left_items();
             }
-            AgentLaunchReadyView::StartupAutoReopen => {}
+            // The create op's keyed error final is resolved ENGINE-SIDE and
+            // arrives alongside this View as a sibling `Status` in the same
+            // `Multi`, so there is no status to set here.
+            AgentLaunchReadyView::CreatePersistFailed { .. }
+            | AgentLaunchReadyView::StartupAutoReopen => {}
         }
     }
 
@@ -1991,11 +2031,6 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create { .. } => {
-                // The create op's keyed error final is resolved ENGINE-SIDE and
-                // arrives as a sibling `Status` in the same `Multi`, so this arm
-                // has no status to set.
-            }
             AgentLaunchFailedOutcome::Reconnect {
                 session_id,
                 agent_label,
@@ -2025,9 +2060,6 @@ impl App {
                     },
                 );
             }
-            AgentLaunchFailedOutcome::ResumeFallback => {
-                // Engine logged + marked Detached; nothing for the view.
-            }
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 agent_label,
                 message,
@@ -2049,10 +2081,16 @@ impl App {
                     "Tab launch failed for \"{agent_label}\": {message}"
                 ));
             }
-            AgentLaunchFailedOutcome::Silent => {
-                // Ghost-tab launch failure: the row was already closed by the
-                // user, so there is nothing to warn about.
-            }
+            // The create op's keyed error final is resolved ENGINE-SIDE and
+            // arrives as a sibling `Status` in the same `Multi`, so a failed
+            // create has no status to set here.
+            AgentLaunchFailedOutcome::Create { .. }
+            // The engine logged it and marked the agent Detached; nothing for the
+            // view.
+            | AgentLaunchFailedOutcome::ResumeFallback
+            // Ghost-tab launch failure: the row was already closed by the user,
+            // so there is nothing to warn about.
+            | AgentLaunchFailedOutcome::Silent => {}
         }
     }
 
@@ -2380,6 +2418,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::app::{BrowsePurpose, TermGridPos, TerminalSelection};
+    use crate::config::DuxPaths;
+    use crate::model::{AgentSession, ProjectBranchStatus, SessionStatus};
+    use dux_core::agent_job::CreateJobRegistries;
+    use dux_core::process_sessions::SpawnGate;
+    use dux_core::term_identity::TerminalIdentity;
+    use dux_core::worker::AgentLaunchRequest;
+    use std::collections::BTreeMap;
 
     /// An agent detaching is a fact about the workspace: a browser has always
     /// been told, and this surface used to speak only for the selected agent.
@@ -3703,7 +3749,7 @@ mod tests {
             pty_size: (24, 80),
             scrollback_lines: 1_000,
             env: Vec::new(),
-            identity: Default::default(),
+            identity: TerminalIdentity::default(),
             kind: AgentLaunchKind::Reconnect {
                 status_message: "reconnect".to_string().into(),
             },
@@ -3711,7 +3757,7 @@ mod tests {
             status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
-        dux_core::agent_job::run_agent_launch_job(request, &worker_tx, &Default::default());
+        dux_core::agent_job::run_agent_launch_job(request, &worker_tx, &SpawnGate::default());
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::AgentLaunchFailed(data) => {
@@ -3859,7 +3905,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -3905,7 +3951,7 @@ mod tests {
             (80, 24),
             "op-test".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            CreateJobRegistries::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -4191,7 +4237,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -4214,7 +4260,7 @@ mod tests {
             (80, 24),
             "op-create-1".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            CreateJobRegistries::default(),
         );
 
         match worker_rx.recv().expect("worker event") {

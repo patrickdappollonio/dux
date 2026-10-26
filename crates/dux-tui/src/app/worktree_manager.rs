@@ -8,7 +8,12 @@
 //! shared with the web route; what lives here is opening the picker and the
 //! confirmation and dispatching the removal onto a background worker.
 
-use super::*;
+use super::{
+    App, ConfirmAnswer, ConfirmDeleteWorktreePrompt, DeleteWorktreeFocus, FullscreenOverlay,
+    InputTarget, ManageWorktreesPrompt, ProjectActionsPrompt, ProjectChooserIntent, PromptState,
+    WorktreesFinalOutcome,
+};
+use crate::model::Project;
 
 impl App {
     /// `manage-worktrees`: open the project chooser, then (per project) load
@@ -241,6 +246,9 @@ fn worktree_removal_final(
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{
+        Listing, ManageWorktreeVisualRow, manage_worktree_visual_rows, removable_worktree_indices,
+    };
     use dux_core::worktree_manager::ManagedWorktree;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;

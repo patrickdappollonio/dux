@@ -11,7 +11,18 @@
 
 use dux_core::engine::EventReaction;
 
-use super::*;
+use super::{
+    App, BackgroundServerOutcome, FocusPane, FullscreenOverlay, InputTarget,
+    PendingBackgroundServerStart, PromptState, SetTailscaleModeOption, SetTailscaleModePrompt,
+    preflight_server_listeners,
+};
+use crate::keybindings::Action;
+use crate::model::SessionSurface;
+use crate::statusline::StatusTone;
+use anyhow::Result;
+use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+use dux_core::worker::WorkerEvent;
+use std::time::Instant;
 
 /// Whether `[server] serve_while_tui` asks for the background server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -779,8 +790,9 @@ impl App {
         outcome: dux_core::config::TailscaleModeOutcome,
     ) {
         self.note_reload_tailscale_change_done(mode, outcome);
-        match self.pending_tailscale_mode_op.take() {
-            Some(op) => self.apply_reaction(op.resolve(&outcome).into_reaction()),
+        if let Some(op) = self.pending_tailscale_mode_op.take() {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        } else {
             // No op waiting: the serve answered a request this surface no longer
             // remembers (a stop and start across it, say). Say it anyway rather
             // than swallowing a listener change nobody asked about, and say it on
@@ -788,20 +800,18 @@ impl App {
             // fact about the process rather than an answer owed to this screen,
             // and a browser reaching dux over the tailnet is as affected as the
             // terminal in front of it.
-            None => {
-                let report = outcome.report(mode);
-                let tone = if report.warning {
-                    dux_core::statusline::StatusTone::Warning
-                } else {
-                    dux_core::statusline::StatusTone::Info
-                };
-                self.engine
-                    .post_status(dux_core::engine::StatusUpdate::keyed(
-                        dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
-                        tone,
-                        report.message,
-                    ));
-            }
+            let report = outcome.report(mode);
+            let tone = if report.warning {
+                dux_core::statusline::StatusTone::Warning
+            } else {
+                dux_core::statusline::StatusTone::Info
+            };
+            self.engine
+                .post_status(dux_core::engine::StatusUpdate::keyed(
+                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
+                    tone,
+                    report.message,
+                ));
         }
     }
 
@@ -1097,6 +1107,11 @@ pub(crate) mod tests {
 
     use super::super::test_support::{default_bindings, test_app};
     use super::*;
+    use dux_core::engine::Engine;
+    use dux_core::ids::{TabId, TabIdRef};
+    use dux_core::worker::ReviewCopyConsent;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
 
     /// What a [`FakeCompanion`] saw and what it was told to do, shared with the
     /// test because the App owns the companion behind a trait object.
@@ -1391,7 +1406,7 @@ pub(crate) mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: crate::model::ProjectBranchStatus::Leading,
             path_missing: false,
@@ -1409,7 +1424,7 @@ pub(crate) mod tests {
             state: "OPEN".to_string(),
             head_ref_name: "feature/pr-42".to_string(),
             custom_name: None,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
         }
     }
@@ -1436,7 +1451,7 @@ pub(crate) mod tests {
                 repository_key: None,
                 mode: dux_core::clone_project::CloneMode::Clone,
                 destination: std::path::PathBuf::new(),
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
             },
         );
         id
@@ -1720,7 +1735,18 @@ pub(crate) mod tests {
     /// its own agent is the one deleted, the cursor rests on no row rather than
     /// on a neighbour it was never on.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn a_change_made_elsewhere_rebuilds_the_sidebar_and_the_cursor_keeps_its_agent() {
+        type Case = (
+            &'static str,
+            Lend,
+            EngineChange,
+            Option<&'static str>,
+            &'static [&'static str],
+        );
         enum Lend {
             Service,
             Fanout,
@@ -1731,13 +1757,6 @@ pub(crate) mod tests {
         let delete = |id: &'static str| -> EngineChange {
             Box::new(move |engine: &mut Engine| engine.sessions.retain(|s| s.id != id))
         };
-        type Case = (
-            &'static str,
-            Lend,
-            EngineChange,
-            Option<&'static str>,
-            &'static [&'static str],
-        );
         let cases: Vec<Case> = vec![
             (
                 "a delete above",

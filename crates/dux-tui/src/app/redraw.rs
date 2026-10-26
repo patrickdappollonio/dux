@@ -8,8 +8,11 @@
 //! last frame: a mutation marked dirty, an animation frame that advanced, the
 //! status line, or the once-a-second backstop.
 
-use super::*;
+use super::{App, CenterMode, FullscreenOverlay, PromptState, attention_blink_phase};
 use crate::app::pty_ownership::PtyTakeoverCard;
+use crate::numeric::u128_to_usize_wrapping;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// A full redraw at least this often whatever the gate thinks, so a mutation
 /// point that forgot to mark dirty costs a one-second lag, not a stuck screen.
@@ -209,12 +212,12 @@ impl App {
         let elapsed = now.saturating_duration_since(self.start_time).as_millis();
         let phase = AnimationPhase {
             spinner: self.spinner_cue_visible().then(|| {
-                ((elapsed / crate::theme::SPINNER_FRAME_MS) as usize)
+                u128_to_usize_wrapping(elapsed / crate::theme::SPINNER_FRAME_MS)
                     % crate::theme::SPINNER_FRAMES.len()
             }),
-            cue: self
-                .any_row_working()
-                .then_some((elapsed / dux_core::working_cue::ELLIPSIS_STEP_MS as u128) as usize),
+            cue: self.any_row_working().then_some(u128_to_usize_wrapping(
+                elapsed / u128::from(dux_core::working_cue::ELLIPSIS_STEP_MS),
+            )),
             attention_on: self
                 .attention_cue_visible()
                 .then(|| attention_blink_phase(elapsed)),
@@ -279,6 +282,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::text_input::TextInput;
+    use crate::model::SessionSurface;
+    use crossterm::event::Event;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -396,7 +402,9 @@ mod tests {
         };
 
         let drawn = frames_per_simulated_second(&mut app, &mut terminal);
-        let spinner_rate = 1_000 / crate::theme::SPINNER_FRAME_MS as u64;
+        let spinner_rate = 1_000
+            / u64::try_from(crate::theme::SPINNER_FRAME_MS)
+                .expect("a frame period in milliseconds fits in a u64");
         assert!(
             drawn.abs_diff(spinner_rate) <= 2,
             "a second of spinner must cost about {spinner_rate} frames, not 30; drew {drawn}"
@@ -421,7 +429,9 @@ mod tests {
         make_the_row_work(&mut app);
 
         let drawn = frames_per_simulated_second(&mut app, &mut terminal);
-        let spinner_rate = 1_000 / crate::theme::SPINNER_FRAME_MS as u64;
+        let spinner_rate = 1_000
+            / u64::try_from(crate::theme::SPINNER_FRAME_MS)
+                .expect("a frame period in milliseconds fits in a u64");
         assert!(
             drawn.abs_diff(spinner_rate) <= 2,
             "a working row must draw at the spinner's cadence of about \

@@ -358,7 +358,7 @@ impl TextInput {
         let total = visual_line_count(&self.text, m.display_width);
         let max_scroll = total.saturating_sub(m.visible_lines);
         if delta >= 0 {
-            m.scroll_offset = (m.scroll_offset + delta as usize).min(max_scroll);
+            m.scroll_offset = (m.scroll_offset + delta.cast_unsigned()).min(max_scroll);
         } else {
             m.scroll_offset = m.scroll_offset.saturating_sub(delta.unsigned_abs());
         }

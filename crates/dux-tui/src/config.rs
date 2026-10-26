@@ -1,3 +1,5 @@
+use crate::numeric::u32_to_usize;
+use crate::numeric::u64_to_usize;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 #[cfg(test)]
@@ -22,7 +24,6 @@ pub(crate) enum ConfigRead {
     Reload,
 }
 
-#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub(crate) fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     ensure_config_with(paths, ConfigRead::Start)
 }
@@ -34,7 +35,10 @@ pub(crate) fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
     ensure_config_with(paths, ConfigRead::Reload)
 }
 
-#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
+#[expect(
+    deprecated,
+    reason = "blessed sync-direct: the boot and first-creation path runs before the queue exists"
+)]
 fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     // Any core-side write that CREATES config.toml (bootstrap project-sync) must
     // emit the commented template, not a bare one.
@@ -362,6 +366,10 @@ enum ConfigEntry {
 /// this table's `comment` text. A field's default, zero-value meaning or comment
 /// changing here needs the matching entry there checked, and vice versa; there
 /// is no codegen linking the two.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the config schema: one entry per setting, in the order the file prints them"
+)]
 fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
@@ -799,7 +807,7 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Without focus reports the grace never applies: the\n# focused agent's indicator clears right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.ui.attention_grace_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.ui.attention_grace_seconds)),
         },
         ConfigEntry::Field {
             key: "auto_reopen_agents",
@@ -1291,7 +1299,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Changing this needs a server restart to take effect (a reload of the\n\
                  # running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_events_connections as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.max_websocket_events_connections))
+            },
         },
         ConfigEntry::Field {
             key: "max_websocket_agent_connections",
@@ -1304,7 +1314,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # server restart to take effect (a reload of the running server cannot\n\
                  # resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_agent_connections as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_agent_connections)),
         },
         ConfigEntry::Field {
             key: "max_websocket_terminal_connections",
@@ -1316,7 +1326,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # class until the server restarts. Changing this needs a server restart\n\
                  # to take effect (a reload of the running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_terminal_connections as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.max_websocket_terminal_connections))
+            },
         },
         ConfigEntry::Field {
             key: "max_websocket_tab_connections",
@@ -1329,7 +1341,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # blocks all tab streams until the server restarts. Changing this needs a\n\
                  # server restart to take effect.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tab_connections as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_tab_connections)),
         },
         ConfigEntry::Field {
             key: "max_websocket_tabs_per_agent",
@@ -1345,7 +1357,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # agent may have; that is [ui] agent_tabs_max (default 20). The two\n\
                  # differ on purpose: creating a tab is cheap, streaming one is not.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tabs_per_agent as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_tabs_per_agent)),
         },
         ConfigEntry::Field {
             key: "title",
@@ -1409,7 +1421,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # way out. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.replay_wait_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.replay_wait_seconds)),
         },
         ConfigEntry::Field {
             key: "reconnect_backoff_cap_seconds",
@@ -1422,7 +1434,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # large and coming back into coverage takes a while to notice. Default 10.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_backoff_cap_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.reconnect_backoff_cap_seconds)),
         },
         ConfigEntry::Field {
             key: "reconnect_attempts",
@@ -1436,7 +1448,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # still abandoned on the deadline below. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempts as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.reconnect_attempts)),
         },
         ConfigEntry::Field {
             key: "reconnect_attempt_timeout_seconds",
@@ -1451,7 +1463,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # notice. Default 10.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempt_timeout_seconds as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.reconnect_attempt_timeout_seconds))
+            },
         },
         ConfigEntry::Field {
             key: "changes_request_timeout_seconds",
@@ -1466,7 +1480,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # above 600 are treated as 600. Default 30.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.changes_request_timeout_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.changes_request_timeout_seconds)),
         },
         ConfigEntry::Field {
             key: "heartbeat_seconds",
@@ -1479,7 +1493,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # a dead terminal takes longer to come back. Default 15.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.heartbeat_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.heartbeat_seconds)),
         },
         ConfigEntry::Field {
             key: "heartbeat_deadline_seconds",
@@ -1495,7 +1509,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Default 30.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.heartbeat_deadline_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.heartbeat_deadline_seconds)),
         },
         ConfigEntry::Field {
             key: "pty_send_timeout_seconds",
@@ -1511,7 +1525,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Default 60.\n\
                  # A config reload applies this to the next terminal connection.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.pty_send_timeout_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.pty_send_timeout_seconds)),
         },
         ConfigEntry::Field {
             key: "operation_unknown_after_seconds",
@@ -1523,7 +1537,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # unknown. Default 1800 (30 minutes).\n\
                  # A config reload applies this to the changes started after it.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.operation_unknown_after_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.operation_unknown_after_seconds)),
         },
         ConfigEntry::Field {
             key: "operation_retention_seconds",
@@ -1534,7 +1548,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # forgets them all. Default 1800 (30 minutes).\n\
                  # A config reload applies this to the changes started after it.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.operation_retention_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.operation_retention_seconds)),
         },
         ConfigEntry::Field {
             key: "presence_grace_seconds",
@@ -1551,7 +1565,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # counting the moment the connection is lost. Default 300.\n\
                  # A config reload applies this to the next connection that is lost.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.presence_grace_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.presence_grace_seconds)),
         },
         ConfigEntry::Field {
             key: "tree_list_max_concurrency",
@@ -1565,7 +1579,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # rather than being refused. Set to 0 to disable the bound entirely.\n\
                  # The limit is sized at startup, so changing it needs a restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.tree_list_max_concurrency)),
         },
         ConfigEntry::Field {
             key: "release_notes_max_concurrency",
@@ -1582,7 +1596,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # the bound entirely.\n\
                  # The limit is sized at startup, so changing it needs a restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.release_notes_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.release_notes_max_concurrency)),
         },
         ConfigEntry::Field {
             key: "file_drop_max_bytes",
@@ -1611,7 +1625,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # all would stall every drop forever; use file_drop_max_bytes = 0 to switch\n\
                  # the feature off. Read at startup, so a change needs a server restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.file_drop_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.file_drop_max_concurrency)),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("server.auth"),
@@ -1904,10 +1918,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     out.push('\n');
                 }
                 match value_fn(config) {
-                    FieldValue::Str(s) => {
-                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
-                    }
-                    FieldValue::OptStr(Some(s)) => {
+                    FieldValue::Str(s) | FieldValue::OptStr(Some(s)) => {
                         let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
                     }
                     FieldValue::OptStr(None) => {
@@ -2230,7 +2241,10 @@ pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
-#[allow(deprecated)] // internal delegation: body calls deprecated core fns (patch_config_file, write_config_secure)
+#[expect(
+    deprecated,
+    reason = "internal delegation: the body calls the deprecated core patch_config_file and write_config_secure"
+)]
 pub(crate) fn save_config(
     config_path: &Path,
     config: &Config,
@@ -2393,7 +2407,7 @@ fn escape_toml_string(value: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                out.push_str(&format!("\\u{:04X}", c as u32));
+                let _ = write!(out, "\\u{:04X}", u32::from(c));
             }
             c => out.push(c),
         }
@@ -2446,28 +2460,23 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
 
     for project in projects {
         out.push_str("[[projects]]\n");
-        out.push_str(&format!("id = \"{}\"\n", escape_toml_string(&project.id)));
-        out.push_str(&format!(
-            "path = \"{}\"\n",
-            escape_toml_string(&project.path)
-        ));
+        let _ = writeln!(out, "id = \"{}\"", escape_toml_string(&project.id));
+        let _ = writeln!(out, "path = \"{}\"", escape_toml_string(&project.path));
         if let Some(name) = &project.name {
-            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(name)));
+            let _ = writeln!(out, "name = \"{}\"", escape_toml_string(name));
         }
         if let Some(provider) = &project.default_provider {
-            out.push_str(&format!(
-                "default_provider = \"{}\"\n",
+            let _ = writeln!(
+                out,
+                "default_provider = \"{}\"",
                 escape_toml_string(provider)
-            ));
+            );
         }
         if let Some(auto_reopen_agents) = project.auto_reopen_agents {
-            out.push_str(&format!("auto_reopen_agents = {auto_reopen_agents}\n"));
+            let _ = writeln!(out, "auto_reopen_agents = {auto_reopen_agents}");
         }
         if let Some(command) = &project.startup_command {
-            out.push_str(&format!(
-                "startup_command = \"{}\"\n",
-                escape_toml_string(command)
-            ));
+            let _ = writeln!(out, "startup_command = \"{}\"", escape_toml_string(command));
         }
         if !project.env.is_empty() {
             out.push_str("env = { ");
@@ -2475,7 +2484,7 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&format!("{} = \"{}\"", key, escape_toml_string(value)));
+                let _ = write!(out, "{} = \"{}\"", key, escape_toml_string(value));
             }
             out.push_str(" }\n");
         }
@@ -2504,7 +2513,7 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
         return;
     }
     for (name, value) in env {
-        out.push_str(&format!("{} = \"{}\"\n", name, escape_toml_string(value)));
+        let _ = writeln!(out, "{} = \"{}\"", name, escape_toml_string(value));
     }
     out.push('\n');
 }
@@ -2514,17 +2523,15 @@ fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str(
         "# CLI command dux should use for the companion terminal bound to an agent session.\n",
     );
-    out.push_str(&format!(
-        "command = \"{}\"\n",
+    let _ = writeln!(
+        out,
+        "command = \"{}\"",
         escape_toml_string(&terminal.command)
-    ));
+    );
     out.push_str(
         "# Arguments for the companion terminal command. The default [\"-l\"] launches a login\n# shell so your profile, aliases, and prompt are loaded.\n",
     );
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&terminal.args)
-    ));
+    let _ = writeln!(out, "args = {}\n", render_string_list(&terminal.args));
 }
 
 fn render_startup_command_terminal_config(
@@ -2536,54 +2543,48 @@ fn render_startup_command_terminal_config(
         "# Shell used to run project startup commands before launching a new agent.\n\
          # \"$SHELL\" is expanded when the command runs and falls back to /bin/sh if unset.\n",
     );
-    out.push_str(&format!(
-        "command = \"{}\"\n",
+    let _ = writeln!(
+        out,
+        "command = \"{}\"",
         escape_toml_string(&terminal.command)
-    ));
+    );
     out.push_str(
         "# Arguments passed before the configured project startup command.\n\
          # The default [\"-l\", \"-c\"] runs a login shell without interactive job-control warnings.\n",
     );
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&terminal.args)
-    ));
+    let _ = writeln!(out, "args = {}\n", render_string_list(&terminal.args));
 }
 
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
-    out.push_str(&format!("[providers.{name}]\n"));
-    out.push_str(&format!("# CLI command for {name} sessions.\n"));
-    out.push_str(&format!(
-        "command = \"{}\"\n",
-        escape_toml_string(&config.command)
-    ));
+    let _ = writeln!(out, "[providers.{name}]");
+    let _ = writeln!(out, "# CLI command for {name} sessions.");
+    let _ = writeln!(out, "command = \"{}\"", escape_toml_string(&config.command));
     out.push_str(
         "# Arguments passed to the provider command when launching an interactive PTY session.\n",
     );
-    out.push_str(&format!("args = {}\n", render_string_list(&config.args)));
+    let _ = writeln!(out, "args = {}", render_string_list(&config.args));
     out.push_str(
         "# Optional args dux should use when reconnecting a detached session.\n\
          # Leave this empty for CLIs that do not support cwd/repo-scoped session resume.\n",
     );
-    out.push_str(&format!(
-        "resume_args = {}\n",
+    let _ = writeln!(
+        out,
+        "resume_args = {}",
         render_string_list(config.resume_args.as_deref().unwrap_or(&[]))
-    ));
+    );
     out.push_str(
         "# Optional timeout for resumed sessions that produce no visible output.\n\
          # If resume hangs before rendering anything, dux kills it and retries fresh after this many milliseconds.\n\
          # Set to 0 to disable the timeout.\n",
     );
-    out.push_str(&format!(
-        "resume_wait_timeout_ms = {}\n",
+    let _ = writeln!(
+        out,
+        "resume_wait_timeout_ms = {}",
         config.resume_wait_timeout_ms.unwrap_or(0)
-    ));
+    );
     if let Some(hint) = &config.install_hint {
         out.push_str("# Hint shown to the user when the provider command is not found on PATH.\n");
-        out.push_str(&format!(
-            "install_hint = \"{}\"\n",
-            escape_toml_string(hint)
-        ));
+        let _ = writeln!(out, "install_hint = \"{}\"", escape_toml_string(hint));
     }
     out.push_str(
         "# Controls whether the mouse wheel and PgUp/PgDn scroll dux's own host\n\
@@ -2598,7 +2599,9 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
          # Leave this key absent for auto. Uncomment to pin a value.\n",
     );
     match config.forward_scroll {
-        Some(value) => out.push_str(&format!("forward_scroll = {value}\n")),
+        Some(value) => {
+            let _ = writeln!(out, "forward_scroll = {value}");
+        }
         None => out.push_str("# forward_scroll = true\n"),
     }
     out.push_str(
@@ -2637,10 +2640,13 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
          # An absent key, or a value dux does not recognize, means bare.\n",
     );
     match &config.web_dragdrop_paste {
-        Some(value) => out.push_str(&format!(
-            "web_dragdrop_paste = \"{}\"\n",
-            escape_toml_string(value)
-        )),
+        Some(value) => {
+            let _ = writeln!(
+                out,
+                "web_dragdrop_paste = \"{}\"",
+                escape_toml_string(value)
+            );
+        }
         None => out.push_str("# web_dragdrop_paste = \"bare\"\n"),
     }
     out.push('\n');
@@ -2732,7 +2738,10 @@ fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usiz
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests call the deprecated save_config wrapper directly to verify its behaviour
+#[expect(
+    deprecated,
+    reason = "the tests call the deprecated save_config wrapper directly to verify its behaviour"
+)]
 mod tests {
     use indexmap::IndexMap;
 
@@ -3288,6 +3297,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one assertion per line the default config must carry"
+    )]
     fn default_config_is_commented_and_complete() {
         let rendered = render_default_config();
         assert!(rendered.contains("# dux configuration"));
@@ -3572,7 +3585,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: Some("npm install".to_string()),
-            env: Default::default(),
+            env: BTreeMap::default(),
         });
         let rendered = render_config_default(&config);
         assert!(rendered.contains("[[projects]]"));
@@ -3716,7 +3729,7 @@ name = "test"
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: Some("echo ready".to_string()),
-            env: Default::default(),
+            env: BTreeMap::default(),
         });
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save config");

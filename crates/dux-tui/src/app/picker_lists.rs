@@ -256,6 +256,10 @@ fn last(names: &[String]) -> Option<String> {
 ///
 /// Panics for a picker with no fixture: that is the failure a new picker
 /// earns until it is given one here.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per picker, each building that picker's fixture"
+)]
 fn fixture(app: &App, name: &str) -> PickerFixture {
     let project = app.engine.projects[0].clone();
     match name {
@@ -647,7 +651,12 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 rows: labels
                     .iter()
                     .enumerate()
-                    .map(|(n, label)| resource_row(label, 100 + n as u32))
+                    .map(|(n, label)| {
+                        resource_row(
+                            label,
+                            100 + u32::try_from(n).expect("a test count fits in a u32"),
+                        )
+                    })
                     .collect(),
                 scroll_offset: 0,
                 selected_row: 0,

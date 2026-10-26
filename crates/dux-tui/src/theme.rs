@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-
+use crate::numeric::f32_to_u8_saturating;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -61,7 +60,9 @@ pub(crate) fn working_word_color(working: Color, muted: Color, step: usize) -> C
     else {
         return working;
     };
-    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * blend).round() as u8;
+    let mix = |a: u8, b: u8| {
+        f32_to_u8_saturating((f32::from(a) + (f32::from(b) - f32::from(a)) * blend).round())
+    };
     Color::Rgb(mix(wr, mr), mix(wg, mg), mix(wb, mb))
 }
 
@@ -206,6 +207,7 @@ impl Glyphs {
     }
 
     /// Every glyph in the set, labelled, for tests that must cover them all.
+    #[cfg(test)]
     pub(crate) fn all(&self) -> [(&'static str, &'static str); 12] {
         [
             ("project", self.project),
@@ -257,6 +259,13 @@ pub(crate) struct Theme {
     pub title_normal: Color,
     pub selection_fg: Color,
     pub selection_bg: Color,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a theme token a theme file may set, which no renderer reads"
+        )
+    )]
     pub project_icon: Color,
     pub project_missing_fg: Color,
     /// Foreground for the standalone star and the directory label on line two.
@@ -325,6 +334,14 @@ pub(crate) struct Theme {
     /// set it explicitly to make the card stand off the pane.
     pub pane_card_bg: Color,
     pub overlay_dim_bg: Color,
+    /// Never painted: the embedded-PTY caret is the host terminal's own cursor.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a theme token a theme file may set, which no renderer reads"
+        )
+    )]
     pub prompt_cursor: Color,
     pub provider_label_fg: Color,
     pub branch_fg: Color,
@@ -459,6 +476,10 @@ fn load_from_str(toml_str: &str) -> Result<Theme> {
 /// them. This lets generic Opaline built-ins (Nord, Catppuccin, …) drive the
 /// dux UI without having to know the dux token namespace, while still letting
 /// dux-aware themes override every dux token explicitly.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one default per dux theme token, derived from the theme's semantic colors"
+)]
 fn register_dux_defaults(theme: &mut OpalineTheme) {
     // Resolve the standard Opaline semantic tokens once. `theme.color()`
     // returns OpalineColor::FALLBACK (gray) for missing tokens, which keeps
@@ -614,8 +635,9 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
 fn blend_over(top: Color, bottom: Color, alpha: f32) -> Color {
     match (top, bottom) {
         (Color::Rgb(tr, tg, tb), Color::Rgb(br, bg, bb)) => {
-            let mix =
-                |t: u8, b: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
+            let mix = |t: u8, b: u8| {
+                f32_to_u8_saturating((f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round())
+            };
             Color::Rgb(mix(tr, br), mix(tg, bg), mix(tb, bb))
         }
         _ => bottom,
@@ -783,6 +805,7 @@ impl Theme {
     /// The original dux dark palette. Kept for tests, snapshots, and any
     /// future caller that wants the exact pre-Opaline default without
     /// going through the loader. Equivalent to [`Self::fallback`].
+    #[cfg(test)]
     pub(crate) fn default_dark() -> Self {
         Self::fallback()
     }
@@ -1064,7 +1087,7 @@ mod tests {
         );
         let plain = Glyphs::PLAIN.all();
         for (index, (name, glyph)) in Glyphs::NERD.all().into_iter().enumerate() {
-            let cp = glyph.chars().next().unwrap() as u32;
+            let cp = u32::from(glyph.chars().next().unwrap());
             assert!(
                 !(0xF500..=0xFD46).contains(&cp),
                 "nerd {name} uses retired codepoint U+{cp:X}"

@@ -26,7 +26,8 @@
 //! The compiler enforces the exhaustive matches in [`modal_spec`] and
 //! [`prompt_text_inputs`]: adding a [`PromptState`] variant is a build error
 //! until somebody classifies it. That gate holds whether or not any code reads
-//! the result, which is why every item here carries `#[allow(dead_code)]`.
+//! the result, which is why every item only the tests read carries
+//! `#[expect(dead_code)]` outside test builds.
 //!
 //! [`ModalSpec`], [`ModalFamily`], [`KNOWN_DUAL_MODE_VIOLATIONS`] and
 //! [`ModalSpec::satisfies_dual_mode_rule`] are read by the guard tests and by
@@ -62,7 +63,6 @@ use crate::keybindings::{Action, text_field_owns_key};
 // Not called from the render or input paths: the registry is a declaration
 // whose value is the exhaustive match the compiler checks whether or not
 // anything reads the result. Do not "clean it up" by deleting an unread arm.
-#[allow(dead_code)]
 pub(crate) enum ModalFamily {
     /// Read-only and scrollable. No focus concept, because there is nothing to
     /// focus: the vertical keys scroll the body.
@@ -81,7 +81,6 @@ pub(crate) enum ModalFamily {
 /// one match: two exhaustive matches over the same enum would be two places to
 /// forget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct ModalSpec {
     /// Which of the four families this modal belongs to.
     pub(crate) family: ModalFamily,
@@ -97,7 +96,6 @@ pub(crate) struct ModalSpec {
     pub(crate) confirm_button: bool,
 }
 
-#[allow(dead_code)]
 impl ModalSpec {
     /// The dual-mode rule: **a modal containing a multi-line text field must
     /// have a confirm button.**
@@ -107,6 +105,13 @@ impl ModalSpec {
     /// Without one there is no third meaning for Enter to land on. A modal with
     /// only single-line fields needs no button, because Enter submits and
     /// nothing competes for it. House style for modals, not a logical necessity.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a guard the compiler checks for exhaustiveness; only the tests read it"
+        )
+    )]
     pub(crate) fn satisfies_dual_mode_rule(self) -> bool {
         !self.multiline_field || self.confirm_button
     }
@@ -117,7 +122,13 @@ impl ModalSpec {
 /// Empty, and it must stay that way. The test asserts this set exactly, so a new
 /// violator cannot be added without writing its name here and defending it in
 /// review. The list should only ever shrink.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a guard the compiler checks for exhaustiveness; only the tests read it"
+    )
+)]
 pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[];
 
 /// The registry. `None` means "no modal is open" ([`PromptState::None`]).
@@ -126,9 +137,12 @@ pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[];
 /// compile error here until its family and its two obligations are declared. Do
 /// not add a catch-all arm, and do not group a new variant into an existing arm
 /// without checking that all three answers really are the same.
-#[allow(dead_code)]
 pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
     use ModalFamily::{Confirm, Form, Picker, Report};
+    #[expect(
+        clippy::match_same_arms,
+        reason = "one arm per reason a modal gets its answer; arms whose answers agree stay apart so each keeps its own justification"
+    )]
     let spec = match prompt {
         PromptState::None => return None,
 
@@ -265,7 +279,13 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
 /// claim can be checked against a live instance instead of trusted. Exhaustive
 /// for the same reason [`modal_spec`] is: a new variant that quietly grows a
 /// text field would otherwise sail past the dual-mode check.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a guard the compiler checks for exhaustiveness; only the tests read it"
+    )
+)]
 pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
     match prompt {
         PromptState::None
@@ -344,7 +364,13 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
 
 /// Whether the open modal really does hold a full-text field, asked of the live
 /// value rather than of the table.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a guard the compiler checks for exhaustiveness; only the tests read it"
+    )
+)]
 pub(crate) fn prompt_has_multiline_field(prompt: &PromptState) -> bool {
     prompt_text_inputs(prompt)
         .iter()
@@ -356,7 +382,13 @@ pub(crate) fn prompt_has_multiline_field(prompt: &PromptState) -> bool {
 /// Commit versus dismiss: an `ok_button` on an error report or a `close_button`
 /// on a log viewer is a way out, not a third meaning for Enter to land on, so
 /// neither counts. Exhaustive with no `_` arm.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a guard the compiler checks for exhaustiveness; only the tests read it"
+    )
+)]
 pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bool {
     match layout {
         // Nothing published, or nothing but a way out.
@@ -449,7 +481,7 @@ impl App {
     /// cells, or by content.
     pub(crate) fn open_modal_frame(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         title: &str,
         area: Rect,
     ) -> ModalFrame {
@@ -816,6 +848,10 @@ pub(super) mod tests {
     /// Every modal as the registry's fixtures build it. Shared with the confirm
     /// dialog's own journey tests, so a new Confirm-family modal is covered
     /// there the moment it has a fixture here.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of one fixture per prompt variant, one entry each"
+    )]
     pub(in crate::app) fn every_prompt(app: &App) -> Vec<(&'static str, PromptState)> {
         let project = app.engine.projects[0].clone();
         vec![

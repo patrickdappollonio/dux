@@ -39,7 +39,6 @@ fn a_tables_defaults_are_marked_and_the_files_own_entries_are_not() {
 /// says so without repeating it, whatever it was.
 #[test]
 fn a_secret_setting_never_repeats_an_unexpected_argument() {
-    let (_tmp, paths) = paths_with("");
     struct NoSecrets;
     impl SecretSource for NoSecrets {
         fn read_stdin(&mut self) -> Result<Password> {
@@ -53,6 +52,7 @@ fn a_secret_setting_never_repeats_an_unexpected_argument() {
             Ok(None)
         }
     }
+    let (_tmp, paths) = paths_with("");
     for args in [
         vec!["server.auth.password", "--hunter2"],
         vec!["server.auth.password", "--stdin", "--hunter2=x"],

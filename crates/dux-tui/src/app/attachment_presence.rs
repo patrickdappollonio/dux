@@ -8,11 +8,17 @@
 //! confirmation names anyone else attached to one
 //! ([`Engine::attached_elsewhere`](dux_core::engine::Engine::attached_elsewhere)).
 
-use super::*;
+use super::{
+    App, ConfirmFocus, DeleteAgentFocus, PromptState, RecreateWorkingCopyFocus, RuntimeTargetId,
+};
+use crate::model::SessionSurface;
+use anyhow::Result;
 use dux_core::attachments::{
     Blocker, ConnectionFacts, Surface, TERMINAL_UI_CONNECTION, Target, TargetKind,
 };
 use dux_core::engine::Attached;
+use dux_core::ids::SessionIdRef;
+use dux_core::model::TerminalOwner;
 
 impl App {
     /// The pane being drawn right now streams this surface's selected
@@ -284,7 +290,12 @@ impl PromptState {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem, LeftSection};
+    use crate::model::AgentSession;
+    use crate::pty::PtyClient;
     use dux_core::attachments::Policy;
+    use dux_core::ids::TabId;
+    use dux_core::worker::WorkerEvent;
 
     fn render(app: &mut App) {
         let mut terminal =
@@ -379,12 +390,11 @@ mod tests {
 
         render(&mut app);
         app.engine.dispatch_policy = Some(Policy::default());
-        let refused = match app
+        let Err(refused) = app
             .engine
             .reserve_destruction(app.engine.agent_scope(&session_id))
-        {
-            Ok(_) => panic!("the drawn pane did not block the delete"),
-            Err(refused) => refused,
+        else {
+            panic!("the drawn pane did not block the delete")
         };
         assert_eq!(refused.blockers.len(), 1);
         assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);
@@ -643,12 +653,11 @@ mod tests {
                     .is_ok(),
                 "deleting the browser's agent is not refused for this surface"
             );
-            let refused = match app
+            let Err(refused) = app
                 .engine
                 .reserve_destruction(app.engine.agent_scope("session-1"))
-            {
-                Ok(_) => panic!("the pane drawn here did not block its delete"),
-                Err(refused) => refused,
+            else {
+                panic!("the pane drawn here did not block its delete")
             };
             assert_eq!(refused.blockers.len(), 1);
             assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);

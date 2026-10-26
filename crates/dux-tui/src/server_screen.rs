@@ -25,6 +25,7 @@
 //! `FnMut`, wired up by the binary (`crates/dux/src/main.rs`), the only crate
 //! that depends on both.
 
+use crate::numeric::usize_to_u16_wrapping;
 use std::collections::VecDeque;
 use std::io::{Stdout, Write, stdout};
 use std::sync::Mutex;
@@ -55,6 +56,7 @@ use dux_core::serve_log::{LogLine, LogRole, LogTone};
 
 /// What the status screen asks the binary to do after a tick. The binary maps
 /// these straight onto `dux_web::ServerTick`.
+#[derive(Debug)]
 pub enum ServerScreenTick {
     /// No exit key pressed: keep serving.
     Continue,
@@ -435,11 +437,26 @@ pub struct ServerStatusScreen {
     shutdown_done: bool,
 }
 
+impl std::fmt::Debug for ServerStatusScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerStatusScreen")
+            .field("urls", &self.urls)
+            .field("browsers", &self.browsers)
+            .field("shutdown_message", &self.shutdown_message)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ServerStatusScreen {
     /// Enter the alternate screen + raw mode + hide the cursor, load the theme
     /// and the key bindings, and draw the first frame. The caller (binary) falls
     /// back to a plain line if this returns `Err`: the server must still run
     /// even if the status screen cannot be set up.
+    ///
+    /// # Errors
+    ///
+    /// When the terminal refuses raw mode or the alternate screen, or the
+    /// first frame cannot be drawn.
     pub fn new(
         urls: &[String],
         theme_name: &str,
@@ -610,14 +627,13 @@ impl ServerStatusScreen {
         let drawn = TERMINAL_GATE.draw_while_held(|| {
             terminal
                 .draw(|frame| {
+                    // Inset the whole screen so nothing is glued to the terminal edges.
+                    const V_MARGIN: u16 = 1;
+                    const H_MARGIN: u16 = 2;
                     let area = frame.area();
                     frame.render_widget(Clear, area);
                     let bg = Block::default().style(Style::default().bg(theme.app_bg));
                     frame.render_widget(bg, area);
-
-                    // Inset the whole screen so nothing is glued to the terminal edges.
-                    const V_MARGIN: u16 = 1;
-                    const H_MARGIN: u16 = 2;
 
                     let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
                     let footer = footer_lines(theme, bindings, shutdown, inner_width);
@@ -625,7 +641,7 @@ impl ServerStatusScreen {
                         .iter()
                         .map(|segs| wrapped_row_count(segs, inner_width))
                         .sum();
-                    let footer_rows = footer.len() as u16 + 1;
+                    let footer_rows = usize_to_u16_wrapping(footer.len()) + 1;
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .vertical_margin(V_MARGIN)
@@ -638,7 +654,7 @@ impl ServerStatusScreen {
                         .split(area);
 
                     // ── Header (centered, no border) ────────────────────────────
-                    let header_text: Vec<Line> =
+                    let header_text: Vec<Line<'_>> =
                         header.iter().map(|s| header_line(s, theme)).collect();
                     let header_para = Paragraph::new(header_text)
                         .alignment(Alignment::Center)
@@ -649,7 +665,16 @@ impl ServerStatusScreen {
 
                     // ── Log panel (rounded, themed) ─────────────────────────────
                     measured = draw_log_panel(
-                        frame, chunks[1], theme, bindings, view, scroll, "Log", browsers,
+                        frame,
+                        chunks[1],
+                        theme,
+                        bindings,
+                        view,
+                        scroll,
+                        PanelTitles {
+                            left: "Log",
+                            right: browsers,
+                        },
                     );
 
                     // ── Footer hints (centered) ─────────────────────────────────
@@ -779,19 +804,28 @@ fn browsers_title(browsers: usize) -> String {
     format!(" {} ", dux_core::text::count_of(browsers, "browser"))
 }
 
+/// The two titles on a log panel's top border: its name on the left and a
+/// count on the right.
+struct PanelTitles<'a> {
+    left: &'a str,
+    right: String,
+}
+
 /// Draw the log panel the flip's status screen and the server log viewer share. Returns
 /// the scrolling area's height and whether the startup stuck on top, to size a page by.
-#[allow(clippy::too_many_arguments)]
 fn draw_log_panel(
-    frame: &mut ratatui::Frame,
+    frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
     bindings: &RuntimeBindings,
     view: &mut LogView,
     scroll: &mut LogScroll,
-    title: &str,
-    right_title: String,
+    titles: PanelTitles<'_>,
 ) -> (usize, bool) {
+    let PanelTitles {
+        left: title,
+        right: right_title,
+    } = titles;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -848,13 +882,13 @@ fn draw_log_panel(
     };
     frame.render_widget(block, area);
     let pinned_area = Rect {
-        height: pinned_rows as u16,
+        height: usize_to_u16_wrapping(pinned_rows),
         ..content
     };
     frame.render_widget(Paragraph::new(view.pinned_rows.clone()), pinned_area);
     let scroll_area = Rect {
-        y: content.y + pinned_rows as u16,
-        height: viewport as u16,
+        y: content.y + usize_to_u16_wrapping(pinned_rows),
+        height: usize_to_u16_wrapping(viewport),
         ..content
     };
     let end = (start + viewport).min(total);
@@ -881,12 +915,12 @@ fn line_render_width(segments: &ScreenLine) -> usize {
 
 /// Estimate how many rows a header line occupies once wrapped to `inner_width`.
 fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
-    let width = inner_width.max(1) as usize;
+    let width = usize::from(inner_width.max(1));
     let chars = line_render_width(segments);
     if chars == 0 {
         return 1;
     }
-    (chars.div_ceil(width)) as u16
+    usize_to_u16_wrapping(chars.div_ceil(width))
 }
 
 /// Map a key to what it does here. The return and quit keys are not bindings:
@@ -924,8 +958,7 @@ fn action_for_key(key: KeyEvent) -> Option<ExitKind> {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(ExitKind::QuitProcess)
         }
-        KeyCode::Char('q' | 'Q') => Some(ExitKind::ReturnToTui),
-        KeyCode::Esc => Some(ExitKind::ReturnToTui),
+        KeyCode::Char('q' | 'Q') | KeyCode::Esc => Some(ExitKind::ReturnToTui),
         _ => None,
     }
 }
@@ -1271,7 +1304,7 @@ impl ServerLogViewer {
     /// Draw the viewer over the whole frame.
     pub(crate) fn render(
         &mut self,
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui::Frame<'_>,
         theme: &Theme,
         bindings: &RuntimeBindings,
     ) {
@@ -1283,7 +1316,7 @@ impl ServerLogViewer {
         );
         let inner_width = area.width.saturating_sub(4).max(1);
         let footer = viewer_footer_lines(theme, bindings, inner_width);
-        let footer_rows = footer.len() as u16 + 1;
+        let footer_rows = usize_to_u16_wrapping(footer.len()) + 1;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .vertical_margin(1)
@@ -1298,8 +1331,10 @@ impl ServerLogViewer {
             bindings,
             &mut self.view,
             &mut self.scroll,
-            "Server log",
-            format!(" {shown} "),
+            PanelTitles {
+                left: "Server log",
+                right: format!(" {shown} "),
+            },
         );
         frame.render_widget(
             Paragraph::new(footer)
@@ -1860,7 +1895,7 @@ mod tests {
     /// against the old per-frame approach (copy the whole buffer, wrap every
     /// line). Run with `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "a benchmark that prints timings; run it with --ignored --nocapture"]
     fn bench_log_frame() {
         let theme = Theme::default_dark();
         let frames = 50;
@@ -1892,7 +1927,10 @@ mod tests {
                     let start = rows.len().saturating_sub(viewport);
                     std::hint::black_box(rows[start..].to_vec());
                 }
-                old_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+                old_runs.push(
+                    started.elapsed().as_secs_f64() * 1000.0
+                        / f64::from(u32::try_from(frames).expect("50 frames fit in a u32")),
+                );
 
                 let mut view = LogView::new(ring.capacity());
                 view.set_width(width, &theme);
@@ -1905,7 +1943,10 @@ mod tests {
                     let start = total.saturating_sub(viewport);
                     std::hint::black_box(view.scroll_window(PinnedRows::Stuck, start, total));
                 }
-                new_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+                new_runs.push(
+                    started.elapsed().as_secs_f64() * 1000.0
+                        / f64::from(u32::try_from(frames).expect("50 frames fit in a u32")),
+                );
             }
             let summary = |runs: &mut Vec<f64>| {
                 runs.sort_by(|a, b| a.partial_cmp(b).unwrap());

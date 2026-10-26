@@ -73,7 +73,9 @@
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
-use super::*;
+use super::App;
+use crate::pty::PtyClient;
+use dux_core::ids::TabIdRef;
 
 /// Who is driving a pty, from this surface's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,11 +134,11 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
         AgentLaunchKind::Create { .. }
         | AgentLaunchKind::Reconnect { .. }
         | AgentLaunchKind::ForceReconnect { .. }
-        | AgentLaunchKind::Tab { .. } => true,
+        | AgentLaunchKind::Tab { .. }
         // The tail of a launch somebody did ask for: the provider refused to
         // resume, so dux relaunches it fresh. dux-core dispatches this one
         // directly, so it never reaches this surface's dispatch.
-        AgentLaunchKind::ResumeFallback { .. } => true,
+        | AgentLaunchKind::ResumeFallback { .. } => true,
     }
 }
 
@@ -623,9 +625,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::background_server::BackgroundServerStart;
     use crate::app::background_server::tests::{FakeCompanion, Recorded};
     use crate::app::test_support::{default_bindings, test_app};
+    use crate::app::{CenterMode, FocusPane, FullscreenOverlay, InputTarget, PromptState};
+    use crate::keybindings::Action;
+    use crate::model::SessionSurface;
+    use crate::statusline::StatusTone;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use dux_core::engine::{AgentLaunchReadyOutcome, AgentLaunchReadyView};
+    use dux_core::ids::TabId;
 
     /// An app with a serving companion, plus the registry seat the companion
     /// handed it and the record of what it published.
@@ -1353,7 +1364,7 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect();
             assert!(
-                rendered.chars().count() <= width as usize,
+                rendered.chars().count() <= usize::from(width),
                 "the hint must fit {width} columns, got {} for {rendered:?}",
                 rendered.chars().count()
             );
@@ -3042,10 +3053,10 @@ mod tests {
         assert!(title_row < button.y, "the title is above the button");
 
         let card_columns = |y: u16| {
-            rows[y as usize]
+            rows[usize::from(y)]
                 .chars()
-                .skip(button.x as usize)
-                .take(button.width as usize)
+                .skip(usize::from(button.x))
+                .take(usize::from(button.width))
                 .collect::<String>()
         };
         assert!(
@@ -3099,10 +3110,10 @@ mod tests {
     /// The padding on either side of a button's label, measured off the drawn
     /// frame: `(left, right, inner width)`.
     fn label_padding(rows: &[String], button: ratatui::layout::Rect) -> (usize, usize, usize) {
-        let inner: Vec<char> = rows[(button.y + 1) as usize]
+        let inner: Vec<char> = rows[usize::from(button.y + 1)]
             .chars()
-            .skip(button.x as usize + 1)
-            .take(button.width as usize - 2)
+            .skip(usize::from(button.x) + 1)
+            .take(usize::from(button.width) - 2)
             .collect();
         let left = inner.iter().take_while(|c| **c == ' ').count();
         let right = inner.iter().rev().take_while(|c| **c == ' ').count();

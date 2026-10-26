@@ -86,7 +86,7 @@ fn csi_tilde(number: u8, mods: KeyModifiers) -> Vec<u8> {
 fn ctrl_byte(c: char) -> Option<u8> {
     let lower = c.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
-        return Some(lower as u8 - b'a' + 1);
+        return Some(u8::try_from(lower).expect("an ASCII letter fits in a byte") - b'a' + 1);
     }
     match c {
         ' ' => Some(0x00),

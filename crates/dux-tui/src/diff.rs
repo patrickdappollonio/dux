@@ -109,7 +109,7 @@ fn render_change_line<'a>(
         ),
         ChangeTag::Equal => (" ", Color::Reset, None, new_highlighter),
     };
-    let content = expand_tabs(change.value().trim_end_matches('\n'), context.tab_width);
+    let line_text = expand_tabs(change.value().trim_end_matches('\n'), context.tab_width);
     let mut spans = Vec::new();
     if context.show_line_numbers {
         spans.push(Span::styled(
@@ -125,15 +125,15 @@ fn render_change_line<'a>(
     // `None` means "render this line plainly", which a skipped highlight and a
     // highlighter that could not parse the line reach by different routes and
     // want the same answer to.
-    let highlighted = if context.highlight {
+    let highlighted_spans = if context.highlight {
         highlighter
-            .highlight_line(&content, &context.cache.syntax_set)
+            .highlight_line(&line_text, &context.cache.syntax_set)
             .ok()
     } else {
         None
     };
 
-    match highlighted {
+    match highlighted_spans {
         Some(ranges) if tag == ChangeTag::Equal => {
             spans.push(Span::styled(prefix, Style::default().fg(base_fg)));
             spans.extend(
@@ -153,7 +153,7 @@ fn render_change_line<'a>(
             }));
         }
         None => spans.push(Span::styled(
-            format!("{prefix}{content}"),
+            format!("{prefix}{line_text}"),
             Style::default()
                 .fg(base_fg)
                 .bg(background.unwrap_or(Color::Reset)),
@@ -195,10 +195,11 @@ pub(crate) struct DiffAnswer {
 /// everything it renders with and the run loop keeps drawing while it works.
 pub(crate) fn spawn_diff_job(
     key: DiffRequestKey,
-    theme: AppTheme,
+    theme: &AppTheme,
     cache: std::sync::Arc<SyntaxCache>,
     tx: std::sync::mpsc::Sender<DiffAnswer>,
 ) {
+    let theme = *theme;
     std::thread::spawn(move || {
         let result = diff_file(
             Path::new(&key.worktree_path),
@@ -279,7 +280,7 @@ fn count_lines(bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         return 0;
     }
-    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let newlines = memchr::memchr_iter(b'\n', bytes).count();
     if bytes.last() == Some(&b'\n') {
         newlines
     } else {
@@ -296,6 +297,31 @@ fn count_lines(bytes: &[u8]) -> usize {
 /// the highlighting are each slow enough to freeze the run loop on a large
 /// file, so the only way in from the app is [`spawn_diff_job`], which runs it
 /// on a thread of its own.
+/// The syntax a file is highlighted with, chosen by its extension; plain text
+/// when nothing matches.
+fn syntax_for<'c>(cache: &'c SyntaxCache, rel_path: &str) -> &'c syntect::parsing::SyntaxReference {
+    cache
+        .syntax_set
+        .find_syntax_by_extension(
+            Path::new(rel_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        )
+        .unwrap_or_else(|| cache.syntax_set.find_syntax_plain_text())
+}
+
+/// The `--- a/` and `+++ b/` lines a diff opens with.
+fn file_header_lines(rel_path: &str, theme: &AppTheme) -> [Line<'static>; 2] {
+    let style = Style::default()
+        .fg(theme.diff_file_header)
+        .add_modifier(Modifier::BOLD);
+    [
+        Line::from(Span::styled(format!("--- a/{rel_path}"), style)),
+        Line::from(Span::styled(format!("+++ b/{rel_path}"), style)),
+    ]
+}
+
 fn diff_file(
     worktree_path: &Path,
     rel_path: &str,
@@ -342,15 +368,7 @@ fn diff_file(
 
     let syn_theme = &cache.theme_set.themes["base16-ocean.dark"];
 
-    let syntax = cache
-        .syntax_set
-        .find_syntax_by_extension(
-            Path::new(rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or(""),
-        )
-        .unwrap_or_else(|| cache.syntax_set.find_syntax_plain_text());
+    let syntax = syntax_for(cache, rel_path);
 
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -368,19 +386,7 @@ fn diff_file(
         highlight: verdict == DiffSizeVerdict::Full,
     };
 
-    // File header.
-    lines.push(Line::from(Span::styled(
-        format!("--- a/{rel_path}"),
-        Style::default()
-            .fg(theme.diff_file_header)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("+++ b/{rel_path}"),
-        Style::default()
-            .fg(theme.diff_file_header)
-            .add_modifier(Modifier::BOLD),
-    )));
+    lines.extend(file_header_lines(rel_path, theme));
 
     for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
         // Hunk header (@@ ... @@).
@@ -620,7 +626,7 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
     if tab_width == 0 || !line.contains('\t') {
         return line.to_string();
     }
-    let tw = tab_width as usize;
+    let tw = usize::from(tab_width);
     let mut out = String::with_capacity(line.len());
     let mut col: usize = 0;
     for ch in line.chars() {
@@ -831,6 +837,7 @@ pub(crate) fn wrap_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     use tempfile::tempdir;
 
     #[test]
@@ -1538,7 +1545,10 @@ mod tests {
         // Both sides rewritten line for line, so the pair is past the hard cap
         // AND git's own patch is far longer than the head cap.
         let lines = DIFF_REFUSE_ABOVE_LINES / 2 + 1;
-        let base: String = (0..lines).map(|i| format!("old {i}\n")).collect();
+        let base = (0..lines).fold(String::new(), |mut text, i| {
+            let _ = writeln!(text, "old {i}");
+            text
+        });
         // Every other line rewritten, so the patch interleaves its removals and
         // its additions rather than emitting one whole side before the other.
         let changed: String = (0..lines)
@@ -1692,7 +1702,7 @@ mod tests {
 
         spawn_diff_job(
             key.clone(),
-            AppTheme::default_dark(),
+            &AppTheme::default_dark(),
             std::sync::Arc::new(SyntaxCache::new()),
             tx,
         );

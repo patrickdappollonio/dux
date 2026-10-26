@@ -1,3 +1,4 @@
+use crate::numeric::usize_to_u16_wrapping;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Modifier, Style};
@@ -17,6 +18,17 @@ pub(crate) enum CheckMark {
     Checked,
     /// Not ticked.
     Unchecked,
+}
+
+impl From<bool> for CheckMark {
+    /// Ticked for `true`, the state a box shows for a setting that is on.
+    fn from(checked: bool) -> Self {
+        if checked {
+            Self::Checked
+        } else {
+            Self::Unchecked
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +122,17 @@ impl<'a> Checkbox<'a> {
         self
     }
 
+    /// How many rows the checkbox takes at `max_width`, laid out in its own
+    /// marker and label styles.
+    pub(crate) fn height_at(&self, max_width: u16) -> u16 {
+        self.layout(
+            max_width,
+            self.marker_style(Style::default()),
+            self.label_style(Style::default()),
+        )
+        .height
+    }
+
     pub(crate) fn layout(
         &self,
         max_width: u16,
@@ -156,7 +179,7 @@ impl<'a> Checkbox<'a> {
         }
 
         CheckboxLayout {
-            height: lines.len() as u16,
+            height: usize_to_u16_wrapping(lines.len()),
             lines,
             background: None,
         }
@@ -207,7 +230,7 @@ impl Widget for CheckboxLayout {
         }
 
         for (offset, line) in self.lines.into_iter().enumerate() {
-            let y = area.y.saturating_add(offset as u16);
+            let y = area.y.saturating_add(usize_to_u16_wrapping(offset));
             if y >= area.y.saturating_add(area.height) {
                 break;
             }
