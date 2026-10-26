@@ -234,6 +234,7 @@ pub fn status_op(pending: impl Into<StatusText>) -> NeedsSuccess {
     }
 }
 
+#[derive(Debug)]
 pub struct NeedsSuccess {
     key: String,
     pending: StatusText,
@@ -284,6 +285,16 @@ pub struct HandlerStatusOp<O> {
     /// those later emits happen in worker-completion followups, by which point
     /// `current_origin` has been reset. Defaults to [`StatusScope::All`].
     scope: StatusScope,
+}
+
+impl<O> std::fmt::Debug for HandlerStatusOp<O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandlerStatusOp")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<O> HandlerStatusOp<O> {
@@ -409,6 +420,15 @@ pub struct NeedsFailure<T> {
     _t: PhantomData<fn(&T)>,
 }
 
+impl<T> std::fmt::Debug for NeedsFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NeedsFailure")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> NeedsFailure<T> {
     pub fn on_failure<E, F>(self, f: F) -> StatusOp<T, E>
     where
@@ -430,6 +450,15 @@ pub struct StatusOp<T, E> {
     pending: StatusText,
     on_success: Box<dyn FnOnce(&T) -> Final + Send>,
     on_failure: Box<dyn FnOnce(&E) -> Final + Send>,
+}
+
+impl<T, E> std::fmt::Debug for StatusOp<T, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatusOp")
+            .field("key", &self.key)
+            .field("pending", &self.pending)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T, E> StatusOp<T, E> {

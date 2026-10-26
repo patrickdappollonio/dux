@@ -43,6 +43,18 @@ pub struct RemovalCoordination {
     pub(crate) labels: HashMap<String, String>,
 }
 
+impl std::fmt::Debug for RemovalCoordination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalCoordination")
+            .field("ops", &self.ops)
+            .field("claims", &self.claims)
+            .field("cascade_members", &self.cascade_members)
+            .field("creating", &self.creating)
+            .field("labels", &self.labels)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a startup-command rerun holds while it runs: the agent's one run, and
 /// its hold on the worktree. Both are released when this drops.
 pub struct StartupRerunClaim {
@@ -50,7 +62,16 @@ pub struct StartupRerunClaim {
     pub hold: crate::worktree_ops::WorktreeOpGuard,
 }
 
+impl std::fmt::Debug for StartupRerunClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartupRerunClaim")
+            .field("hold", &self.hold)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a project deletion reports when its last worktree removal lands.
+#[derive(Debug)]
 pub struct ProjectDeletionOutcome {
     pub(crate) project_name: String,
     pub(crate) agents: usize,

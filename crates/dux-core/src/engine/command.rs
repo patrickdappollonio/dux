@@ -23,6 +23,7 @@ use crate::worker::{
 /// What the Engine should do. Variants carry their payload: the caller computes
 /// the context and supplies it, the Engine does the domain work and returns an
 /// `EventReaction` describing any view follow-up.
+#[derive(Debug)]
 pub enum Command {
     /// Complete a deletion that's already past its git step: the async
     /// `WorktreeRemoveCompleted` callback.

@@ -462,6 +462,15 @@ pub struct AgentLaunchReadyData {
     pub spawn_ticket: Option<crate::process_sessions::SpawnTicket>,
 }
 
+impl std::fmt::Debug for AgentLaunchReadyData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLaunchReadyData")
+            .field("request", &self.request)
+            .field("spawn_ticket", &self.spawn_ticket)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentLaunchFailedData {
     pub request: AgentLaunchRequest,
@@ -572,6 +581,7 @@ impl CreateAgentRequest {
     }
 }
 
+#[derive(Debug)]
 pub enum WorkerEvent {
     /// Status update delivered via the worker channel so it stays FIFO with
     /// the completion event of the operation it announces. Posted by

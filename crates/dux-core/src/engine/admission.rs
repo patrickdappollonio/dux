@@ -40,6 +40,7 @@ use crate::operations::{Hold, InTheWay};
 use crate::wire::WireCommand;
 
 /// What a change wants admitted, and what it holds once admitted.
+#[derive(Debug)]
 pub struct Admission {
     pub(crate) wants: Vec<Hold>,
     pub(crate) takes: Vec<Hold>,

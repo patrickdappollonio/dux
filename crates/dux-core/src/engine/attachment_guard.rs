@@ -46,6 +46,7 @@ impl std::error::Error for Attached {}
 /// A reservation that ends when dropped, for a change with no operation record;
 /// one tied to a record ends with the record, and dropping this leaves it.
 #[must_use = "the reservation ends when this is dropped"]
+#[derive(Debug)]
 pub struct Reservation {
     held: Option<(Attachments, u64)>,
 }

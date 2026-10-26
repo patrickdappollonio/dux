@@ -245,7 +245,7 @@ pub struct LaunchedDropPaste {
 /// worktree is the one the user is looking at. The pending slot and the running
 /// flag live under the same lock, which closes the gap between a worker deciding
 /// it has nothing left to do and a requester seeing it still marked running.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ChangedFilesRefreshQueue {
     pending: Option<PathBuf>,
     running: bool,
@@ -921,11 +921,131 @@ pub struct Engine {
     pub removal_coordination: RemovalCoordination,
 }
 
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("config", &self.config)
+            .field("paths", &self.paths)
+            .field("projects", &self.projects)
+            .field("sessions", &self.sessions)
+            .field("staged_files", &self.staged_files)
+            .field("unstaged_files", &self.unstaged_files)
+            .field("changed_files_revision", &self.changed_files_revision)
+            .field("terminal_counter", &self.terminal_counter)
+            .field(
+                "github_integration_enabled",
+                &self.github_integration_enabled,
+            )
+            .field("single_instance_lock", &self.single_instance_lock)
+            .field("surface_kind", &self.surface_kind)
+            .field("host_env", &self.host_env)
+            .field("worker_tx", &self.worker_tx)
+            .field("worker_rx", &self.worker_rx)
+            .field("reloading", &self.reloading)
+            .field("deferred_commands", &self.deferred_commands)
+            .field("deferred_operations", &self.deferred_operations)
+            .field("deferred_policies", &self.deferred_policies)
+            .field("command_applies", &self.command_applies)
+            .field("reload_origin", &self.reload_origin)
+            .field("running_provider_pins", &self.running_provider_pins)
+            .field("launched_drop_paste", &self.launched_drop_paste)
+            .field("agent_tabs", &self.agent_tabs)
+            .field("terminating_ptys", &self.terminating_ptys)
+            .field("removal_workers", &self.removal_workers)
+            .field("pending_group_removals", &self.pending_group_removals)
+            .field("pending_detachments", &self.pending_detachments)
+            .field("pending_tab_restarts", &self.pending_tab_restarts)
+            .field("gh_status", &self.gh_status)
+            .field("gh_probe", &self.gh_probe)
+            .field("pr_statuses", &self.pr_statuses)
+            .field("pr_overrides", &self.pr_overrides)
+            .field("pr_suppressions", &self.pr_suppressions)
+            .field("branch_sync_sessions", &self.branch_sync_sessions)
+            .field("pr_sync_sessions", &self.pr_sync_sessions)
+            .field("pr_sync", &self.pr_sync)
+            .field("pr_poll_interval_secs", &self.pr_poll_interval_secs)
+            .field(
+                "pr_poll_inactive_interval_secs",
+                &self.pr_poll_inactive_interval_secs,
+            )
+            .field("pr_inactive_sweep_at", &self.pr_inactive_sweep_at)
+            .field("pr_inactive_sessions", &self.pr_inactive_sessions)
+            .field("pr_return_checks_owed", &self.pr_return_checks_owed)
+            .field("pr_branch_generations", &self.pr_branch_generations)
+            .field("pr_branch_checks_owed", &self.pr_branch_checks_owed)
+            .field("branch_sync_interval_secs", &self.branch_sync_interval_secs)
+            .field("branch_sync_wait", &self.branch_sync_wait)
+            .field("pr_backoff", &self.pr_backoff)
+            .field(
+                "resume_fallback_candidates",
+                &self.resume_fallback_candidates,
+            )
+            .field("resumed_tab_runs", &self.resumed_tab_runs)
+            .field("pending_deletions", &self.pending_deletions)
+            .field("folder_repo_statuses", &self.folder_repo_statuses)
+            .field("changed_files_failures", &self.changed_files_failures)
+            .field("closing_sessions", &self.closing_sessions)
+            .field("deletion_busy_messages", &self.deletion_busy_messages)
+            .field("watched_worktree", &self.watched_worktree)
+            .field("changed_files_refresh", &self.changed_files_refresh)
+            .field("watched_session_id", &self.watched_session_id)
+            .field("has_active_processes", &self.has_active_processes)
+            .field("serve_memory", &self.serve_memory)
+            .field("current_origin", &self.current_origin)
+            .field("in_flight", &self.in_flight)
+            .field("rename_expected", &self.rename_expected)
+            .field("pr_last_checked", &self.pr_last_checked)
+            .field(
+                "changed_files_poller_started",
+                &self.changed_files_poller_started,
+            )
+            .field(
+                "branch_sync_worker_started",
+                &self.branch_sync_worker_started,
+            )
+            .field("pty_activity", &self.pty_activity)
+            .field("pty_input", &self.pty_input)
+            .field("pty_pointer", &self.pty_pointer)
+            .field("pty_used", &self.pty_used)
+            .field("needs_attention", &self.needs_attention)
+            .field("failed_tab_runs", &self.failed_tab_runs)
+            .field("pty_progress", &self.pty_progress)
+            .field("agent_viewed", &self.agent_viewed)
+            .field("last_foreground_refresh", &self.last_foreground_refresh)
+            .field("pending_web_checkout_ops", &self.pending_web_checkout_ops)
+            .field("pending_change_base_ops", &self.pending_change_base_ops)
+            .field(
+                "pending_web_add_project_ops",
+                &self.pending_web_add_project_ops,
+            )
+            .field("pending_web_pr_lookup_ops", &self.pending_web_pr_lookup_ops)
+            .field("pending_pr_attach_ops", &self.pending_pr_attach_ops)
+            .field("pending_recreate_ops", &self.pending_recreate_ops)
+            .field("pending_delete_ops_web", &self.pending_delete_ops_web)
+            .field(
+                "pending_delete_reports_web",
+                &self.pending_delete_reports_web,
+            )
+            .field("pending_create_ops", &self.pending_create_ops)
+            .field("pending_web_launch_ops", &self.pending_web_launch_ops)
+            .field("live_status_keys", &self.live_status_keys)
+            .field("last_created_op_id", &self.last_created_op_id)
+            .field("operations", &self.operations)
+            .field("operation_in_dispatch", &self.operation_in_dispatch)
+            .field("attachments", &self.attachments)
+            .field("dispatch_policy", &self.dispatch_policy)
+            .field("created_session_by_op", &self.created_session_by_op)
+            .field("removal_coordination", &self.removal_coordination)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Handler-computed outcome for a create-agent op (see
 /// [`Engine::pending_create_ops`]). The create launch resolves to one of these in
 /// the engine's launch-ready / launch-failed handlers; the resolver (declared at
 /// the `DispatchCreateAgentRequest` dispatch site) maps it to the final user
 /// message, byte-identical to the pre-op wording on both surfaces.
+#[derive(Debug)]
 pub enum CreateLaunchOutcome {
     /// The session was committed and the agent surface is ready. `status_message`
     /// is the create-kind success line.
@@ -1029,6 +1149,7 @@ pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
 /// confirmation warned about may have been stopped while the checkout ran, and a
 /// final telling the user to stop a process that already ended is a lie the
 /// dispatch could not have avoided.
+#[derive(Debug)]
 pub struct RecreateOutcome {
     /// The branch arm the checkout took, or the sentence explaining what stopped
     /// it.
@@ -1044,6 +1165,7 @@ pub struct RecreateOutcome {
 /// and, when the confirmation asked for the tabs that cannot follow the folder
 /// to be restarted once the checkout lands, which tabs those were when it
 /// asked.
+#[derive(Debug)]
 pub struct PendingRecreate {
     pub(crate) op: HandlerStatusOp<RecreateOutcome>,
     /// The tabs to restart, captured with the request: exactly the set the
@@ -1059,6 +1181,7 @@ pub struct PendingRecreate {
 /// record is still present (driving the `FinishDeleteSession` cascade vs the
 /// already-gone fallback). The resolver (declared at dispatch) maps this to the
 /// final user message, byte-identical to the pre-op web wording.
+#[derive(Debug)]
 pub enum WebDeleteOutcome {
     /// Git removal succeeded and a report could be authored for it: either the
     /// session was still present and the `FinishDeleteSession` cascade produced
@@ -1084,6 +1207,7 @@ pub enum WebDeleteOutcome {
 /// inspection (worker 1) can short-circuit with already-leading / heuristic /
 /// inspect-failed before any switch runs, and the switch (worker 2) finishes
 /// with success / failure.
+#[derive(Debug)]
 pub enum WebCheckoutOutcome {
     /// The `git switch` (worker 2) succeeded onto `target_branch`; `base` says
     /// whether it became the project's base.
@@ -1111,6 +1235,7 @@ pub enum WebCheckoutOutcome {
 /// What a finished "check out the default branch" did to the project's base,
 /// the branch new worktrees start from. The base moves only once SQLite has
 /// saved it, so memory and disk always agree on it.
+#[derive(Debug)]
 pub enum ProjectBaseAdoption {
     /// It already was the checked-out branch.
     Unchanged,
@@ -1199,6 +1324,7 @@ impl ProjectBaseAdoption {
 /// What a finished "Change base branch" came to, computed where its worker's
 /// answer lands so the base can be saved first. Resolved into the one final
 /// both surfaces show by [`change_base_final`].
+#[derive(Debug)]
 pub enum ChangeBaseOutcome {
     /// The folder is on `branch` (switched just now, or already there) and the
     /// save of the base came to `base`.
@@ -1603,6 +1729,7 @@ fn base_moved_suffix(branch: &str, base: &ProjectBaseAdoption) -> StatusText {
 }
 
 /// Handler-computed outcome for the web add-project "Check Out & Add" op.
+#[derive(Debug)]
 pub enum WebAddProjectOutcome {
     /// The switch and the inline project-add both succeeded; `status_message` is
     /// the combined "Checked out X and added project Y" line.
@@ -1618,6 +1745,7 @@ pub enum WebAddProjectOutcome {
 }
 
 /// Handler-computed outcome for the web new-agent-from-PR lookup op.
+#[derive(Debug)]
 pub enum WebPrLookupOutcome {
     /// The lookup resolved and the create dispatch took over (its busy, keyed by
     /// the shared create op's opaque id, now owns the spinner), so this op's busy
@@ -1628,6 +1756,7 @@ pub enum WebPrLookupOutcome {
 }
 
 /// Handler-computed outcome for a manual PR-attach op (both surfaces).
+#[derive(Debug)]
 pub enum PrAttachOutcome {
     /// The lookup resolved and the pin was applied; `message` is the
     /// already-formatted confirmation from [`Engine::apply_pr_attach`].

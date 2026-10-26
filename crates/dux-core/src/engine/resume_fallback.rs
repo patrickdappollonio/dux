@@ -82,6 +82,7 @@ pub(crate) struct ResumedScreen {
 
 /// Outcome of an attempted resume-fallback retry. Three states because the
 /// caller must react differently to each: collapsing any two corrupts state.
+#[derive(Debug)]
 pub enum ResumeFallbackOutcome {
     /// Engine removed the candidate, provider and pin and dispatched a fresh
     /// `resume:false` launch. `reaction` is the `DispatchAgentLaunchView`

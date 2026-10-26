@@ -326,7 +326,7 @@ pub struct TerminatingOwner {
 /// force-killed, and its client dropped. A launch of the same provider in the
 /// same agent waits on it, so two CLIs never share one worktree and one
 /// conversation.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PtyGone(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
 
 impl PtyGone {
@@ -354,7 +354,7 @@ impl PtyGone {
 /// The firing half of [`PtyGone`], held as a [`TerminatingPty`]'s LAST field so
 /// it drops after the client: the signal means the client's own teardown (its
 /// SIGKILL and reap) has finished, not merely begun.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PtyGoneNotice(PtyGone);
 
 impl PtyGoneNotice {
@@ -387,6 +387,19 @@ pub struct TerminatingPty {
     /// Declared LAST so it fires after `client` has dropped. See
     /// [`PtyGoneNotice`].
     pub gone: PtyGoneNotice,
+}
+
+impl std::fmt::Debug for TerminatingPty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminatingPty")
+            .field("deadline", &self.deadline)
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("owner", &self.owner)
+            .field("gone", &self.gone)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The result of a user-initiated `Engine::kill_tab_runtime` teardown, so a
@@ -656,6 +669,7 @@ pub struct TabExit {
 /// the session's terminating tab entries is listed in `pending_ids`;
 /// `reap_terminating_ptys` removes ids as they reap (clean exit OR force-kill)
 /// and dispatches `removal` exactly once, when `pending_ids` empties.
+#[derive(Debug)]
 pub struct GroupWorktreeRemoval {
     pub(crate) pending_ids: std::collections::HashSet<String>,
     pub(crate) removal: DeferredWorktreeRemoval,
@@ -696,6 +710,7 @@ pub(crate) enum RestartsStop {
 /// agent had, the same shape [`GroupWorktreeRemoval`] uses for a multi-tab
 /// delete: [`Engine::reap_terminating_ptys`] drops each tab id as it reaps and
 /// emits the keyed final only once the set empties.
+#[derive(Debug)]
 pub struct PendingDetach {
     pub(crate) session_id: String,
     /// The agent's display label, captured at request time so the outcome names
@@ -730,6 +745,7 @@ pub struct PendingDetach {
 /// drops each tab id as it reaps, and [`Engine::sweep_recreate_restarts`]
 /// starts the tabs and resolves the recreate's own op once the set is empty, so
 /// the one spinner the user saw spans the checkout and the restart.
+#[derive(Debug)]
 pub struct PendingTabRestart {
     pub(crate) session_id: String,
     /// The recreate's op, still unresolved: its final names the branch outcome
@@ -768,6 +784,7 @@ pub struct PendingTabRestart {
 }
 
 /// One launch a restart dispatched and is waiting on.
+#[derive(Debug)]
 pub struct RestartLaunch {
     pub provider: String,
     /// Whether it resumes the conversation.
@@ -791,7 +808,7 @@ enum ResumedRestart {
 /// What one [`Engine::sweep_recreate_restarts`] pass produced: the launch
 /// reactions to apply through the surface's own launch pipeline, and the finals
 /// of the recreates whose restart is complete.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RecreateRestartSweep {
     pub launches: Vec<crate::engine::EventReaction>,
     pub finals: Vec<crate::engine::ResolvedFinal>,
@@ -841,7 +858,7 @@ pub enum ForceDetachOutcome {
 /// outputs, returned together because a reap is one pass over one set: worktree
 /// removals that were waiting on a dead process, and the finals that retire the
 /// spinners of completed detach requests.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ReapedTerminations {
     pub removals: Vec<DeferredWorktreeRemoval>,
     pub detach_finals: Vec<crate::engine::ResolvedFinal>,

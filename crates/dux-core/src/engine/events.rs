@@ -234,6 +234,7 @@ pub(crate) const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
 /// `session_store`, sync entries, in-flight maps, env, etc.); anything that
 /// touches view state (status line, prompt, focus, `input_target`, derived caches
 /// like `left_items_cache` and `files_index`) is described here.
+#[derive(Debug)]
 pub enum EventReaction {
     /// Engine fully handled the event; no view follow-up needed.
     Nothing,
@@ -472,6 +473,7 @@ pub struct DetachedSession {
 /// portion of `detach_conflicting_worktree_session`). The App applies
 /// `last_pty_size`, clears the engine's `pty_activity` entry for any
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
+#[derive(Debug)]
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
     /// The tab whose launch completed (the slot tab id for the session-slot tab). Lets a
@@ -489,6 +491,7 @@ pub struct AgentLaunchReadyOutcome {
     pub view: AgentLaunchReadyView,
 }
 
+#[derive(Debug)]
 pub enum AgentLaunchReadyView {
     /// Create-kind launch: `session_store.upsert_session` failed before the
     /// session could be committed. App surfaces the error; no view rebuild.
@@ -522,6 +525,7 @@ pub enum AgentLaunchReadyView {
 /// `InFlightKey::CreateAgent` for Create-kind failures, logged the
 /// `ResumeFallback` / `StartupAutoReopen` cases, and marked `ResumeFallback`
 /// sessions Detached. The App only formats the status message.
+#[derive(Debug)]
 pub enum AgentLaunchFailedOutcome {
     Create {
         /// The project the failed create belonged to, or `None` when it was a
@@ -599,6 +603,7 @@ pub enum AgentLaunchFailedOutcome {
 /// needs for its view follow-up. The Engine never calls
 /// `persist_config_projects_from_runtime` itself, because that helper uses
 /// binary-only `RuntimeBindings` and `save_config`.
+#[derive(Debug)]
 pub struct ProjectPersistenceOutcome {
     pub action: ProjectPersistenceAction,
     pub view: ProjectPersistenceView,
@@ -609,6 +614,7 @@ pub struct ProjectPersistenceOutcome {
     pub status_op_id: Option<String>,
 }
 
+#[derive(Debug)]
 pub enum ProjectPersistenceView {
     PersistenceFailed {
         error: String,
@@ -1419,6 +1425,7 @@ enum WorktreeSharing {
 /// (`pty_activity` clear, `clear_companion_terminals_for_session`,
 /// `rebuild_left_items`, `selected_left` adjustment, `reload_changed_files`)
 /// and to format the 4-branch status message.
+#[derive(Debug)]
 pub struct FinishDeleteSessionOutcome {
     pub session: AgentSession,
     pub project: Option<Project>,
@@ -1464,6 +1471,7 @@ pub enum BeginDeleteSessionOutcome {
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
 /// engine outcome with the App-context fields needed for status formatting.
+#[derive(Debug)]
 pub struct FinishDeleteSessionView {
     pub session_id: String,
     pub outcome: FinishDeleteSessionOutcome,
@@ -1474,6 +1482,7 @@ pub struct FinishDeleteSessionView {
 /// View follow-up data for a `Command::BeginDeleteSession`. Wraps the
 /// engine outcome with the App-context fields needed for status
 /// formatting and the inline cleanup follow-up.
+#[derive(Debug)]
 pub struct BeginDeleteSessionView {
     pub session_id: String,
     pub outcome: BeginDeleteSessionOutcome,
@@ -1484,6 +1493,7 @@ pub struct BeginDeleteSessionView {
 /// site-specific follow-up. `status` is `Some` only on the already-in-flight
 /// path. `session_id` is populated on both branches, so an observer can
 /// correlate the dispatch with its session without re-deriving it.
+#[derive(Debug)]
 pub struct DispatchAgentLaunchView {
     pub session_id: String,
     /// The tab whose launch was dispatched (the slot tab id for the session-slot tab).
@@ -1496,6 +1506,7 @@ pub struct DispatchAgentLaunchView {
 /// if the terminal existed; `None` if it was already gone. The App caller
 /// clears `active_terminal_id` if it matches and clamps the terminal
 /// cursor.
+#[derive(Debug)]
 pub struct DeleteTerminalView {
     pub terminal_id: String,
     pub label: Option<String>,
