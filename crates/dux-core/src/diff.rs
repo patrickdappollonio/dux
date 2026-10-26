@@ -77,6 +77,10 @@ pub struct DiffHead {
 /// ceiling would hold a dux worker for minutes, while git answers in well under
 /// a second and this only ever reads the first few thousand lines of what it
 /// says.
+///
+/// # Errors
+///
+/// Fails as [`diff_head_via_git_as`] does.
 pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffHead> {
     diff_head_via_git_as(worktree, rel_path, None)
 }
@@ -94,6 +98,11 @@ enum Reap {
 /// the editor's automatic rule (UTF-8 when the shown content is, otherwise
 /// windows-1252). A requested encoding the content is not valid in is refused
 /// rather than shown with replacement characters.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, the file is in neither the worktree
+/// nor HEAD, git cannot be run or fails, or the patch is not valid in `requested`.
 pub fn diff_head_via_git_as(
     worktree: &Path,
     rel_path: &str,
@@ -494,6 +503,10 @@ fn sniffs_as_utf8(bytes: &[u8]) -> bool {
 /// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any `..`,
 /// root or prefix component, and symlinks that escape the worktree are rejected,
 /// since the web passes client-supplied paths here.
+///
+/// # Errors
+///
+/// Fails as [`file_diff_contents_as`] does.
 pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffContents> {
     file_diff_contents_as(worktree, rel_path, None)
 }
@@ -501,6 +514,12 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
 /// [`file_diff_contents`] reading both sides in `encoding` where they decode in
 /// it: the encoding the person reopened the file in, so the diff and the
 /// editor tab show the same characters.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, either side is too large (a
+/// [`DiffTooLarge`]), the working copy is a symlink or cannot be read, the file is in neither the
+/// worktree nor HEAD, or git cannot be run.
 pub fn file_diff_contents_as(
     worktree: &Path,
     rel_path: &str,

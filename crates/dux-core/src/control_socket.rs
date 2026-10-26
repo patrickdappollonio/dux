@@ -160,6 +160,10 @@ impl ControlSocket {
 
     /// A clone of the bound listener for a core to serve; the socket stays bound
     /// while no core serves, and connections wait in its backlog.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the listener cannot be cloned.
     pub fn listener(&self) -> io::Result<UnixListener> {
         self.listener.try_clone()
     }

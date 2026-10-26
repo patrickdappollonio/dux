@@ -37,6 +37,11 @@ use crate::storage::SessionStore;
 /// was repaired from config-only projects, to keep the on-disk config
 /// normalized). Identity conflicts within either store, or across the two, abort
 /// with a descriptive error and no writes.
+///
+/// # Errors
+///
+/// Fails on an identity conflict within or across the two stores, or when the database or `persist`
+/// fails.
 pub fn reconcile_config_projects<P>(
     config: &mut Config,
     session_store: &SessionStore,
@@ -114,6 +119,10 @@ where
 /// reconciliation touches anything: two entries with the same id, or two entries
 /// whose expanded paths collide. `source` names the store ("config.toml" or
 /// "SQLite") for the error.
+///
+/// # Errors
+///
+/// Fails when two records share an id or a path.
 pub fn validate_project_records(source: &str, projects: &[ProjectConfig]) -> Result<()> {
     match duplicate_project(projects) {
         // Named by position, never by path, name or id: those are what a
@@ -187,6 +196,10 @@ pub(crate) fn duplicate_project(projects: &[ProjectConfig]) -> Option<DuplicateP
 /// back into portable config); `env` is config-authoritative wholesale. A
 /// same-id/different-path or same-path/different-id mismatch is an identity
 /// conflict and aborts.
+///
+/// # Errors
+///
+/// Fails when the two records share an id but not a path, or a path but not an id.
 pub fn merge_project_records(
     config_project: &ProjectConfig,
     stored_project: &ProjectConfig,

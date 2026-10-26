@@ -588,6 +588,11 @@ impl DropDir {
     /// is the deliverable: a file saved into a folder dux cannot name is a file
     /// the user cannot reference, and it is better to refuse than to leave one
     /// behind and report a path that names something else.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be opened, or its path cannot be sent to a terminal
+    /// unchanged.
     pub fn open(dir: &Path) -> Result<Self, DropDirError> {
         let fd = rustix::fs::open(
             dir,
@@ -988,6 +993,10 @@ fn collision_step(probe: rustix::io::Result<bool>) -> CollisionStep {
 ///
 /// `stamp` is the timestamp half of the collision suffix, passed in rather than
 /// read from the clock so the naming is testable.
+///
+/// # Errors
+///
+/// Fails when the name is not usable, a symlink is in the way, or the file cannot be written.
 pub fn save_drop(
     dir: &DropDir,
     requested_name: &str,
@@ -1161,6 +1170,11 @@ impl FileDropDestination {
     /// this is the first file to land in it. Blocking: this creates
     /// directories, and for a terminal reads `/proc` (Linux) or asks the kernel
     /// (macOS), so it belongs on a blocking pool.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a component of the upload directory is a symlink or a file, or the directory
+    /// cannot be created or opened.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         match self {
             Self::AgentUploads {
@@ -1557,6 +1571,10 @@ impl WorkingDirectory {
     /// finished is an ordinary thing rather than an error. Only when every
     /// member is gone too does the shell get its turn. A platform that cannot
     /// enumerate the group refuses instead of guessing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the terminal's working directory cannot be learned, or it cannot be opened.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         self.open_with(probe_process_cwd, process_group_members)
     }

@@ -181,6 +181,11 @@ impl ConfigWriteQueue {
 
     /// Awaited write: blocks (a few ms) for the result, ~2 s timeout. On a dead
     /// writer it returns an error rather than hanging.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the writer thread is gone, does not answer within its timeout, or the save itself
+    /// fails.
     pub fn save_eager(&self, config: Config) -> Result<(), String> {
         let (reply, rx) = mpsc::sync_channel(1);
         if self.tx.send(WriteMsg::Eager { config, reply }).is_err() {

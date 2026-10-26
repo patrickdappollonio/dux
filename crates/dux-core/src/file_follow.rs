@@ -176,6 +176,10 @@ fn capped_note(cap: usize) -> String {
 ///
 /// A cursor from before a rotation reads on in the uncompressed kept copy, or,
 /// with it gone, from the new file's start with a note; a missing file is empty.
+///
+/// # Errors
+///
+/// Fails when `since` is not a cursor dux gave, or the file cannot be read.
 pub fn open_log(
     path: &Path,
     since: Option<&str>,

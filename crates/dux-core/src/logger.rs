@@ -751,6 +751,10 @@ impl ServerLog {
 
 /// Open the server log named by `config`, creating its folder and the file
 /// owner-only; its settings are read once, here.
+///
+/// # Errors
+///
+/// Fails when the log's folder cannot be created or the file cannot be opened.
 pub fn open_server_log(config: &ServerConfig, paths: &DuxPaths) -> std::io::Result<ServerLog> {
     let path = resolve_server_log_path(config, paths);
     if let Some(parent) = path.parent() {

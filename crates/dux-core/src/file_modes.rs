@@ -115,6 +115,10 @@ pub fn restrict_to_owner_best_effort(path: &Path, what: &str) {
 /// Creation is fatal; the tightening is not. A directory that already exists
 /// and works must not become a startup failure because its mode could not be
 /// changed.
+///
+/// # Errors
+///
+/// Fails when the directory cannot be created; a mode that cannot be tightened is only a warning.
 pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     restrict_to_owner_best_effort(path, "directory");

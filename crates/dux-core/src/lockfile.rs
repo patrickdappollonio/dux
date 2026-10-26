@@ -188,6 +188,11 @@ impl SingleInstanceLock {
     /// holder. The lock is held until the returned value is dropped.
     ///
     /// The parent directory of `path` must already exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`AcquireError::AlreadyRunning`] when another process holds the lock, or
+    /// [`AcquireError::Io`] when the file cannot be opened, locked or written.
     pub fn acquire(path: &Path) -> Result<Self, AcquireError> {
         // Opens for read+write so we can both rewrite the PID after acquiring
         // and read the PID of the holder if we lose the race.

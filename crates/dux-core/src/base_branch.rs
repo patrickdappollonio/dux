@@ -69,6 +69,10 @@ impl BranchListing {
 /// `fetch_timeout`), then list the branches of the folder at `repo`. A failed
 /// fetch is recorded in the listing, never fatal; only a failed listing is an
 /// `Err`.
+///
+/// # Errors
+///
+/// Fails when git cannot list the branches.
 pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Result<BranchListing> {
     let fetch = match git::has_origin_remote(repo) {
         Ok(false) => OriginFetch::NoOrigin,

@@ -495,6 +495,10 @@ impl Attachments {
 
     /// Attach `connection` to `target`, refused while a change that covers it
     /// holds a reservation. The token is what [`Self::detach`] takes.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Reserved`] when a change that covers `target` holds a reservation.
     pub fn attach(
         &self,
         connection: &str,

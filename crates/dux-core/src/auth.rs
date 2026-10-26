@@ -73,6 +73,10 @@ impl Password {
 
     /// Take ownership of raw bytes read from a request or a pipe. Bytes that
     /// are not UTF-8 are wiped before the error returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`AuthError::NotUtf8`] when the bytes are not UTF-8.
     pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, AuthError> {
         match String::from_utf8(bytes) {
             Ok(text) => Ok(Self::new(text)),
@@ -132,6 +136,10 @@ impl std::error::Error for AuthError {}
 
 /// Hash `password` into a new Argon2id PHC string with a fresh random salt.
 /// Slow on purpose (tens of milliseconds); keep it off UI and async threads.
+///
+/// # Errors
+///
+/// Fails when the salt cannot be drawn or Argon2 cannot hash.
 pub fn hash_password(password: &Password) -> Result<String, AuthError> {
     let params = Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
         .map_err(|e| AuthError::Hashing(e.to_string()))?;
@@ -216,6 +224,10 @@ fn parse_checked(phc: &str) -> Result<PasswordHash, AuthError> {
 /// first ([`validate_password_hash`]), so an absurd one is refused before any
 /// memory is allocated for it. `Ok(false)` is a wrong password; `Err` is a
 /// hash dux will not use. Slow on purpose; keep it off UI and async threads.
+///
+/// # Errors
+///
+/// Fails when `phc` is not a hash dux will use, or Argon2 cannot verify against it.
 pub fn verify_password(password: &Password, phc: &str) -> Result<bool, AuthError> {
     let parsed = parse_checked(phc)?;
     match Argon2::default().verify_password(password.expose().as_bytes(), &parsed) {

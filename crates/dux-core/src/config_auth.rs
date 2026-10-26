@@ -213,6 +213,10 @@ impl ServerAuthConfig {
 
     /// Every rule the deserializer enforces beyond types. Public so a writer
     /// can check a candidate before it lands on disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first rule the settings break.
     pub fn validate(&self) -> Result<(), String> {
         match self.problems().into_iter().next() {
             Some(problem) => Err(problem),
@@ -629,6 +633,10 @@ impl AddressBlock {
     /// (`203.0.113.0/24`), so it reads and matches like the IPv4 form; with
     /// a shorter prefix it stays an IPv6 range. Its prefix is checked
     /// against 128, the length of what was written.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `entry` is not an IP address or CIDR range, or its prefix length is out of range.
     pub fn parse(entry: &str) -> Result<Self, String> {
         let (addr, prefix) = match entry.split_once('/') {
             Some((addr, prefix)) => (addr, Some(prefix)),

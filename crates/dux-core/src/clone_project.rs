@@ -305,6 +305,11 @@ pub struct PrDestinationCheck {
 /// folder check and the terminal UI's give. Runs git, so only on a worker. The
 /// outlook is told from the folder as it is, never from a write, and a folder
 /// that does not answer in time leaves the question open for the create to ask.
+///
+/// # Errors
+///
+/// Fails with the sentence to show when the folder cannot take the clone or the add: it holds
+/// something else, or cannot be named or inspected.
 pub fn check_pr_destination(
     raw: &str,
     target: &PullRequestCloneTarget,

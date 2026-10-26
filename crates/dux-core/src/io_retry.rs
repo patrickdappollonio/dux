@@ -5,6 +5,10 @@ use std::io::{self, ErrorKind};
 
 /// Runs `op` again for as long as it fails with `ErrorKind::Interrupted`, and returns its first
 /// other answer.
+///
+/// # Errors
+///
+/// Fails with `op`'s first error that is not an interruption.
 pub fn retry_on_interrupt<T, F>(mut op: F) -> io::Result<T>
 where
     F: FnMut() -> io::Result<T>,
@@ -18,6 +22,10 @@ where
 }
 
 /// Runs `op` again for as long as it fails with `EINTR`, and returns its first other answer.
+///
+/// # Errors
+///
+/// Fails with `op`'s first error that is not `EINTR`.
 pub fn retry_on_interrupt_errno<T, F>(mut op: F) -> rustix::io::Result<T>
 where
     F: FnMut() -> rustix::io::Result<T>,

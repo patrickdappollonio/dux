@@ -2400,6 +2400,10 @@ pub mod probe_test_support {
     /// real, observed flake, not a theoretical one. The warmup swallows the
     /// window, and it answers [`WARMUP_ARG`] by exiting before the body so a
     /// stand-in that records its calls does not record this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stand-in cannot be written or made executable, or stays busy for a second.
     pub fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
         let script = dir.join("fake-gh");
         std::fs::write(

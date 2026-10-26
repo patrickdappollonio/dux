@@ -306,6 +306,10 @@ pub trait BackgroundServeCompanion {
     /// `claims` says whether every undriven running pty is claimed for the
     /// terminal UI before any listener accepts a connection; `startup` opens
     /// the log's banner.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a status-line message when serving cannot start.
     fn start(
         &mut self,
         engine: &mut Engine,

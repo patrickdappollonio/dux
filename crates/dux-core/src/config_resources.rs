@@ -30,6 +30,10 @@ pub struct ConfigFile {
 
 /// Read `config_path` as every surface loads it; a missing file is the defaults,
 /// and the error never quotes a value from the file.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or does not load.
 pub fn read(config_path: &Path) -> Result<ConfigFile, String> {
     let fail = |problem| {
         crate::config::ConfigLoadError {
@@ -248,6 +252,10 @@ pub struct KeyItem {
 
 /// Every action the terminal UI binds, with the keys it uses under the file
 /// `raw`, in the terminal UI's own order.
+///
+/// # Errors
+///
+/// Fails when the `[keys]` in `raw` cannot be read.
 pub fn keys(raw: &str) -> Result<Vec<KeyItem>, String> {
     let unreadable = || {
         "the [keys] in config.toml could not be read; run \"dux config get keys\" to see why"
