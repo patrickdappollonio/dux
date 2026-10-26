@@ -97,7 +97,7 @@ pub(crate) const DEFAULT_MAX_BLOCKED_ADDRESSES: u32 = 1_000;
 /// The `[server.auth]` table. Field meanings are documented once, in the
 /// canonical config template (`crates/dux-tui/src/config.rs`); the summaries
 /// here are for code readers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawServerAuthConfig")]
 pub struct ServerAuthConfig {
     /// Argon2id PHC string, or empty for no password. Validated by
@@ -152,6 +152,66 @@ pub struct ServerAuthConfig {
     /// Size `blocked_addresses` may reach through dux's own appends. Beyond
     /// it a new ban holds in memory for the run and dux warns.
     pub max_blocked_addresses: u32,
+}
+
+/// Every field but the password hash, which is only said to be set or not, so
+/// no log line or panic message built from this ever carries it.
+impl std::fmt::Debug for ServerAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            password_hash,
+            require,
+            minimum_password_length,
+            minimum_password_score,
+            max_failed_logins,
+            blocked_addresses,
+            session_idle_seconds,
+            cli_token_idle_days,
+            disable_no_auth_warning,
+            cookie_secure,
+            max_concurrent_password_checks,
+            password_check_queue,
+            max_password_bytes,
+            failed_login_window_seconds,
+            failed_login_delay_seconds,
+            failed_login_max_delay_seconds,
+            max_failed_logins_per_minute,
+            max_tracked_addresses,
+            max_blocked_addresses,
+        } = self;
+        let password = if password_hash.is_empty() {
+            "none"
+        } else {
+            "set"
+        };
+        f.debug_struct("ServerAuthConfig")
+            .field("password_hash", &format_args!("<{password}>"))
+            .field("require", require)
+            .field("minimum_password_length", minimum_password_length)
+            .field("minimum_password_score", minimum_password_score)
+            .field("max_failed_logins", max_failed_logins)
+            .field("blocked_addresses", blocked_addresses)
+            .field("session_idle_seconds", session_idle_seconds)
+            .field("cli_token_idle_days", cli_token_idle_days)
+            .field("disable_no_auth_warning", disable_no_auth_warning)
+            .field("cookie_secure", cookie_secure)
+            .field(
+                "max_concurrent_password_checks",
+                max_concurrent_password_checks,
+            )
+            .field("password_check_queue", password_check_queue)
+            .field("max_password_bytes", max_password_bytes)
+            .field("failed_login_window_seconds", failed_login_window_seconds)
+            .field("failed_login_delay_seconds", failed_login_delay_seconds)
+            .field(
+                "failed_login_max_delay_seconds",
+                failed_login_max_delay_seconds,
+            )
+            .field("max_failed_logins_per_minute", max_failed_logins_per_minute)
+            .field("max_tracked_addresses", max_tracked_addresses)
+            .field("max_blocked_addresses", max_blocked_addresses)
+            .finish()
+    }
 }
 
 impl Default for ServerAuthConfig {
@@ -742,6 +802,19 @@ mod tests {
             "correct horse battery staple".to_string(),
         ))
         .expect("hash")
+    }
+
+    #[test]
+    fn debug_says_a_password_is_set_and_never_prints_its_hash() {
+        let hash = real_hash();
+        let config = ServerAuthConfig {
+            password_hash: hash.clone(),
+            ..ServerAuthConfig::default()
+        };
+        let shown = format!("{config:?}");
+        assert!(!shown.contains(&hash), "{shown}");
+        assert!(shown.contains("password_hash: <set>"), "{shown}");
+        assert!(format!("{:?}", ServerAuthConfig::default()).contains("password_hash: <none>"));
     }
 
     #[test]
