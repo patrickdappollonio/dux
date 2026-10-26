@@ -48,6 +48,7 @@ const BINARY_SAMPLE_BYTES: usize = 8 * 1024;
 pub struct DiffHead {
     /// The kept lines, newline-joined. Always ends at a line boundary.
     pub text: String,
+    /// How many lines were kept.
     pub shown_lines: usize,
     /// The patch's whole line count, or the point counting stopped when
     /// `total_is_at_least` is set.
@@ -282,6 +283,7 @@ pub fn diff_head_via_git_as(
 /// story of how the diff head came to be asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchNotInEncoding {
+    /// The encoding that was asked for.
     pub encoding: &'static encoding_rs::Encoding,
     /// 1-based line of the patch that does not decode.
     pub line: usize,
@@ -426,8 +428,10 @@ pub fn diff_head_banner(head: &DiffHead) -> String {
     )
 }
 
+/// Both sides of one file's diff, for the web's diff view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiffContents {
+    /// The file's path, relative to the worktree.
     pub path: String,
     /// File content at HEAD. Empty when the path is absent at HEAD (a newly
     /// added/untracked file); the client then renders an all-insert diff.
@@ -448,6 +452,7 @@ pub struct DiffContents {
 /// a reworded message quietly changes an HTTP status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTooLarge {
+    /// The sentence the caller shows, unchanged.
     pub message: String,
 }
 

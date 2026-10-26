@@ -11,8 +11,11 @@ use super::{CliError, Exit};
 /// order, and the object `--format json` prints for it.
 #[derive(Clone, Debug)]
 pub struct Row {
+    /// The row's id, which `-q` prints.
     pub id: String,
+    /// The table's cells, in header order.
     pub cells: Vec<String>,
+    /// The object `--format json` prints for the row.
     pub json: serde_json::Value,
 }
 
@@ -20,7 +23,9 @@ pub struct Row {
 /// resource's own list uses.
 #[derive(Clone, Debug)]
 pub struct Listing {
+    /// The table's column headers.
     pub headers: Vec<&'static str>,
+    /// The rows, in the resource's own order.
     pub rows: Vec<Row>,
 }
 

@@ -94,7 +94,10 @@ pub enum DropNameError {
     Control,
     /// Longer than this filesystem allows. The limit is in BYTES, which is what
     /// the kernel counts.
-    TooLong { limit: usize },
+    TooLong {
+        /// The filesystem's limit, in bytes.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for DropNameError {
@@ -231,7 +234,10 @@ pub enum DropDirError {
     /// one way a relative, traversal-free `ui.upload_directory` could still
     /// land outside the worktree, and a file in the way means the path names
     /// something dux did not create and must not disturb.
-    UploadPathBlocked { component: String },
+    UploadPathBlocked {
+        /// The path component that is in the way.
+        component: String,
+    },
     /// The directory the editor's file tree named is not a place a file may be
     /// put. See [`TreeDirError`].
     TreeDirRefused(TreeDirError),
@@ -239,7 +245,10 @@ pub enum DropDirError {
     /// rather than a directory. Refused rather than followed, for the same
     /// reason as [`Self::UploadPathBlocked`]: a symlink is the one way a
     /// relative, traversal-free directory still lands outside the worktree.
-    TreePathBlocked { component: String },
+    TreePathBlocked {
+        /// The path component that is a symlink.
+        component: String,
+    },
     /// A component of the editor tree directory is not there. The browser's
     /// tree is a lazy client-side cache, so the ordinary way to reach this is
     /// a folder deleted elsewhere since the tree last listed it.
@@ -247,7 +256,10 @@ pub enum DropDirError {
     /// It is its OWN variant rather than an [`Self::Io`] carrying `ENOENT`
     /// because the message is shown to a person: an errno is not a sentence,
     /// and every other refusal on this path is written in the user's words.
-    TreeDirMissing { component: String },
+    TreeDirMissing {
+        /// The path component that is missing.
+        component: String,
+    },
     /// The editor tree directory was opened, and the path it answers to no
     /// longer names it (it was removed while the handle was held).
     ///
@@ -347,7 +359,10 @@ pub enum DropSaveError {
     Name(DropNameError),
     /// Something already at this name is a SYMLINK. The request fails rather
     /// than being renamed around, for ANY candidate name and not only the first.
-    Symlink { name: String },
+    Symlink {
+        /// The name the symlink is at.
+        name: String,
+    },
     /// Every candidate name was taken, or the name is so long that no suffixed
     /// candidate fits within the filesystem's limit. Fails deterministically
     /// rather than looping.

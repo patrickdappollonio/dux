@@ -299,8 +299,11 @@ pub enum ConversationResume {
 /// restart checkbox and the final are all written from this, on both surfaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RunningTabs {
+    /// The providers of the tabs that follow the folder by themselves.
     pub follows: Vec<String>,
+    /// The providers of the tabs that pick their conversation back up when restarted.
     pub restartable: Vec<String>,
+    /// The providers of the tabs that are left running as they are.
     pub left_running: Vec<String>,
 }
 
@@ -316,6 +319,7 @@ impl RunningTabs {
         }
     }
 
+    /// Whether no tab is running there.
     pub fn is_empty(&self) -> bool {
         self.follows.is_empty() && self.restartable.is_empty() && self.left_running.is_empty()
     }

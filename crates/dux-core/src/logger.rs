@@ -37,6 +37,8 @@ struct Logger {
     log: RotatingLog,
 }
 
+/// Opens the log file the config names and installs the process-wide logger, with its level,
+/// rotation and panic hook; a file that cannot be opened leaves logging off.
 pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
     let path = resolve_log_path(config, paths);
     if let Some(parent) = path.parent() {
@@ -82,18 +84,22 @@ fn install_panic_hook() {
     });
 }
 
+/// Logs `message` at warn level.
 pub fn warn(message: &str) {
     log(LogLevel::Warn, message);
 }
 
+/// Logs `message` at info level.
 pub fn info(message: &str) {
     log(LogLevel::Info, message);
 }
 
+/// Logs `message` at debug level.
 pub fn debug(message: &str) {
     log(LogLevel::Debug, message);
 }
 
+/// Logs `message` at error level.
 pub fn error(message: &str) {
     log(LogLevel::Error, message);
 }
@@ -694,6 +700,8 @@ fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// The log file's path: `[logging] path` resolved against the config directory, `dux.log` there
+/// when it is empty.
 pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     resolve_under_root(&config.path, paths, "dux.log")
 }

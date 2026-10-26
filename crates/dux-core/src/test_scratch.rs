@@ -30,6 +30,7 @@ impl ScratchDir {
         Self::from(tempfile::tempdir().expect("create a test scratch directory"))
     }
 
+    /// The directory's path.
     pub fn path(&self) -> &Path {
         self.0
             .as_ref()
@@ -71,18 +72,22 @@ impl Drop for ScratchDir {
 pub struct ScratchDirs(Vec<ScratchDir>);
 
 impl ScratchDirs {
+    /// No directories yet.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a directory to remove with the rest.
     pub fn push(&mut self, dir: impl Into<ScratchDir>) {
         self.0.push(dir.into());
     }
 
+    /// How many directories are held.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether none are held.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

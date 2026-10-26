@@ -13,9 +13,13 @@ use crate::model::{AgentSession, Project};
 /// `name` is then a short id slice and it always has agents.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SidebarGroup {
+    /// The project's id.
     pub project_id: String,
+    /// The group's heading: the project's name, or a short id slice for an orphaned group.
     pub name: String,
+    /// Whether the project record no longer exists.
     pub orphaned: bool,
+    /// Whether the project's path is gone from disk.
     pub path_missing: bool,
     /// Session ids in this group, in engine order.
     pub session_ids: Vec<String>,
@@ -28,6 +32,7 @@ pub struct SidebarGroup {
 /// before it. `None` means no split (below the threshold, or nothing to sink).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SidebarModel {
+    /// The groups, in display order.
     pub groups: Vec<SidebarGroup>,
     pub(crate) agentless_start: Option<usize>,
 }
