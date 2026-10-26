@@ -12747,13 +12747,10 @@ mod tests {
         // the mouse owns the wheel whether or not it took the alt screen.
         assert!(should_forward_wheel(None, super::MouseReporting::On));
         assert!(!should_forward_wheel(None, super::MouseReporting::Off));
-        assert!(should_forward_wheel(None, super::MouseReporting::On));
-        assert!(!should_forward_wheel(None, super::MouseReporting::Off));
         // Some(true) = always forward, regardless of live signals.
         assert!(should_forward_wheel(Some(true), super::MouseReporting::Off));
         assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
-        assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
-        // Some(false) = never forward, even in the alt screen with mouse.
+        // Some(false) = never forward, even when the app asks for the mouse.
         assert!(!should_forward_wheel(
             Some(false),
             super::MouseReporting::On
