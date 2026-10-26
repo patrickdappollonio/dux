@@ -1473,7 +1473,7 @@ impl App {
     /// can fall back to its legacy `set_info`/`set_error`.
     fn resolve_persist_op(
         &mut self,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
         outcome: PersistFinalOutcome,
     ) -> bool {
         let Some(id) = status_op_id else {
@@ -1491,7 +1491,7 @@ impl App {
         &mut self,
         action: ProjectPersistenceAction,
         error: String,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         if self.resolve_persist_op(status_op_id, PersistFinalOutcome::DbFailed(error.clone())) {
             return;
@@ -1508,7 +1508,7 @@ impl App {
 
     fn apply_project_removal(
         &mut self,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
         config_error_prefix: &'static str,
         success_message: String,
     ) {
@@ -1527,7 +1527,7 @@ impl App {
         project_name: String,
         provider: Option<ProviderKind>,
         global_default: ProviderKind,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         self.rebuild_left_items();
         let success_message = match provider {
@@ -1555,7 +1555,7 @@ impl App {
         &mut self,
         project_name: String,
         auto_reopen_agents: Option<bool>,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         let enabled = auto_reopen_agents.unwrap_or(true);
         self.save_runtime_projects_and_finish_status(
@@ -1575,7 +1575,7 @@ impl App {
         &mut self,
         project_name: String,
         startup_command: Option<String>,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         let success_message = match startup_command {
             Some(command) => {
@@ -1596,7 +1596,7 @@ impl App {
         &mut self,
         project_name: String,
         env_count: usize,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         let success_message = super::render::project_env_saved_message(env_count, &project_name);
         self.save_runtime_projects_and_finish_status(
@@ -1610,7 +1610,7 @@ impl App {
 
     fn save_runtime_projects_and_finish_status(
         &mut self,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
         config_error_prefix: &str,
         success_message: String,
     ) {
@@ -1646,7 +1646,7 @@ impl App {
 
         match view {
             ProjectPersistenceView::PersistenceFailed { error } => {
-                self.apply_project_persistence_failure(action, error, &status_op_id);
+                self.apply_project_persistence_failure(action, error, status_op_id.as_deref());
             }
             ProjectPersistenceView::Added {
                 project_id: _,
@@ -1656,14 +1656,14 @@ impl App {
             }
             ProjectPersistenceView::Removed { project_name } => {
                 self.apply_project_removal(
-                    &status_op_id,
+                    status_op_id.as_deref(),
                     "Project was removed from the database, but config.toml could not be updated",
                     format!("Removed project \"{project_name}\" from app"),
                 );
             }
             ProjectPersistenceView::Deleted { project_name } => {
                 self.apply_project_removal(
-                    &status_op_id,
+                    status_op_id.as_deref(),
                     "Project was deleted from the database, but config.toml could not be updated",
                     format!("Deleted project \"{project_name}\" and all its agents"),
                 );
@@ -1677,26 +1677,26 @@ impl App {
                     project_name,
                     provider,
                     global_default,
-                    &status_op_id,
+                    status_op_id.as_deref(),
                 );
             }
             ProjectPersistenceView::AutoReopenUpdated {
                 project_name,
                 auto_reopen_agents,
             } => {
-                self.apply_auto_reopen_update(project_name, auto_reopen_agents, &status_op_id);
+                self.apply_auto_reopen_update(project_name, auto_reopen_agents, status_op_id.as_deref());
             }
             ProjectPersistenceView::StartupCommandUpdated {
                 project_name,
                 startup_command,
             } => {
-                self.apply_startup_command_update(project_name, startup_command, &status_op_id);
+                self.apply_startup_command_update(project_name, startup_command, status_op_id.as_deref());
             }
             ProjectPersistenceView::EnvUpdated {
                 project_name,
                 env_count,
             } => {
-                self.apply_env_update(project_name, env_count, &status_op_id);
+                self.apply_env_update(project_name, env_count, status_op_id.as_deref());
             }
         }
     }
