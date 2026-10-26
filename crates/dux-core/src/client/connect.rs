@@ -30,6 +30,7 @@ pub const REMOTE_VARIABLE: &str = "DUX_REMOTE";
 pub enum Target {
     /// This machine's dux, over the control socket.
     Local,
+    /// A saved remote, over HTTP.
     Remote {
         /// The remote's saved name.
         name: String,

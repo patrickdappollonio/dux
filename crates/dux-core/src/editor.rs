@@ -18,7 +18,7 @@ pub enum EditorKind {
     VsCode,
     /// Zed.
     Zed,
-    /// VSCodium.
+    /// The open-source build of Visual Studio Code, `VSCodium`.
     VsCodium,
     /// Sublime Text.
     SublimeText,
