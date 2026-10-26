@@ -227,6 +227,10 @@ fn malformed_at(typed: &str, reason: impl Into<String>) -> KeyError {
 }
 
 /// Find the setting `path` names.
+///
+/// # Errors
+///
+/// Fails when `path` is not a well-formed setting path, or names no setting.
 pub fn lookup(path: &str) -> Result<Key, KeyError> {
     // `name=value` is how other tools take a setting. What follows `=` may be
     // a password, so it is never repeated: only the name is.
@@ -601,11 +605,20 @@ pub struct SetReport {
 
 /// Write one plain setting into the config file at `config_path`, through
 /// the coordinated mutation path. `raw` is parsed by [`parse_value`].
+///
+/// # Errors
+///
+/// Fails when `raw` is not a valid value for the key, the file cannot be read or is not TOML, the
+/// write would add a problem that stops dux starting, or the write fails.
 pub fn set_plain(config_path: &Path, key: &Key, raw: &str) -> Result<SetReport> {
     set_plain_with(config_path, MissingConfig::CreateDocumented, key, raw)
 }
 
 /// [`set_plain`] with a choice of what a missing file means.
+///
+/// # Errors
+///
+/// Fails as [`set_plain`] does.
 pub fn set_plain_with(
     config_path: &Path,
     missing: MissingConfig<'_>,
@@ -967,6 +980,10 @@ const PASSWORD_POLICY_KEYS: [&str; 3] = [
 /// defaults. A policy key that does not read, or breaks its rule, is an
 /// error naming it: dux cannot tell what a new password has to meet, so it
 /// sets none until that key is fixed.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, or a policy key does not read or breaks its rule.
 pub fn current_password_policy(config_path: &Path) -> Result<crate::auth::PasswordPolicy> {
     match std::fs::read_to_string(config_path) {
         Ok(raw) => password_policy_of(&raw),
@@ -1056,6 +1073,11 @@ pub struct PasswordSet {
 /// the very text the hash is written into, and the password checked against
 /// them once more, so minimums raised meanwhile can never let a weaker
 /// password through.
+///
+/// # Errors
+///
+/// Fails when the password is below the file's minimums, now or under the lock, or the policy
+/// cannot be read, the password cannot be hashed, or the write fails.
 pub fn set_password(
     config_path: &Path,
     password: &Password,
@@ -1070,6 +1092,10 @@ pub fn set_password(
 }
 
 /// [`set_password`] with a choice of what a missing file means.
+///
+/// # Errors
+///
+/// Fails as [`set_password`] does.
 pub fn set_password_with(
     config_path: &Path,
     missing: MissingConfig<'_>,
@@ -1120,6 +1146,11 @@ pub fn set_password_with(
 /// The write is [`set_password`]'s own: the locked, repairing, start-checked
 /// mutation, so it adds no problem the file did not have and reports the ones
 /// left.
+///
+/// # Errors
+///
+/// Fails as [`set_password`] does, and with [`SetPasswordError::ChangedMeanwhile`] when the stored
+/// hash is no longer `expected`.
 pub fn set_password_if_current(
     config_path: &Path,
     expected: &str,
@@ -1189,6 +1220,11 @@ pub enum BanWrite {
 /// never refuses a ban, while one the append would add does. An IPv4-mapped IPv6 address is written as the IPv4 address it
 /// carries. `max_entries` is `max_blocked_addresses`: a list already that long
 /// is left alone.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or is not TOML, the write would add a problem that stops dux
+/// starting, or the write fails.
 pub fn append_blocked_address(
     config_path: &Path,
     ip: std::net::IpAddr,
@@ -1202,6 +1238,11 @@ pub fn append_blocked_address(
 /// range holding it) for `ip`. Nothing is written when an entry already
 /// covers all of `entry`, and a range takes the place of the single-address
 /// entries inside it in the same save.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or is not TOML, the write would add a problem that stops dux
+/// starting, or the write fails.
 pub fn append_blocked_entry(
     config_path: &Path,
     ip: std::net::IpAddr,
@@ -1388,6 +1429,11 @@ impl std::error::Error for BanNoop {}
 /// Store a [`SecretKind::Text`] value (an environment value) as given,
 /// through the coordinated mutation path. The caller never prints it.
 /// Returns what still stops dux starting with the file.
+///
+/// # Errors
+///
+/// Fails when the key is not stored as typed text, the file cannot be read or is not TOML, or the
+/// write fails.
 pub fn set_secret_text(
     config_path: &Path,
     key: &Key,
@@ -1397,6 +1443,10 @@ pub fn set_secret_text(
 }
 
 /// [`set_secret_text`] with a choice of what a missing file means.
+///
+/// # Errors
+///
+/// Fails as [`set_secret_text`] does.
 pub fn set_secret_text_with(
     config_path: &Path,
     missing: MissingConfig<'_>,
@@ -1494,6 +1544,10 @@ pub struct GetReport {
 }
 
 /// The value dux uses for `key` with the file `raw` (see [`get_report`]).
+///
+/// # Errors
+///
+/// Fails when `raw` cannot be read as TOML for the key's part of the file.
 pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
     get_report(raw, key).map(|report| report.value)
 }
@@ -1513,6 +1567,10 @@ pub fn get(raw: &str, key: &Key) -> Result<GetValue> {
 /// a surface would refuse to start with: `get` is how you look at the broken
 /// part. For a [`WritePolicy::Secret`] key it reads where the secret is
 /// stored (the password's hash).
+///
+/// # Errors
+///
+/// Fails when `raw` cannot be read as TOML for the key's part of the file.
 pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
     get_report_inner(raw, key, None)
 }
@@ -1520,6 +1578,10 @@ pub fn get_report(raw: &str, key: &Key) -> Result<GetReport> {
 /// [`get_report`] for the config file in dux's config directory `root`, so
 /// a value that depends on files beside the config (the theme) is reported
 /// as dux uses it too.
+///
+/// # Errors
+///
+/// Fails when `raw` cannot be read as TOML for the key's part of the file.
 pub fn get_report_at(raw: &str, key: &Key, root: &Path) -> Result<GetReport> {
     get_report_inner(raw, key, Some(root))
 }
@@ -1590,6 +1652,10 @@ pub enum HeldBack {
 /// An error, naming the parse problem by line and kind only, when `raw` is
 /// not TOML: dux cannot tell where anything sits in such a file, a secret
 /// included, so none of its text is shown, whatever `values` says.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML, naming the problem by line and kind only.
 pub fn shown_file_text(
     raw: &str,
     values: HeldBack,

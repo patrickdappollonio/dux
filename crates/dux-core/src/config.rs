@@ -132,6 +132,11 @@ pub(crate) fn checked_macro(
 
 /// Whether `name` may be set to `value` in the global environment, by the rule
 /// a project's env lines follow. A refusal never quotes the value.
+///
+/// # Errors
+///
+/// Fails when `name` is not a valid variable name or `value` holds a NUL byte or invalid expansion
+/// syntax.
 pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
     // A name that is no variable name may be a token pasted where a name
     // goes, so it is never repeated either.
@@ -2609,6 +2614,10 @@ impl DuxPaths {
     /// local user cannot search their way in whatever the worktrees directory
     /// itself says; sharing a worktree with another local account means putting
     /// the worktrees outside the config root, never loosening the root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the config directory or the worktrees directory cannot be created.
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
@@ -3160,6 +3169,10 @@ pub fn provider_config(
 /// config. Note the returned value is the raw parse (no provider defaults
 /// applied); callers that want to *adopt* the config should reload from disk via
 /// [`load_config`] so provider defaults are reapplied consistently.
+///
+/// # Errors
+///
+/// Fails with a sentence when `s` is not TOML or does not read as a config.
 pub fn validate_config_str(s: &str) -> Result<Config, String> {
     toml::from_str::<Config>(s).map_err(|e| describe_toml_error(s, &e))
 }
@@ -3919,6 +3932,10 @@ pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
 ///
 /// Read from the user's own text, so an error quotes their file with its real
 /// line numbers rather than a re-serialized copy of the section.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML, `[server.auth]` sits somewhere else, or the section does not read.
 pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
     // Only `server.auth` is read; every other key is ignored here.
     #[derive(Deserialize)]
@@ -5103,6 +5120,10 @@ fn env_variable_problem(name: &str, value: &str) -> Option<String> {
 }
 
 /// [`start_check_problems`], failing on the first.
+///
+/// # Errors
+///
+/// Fails with the first problem that stops dux starting with `config`.
 pub fn start_check(config: &Config) -> Result<()> {
     match start_check_problems(config).into_iter().next() {
         Some(problem) => Err(anyhow!(problem)),
@@ -5197,6 +5218,10 @@ pub fn log_path_refusal(config: &Config, paths: &DuxPaths) -> Option<String> {
 
 /// The config dux runs with from a whole file's text: read as a start reads
 /// it, with the corrections a load makes.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML or carries an `[server.auth]` that does not load.
 pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
     config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
@@ -5497,6 +5522,11 @@ fn table_into_config(table: &toml::Table) -> Result<Config, String> {
 /// or carries an invalid auth section is a [`ConfigLoadError`], never a
 /// silent fallback to defaults, because the default is "no password". A
 /// start then refuses to run and a reload keeps the running config.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, is not TOML, or carries an `[server.auth]` that does not
+/// load.
 pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     load_config_file(&paths.config_path)
 }
@@ -5508,6 +5538,11 @@ pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadEr
 /// refused for the same reason: it is what an editor leaves mid-save. The
 /// emptiness is judged on the very text that is then parsed, so a file
 /// truncated between two reads cannot slip through as the defaults.
+///
+/// # Errors
+///
+/// Fails when the file is missing, empty, unreadable, not TOML, or carries an `[server.auth]` that
+/// does not load.
 pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     let fail = |problem| ConfigLoadError {
         path: paths.config_path.clone(),
@@ -5527,6 +5562,10 @@ pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, C
 /// UI's `ensure_config_for_reload`, which would otherwise create a fresh
 /// default file) runs first: the file is there. Emptiness is that reader's to
 /// judge on the text it parses.
+///
+/// # Errors
+///
+/// Fails when the file is missing, unreadable, or a link to a file that is gone.
 pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
     match read_config_text(&paths.config_path)? {
         Some(_) => Ok(()),
@@ -5538,6 +5577,10 @@ pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), Co
 }
 
 /// [`load_config`] for a bare file path.
+///
+/// # Errors
+///
+/// Fails as [`load_config`] does.
 pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, ConfigLoadError> {
     let config = load_config_file_as_written(config_path)?;
     Ok(apply_load_corrections(config))
@@ -5578,6 +5621,10 @@ fn config_from_read_text(
 /// `dux config get`): `None` when there is no file yet, which means the
 /// defaults; an error when it cannot be read, or when it is a link to a file
 /// that is gone, which is not "no file yet" and stops every surface.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, or is a link to a file that is gone.
 pub fn read_config_text(
     config_path: &Path,
 ) -> std::result::Result<Option<String>, ConfigLoadError> {
@@ -5601,6 +5648,10 @@ pub fn read_config_text(
 /// with the load's in-memory corrections, without warning about them. What
 /// memory starts as, and therefore the config writer's base: a correction is
 /// never a change dux made, so a save never writes it over what the file says.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML or carries an `[server.auth]` that does not load.
 pub fn config_from_text_as_loaded(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
     config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
@@ -6223,6 +6274,10 @@ fn port_zero_problem(host: &str, port: u16) -> Option<String> {
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
+///
+/// # Errors
+///
+/// Fails when the configured or `--bind` address does not parse, or the plan breaks a bind rule.
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,

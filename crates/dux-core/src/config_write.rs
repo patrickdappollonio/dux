@@ -72,6 +72,10 @@ impl ConfigFileLock {
     }
 
     /// Take the lock, waiting up to [`Self::DEFAULT_WAIT`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock file cannot be opened, or the lock is not free within the wait.
     pub fn acquire(config_path: &Path) -> Result<Self> {
         Self::acquire_within(config_path, Self::DEFAULT_WAIT)
     }
@@ -338,6 +342,10 @@ fn write_target(path: &Path) -> Result<PathBuf> {
 /// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
 /// recover, bootstrap project-sync) silence the lint with `#[allow(deprecated)]`
 /// and a short comment explaining why direct write is correct there.
+///
+/// # Errors
+///
+/// Fails when the temporary file cannot be written, synced or renamed into place.
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
@@ -350,6 +358,10 @@ use crate::config::{Config, MacrosConfig, ProjectConfig, ProvidersConfig};
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
 /// every section patch, and writes it back atomically at [`Durability::Fsync`].
+///
+/// # Errors
+///
+/// Fails as [`patch_config_file_with`] does.
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
@@ -441,6 +453,11 @@ pub(crate) fn patch_config_file_three_way(
 /// [`save_config_with`] for a writer that knows its base: patch the file
 /// three ways when it exists, write the documented template when it does
 /// not. Returns the text written.
+///
+/// # Errors
+///
+/// Fails when an existing file cannot be read or parsed as TOML, the result's `[server.auth]` would
+/// not load, or the write fails.
 pub fn save_config_three_way(
     config_path: &Path,
     base: Option<SaveBase<'_>>,
@@ -1408,6 +1425,11 @@ fn item_text(item: &Item) -> String {
 /// is part of what `render` sees. For the whole-file writers that depend on
 /// what the file holds now: recovering the last working config, restoring the
 /// documentation. The result's `[server.auth]` is checked before it lands.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, the file cannot be read, `render` fails, the result's
+/// `[server.auth]` would not load, or the write fails.
 pub fn replace_config_file<T>(
     config_path: &Path,
     render: impl FnOnce(Option<&str>) -> Result<(String, T)>,
@@ -1433,6 +1455,11 @@ pub fn replace_config_file<T>(
 /// to judge) and returns the text to write, if any, with its outcome. A
 /// text to write is checked for a readable `[server.auth]` first. For a
 /// load-time migration, which rewrites keys of whatever the file holds.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, `decide` fails, the result's `[server.auth]` would not
+/// load, or the write fails.
 pub fn migrate_config_file<T>(
     config_path: &Path,
     decide: impl FnOnce(std::io::Result<String>) -> Result<(Option<String>, T)>,
@@ -1452,6 +1479,10 @@ pub fn migrate_config_file<T>(
 /// Write a private (0600) file beside the config while the caller holds the
 /// [`ConfigFileLock`] inside [`replace_config_file`]'s `render`: a backup of
 /// the file being replaced. Taking the lock again there would wait forever.
+///
+/// # Errors
+///
+/// Fails when the file cannot be written.
 pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic_unlocked(path, contents, Durability::Fsync)
 }
@@ -1469,6 +1500,11 @@ pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
 /// not TOML is refused (there is nothing safe to patch), and so is a result
 /// whose `[server.auth]` would not load, because that would stop dux from
 /// starting; in both cases nothing is written.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, the file cannot be read or is not TOML, `change` fails, the
+/// result's `[server.auth]` would not load, or the write fails.
 pub fn mutate_config_file<T>(
     config_path: &Path,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
@@ -1656,6 +1692,10 @@ fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthCo
 /// documented template from scratch (see [`render_config_documented`]). Used by surfaces that
 /// don't have the TUI's canonical commented renderer (e.g. the web). The TUI
 /// keeps its own `save_config` for the pretty first-creation path.
+///
+/// # Errors
+///
+/// Fails as [`save_config_with`] does.
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
@@ -1715,6 +1755,10 @@ pub fn render_config_documented(config: &Config) -> String {
 /// an existing file, so it succeeds even when the current `config.toml` is
 /// corrupt or unparseable. Used by the web's "recover config" path, which must
 /// overwrite a broken file from the in-memory config.
+///
+/// # Errors
+///
+/// Fails as [`write_config_plain_with`] does.
 #[deprecated(
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
