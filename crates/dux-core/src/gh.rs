@@ -762,8 +762,10 @@ impl GithubHostPolicy {
 /// unrecognised value is https, which is also what `gh repo clone` falls back to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GitProtocol {
+    /// Clone over HTTPS.
     #[default]
     Https,
+    /// Clone over SSH.
     Ssh,
 }
 
@@ -788,7 +790,9 @@ pub enum GhProbe {
     Transient(String),
     /// `gh` answered. `available` is whether any GitHub feature can work at all.
     Decided {
+        /// Whether any GitHub feature can work at all.
         available: bool,
+        /// Which hosts dux may ask about.
         policy: GithubHostPolicy,
         /// Each qualifying host's git protocol (lowercased host keys). Empty
         /// under the legacy policy, which reports none: https for every host.

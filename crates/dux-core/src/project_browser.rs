@@ -15,6 +15,8 @@ use crate::worker::{
     BranchWarningKind, BrowserEntry, NonDefaultBranchAction, ProjectWorktreeEntry, WorkerEvent,
 };
 
+/// The add-project browser's rows for `dir`: its visible subdirectories, repositories first then by
+/// name, under a `../` row for its parent.
 pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     let mut entries = fs::read_dir(dir)
         .ok()
@@ -85,6 +87,7 @@ pub fn resolve_start_dir(config: &Config) -> PathBuf {
         })
 }
 
+/// `path` canonicalized, or `path` itself when it cannot be.
 pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -202,6 +205,8 @@ pub fn load_projects<S: std::hash::BuildHasher>(
     projects
 }
 
+/// Tags each of a project's git worktrees with whether dux manages it, which agent holds it and
+/// whether it is the project's own checkout, the ones an agent can be started on first.
 pub fn classify_project_worktrees(
     project: &Project,
     paths: &DuxPaths,
@@ -284,6 +289,8 @@ pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: &Sender
     });
 }
 
+/// Works out on the calling worker thread which branch the project's checkout is on and whether it
+/// is the default, and reports it to `worker_tx`.
 pub fn run_checkout_project_default_branch_inspection_job(
     project: Project,
     worker_tx: &Sender<WorkerEvent>,

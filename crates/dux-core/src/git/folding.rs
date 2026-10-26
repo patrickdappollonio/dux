@@ -15,7 +15,9 @@ use crate::model::ChangedFileKind;
 /// tree for an untracked folder, the index for a staged one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ChangesSide {
+    /// The index.
     Staged,
+    /// The working tree.
     Unstaged,
 }
 
@@ -838,7 +840,9 @@ pub(crate) fn folder_inside(worktree: &Path, dir: &str) -> Result<FolderInside> 
 /// A whole-folder action that leaves the repositories inside the folder alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FolderAction {
+    /// Stage the folder.
     Stage,
+    /// Delete the folder.
     Delete,
 }
 

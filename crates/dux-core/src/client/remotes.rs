@@ -12,11 +12,13 @@ use super::{CliError, Exit};
 
 pub(crate) const REMOTES_FILE: &str = "remotes.toml";
 
+/// The saved remotes, as `remotes.toml` holds them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remotes {
     /// The remote used when none is named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// Every saved remote, by name.
     #[serde(default)]
     pub remotes: BTreeMap<String, Remote>,
 }
@@ -31,8 +33,10 @@ pub enum PlainHttp {
     Anywhere,
 }
 
+/// One saved remote.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
+    /// The remote's address.
     pub url: String,
     /// Plain HTTP to an address that is neither this machine nor the tailnet
     /// was allowed when it was added.

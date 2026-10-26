@@ -2974,13 +2974,18 @@ fn launch_managed_create(
 /// held in from before `git worktree add` until its launch lands.
 #[derive(Clone, Default)]
 pub struct CreateJobRegistries {
+    /// The process sessions the startup command runs in.
     pub processes: crate::process_sessions::AgentProcessRegistry,
+    /// The per-worktree registry the folder is held in.
     pub worktrees: crate::worktree_ops::WorktreeOps,
     /// What the pull before the create asks before git moves the project's
     /// checkout (see [`crate::checkout_move`]).
     pub moves: crate::checkout_move::CheckoutMoveGuard,
 }
 
+/// Creates an agent on the calling worker thread: provisions its worktree (or takes its folder, for
+/// a standalone agent), runs the startup command and launches the provider, reporting each step and
+/// the outcome to `worker_tx` under `status_op_id`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
@@ -3050,6 +3055,8 @@ pub fn run_create_agent_job(
         },
     );
 }
+/// Launches an agent tab's provider in a PTY on the calling worker thread, through `gate`,
+/// reporting the outcome to `worker_tx`.
 pub fn run_agent_launch_job(
     request: AgentLaunchRequest,
     worker_tx: &Sender<WorkerEvent>,

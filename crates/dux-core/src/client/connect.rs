@@ -28,8 +28,14 @@ pub const REMOTE_VARIABLE: &str = "DUX_REMOTE";
 /// The dux a command talks to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// This machine's dux, over the control socket.
     Local,
-    Remote { name: String, remote: Remote },
+    Remote {
+        /// The remote's saved name.
+        name: String,
+        /// The saved remote.
+        remote: Remote,
+    },
 }
 
 /// Whether `--local` was given, which talks to this machine's dux whatever

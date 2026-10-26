@@ -39,7 +39,9 @@ pub enum OriginFetch {
 /// origin-only ones are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchListing {
+    /// The branches to choose from.
     pub branches: Vec<BranchChoice>,
+    /// How fetching from origin went before the listing.
     pub fetch: OriginFetch,
 }
 
@@ -149,7 +151,12 @@ pub enum BaseBranchChangeFailure {
     /// Another worktree has the branch checked out, so git will not check it
     /// out in the project folder too. `by` says whose that worktree is, which
     /// decides the way out the refusal can honestly offer.
-    Held { holder: PathBuf, by: BranchHolder },
+    Held {
+        /// The worktree that has the branch checked out.
+        holder: PathBuf,
+        /// Whose that worktree is.
+        by: BranchHolder,
+    },
     /// Creating the local tracking branch or the `git switch` failed; the text
     /// is git's reason (for the log: the message the user reads is the sticky
     /// "Couldn't check out" one).

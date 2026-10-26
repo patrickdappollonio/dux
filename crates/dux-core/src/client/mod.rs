@@ -41,6 +41,7 @@ pub enum Exit {
 }
 
 impl Exit {
+    /// The process exit code.
     pub fn code(self) -> i32 {
         match self {
             Exit::Failed => 1,
@@ -56,11 +57,14 @@ impl Exit {
 /// A command that did not succeed: the sentence for stderr and the exit code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliError {
+    /// The exit code.
     pub exit: Exit,
+    /// The sentence for stderr.
     pub message: String,
 }
 
 impl CliError {
+    /// An error with this exit code and sentence.
     pub fn new(exit: Exit, message: impl Into<String>) -> Self {
         Self {
             exit,

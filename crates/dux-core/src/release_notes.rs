@@ -333,8 +333,11 @@ fn strip_inline_markup(s: &str) -> String {
 pub struct ReleaseNotes {
     /// The release tag, e.g. `v0.6.0`.
     pub version: String,
+    /// The release headline, from the leading `## ...` line.
     pub headline: String,
+    /// Intro prose, one entry per paragraph.
     pub paragraphs: Vec<String>,
+    /// The `### ...` feature titles.
     pub sections: Vec<String>,
     /// The release's own web page. Taken from the API's `html_url` when present,
     /// falling back to the releases index.
@@ -443,7 +446,10 @@ fn is_path_safe_tag(tag: &str) -> bool {
 pub enum FetchError {
     /// GitHub answered definitively: no release exists for this tag (HTTP 404).
     /// Retrying cannot change the answer.
-    NoSuchRelease { tag: String },
+    NoSuchRelease {
+        /// The tag asked about.
+        tag: String,
+    },
     /// Anything that might succeed later: offline, DNS, timeout, 5xx, a rate
     /// limit, or a response dux could not parse.
     Transient(anyhow::Error),

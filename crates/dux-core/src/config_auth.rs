@@ -99,6 +99,7 @@ pub struct ServerAuthConfig {
     /// Argon2id PHC string, or empty for no password. Validated by
     /// [`crate::auth::validate_password_hash`] when read.
     pub password_hash: String,
+    /// Where the password is asked for once one is set.
     pub require: AuthRequire,
     /// Characters a new password must have.
     pub minimum_password_length: u32,
@@ -121,7 +122,10 @@ pub struct ServerAuthConfig {
     pub session_idle_seconds: u32,
     /// Days a command-line sign-in survives without being used.
     pub cli_token_idle_days: u32,
+    /// Whether to hide the web warning shown when dux is reachable beyond this machine with no
+    /// password.
     pub disable_no_auth_warning: bool,
+    /// Whether the sign-in cookie is marked Secure.
     pub cookie_secure: CookieSecure,
     /// Password checks (Argon2id runs) at once, across every client.
     pub max_concurrent_password_checks: u32,
@@ -134,6 +138,7 @@ pub struct ServerAuthConfig {
     /// Wait imposed on an address after its first failure in the window,
     /// doubling with each further failure up to the next setting.
     pub failed_login_delay_seconds: u32,
+    /// The longest wait an address's failures can add up to.
     pub failed_login_max_delay_seconds: u32,
     /// Failed logins per minute across all addresses before every address
     /// but this machine gets "too many requests" until the minute passes.
