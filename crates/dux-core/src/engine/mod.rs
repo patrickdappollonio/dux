@@ -309,21 +309,33 @@ fn lock_changed_files_queue(
 /// See [`Engine::serve_memory`].
 pub(crate) type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
 
+/// The workspace's state and the one place every change to it is made, shared
+/// by both surfaces.
 pub struct Engine {
+    /// The running config.
     pub config: Config,
+    /// Where dux keeps its files.
     pub paths: DuxPaths,
+    /// The session database.
     pub session_store: SessionStore,
+    /// The workspace's projects.
     pub projects: Vec<Project>,
+    /// The workspace's agents, in sidebar order.
     pub sessions: Vec<AgentSession>,
+    /// The watched worktree's staged files.
     pub staged_files: Vec<ChangedFile>,
+    /// The watched worktree's unstaged files.
     pub unstaged_files: Vec<ChangedFile>,
     /// Moves every time new lists are assigned through
     /// [`Engine::set_changed_files`], so a surface caching something derived
     /// from them (the terminal UI's row layout) can tell a new read from the
     /// one it built from without comparing the lists.
     pub changed_files_revision: u64,
+    /// How many terminals have been opened, which numbers the next one.
     pub terminal_counter: usize,
+    /// Whether the GitHub integration is on.
     pub github_integration_enabled: bool,
+    /// This process's hold on `dux.lock`, which also owns the control socket.
     pub single_instance_lock: SingleInstanceLock,
     /// Which surface currently owns this engine. Decides how a `terminal_identity`
     /// of `auto` resolves (mirror on the TUI, ghostty on the headless server). The
@@ -342,7 +354,9 @@ pub struct Engine {
     /// and the in-flight guard already serialises those samples.
     pub resource_collector: Arc<Mutex<crate::resource_stats::ResourceCollector>>,
 
+    /// Where workers send their events.
     pub worker_tx: Sender<WorkerEvent>,
+    /// Where the engine reads worker events from.
     pub worker_rx: Receiver<WorkerEvent>,
     /// The single ordered, off-thread, atomic config writer for this process.
     /// Every config-mutating handler writes through this, so saves never block
@@ -388,6 +402,7 @@ pub struct Engine {
     /// Who asked for the reloads running and deferred, so one dux asked for
     /// after its own write is not announced.
     pub reload_origin: reload_origin::ReloadOrigin,
+    /// Each live agent tab's provider terminal, by tab id.
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
@@ -417,6 +432,7 @@ pub struct Engine {
     /// user edits in their own editor and dux reloads, so there is no point at
     /// which a refusal could be delivered.
     pub launched_drop_paste: HashMap<TabId, LaunchedDropPaste>,
+    /// Every open terminal, by terminal id.
     pub companion_terminals: HashMap<String, CompanionTerminal>,
     /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
@@ -454,6 +470,7 @@ pub struct Engine {
     /// `reap_terminating_ptys` drains the waits; `sweep_recreate_restarts`
     /// starts the tabs.
     pub pending_tab_restarts: Vec<lifecycle::PendingTabRestart>,
+    /// Whether `gh` is usable, as the last probe found.
     pub gh_status: GhStatus,
     /// Test-only injection point for the rare synchronous worker-spawn failure
     /// (PID/RLIMIT exhaustion in production). Consumed by the next
@@ -475,6 +492,7 @@ pub struct Engine {
     /// State owned by the `gh` host probe: which hosts qualify, the generation
     /// stamp that keeps overlapping probes ordered, and the program to run.
     pub gh_probe: GhProbeState,
+    /// Each agent's pull request, by session id.
     pub pr_statuses: HashMap<String, PrInfo>,
     /// Manually attached ("pinned") pull requests, keyed by session id: the
     /// in-memory mirror of the `session_pr_overrides` table. While a session
@@ -493,7 +511,9 @@ pub struct Engine {
     /// `ResumePullRequestAutodetection`, and loaded at boot by
     /// [`Engine::seed_pr_statuses_from_store`].
     pub pr_suppressions: HashSet<String>,
+    /// The agents the branch-sync poller checks, shared with it.
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
+    /// The agents the pull-request poller asks about, shared with it.
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     /// Arm state and single-instance guard for pull-request background work.
     /// See [`PrSyncControl`]: a bare `AtomicBool` could not keep the poller
@@ -615,6 +635,7 @@ pub struct Engine {
     /// should be cleared) or by an unrelated operation (and should be left
     /// alone). Cleared per-session when the worker event arrives.
     pub deletion_busy_messages: HashMap<String, StatusText>,
+    /// The worktree the changed-files poller watches, shared with it.
     pub watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     /// Coalescing state for [`Engine::spawn_changed_files_refresh`]: at most one
     /// reader thread and at most one queued worktree, newest wins. Shared by
@@ -629,6 +650,8 @@ pub struct Engine {
     /// the wrong session's files (cross-tab safety). Written exclusively by
     /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
+    /// Whether any provider or terminal is running, shared with the web's
+    /// changed-files poller to pick its cadence.
     pub has_active_processes: Arc<AtomicBool>,
     /// What a web serve keeps for the life of this engine, which is the life
     /// of this dux process, rather than for one serve: the web layer's address
@@ -945,6 +968,7 @@ pub enum CreateLaunchOutcome {
     /// The session was committed and the agent surface is ready. `status_message`
     /// is the create-kind success line.
     Committed {
+        /// The create's success line.
         status_message: StatusText,
         /// Which surfaces withhold that line. A create whose pane launches and
         /// streams confirms nothing; one whose sentence carries a fact the
@@ -959,21 +983,28 @@ pub enum CreateLaunchOutcome {
     /// notes said, such as that the agent is a fresh copy of a pull request)
     /// follow it when there were any.
     StartupFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the startup command failed.
         error: String,
+        /// What the create's notes said, when it had any.
         notes: Option<StatusText>,
     },
     /// `session_store.upsert_session` failed before the session could be
     /// committed; `error` is the persistence error.
     PersistFailed {
+        /// The store's error.
         error: String,
+        /// The name the create had settled on, when it had one.
         attempted_name: Option<String>,
     },
     /// The launch (or the create worker) failed; `message` is the already-formatted
     /// error line. `attempted_name` is the name the create had settled on, when
     /// it had.
     Failed {
+        /// The failure line.
         message: StatusText,
+        /// The name the create had settled on, when it had one.
         attempted_name: Option<String>,
     },
 }
@@ -987,6 +1018,7 @@ pub enum CreateLaunchOutcome {
 pub enum LaunchOutcome {
     /// Reconnect / force-reconnect succeeded; `status_message` is the success line.
     Ready {
+        /// The success line.
         status_message: StatusText,
         /// Which surfaces withhold that line. A resumed pane relaunches and
         /// paints its prior conversation, so it confirms nothing; a pane that
@@ -995,12 +1027,16 @@ pub enum LaunchOutcome {
     },
     /// Reconnect failed; `branch_name`/`message` build the reconnect-failure line.
     ReconnectFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the relaunch failed.
         message: String,
     },
     /// Force-restart failed; `branch_name`/`message` build the fresh-restart line.
     ForceReconnectFailed {
+        /// The agent's name.
         branch_name: String,
+        /// Why the restart failed.
         message: String,
     },
     /// The session vanished between dispatch and launch; the busy is cleared with
@@ -1084,16 +1120,27 @@ pub enum WebDeleteOutcome {
     /// message came from the snapshot it left behind. `refused` is true when git
     /// would not delete one of the branches, which leaves the user something to
     /// clean up and is the difference between an info and a warning.
-    Succeeded { message: StatusText, refused: bool },
+    Succeeded {
+        /// The report.
+        message: StatusText,
+        /// Whether git refused to delete one of the branches.
+        refused: bool,
+    },
     /// Git removal succeeded but the session was already gone (e.g. its project
     /// was removed) before the worker reported back.
     SucceededGone,
     /// Git removal failed; `message` is the authored failure sentence, which
     /// names the agent when the dispatch-time snapshot was still there to name it.
-    Failed { message: StatusText },
+    Failed {
+        /// The failure sentence.
+        message: StatusText,
+    },
     /// Git removal succeeded but the post-removal `FinishDeleteSession` cascade
     /// failed; `message` is the formatted error.
-    CleanupFailed { message: String },
+    CleanupFailed {
+        /// The formatted error.
+        message: String,
+    },
 }
 
 /// Handler-computed outcome for the web checkout-project-default-branch op. The
@@ -1107,24 +1154,36 @@ pub enum WebCheckoutOutcome {
     /// The `git switch` (worker 2) succeeded onto `target_branch`; `base` says
     /// whether it became the project's base.
     Ok {
+        /// The branch switched to.
         target_branch: String,
+        /// What became of the project's base.
         base: ProjectBaseAdoption,
     },
     /// The `git switch` (worker 2) failed; `repo_path` is the source checkout path.
     Failed {
+        /// The branch the switch was for.
         target_branch: String,
+        /// The checkout the switch ran in.
         repo_path: String,
     },
     /// Worker 1 found the project already on its leading branch; no switch ran.
     /// `base` as for `Ok`.
     AlreadyLeading {
+        /// The branch the checkout is on.
         current_branch: String,
+        /// What became of the project's base.
         base: ProjectBaseAdoption,
     },
     /// Worker 1 could only heuristically guess the default branch, so it refused.
-    Heuristic { current_branch: String },
+    Heuristic {
+        /// The branch the checkout is on.
+        current_branch: String,
+    },
     /// Worker 1's inspection itself failed.
-    InspectFailed { error: String },
+    InspectFailed {
+        /// Why the inspection failed.
+        error: String,
+    },
 }
 
 /// What a finished "check out the default branch" did to the project's base,
@@ -1139,7 +1198,9 @@ pub enum ProjectBaseAdoption {
     /// SQLite refused the new base, so the base stayed `previous` (`None` when
     /// the project had none recorded); `reason` is the refusal.
     SaveFailed {
+        /// The base that stayed, or `None` when there was none.
         previous: Option<String>,
+        /// Why SQLite refused the new base.
         reason: String,
     },
 }
@@ -1224,14 +1285,20 @@ pub enum ChangeBaseOutcome {
     /// The folder is on `branch` (switched just now, or already there) and the
     /// save of the base came to `base`.
     Changed {
+        /// The branch that became the base.
         branch: String,
+        /// Whether the folder was on it already, so nothing was checked out.
         folder_was_on_it: bool,
+        /// What became of the saved base.
         base: ProjectBaseAdoption,
     },
     /// Nothing ran: the folder, or the branch, did not allow it.
     Refused {
+        /// The branch asked for.
         branch: String,
+        /// What refused it.
         failure: crate::base_branch::BaseBranchChangeFailure,
+        /// The project folder.
         repo_path: String,
     },
 }
@@ -1653,15 +1720,23 @@ fn base_moved_suffix(branch: &str, base: &ProjectBaseAdoption) -> StatusText {
 pub enum WebAddProjectOutcome {
     /// The switch and the inline project-add both succeeded; `status_message` is
     /// the combined "Checked out X and added project Y" line.
-    Added { status_message: StatusText },
+    Added {
+        /// The combined line.
+        status_message: StatusText,
+    },
     /// The `git switch` failed before the add ran.
     SwitchFailed {
+        /// The branch the switch was for.
         target_branch: String,
+        /// The checkout the switch ran in.
         repo_path: String,
     },
     /// The switch succeeded but the inline add was rolled back; `message` is the
     /// already-formatted failure line.
-    AddFailed { message: StatusText },
+    AddFailed {
+        /// The failure line.
+        message: StatusText,
+    },
 }
 
 /// Handler-computed outcome for the web new-agent-from-PR lookup op.
@@ -1672,7 +1747,10 @@ pub enum WebPrLookupOutcome {
     /// is cleared with no message.
     HandedOff,
     /// The lookup failed; `message` is the already-formatted error line.
-    Failed { message: String },
+    Failed {
+        /// The error line.
+        message: String,
+    },
 }
 
 /// Handler-computed outcome for a manual PR-attach op (both surfaces).
@@ -1680,10 +1758,16 @@ pub enum WebPrLookupOutcome {
 pub enum PrAttachOutcome {
     /// The lookup resolved and the pin was applied; `message` is the
     /// already-formatted confirmation from [`Engine::apply_pr_attach`].
-    Attached { message: StatusText },
+    Attached {
+        /// The confirmation.
+        message: StatusText,
+    },
     /// The lookup failed or applying the pin failed; `message` is the
     /// already-formatted error line.
-    Failed { message: StatusText },
+    Failed {
+        /// The error line.
+        message: StatusText,
+    },
     /// The agent the lookup was for is gone by the time the answer landed.
     /// There is nothing to attach it to and nothing on either surface the
     /// sentence could be about, so the operation ends with its spinner retired
@@ -1944,20 +2028,31 @@ pub(crate) fn pr_attach_in_flight_message(agent_name: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionGitAccess {
     /// A managed working copy: the whole git surface, as always.
-    Full { worktree: PathBuf },
+    Full {
+        /// The working copy.
+        worktree: PathBuf,
+    },
     /// A managed working copy whose directory is gone from disk. Its own answer
     /// rather than an error every poll cycle: there is no directory to run git
     /// in, so the panel is quiet and says so, and the way out is to recreate the
     /// working copy at the same path.
-    WorkingCopyMissing { worktree: PathBuf },
+    WorkingCopyMissing {
+        /// Where the working copy was, and where it is recreated.
+        worktree: PathBuf,
+    },
     /// A standalone agent whose folder IS a repository's top level: the changes
     /// panel works here exactly as anywhere, and nothing branch-shaped exists.
-    ChangesOnly { directory: PathBuf },
+    ChangesOnly {
+        /// The agent's folder.
+        directory: PathBuf,
+    },
     /// A standalone agent with no repository to work in: no branch features and
     /// a quiet changes region. `quiet_reason` says why, in the user's terms,
     /// and never "the repository is busy".
     NoRepository {
+        /// The agent's folder.
         directory: PathBuf,
+        /// The sentence the quiet changes region shows.
         quiet_reason: String,
     },
 }
@@ -3165,6 +3260,9 @@ impl Engine {
         }
     }
 
+    /// Adopt a reloaded config the surface could not fully apply, so memory,
+    /// the projects and the file agree; a session database that cannot be read
+    /// keeps the config's own projects.
     pub fn keep_reloaded_config(&mut self, config: Config) {
         self.github_integration_enabled = config.ui.github_integration;
         let derived = self
@@ -3285,6 +3383,8 @@ impl Engine {
         }
     }
 
+    /// Start the branch-sync poller, at most once, unless the config turns it
+    /// off.
     pub fn spawn_branch_sync_worker(&self) {
         let configured = self.config.ui.branch_sync_interval;
         // Seeded even on the disabled path so a running loop from an earlier,
@@ -4075,6 +4175,8 @@ impl Engine {
         );
     }
 
+    /// List `dir` for the folder browser off the engine thread; the rows arrive
+    /// as `BrowserEntriesReady`.
     pub fn spawn_browser_entries(&mut self, dir: &Path) {
         let dir = dir.to_path_buf();
         let dir_for_panic = dir.clone();
@@ -4103,6 +4205,8 @@ impl Engine {
         );
     }
 
+    /// List `project`'s worktrees for the adopt picker off the engine thread;
+    /// they arrive as `ProjectWorktreesReady` under `status_op_id`.
     pub fn spawn_project_worktrees_worker(
         &mut self,
         project: Project,
@@ -4206,6 +4310,8 @@ impl Engine {
         }
     }
 
+    /// Read each project checkout's branch off the engine thread, for the
+    /// sidebar.
     pub fn spawn_project_branch_status_checks(&mut self) {
         // Not guarded against re-spawn: each project's check is a one-shot
         // background job (post per-branch events, exit). Re-running on a
@@ -4575,6 +4681,8 @@ impl Engine {
         targets
     }
 
+    /// Sample the resource monitor's process trees off the engine thread,
+    /// unless a sample is already running.
     pub fn spawn_resource_stats_worker(&mut self) {
         // The resource monitor refreshes itself periodically; an
         // already-in-flight refresh is a silent skip rather than a
@@ -4946,6 +5054,8 @@ impl Engine {
         changed
     }
 
+    /// Record whether the agent should be running when dux next starts, and
+    /// save it.
     pub fn mark_session_desired_running(
         &mut self,
         session_id: &str,
@@ -5703,6 +5813,8 @@ pub(crate) fn pinned_pr_from_stored(row: &crate::storage::StoredPr) -> crate::wo
 }
 
 impl Engine {
+    /// The provider the project chose itself, or `None` when it follows the
+    /// global default.
     pub fn project_explicit_default_provider(&self, project_id: &str) -> Option<ProviderKind> {
         self.projects
             .iter()
@@ -5710,10 +5822,13 @@ impl Engine {
             .and_then(|project| project.explicit_default_provider.clone())
     }
 
+    /// Whether the project chose its own default provider.
     pub fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
         self.project_explicit_default_provider(project_id).is_some()
     }
 
+    /// Whether the project's agents reopen at startup; a project with no choice
+    /// of its own does.
     pub fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
         self.projects
             .iter()
@@ -5722,6 +5837,8 @@ impl Engine {
             .unwrap_or(true)
     }
 
+    /// The name of the agent's project, or `unknown` when it has none dux
+    /// knows.
     pub fn project_name_for_session(&self, session: &AgentSession) -> String {
         session
             .project_id()
@@ -6158,6 +6275,7 @@ impl Engine {
             .unwrap_or_else(|| session.provider.clone())
     }
 
+    /// Whether the agent's own provider may resume its prior conversation here.
     pub fn should_resume_session(&self, session: &AgentSession) -> bool {
         self.should_resume_provider(session, &session.provider)
     }
@@ -6963,18 +7081,28 @@ impl Engine {
 pub enum ReconnectPlan {
     /// Normal reconnect refused: a provider is already live. The caller shows
     /// `message` and does nothing else.
-    AlreadyConnected { message: StatusText },
+    AlreadyConnected {
+        /// The sentence to show.
+        message: StatusText,
+    },
     /// The session's worktree is gone. The caller surfaces `message` as an error
     /// (the TUI as a status error, the web as a 400).
-    WorktreeMissing { message: StatusText },
+    WorktreeMissing {
+        /// The error to show.
+        message: StatusText,
+    },
     /// Relaunch: dispatch `request` and surface `busy_message` as the pending
     /// status. `resume` is the collision-aware decision the request carries, so a
     /// surface can announce it truthfully. `detached_label` names any conflicting
     /// same-worktree agent that was detached to make room (already applied).
     Launch {
+        /// The launch to dispatch.
         request: Box<crate::worker::AgentLaunchRequest>,
+        /// The busy shown while it runs.
         busy_message: StatusText,
+        /// Whether the launch resumes the provider's conversation.
         resume: bool,
+        /// The agent detached to make room, if any.
         detached_label: Option<String>,
     },
 }
