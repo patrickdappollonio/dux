@@ -295,6 +295,7 @@ impl HostAllowlist {
 
     /// Skip the Host rules. For a router with no bound address to pin Hosts
     /// to; no serve path builds one.
+    #[must_use]
     pub fn without_host_rules(mut self) -> Self {
         self.host_rules = false;
         self
@@ -303,6 +304,7 @@ impl HostAllowlist {
     /// Read whether a Funnel is on from the serve's exposure, and whether a
     /// password is set from `password_set`: together they decide whether rule
     /// 6's name is withdrawn.
+    #[must_use]
     pub fn with_exposure(
         mut self,
         cell: crate::exposure::ExposureCell,
@@ -325,6 +327,7 @@ impl HostAllowlist {
 
     /// Read rule 4 from a set a config reload rewrites, instead of the list
     /// given at construction.
+    #[must_use]
     pub fn with_live_configured_hosts(mut self, names: LiveHostNames) -> Self {
         self.configured = names;
         self
@@ -332,6 +335,7 @@ impl HostAllowlist {
 
     /// Read rule 6 from the set the serve loop writes this machine's `MagicDNS`
     /// name into. Without it the guard admits no tailnet name of its own accord.
+    #[must_use]
     pub fn with_live_own_magicdns_name(mut self, names: LiveHostNames) -> Self {
         self.own_magicdns_name = names;
         self
@@ -340,6 +344,7 @@ impl HostAllowlist {
     /// Read rule 5 from a live cell instead of the constructed value, so a
     /// `[server] tailscale` change applied while dux serves moves the Host guard
     /// with the listener rather than waiting for a restart.
+    #[must_use]
     pub fn with_live_tailscale_literals(
         mut self,
         cell: Arc<std::sync::atomic::AtomicBool>,

@@ -1338,6 +1338,7 @@ impl TailscaleModeControl {
     }
 
     /// Read whether a password is set from `password_set`.
+    #[must_use]
     pub fn with_password_set(mut self, password_set: crate::host_guard::PasswordSet) -> Self {
         self.password_set = password_set;
         self

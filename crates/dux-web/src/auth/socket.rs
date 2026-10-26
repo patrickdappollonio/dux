@@ -17,9 +17,9 @@ use super::{AuthState, RequestAuth};
 
 /// The close code for a socket whose session ended or never was: signed out,
 /// revoked, expired, or a password change.
-pub const CLOSE_SIGNED_OUT: u16 = 4401;
+pub(crate) const CLOSE_SIGNED_OUT: u16 = 4401;
 /// The close code for a socket whose client address is blocked.
-pub const CLOSE_BLOCKED: u16 = 4403;
+pub(crate) const CLOSE_BLOCKED: u16 = 4403;
 
 /// The close reason sent with a code, for logs and developer tools; the
 /// browser decides on the code alone.

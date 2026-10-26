@@ -581,6 +581,7 @@ impl RouterParams {
     /// suite serves a canned release payload from a local listener and passes its
     /// base here. Production never calls this and keeps
     /// `dux_core::urls::GITHUB_API_BASE`.
+    #[must_use]
     pub fn with_release_notes_api_base(mut self, base: impl Into<String>) -> Self {
         self.release_notes_api_base = base.into();
         self
@@ -590,6 +591,7 @@ impl RouterParams {
     /// Exists for tests: the real windows are tens of seconds, and a test that
     /// wants the deferred reply would otherwise have to sit through one.
     /// Production never calls this and keeps the real windows.
+    #[must_use]
     pub fn with_create_await_timeout(mut self, window: std::time::Duration) -> Self {
         self.create_await_timeout = Some(window);
         self
@@ -598,6 +600,7 @@ impl RouterParams {
     /// Set the file-search index cap from `[server] search_index_max_files`.
     /// The serve paths call this so the configured value (not just the default)
     /// bounds the flat walk behind `/files/list`.
+    #[must_use]
     pub fn with_search_index_max_files(mut self, max_files: usize) -> Self {
         self.search_index_max_files = max_files;
         self
@@ -606,6 +609,7 @@ impl RouterParams {
     /// Set the opening-send deadline from `[server] pty_send_timeout_seconds`.
     /// The serve paths call this so the configured value (not just the default)
     /// bounds the handshake and the scrollback replay.
+    #[must_use]
     pub fn with_pty_send_timeout_seconds(mut self, seconds: u32) -> Self {
         self.pty_send_timeout_seconds = seconds;
         self
@@ -614,6 +618,7 @@ impl RouterParams {
     /// Set the browser's beat-answer deadline from
     /// `[server] heartbeat_deadline_seconds`. The serve paths call this so the
     /// beat echo's own bound follows the window the client actually waits in.
+    #[must_use]
     pub fn with_heartbeat_deadline_seconds(mut self, seconds: u32) -> Self {
         self.heartbeat_deadline_seconds = seconds;
         self
@@ -622,6 +627,7 @@ impl RouterParams {
     /// Set the concurrent tree-listing cap from `[server]
     /// tree_list_max_concurrency`. The serve paths call this so the
     /// configured value (not just the default) bounds `/files/tree`.
+    #[must_use]
     pub fn with_tree_list_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.tree_list_max_concurrency = max_concurrency;
         self
@@ -630,6 +636,7 @@ impl RouterParams {
     /// Set the concurrent release-notes-fetch cap from `[server]
     /// release_notes_max_concurrency`. The serve paths call this so the
     /// configured value (not just the default) bounds `/api/v1/release-notes`.
+    #[must_use]
     pub fn with_release_notes_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.release_notes_max_concurrency = max_concurrency;
         self
@@ -640,6 +647,7 @@ impl RouterParams {
     /// this so the configured values (not just the defaults) bound
     /// `/api/v1/file-drop`. Both are read here, at startup, which is why the
     /// documentation says changing either needs a restart.
+    #[must_use]
     pub fn with_file_drop_limits(mut self, max_bytes: usize, max_concurrency: u32) -> Self {
         self.file_drop_max_bytes = max_bytes;
         self.file_drop_max_concurrency = max_concurrency;
@@ -649,6 +657,7 @@ impl RouterParams {
     /// Attach a real console + the access-log toggle. The CLI serve paths call
     /// this so handler events and the access middleware reach stdout; the flip
     /// leaves the no-op console in place.
+    #[must_use]
     pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
         self.console = console;
         self.access_log = access_log;
@@ -659,6 +668,7 @@ impl RouterParams {
     /// `[server] max_websocket_*_connections` settings. The serve paths call this
     /// so the configured values (not just the defaults) bound live sockets, each
     /// class independently.
+    #[must_use]
     pub fn with_max_websocket_connections(
         mut self,
         events: u32,
@@ -686,6 +696,7 @@ impl RouterParams {
     /// bound: on `auto` the Tailscale leg comes and goes behind this one
     /// immutable allowlist, and a rule derived from the startup bind set would
     /// 403 every tailnet device the moment the leg was re-bound.
+    #[must_use]
     pub fn with_host_allowlist(
         mut self,
         bound_ips: Vec<IpAddr>,
@@ -701,6 +712,7 @@ impl RouterParams {
     /// Set rule 5's constructed value on its own, for a caller whose EFFECTIVE
     /// mode differs from the configured one that [`crate::router_params`]
     /// derived (a run started with `--no-tailscale`).
+    #[must_use]
     pub fn with_tailscale_host_literals(mut self, allowed: bool) -> Self {
         self.tailscale_host_literals = allowed;
         self
@@ -709,6 +721,7 @@ impl RouterParams {
     /// Give the routes the handle that changes `[server] tailscale` while dux
     /// serves. Absent on any path with no serve loop behind it, which is what
     /// makes the route answer "nothing is serving" rather than hanging.
+    #[must_use]
     pub fn with_tailscale_mode_control(
         mut self,
         control: crate::serve_legs::TailscaleModeControl,
@@ -721,6 +734,7 @@ impl RouterParams {
 
     /// Let the Host guard read rule 5 from the serve's live Tailscale-mode cell,
     /// so a mode change applied while dux serves moves the guard with it.
+    #[must_use]
     pub fn with_live_tailscale_host_literals(
         mut self,
         cell: Arc<std::sync::atomic::AtomicBool>,
@@ -731,6 +745,7 @@ impl RouterParams {
 
     /// Let the Host guard admit this machine's own `MagicDNS` name from the set the
     /// serve loop keeps up to date, so a tailnet rename applies with no restart.
+    #[must_use]
     pub fn with_live_own_magicdns_name(mut self, names: crate::host_guard::LiveHostNames) -> Self {
         self.live_own_magicdns_name = Some(names);
         self
@@ -738,6 +753,7 @@ impl RouterParams {
 
     /// Classify requests and admit the `MagicDNS` name by the serve's live
     /// exposure.
+    #[must_use]
     pub fn with_live_exposure(mut self, cell: crate::exposure::ExposureCell) -> Self {
         self.live_exposure = Some(cell);
         self
@@ -745,12 +761,14 @@ impl RouterParams {
 
     /// See [`RouterParams::socket_opening_hook`].
     #[doc(hidden)]
+    #[must_use]
     pub fn with_socket_opening_hook(mut self, hook: crate::auth::OpeningHook) -> Self {
         self.socket_opening_hook = Some(hook);
         self
     }
 
     /// Replace what the auth layer calls after it writes `config.toml`.
+    #[must_use]
     pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.auth_reload = Some(reload);
         self

@@ -371,6 +371,7 @@ impl Console {
 
     /// This console, also writing every line to `log`. Only while building: the
     /// console is not shared yet.
+    #[must_use]
     pub fn with_server_log(mut self, log: Arc<ServerLog>) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.0) {
             inner.file = Some(log);
