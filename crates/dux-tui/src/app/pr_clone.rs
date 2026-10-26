@@ -9,7 +9,7 @@
 //! will actually happen. When the agent would need a review copy of the pull
 //! request, the form says so up front and holds the button until it is ticked.
 
-use super::components::next_focus;
+use super::components::{FocusStep, next_focus};
 use super::*;
 use crate::git::{agent_name_char_map, is_valid_agent_name};
 use dux_core::clone_project::{
@@ -535,7 +535,11 @@ impl App {
                 PrReviewQuestion::Needed(_)
             )
         {
-            *focus = next_focus(&form.focus_ring(&agent_name.text), *focus, true);
+            *focus = next_focus(
+                &form.focus_ring(&agent_name.text),
+                *focus,
+                FocusStep::Forward,
+            );
         }
     }
 

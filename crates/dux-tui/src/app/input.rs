@@ -1,5 +1,5 @@
 use super::components::wrap_lines::cluster_width;
-use super::components::{ButtonPressedTarget, PressedButton, next_focus};
+use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
 use chrono::Local;
@@ -184,6 +184,15 @@ fn is_reverse_tab(key: KeyEvent) -> bool {
 /// rebound key simply moves forwards.
 fn focus_move_is_reverse(key: KeyEvent) -> bool {
     is_reverse_tab(key) || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+}
+
+/// Which way a focus-moving key travels.
+fn focus_move_step(key: KeyEvent) -> FocusStep {
+    if focus_move_is_reverse(key) {
+        FocusStep::Backward
+    } else {
+        FocusStep::Forward
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1557,8 +1566,8 @@ impl App {
 
     fn handle_center_tab_action(&mut self, action: Action) -> Result<bool> {
         match action {
-            Action::NextTab => self.focus_tab_relative(true),
-            Action::PrevTab => self.focus_tab_relative(false),
+            Action::NextTab => self.focus_tab_relative(FocusStep::Forward),
+            Action::PrevTab => self.focus_tab_relative(FocusStep::Backward),
             Action::NewTab => self.open_new_tab_provider_prompt()?,
             Action::CloseTab => self.close_focused_tab_prompt(),
             Action::StopTab => self.stop_focused_tab_prompt(),
@@ -4027,14 +4036,16 @@ impl App {
         }
     }
 
-    fn move_kill_running_focus(&mut self, forward: bool) {
+    fn move_kill_running_focus(&mut self, direction: FocusStep) {
         let PromptState::KillRunning(prompt) = &mut self.prompt else {
             return;
         };
         prompt.focus = match prompt.focus {
-            KillRunningFocus::List => Self::next_kill_running_footer_action(prompt, None, forward),
+            KillRunningFocus::List => {
+                Self::next_kill_running_footer_action(prompt, None, direction)
+            }
             KillRunningFocus::Footer(action) => {
-                Self::next_kill_running_footer_action(prompt, Some(action), forward)
+                Self::next_kill_running_footer_action(prompt, Some(action), direction)
             }
         };
     }
@@ -4098,10 +4109,10 @@ impl App {
                 self.move_kill_running_selection(false);
             }
             Some(Action::FocusNext) => {
-                self.move_kill_running_focus(true);
+                self.move_kill_running_focus(FocusStep::Forward);
             }
             Some(Action::FocusPrev) => {
-                self.move_kill_running_focus(false);
+                self.move_kill_running_focus(FocusStep::Backward);
             }
             Some(Action::ToggleMarked) => {
                 self.toggle_hovered_kill_running_selection();
@@ -4487,7 +4498,7 @@ impl App {
                 prompt.focus = next_focus(
                     &StartupCommandLogFocus::RING,
                     prompt.focus,
-                    !focus_move_is_reverse(key),
+                    focus_move_step(key),
                 );
             }
             Some(Action::SearchToggle) => prompt.searching = true,
@@ -4777,7 +4788,7 @@ impl App {
                 (ConfigReloadFailedFocus::Apply, true),
                 (ConfigReloadFailedFocus::Checkbox, true),
             ];
-            *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
+            *focus = next_focus(&ring, *focus, focus_move_step(key));
             return Some(false);
         }
         if matches!(action, Some(Action::Confirm)) || key.code == KeyCode::Char(' ') {
@@ -4916,7 +4927,7 @@ impl App {
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 DeleteAgentFocus::WorktreeCheckbox => {
                     *delete_worktree = !*delete_worktree;
@@ -5028,7 +5039,7 @@ impl App {
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => *focus = next_focus(&ring, *focus, forward),
+            ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 RecreateWorkingCopyFocus::RestartCheckbox => *restart_tabs = !*restart_tabs,
                 RecreateWorkingCopyFocus::Cancel => {
@@ -5171,31 +5182,6 @@ impl App {
         Some(false)
     }
 
-    fn next_non_default_branch_focus(
-        focus: ConfirmNonDefaultBranchFocus,
-        has_checkbox: bool,
-        reverse: bool,
-    ) -> ConfirmNonDefaultBranchFocus {
-        match (focus, has_checkbox, reverse) {
-            (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
-                ConfirmNonDefaultBranchFocus::Add
-            }
-            (ConfirmNonDefaultBranchFocus::Add, true, false) => {
-                ConfirmNonDefaultBranchFocus::Checkbox
-            }
-            (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
-                ConfirmNonDefaultBranchFocus::Cancel
-            }
-            (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
-                ConfirmNonDefaultBranchFocus::Checkbox
-            }
-            (ConfirmNonDefaultBranchFocus::Add, true, true) => ConfirmNonDefaultBranchFocus::Cancel,
-            (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => ConfirmNonDefaultBranchFocus::Add,
-            (ConfirmNonDefaultBranchFocus::Cancel, false, _) => ConfirmNonDefaultBranchFocus::Add,
-            (ConfirmNonDefaultBranchFocus::Add, false, _) => ConfirmNonDefaultBranchFocus::Cancel,
-        }
-    }
-
     fn handle_confirm_non_default_branch_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::ConfirmNonDefaultBranch {
             focus,
@@ -5210,8 +5196,16 @@ impl App {
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::MoveFocus(forward) => {
-                *focus = Self::next_non_default_branch_focus(*focus, has_checkbox, !forward);
+            ModalKeyStep::MoveFocus(direction) => {
+                *focus = next_focus(
+                    &[
+                        (ConfirmNonDefaultBranchFocus::Cancel, true),
+                        (ConfirmNonDefaultBranchFocus::Add, true),
+                        (ConfirmNonDefaultBranchFocus::Checkbox, has_checkbox),
+                    ],
+                    *focus,
+                    direction,
+                );
             }
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 ConfirmNonDefaultBranchFocus::Checkbox => {
@@ -5259,8 +5253,8 @@ impl App {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::ManageWorktrees(previous);
             }
-            ModalKeyStep::MoveFocus(forward) => {
-                prompt.focus = next_focus(&ring, prompt.focus, forward);
+            ModalKeyStep::MoveFocus(direction) => {
+                prompt.focus = next_focus(&ring, prompt.focus, direction);
             }
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match prompt.focus {
                 DeleteWorktreeFocus::Checkbox => {
@@ -5357,7 +5351,7 @@ impl App {
                 self.open_pull_request_project_picker()?;
             }
             ModalKeyStep::ActivateFocus => {}
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_pull_request_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_pull_request_control(direction),
             ModalKeyStep::FallThroughToField => {
                 if field_focused
                     && let PromptState::PullRequestInput { input, .. } = &mut self.prompt
@@ -5458,7 +5452,7 @@ impl App {
                     self.prompt = PromptState::None;
                 }
             }
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_rename_session_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_rename_session_control(direction),
             ModalKeyStep::ActivateFocus if checkbox_focused => {
                 self.toggle_rename_session_branch();
             }
@@ -5611,7 +5605,7 @@ impl App {
         match action {
             Some(Action::CloseOverlay) => self.prompt = PromptState::None,
             Some(Action::ToggleSelection) => {
-                self.focus_next_name_new_agent_control(!focus_move_is_reverse(key));
+                self.focus_next_name_new_agent_control(focus_move_step(key));
             }
             Some(Action::Confirm) => self.confirm_name_new_agent_prompt()?,
             _ if checkbox_focused && key.code == KeyCode::Char(' ') => {
@@ -5653,7 +5647,7 @@ impl App {
                 self.choose_existing_project_from_clone_form();
             }
             ModalKeyStep::Confirm => self.confirm_clone_project(),
-            ModalKeyStep::MoveFocus(forward) => self.focus_next_clone_project_control(forward),
+            ModalKeyStep::MoveFocus(direction) => self.focus_next_clone_project_control(direction),
             ModalKeyStep::ActivateFocus => match focus {
                 CloneProjectFocus::RandomizedNameCheckbox => self.toggle_clone_randomized_name(),
                 CloneProjectFocus::ReviewCopyCheckbox => self.toggle_pr_clone_review_copy(),
@@ -5727,7 +5721,7 @@ impl App {
         }
     }
 
-    fn focus_next_clone_project_control(&mut self, forward: bool) {
+    fn focus_next_clone_project_control(&mut self, direction: FocusStep) {
         if let PromptState::CloneProject {
             focus,
             agent_name,
@@ -5738,7 +5732,7 @@ impl App {
             // The pull-request form has no address stop and no random-name box;
             // the stops it adds are present only while they mean something.
             *focus = match pull_request {
-                Some(form) => next_focus(&form.focus_ring(&agent_name.text), *focus, forward),
+                Some(form) => next_focus(&form.focus_ring(&agent_name.text), *focus, direction),
                 None => next_focus(
                     &[
                         (CloneProjectFocus::Address, true),
@@ -5747,7 +5741,7 @@ impl App {
                         (CloneProjectFocus::RandomizedNameCheckbox, true),
                     ],
                     *focus,
-                    forward,
+                    direction,
                 ),
             };
         }
@@ -5987,8 +5981,8 @@ impl App {
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         match action {
             Some(Action::CloseOverlay) => self.close_provider_picker(),
-            Some(Action::MoveDown) => self.move_provider_picker_selection(true),
-            Some(Action::MoveUp) => self.move_provider_picker_selection(false),
+            Some(Action::MoveDown) => self.move_provider_picker_selection(FocusStep::Forward),
+            Some(Action::MoveUp) => self.move_provider_picker_selection(FocusStep::Backward),
             Some(Action::Confirm) => match which {
                 ProviderPickerKind::Agent => self.apply_change_agent_provider()?,
                 ProviderPickerKind::GlobalDefault => self.apply_change_default_provider()?,
@@ -6002,7 +5996,7 @@ impl App {
     }
 
     /// Step the open provider picker's selection cursor, clamped at both ends.
-    fn move_provider_picker_selection(&mut self, forward: bool) {
+    fn move_provider_picker_selection(&mut self, direction: FocusStep) {
         let (selected, len) = match &mut self.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let len = prompt.options.len();
@@ -6018,7 +6012,7 @@ impl App {
             }
             _ => return,
         };
-        if forward {
+        if direction == FocusStep::Forward {
             if *selected + 1 < len {
                 *selected += 1;
             }
@@ -6193,7 +6187,7 @@ impl App {
                 return Ok(false);
             }
             Some(Action::ToggleSelection) => {
-                self.focus_next_macro_edit_control(!focus_move_is_reverse(key));
+                self.focus_next_macro_edit_control(focus_move_step(key));
                 return Ok(false);
             }
             Some(Action::ClearTextField) if focus == MacroEditFocus::Text => {
@@ -6303,7 +6297,7 @@ impl App {
                 return Ok(false);
             }
             Some(Action::ToggleSelection) => {
-                self.focus_next_configure_control(!focus_move_is_reverse(key));
+                self.focus_next_configure_control(focus_move_step(key));
                 return Ok(false);
             }
             Some(Action::Confirm) => {
@@ -6353,10 +6347,10 @@ impl App {
     /// Move focus between the configure modal's controls. Leaving the field
     /// always drops edit mode, so focus can never sit on a button while the
     /// field still swallows keystrokes.
-    fn focus_next_configure_control(&mut self, forward: bool) {
+    fn focus_next_configure_control(&mut self, direction: FocusStep) {
         self.input_target = InputTarget::None;
         if let Some(focus) = configure_focus(&self.prompt) {
-            set_configure_focus(&mut self.prompt, focus.step(forward));
+            set_configure_focus(&mut self.prompt, focus.step(direction));
         }
     }
 
@@ -6402,10 +6396,10 @@ impl App {
     ///
     /// Leaving the body always drops edit mode, so focus can never sit on a
     /// different control while the body still swallows keystrokes.
-    pub(super) fn focus_next_macro_edit_control(&mut self, forward: bool) {
+    pub(super) fn focus_next_macro_edit_control(&mut self, direction: FocusStep) {
         self.input_target = InputTarget::None;
         if let Some(state) = self.macro_edit_state_mut() {
-            state.focus = state.focus.step(forward);
+            state.focus = state.focus.step(direction);
         }
     }
 
@@ -7904,7 +7898,7 @@ impl App {
     fn next_kill_running_footer_action(
         prompt: &KillRunningPrompt,
         current: Option<KillRunningFooterAction>,
-        forward: bool,
+        direction: FocusStep,
     ) -> KillRunningFocus {
         const ACTIONS: [KillRunningFooterAction; 4] = [
             KillRunningFooterAction::Cancel,
@@ -7924,7 +7918,7 @@ impl App {
 
         match current {
             None => {
-                if forward {
+                if direction == FocusStep::Forward {
                     KillRunningFocus::Footer(enabled[0])
                 } else {
                     KillRunningFocus::Footer(*enabled.last().unwrap())
@@ -7932,13 +7926,13 @@ impl App {
             }
             Some(current) => {
                 let Some(index) = enabled.iter().position(|action| *action == current) else {
-                    return if forward {
+                    return if direction == FocusStep::Forward {
                         KillRunningFocus::Footer(enabled[0])
                     } else {
                         KillRunningFocus::Footer(*enabled.last().unwrap())
                     };
                 };
-                if forward {
+                if direction == FocusStep::Forward {
                     if index + 1 < enabled.len() {
                         KillRunningFocus::Footer(enabled[index + 1])
                     } else {
@@ -9215,7 +9209,7 @@ impl App {
     /// `_forward` is accepted so the call site reads exactly like the new-agent
     /// modal's, but with only two controls both directions land on the other
     /// one, so it has nothing to decide here.
-    fn focus_next_rename_session_control(&mut self, forward: bool) {
+    fn focus_next_rename_session_control(&mut self, direction: FocusStep) {
         if let PromptState::RenameSession {
             focus,
             branch_named,
@@ -9233,7 +9227,7 @@ impl App {
                     (RenameSessionFocus::RenameBranchCheckbox, branch_named),
                 ],
                 *focus,
-                forward,
+                direction,
             );
         }
     }
@@ -9301,7 +9295,7 @@ impl App {
     /// Focus order for the Create-Agent-From-PR modal. The secondary action is
     /// a CONDITIONAL stop: with a project already chosen it is not offered, so
     /// the ring has one enabled entry and focus cannot leave the field.
-    fn focus_next_pull_request_control(&mut self, forward: bool) {
+    fn focus_next_pull_request_control(&mut self, direction: FocusStep) {
         let has_project = matches!(
             self.prompt,
             PromptState::PullRequestInput {
@@ -9316,7 +9310,7 @@ impl App {
                     (PullRequestInputFocus::ChooseProject, !has_project),
                 ],
                 *focus,
-                forward,
+                direction,
             );
         }
     }
@@ -9333,7 +9327,7 @@ impl App {
         }
     }
 
-    fn focus_next_name_new_agent_control(&mut self, forward: bool) {
+    fn focus_next_name_new_agent_control(&mut self, direction: FocusStep) {
         if let PromptState::NameNewAgent {
             request,
             review_copy,
@@ -9355,7 +9349,7 @@ impl App {
                 ring.push(NameNewAgentFocus::ReviewCopyCheckbox);
             }
             let at = ring.iter().position(|stop| stop == focus).unwrap_or(0);
-            *focus = if forward {
+            *focus = if direction == FocusStep::Forward {
                 ring[(at + 1) % ring.len()]
             } else {
                 ring[(at + ring.len() - 1) % ring.len()]

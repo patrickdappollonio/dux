@@ -44,6 +44,7 @@ use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
     SessionSurface,
 };
+use components::FocusStep;
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
 // (the rename optimistic-title write and the exit-loop detach marking) moved
@@ -3418,13 +3419,13 @@ impl MacroEditFocus {
     ];
 
     /// The next focus stop in `forward` direction, wrapping at both ends.
-    pub(crate) fn step(self, forward: bool) -> Self {
+    pub(crate) fn step(self, direction: FocusStep) -> Self {
         let order = Self::ORDER;
         let index = order
             .iter()
             .position(|f| *f == self)
             .expect("every variant is in ORDER");
-        let next = if forward {
+        let next = if direction == FocusStep::Forward {
             (index + 1) % order.len()
         } else {
             (index + order.len() - 1) % order.len()
@@ -3472,13 +3473,13 @@ impl ConfigureFieldFocus {
     /// The next focus stop in `forward` direction, wrapping at both ends.
     /// Every stop is unconditional here, but the shared ring is used anyway so
     /// this modal's focus order is declared as data like everyone else's.
-    pub(crate) fn step(self, forward: bool) -> Self {
+    pub(crate) fn step(self, direction: FocusStep) -> Self {
         let ring: [(ConfigureFieldFocus, bool); 3] = [
             (ConfigureFieldFocus::Input, true),
             (ConfigureFieldFocus::Cancel, true),
             (ConfigureFieldFocus::Save, true),
         ];
-        components::focus_ring::next_focus(&ring, self, forward)
+        components::focus_ring::next_focus(&ring, self, direction)
     }
 }
 
@@ -7858,7 +7859,7 @@ impl App {
 
     /// Move focus to the next/previous tab of the selected session (wrapping).
     /// No-op when the session has fewer than two tabs.
-    pub(crate) fn focus_tab_relative(&mut self, forward: bool) {
+    pub(crate) fn focus_tab_relative(&mut self, direction: FocusStep) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return;
         };
@@ -7868,7 +7869,7 @@ impl App {
         }
         let cur = self.focused_tab_id(&session_id);
         let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
-        let next = if forward {
+        let next = if direction == FocusStep::Forward {
             (idx + 1) % ids.len()
         } else {
             (idx + ids.len() - 1) % ids.len()

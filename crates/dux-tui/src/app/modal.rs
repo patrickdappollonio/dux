@@ -49,6 +49,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
+use super::components::FocusStep;
 use super::input::contains_point;
 use super::text_input::TextInput;
 use super::{App, OverlayMouseLayout, PromptState};
@@ -497,7 +498,7 @@ pub(crate) enum ModalKeyStep {
     /// `prompt = None`; see [`super::overlay_dismiss`]).
     Close,
     /// Move focus. `true` is forwards.
-    MoveFocus(bool),
+    MoveFocus(FocusStep),
     /// The confirm key. What it means is the family's business: a `Confirm` or
     /// `Picker` acts on whatever has focus, while a `Form` whose fields are all
     /// single-line submits whichever control has focus. Collapsing this into
@@ -540,7 +541,7 @@ pub(crate) fn modal_key_step(
 ) -> ModalKeyStep {
     match action {
         Some(Action::CloseOverlay) => ModalKeyStep::Close,
-        Some(Action::ToggleSelection) => ModalKeyStep::MoveFocus(!focus_move_is_reverse(key)),
+        Some(Action::ToggleSelection) => ModalKeyStep::MoveFocus(focus_move_step(key)),
         Some(Action::Confirm) => ModalKeyStep::Confirm,
         _ if key.code == KeyCode::Char(' ') && !text_field_focused => ModalKeyStep::ActivateFocus,
         _ => ModalKeyStep::FallThroughToField,
@@ -556,6 +557,15 @@ fn focus_move_is_reverse(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::BackTab)
         || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
         || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+}
+
+/// Which way a focus-moving key travels.
+fn focus_move_step(key: KeyEvent) -> FocusStep {
+    if focus_move_is_reverse(key) {
+        FocusStep::Backward
+    } else {
+        FocusStep::Forward
+    }
 }
 
 #[cfg(test)]
@@ -1845,15 +1855,15 @@ pub(super) mod tests {
         );
         assert_eq!(
             modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Tab), false),
-            ModalKeyStep::MoveFocus(true)
+            ModalKeyStep::MoveFocus(FocusStep::Forward)
         );
         assert_eq!(
             modal_key_step(Some(Action::ToggleSelection), key(KeyCode::BackTab), false),
-            ModalKeyStep::MoveFocus(false)
+            ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
             modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Left), false),
-            ModalKeyStep::MoveFocus(false)
+            ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
             modal_key_step(Some(Action::Confirm), key(KeyCode::Enter), false),
