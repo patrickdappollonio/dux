@@ -39,9 +39,13 @@ pub(crate) const QR_INDENT: &str = "  ";
 /// surface paints it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogTone {
+    /// Plain information.
     Info,
+    /// Something that went right.
     Ok,
+    /// A warning.
     Warn,
+    /// An error.
     Error,
 }
 
@@ -115,6 +119,7 @@ pub struct LogSegment {
     /// The spelling stdout uses when color is off, when it differs (a glyph's
     /// word). `None` means the same as `text`.
     pub plain: Option<String>,
+    /// What the run of text is, which decides how it is styled.
     pub role: LogRole,
 }
 
@@ -168,6 +173,7 @@ fn status_ansi(status: u16) -> Option<&'static str> {
 /// One line of the server's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
+    /// The line's runs of text, in order.
     pub segments: Vec<LogSegment>,
 }
 
@@ -400,7 +406,9 @@ pub struct StartupNotes {
 /// are printed so each lands once per place a person reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StdStreams {
+    /// Whether stdout is a terminal.
     pub stdout_is_terminal: bool,
+    /// Whether stderr is a terminal.
     pub stderr_is_terminal: bool,
     /// Both name the same open file (device and inode), as with `> log 2>&1`,
     /// `nohup`, or a service manager's one log stream.

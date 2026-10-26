@@ -346,11 +346,26 @@ pub struct PasswordPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MinimumFailure {
     /// Fewer characters than `minimum_password_length`.
-    TooShort { length: usize, minimum: u32 },
+    TooShort {
+        /// How many characters the password has.
+        length: usize,
+        /// The fewest it may have.
+        minimum: u32,
+    },
     /// A zxcvbn score below `minimum_password_score`.
-    TooWeak { score: u8, minimum: u8 },
+    TooWeak {
+        /// The password's zxcvbn score.
+        score: u8,
+        /// The lowest score allowed.
+        minimum: u8,
+    },
     /// More bytes than `max_password_bytes`.
-    TooLong { bytes: usize, maximum: u32 },
+    TooLong {
+        /// How many bytes the password has.
+        bytes: usize,
+        /// The most it may have.
+        maximum: u32,
+    },
     /// A control character (Unicode category Cc: a line break, a tab, NUL,
     /// DEL), which a browser's password field cannot type, so the web login
     /// could never match the password. Says nothing of where or which.
@@ -390,7 +405,9 @@ impl fmt::Display for MinimumFailure {
 /// meter can show it) and every minimum the password misses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MinimumCheck {
+    /// How strong the password is, for the meter.
     pub strength: Strength,
+    /// Every minimum the password misses.
     pub failures: Vec<MinimumFailure>,
 }
 

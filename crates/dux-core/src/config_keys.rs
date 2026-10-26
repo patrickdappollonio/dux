@@ -58,7 +58,10 @@ pub enum WritePolicy {
 pub enum SecretKind {
     /// An Argon2id hash of the input, stored at `stores_at` (its path's
     /// segments).
-    PasswordHash { stores_at: &'static [&'static str] },
+    PasswordHash {
+        /// The path the hash is stored at, as its segments.
+        stores_at: &'static [&'static str],
+    },
     /// Stored as typed, but never taken from the command line and never
     /// printed unless asked for: `env.<NAME>`, where API tokens live.
     Text,
@@ -108,6 +111,7 @@ enum Shape {
 pub struct Key {
     /// The path as given, split on dots.
     pub path: Vec<String>,
+    /// How a set of this key may write the file.
     pub policy: WritePolicy,
     shape: Shape,
 }
@@ -138,13 +142,20 @@ pub enum KeyError {
     /// Not a well-formed path. `known` is the longest start of it that is a
     /// setting or table (empty when none is), the only part of what was typed
     /// that is ever repeated; `reason` holds nothing that was typed.
-    Malformed { known: String, reason: String },
+    Malformed {
+        /// The longest start of the path that is a setting or table.
+        known: String,
+        /// What is wrong, holding nothing that was typed.
+        reason: String,
+    },
     /// No such setting. `known` is the longest start of the path that is a
     /// setting or table (empty when none is); the rest is never repeated,
     /// since it may be a value typed where a name goes. `suggestion` is the
     /// closest setting directly below `known`.
     Unknown {
+        /// The longest start of the path that is a setting or table.
         known: String,
+        /// The closest setting directly below `known`, when there is one.
         suggestion: Option<String>,
     },
 }
@@ -1425,7 +1436,9 @@ pub enum GetValue {
     /// out: `in_file` is what the file's own text says, if anything, and
     /// `reason` is the problem that stops the load.
     Unknown {
+        /// What the file's own text says, if anything.
         in_file: Option<String>,
+        /// The problem that stops the load.
         reason: String,
     },
 }

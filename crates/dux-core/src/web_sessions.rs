@@ -31,7 +31,9 @@ pub type TokenDigest = [u8; 32];
 /// A newly minted session token. `cookie_value` goes to the browser once and is
 /// never kept; `digest` is what the server stores.
 pub struct NewToken {
+    /// The token as the cookie carries it; given to the browser once and never kept.
     pub cookie_value: String,
+    /// The digest the server stores and looks the session up by.
     pub digest: TokenDigest,
 }
 
@@ -87,7 +89,9 @@ pub fn credential_generation(password_hash: &str) -> String {
 /// `session_idle_seconds` for a browser, `cli_token_idle_days` for the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
+    /// A browser's login session.
     Browser,
+    /// A command-line sign-in token.
     Cli,
 }
 
@@ -111,10 +115,13 @@ impl SessionKind {
 /// One stored session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredSession {
+    /// The digest the session is looked up by.
     pub digest: TokenDigest,
+    /// The credential generation it was issued under; it is good only while that one is current.
     pub generation: String,
     /// When it was last used, in milliseconds since the Unix epoch.
     pub last_seen_ms: i64,
+    /// Whether it is a browser session or a command-line token.
     pub kind: SessionKind,
 }
 

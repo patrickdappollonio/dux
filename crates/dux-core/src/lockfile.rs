@@ -117,9 +117,19 @@ pub enum AcquireError {
     /// Another live dux process already holds the lock. `pid` is the holder's
     /// PID as read from the lockfile. `None` if the file was empty or its
     /// contents could not be parsed.
-    AlreadyRunning { pid: Option<u32>, path: PathBuf },
+    AlreadyRunning {
+        /// The holder's pid, or `None` when the file was empty or unreadable.
+        pid: Option<u32>,
+        /// The lock file.
+        path: PathBuf,
+    },
     /// An unexpected filesystem error occurred (not contention).
-    Io { path: PathBuf, err: std::io::Error },
+    Io {
+        /// The lock file.
+        path: PathBuf,
+        /// The filesystem error.
+        err: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for AcquireError {
@@ -304,13 +314,16 @@ pub(crate) const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unava
 /// file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFileContents {
+    /// The holder's pid, when the first line is one.
     pub pid: Option<u32>,
     pub(crate) handles_reload_signal: bool,
+    /// Where the holder's control socket is bound, when it wrote one.
     pub control_socket: Option<PathBuf>,
     pub(crate) control_socket_unavailable: Option<String>,
 }
 
 impl LockFileContents {
+    /// Reads a lock file's text; anything it does not recognize is left out.
     pub fn parse(text: &str) -> Self {
         let mut lines = text.lines();
         let pid = lines

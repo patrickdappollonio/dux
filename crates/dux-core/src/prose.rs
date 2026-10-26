@@ -28,8 +28,11 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProseSegment {
+    /// Constant words.
     Text(String),
+    /// A name dux did not write, drawn as a chip.
     Name {
+        /// The name's text, bidi controls removed.
         name: String,
         /// The plain-text spelling wraps this name in straight double quotes.
         quoted: bool,
@@ -45,6 +48,7 @@ pub struct Prose {
 }
 
 impl Prose {
+    /// An empty sentence.
     pub fn new() -> Self {
         Self::default()
     }
@@ -82,6 +86,7 @@ impl Prose {
         self
     }
 
+    /// Appends constant words, merging them into the text before.
     pub fn push_text(&mut self, text: impl AsRef<str>) {
         let text = text.as_ref();
         if text.is_empty() {
@@ -114,6 +119,7 @@ impl Prose {
         });
     }
 
+    /// The segments, in order.
     pub fn segments(&self) -> &[ProseSegment] {
         &self.segments
     }
@@ -131,10 +137,12 @@ impl Prose {
         prose
     }
 
+    /// The segments, by value.
     pub fn into_segments(self) -> Vec<ProseSegment> {
         self.segments
     }
 
+    /// Whether the sentence has no segments.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
