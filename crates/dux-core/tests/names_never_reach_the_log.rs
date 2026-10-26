@@ -1,12 +1,7 @@
 //! A name the file writes that is not a setting name (a token pasted where a
 //! key goes) never reaches dux.log when `dux server` loads the file, in any
 //! structural position (see `NAME_POSITIONS`).
-// The same positions and tokens as the printers' property test, from the one
-// fixture file (an integration test does not see the crate's test items).
-#[allow(dead_code)]
-#[path = "../src/start_check_fixtures.rs"]
-mod start_check_fixtures;
-use start_check_fixtures::{NAME_POSITIONS, name_tokens};
+use dux_core::start_check_fixtures::{NAME_POSITIONS, name_tokens};
 
 #[test]
 fn a_name_that_is_not_a_setting_name_never_reaches_the_log() {
