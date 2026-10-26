@@ -737,16 +737,25 @@ impl SecretSource for TerminalSecrets {
     }
 }
 
-/// A password for `dux remote login`: read from standard input with `from_stdin`,
-/// else asked for once on the terminal without echo.
+/// Where a command reads a secret it asks for: what `--stdin` chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretInput {
+    /// Standard input, which must be a pipe or a file.
+    Stdin,
+    /// A prompt on the terminal, without echo.
+    Prompt,
+}
+
+/// A password for `dux remote login`: read from standard input with
+/// [`SecretInput::Stdin`], else asked for once on the terminal without echo.
 ///
 /// # Errors
 ///
-/// When `from_stdin` is set on a terminal or standard input is too large, or
-/// there is no terminal to ask on.
-pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> {
+/// When standard input is chosen but is a terminal or too large, or there is
+/// no terminal to ask on.
+pub fn read_sign_in_password(input: SecretInput, label: &str) -> Result<Password> {
     use std::io::IsTerminal;
-    if from_stdin {
+    if input == SecretInput::Stdin {
         return TerminalSecrets.read_stdin();
     }
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
@@ -756,15 +765,15 @@ pub fn read_sign_in_password(from_stdin: bool, label: &str) -> Result<Password> 
 }
 
 /// An environment value for `dux env set <name>`: read from standard input with
-/// `from_stdin`, else asked for twice on the terminal without echo.
+/// [`SecretInput::Stdin`], else asked for twice on the terminal without echo.
 ///
 /// # Errors
 ///
-/// When `from_stdin` is set on a terminal or standard input is too large, when
-/// there is no terminal to ask on, or when the two answers differ.
-pub fn read_env_value(from_stdin: bool, name: &str) -> Result<Password> {
+/// When standard input is chosen but is a terminal or too large, when there is
+/// no terminal to ask on, or when the two answers differ.
+pub fn read_env_value(input: SecretInput, name: &str) -> Result<Password> {
     let mut secrets = TerminalSecrets;
-    if from_stdin {
+    if input == SecretInput::Stdin {
         return secrets.read_stdin().map_err(|error| {
             if error.is::<StdinTooLarge>() {
                 anyhow!(

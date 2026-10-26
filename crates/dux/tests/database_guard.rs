@@ -230,6 +230,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "asks for a password, or reads it from stdin",
     ),
     (
+        "dux_tui::SecretInput",
+        Vetted::Data,
+        "says whether a secret comes from stdin or a prompt",
+    ),
+    (
         "dux_tui::read_env_value",
         Vetted::Function("crates/dux-tui/src/config_cli.rs", "read_env_value"),
         "asks for a variable's value, or reads it from stdin",
