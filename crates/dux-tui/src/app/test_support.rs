@@ -26,16 +26,13 @@ use std::sync::{Arc, Mutex, mpsc};
 use tempfile::tempdir;
 
 pub(crate) fn default_bindings() -> RuntimeBindings {
-    RuntimeBindings::new(
-        |action| {
-            BINDING_DEFS
-                .iter()
-                .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default()
-        },
-        true,
-    )
+    RuntimeBindings::new(|action| {
+        BINDING_DEFS
+            .iter()
+            .find(|d| d.action == action)
+            .map(|d| d.default_keys.to_vec())
+            .unwrap_or_default()
+    })
 }
 
 pub(crate) fn run_git(cwd: &std::path::Path, args: &[&str]) {

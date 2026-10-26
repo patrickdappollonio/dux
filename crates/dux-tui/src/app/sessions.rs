@@ -5024,16 +5024,13 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_bindings() -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
+        RuntimeBindings::new(|action| {
+            BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     fn test_app_with_sessions(sessions: Vec<AgentSession>, projects: Vec<Project>) -> App {

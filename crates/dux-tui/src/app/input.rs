@@ -12497,24 +12497,19 @@ mod tests {
     }
 
     fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                if let Some((_, keys)) =
-                    overrides.iter().find(|(candidate, _)| *candidate == action)
-                {
-                    return keys
-                        .iter()
-                        .map(|key| crokey::parse(key).expect("valid test binding"))
-                        .collect();
-                }
-                BINDING_DEFS
+        RuntimeBindings::new(|action| {
+            if let Some((_, keys)) = overrides.iter().find(|(candidate, _)| *candidate == action) {
+                return keys
                     .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
+                    .map(|key| crokey::parse(key).expect("valid test binding"))
+                    .collect();
+            }
+            BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     fn set_remote_default(path: &std::path::Path, branch: &str) {
@@ -39094,19 +39089,16 @@ cyan = "#00ffff"
             crokey::KeyCombination::new(KeyCode::F(n), KeyModifiers::CONTROL | KeyModifiers::ALT)
         };
         let bindings = || {
-            crate::keybindings::RuntimeBindings::new(
-                |action| match action {
-                    Action::OpenEntry => vec![ctrl_alt(6)],
-                    Action::CloseOverlay => vec![ctrl_alt(7)],
-                    Action::Confirm => vec![ctrl_alt(8)],
-                    _ => crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default(),
-                },
-                true,
-            )
+            crate::keybindings::RuntimeBindings::new(|action| match action {
+                Action::OpenEntry => vec![ctrl_alt(6)],
+                Action::CloseOverlay => vec![ctrl_alt(7)],
+                Action::Confirm => vec![ctrl_alt(8)],
+                _ => crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            })
         };
         let press = |app: &mut App, n: u8| {
             app.handle_key(KeyEvent::new(
@@ -39338,20 +39330,17 @@ cyan = "#00ffff"
         assert!(!searching, "Enter must end the search");
         assert_eq!(query, "line 40", "and keep the query");
 
-        let rebound = crate::keybindings::RuntimeBindings::new(
-            |action| match action {
-                Action::Confirm => vec![crokey::KeyCombination::new(
-                    KeyCode::F(5),
-                    KeyModifiers::CONTROL | KeyModifiers::ALT,
-                )],
-                _ => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let rebound = crate::keybindings::RuntimeBindings::new(|action| match action {
+            Action::Confirm => vec![crokey::KeyCombination::new(
+                KeyCode::F(5),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )],
+            _ => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = startup_log_viewer_app();
         app.bindings = rebound;
         begin_search(&mut app);

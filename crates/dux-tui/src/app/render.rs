@@ -14179,20 +14179,17 @@ mod tests {
     }
 
     fn bindings_with_standalone_keys(keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
-        crate::keybindings::RuntimeBindings::new(
-            move |action| {
-                if action == crate::keybindings::Action::NewStandaloneAgent {
-                    keys.clone()
-                } else {
-                    crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        )
+        crate::keybindings::RuntimeBindings::new(move |action| {
+            if action == crate::keybindings::Action::NewStandaloneAgent {
+                keys.clone()
+            } else {
+                crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        })
     }
 
     /// A rebinding that leaves only keys the filter types must drop the whole
@@ -17738,18 +17735,15 @@ mod tests {
     /// to the item that follows it, so nothing may trail the last one.
     #[test]
     fn typeable_hint_closes_up_when_no_pane_chord_survives() {
-        let bindings = crate::keybindings::RuntimeBindings::new(
-            |action| match action {
-                Action::FocusNext => vec![crokey::key!(tab)],
-                Action::FocusPrev => vec![crokey::key!(shift - tab)],
-                _ => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let bindings = crate::keybindings::RuntimeBindings::new(|action| match action {
+            Action::FocusNext => vec![crokey::key!(tab)],
+            Action::FocusPrev => vec![crokey::key!(shift - tab)],
+            _ => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = test_app(bindings);
         app.engine.config.ui.tab_reaches_agent = true;
 
@@ -24565,20 +24559,17 @@ mod tests {
 
     /// Bindings with every default key list except `action`, which gets `keys`.
     fn bindings_with(action: Action, keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
-        RuntimeBindings::new(
-            move |a| {
-                if a == action {
-                    keys.clone()
-                } else {
-                    crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == a)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        )
+        RuntimeBindings::new(move |a| {
+            if a == action {
+                keys.clone()
+            } else {
+                crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == a)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        })
     }
 
     /// A single-code key combination as the key event a user would produce.
@@ -25723,18 +25714,15 @@ mod tests {
     /// Rebinding any of the four macro-list keys moves its footer label.
     #[test]
     fn the_macro_list_footer_names_the_bound_keys() {
-        let bindings = RuntimeBindings::new(
-            |action| match action {
-                Action::NewMacro => vec![crokey::parse("ctrl-t").expect("binding")],
-                Action::DeleteMacro => vec![crokey::parse("ctrl-x").expect("binding")],
-                other => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == other)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| match action {
+            Action::NewMacro => vec![crokey::parse("ctrl-t").expect("binding")],
+            Action::DeleteMacro => vec![crokey::parse("ctrl-x").expect("binding")],
+            other => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == other)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = macro_list_app(bindings);
         let buf = render_to_buffer(&mut app);
         let footer = macro_modal_footer(&buf);

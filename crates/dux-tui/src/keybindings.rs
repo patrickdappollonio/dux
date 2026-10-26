@@ -1729,8 +1729,6 @@ pub(crate) struct RuntimeBinding {
 
 pub(crate) struct RuntimeBindings {
     bindings: Vec<RuntimeBinding>,
-    #[allow(dead_code)] // Will be used to filter terminal-native hints
-    pub show_terminal_keys: bool,
     format: KeyCombinationFormat,
 }
 
@@ -1739,31 +1737,25 @@ impl RuntimeBindings {
     /// Parses key strings from the config, falling back to defaults for
     /// missing or unparseable entries.
     pub(crate) fn from_keys_config(keys: &crate::config::KeysConfig) -> Self {
-        Self::new(
-            |action| {
-                let config_name = action.config_name();
-                match keys.bindings.get(config_name) {
-                    Some(key_strs) => key_strs
-                        .iter()
-                        .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
-                        .collect(),
-                    None => BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default(),
-                }
-            },
-            keys.show_terminal_keys,
-        )
+        Self::new(|action| {
+            let config_name = action.config_name();
+            match keys.bindings.get(config_name) {
+                Some(key_strs) => key_strs
+                    .iter()
+                    .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
+                    .collect(),
+                None => BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            }
+        })
     }
 
     /// Build runtime bindings from parsed config keys.
     /// `keys_for` returns the parsed `KeyCombination`s for a given action.
-    pub(crate) fn new(
-        keys_for: impl Fn(Action) -> Vec<KeyCombination>,
-        show_terminal_keys: bool,
-    ) -> Self {
+    pub(crate) fn new(keys_for: impl Fn(Action) -> Vec<KeyCombination>) -> Self {
         let format = display_format();
         let bindings = BINDING_DEFS
             .iter()
@@ -1788,11 +1780,7 @@ impl RuntimeBindings {
                 }
             })
             .collect();
-        Self {
-            bindings,
-            show_terminal_keys,
-            format,
-        }
+        Self { bindings, format }
     }
 
     /// Every action's binding, in declaration order.
@@ -2409,16 +2397,13 @@ mod tests {
     use super::*;
 
     fn default_bindings() -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
+        RuntimeBindings::new(|action| {
+            BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default()
+        })
     }
 
     #[test]
@@ -2545,18 +2530,15 @@ mod tests {
             "the default Ctrl-o and Ctrl-y are the way out"
         );
 
-        let tab_only = RuntimeBindings::new(
-            |action| match action {
-                Action::FocusNext => vec![key!(tab)],
-                Action::FocusPrev => vec![key!(shift - tab)],
-                _ => BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let tab_only = RuntimeBindings::new(|action| match action {
+            Action::FocusNext => vec![key!(tab)],
+            Action::FocusPrev => vec![key!(shift - tab)],
+            _ => BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         assert!(
             tab_only.typeable_center_traps_focus(true),
             "with both pane actions on Tab alone, nothing moves focus off the pane"
@@ -2581,20 +2563,17 @@ mod tests {
         );
 
         // Rebound to keys the field owns entirely: no honest label exists.
-        let letters_only = RuntimeBindings::new(
-            |action| {
-                if action == Action::ToggleSelection {
-                    vec![key!(h), key!(l)]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let letters_only = RuntimeBindings::new(|action| {
+            if action == Action::ToggleSelection {
+                vec![key!(h), key!(l)]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         assert_eq!(
             letters_only.label_for_text_field_dialog(Action::ToggleSelection),
             None
@@ -2756,20 +2735,17 @@ mod tests {
     /// types a character.
     #[test]
     fn a_letters_only_rebinding_leaves_the_chooser_footer_no_label() {
-        let bindings = RuntimeBindings::new(
-            |action| {
-                if action == Action::NewStandaloneAgent {
-                    vec![key!(s)]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| {
+            if action == Action::NewStandaloneAgent {
+                vec![key!(s)]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         assert_eq!(
             bindings.label_for_text_field_dialog(Action::NewStandaloneAgent),
             None
@@ -3800,21 +3776,18 @@ mod tests {
     fn lookup_declaration_order_wins() {
         // Build bindings where two actions share the same key in the same scope.
         // The one declared earlier in BINDING_DEFS should win.
-        let bindings = RuntimeBindings::new(
-            |action| {
-                if action == Action::MoveDown || action == Action::MoveUp {
-                    // Both bound to 'x' in Left scope
-                    vec![crokey::parse("x").unwrap()]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| {
+            if action == Action::MoveDown || action == Action::MoveUp {
+                // Both bound to 'x' in Left scope
+                vec![crokey::parse("x").unwrap()]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
         // MoveDown is declared before MoveUp in BINDING_DEFS
         assert_eq!(
@@ -3827,20 +3800,17 @@ mod tests {
     #[test]
     fn lookup_plain_key_ignores_shift_variant() {
         // A plain 'p' binding should NOT match Shift+p.
-        let bindings = RuntimeBindings::new(
-            |action| {
-                if action == Action::Quit {
-                    vec![crokey::parse("p").unwrap()]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| {
+            if action == Action::Quit {
+                vec![crokey::parse("p").unwrap()]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
         assert_ne!(
             bindings.lookup(&shift_p, BindingScope::Global),
@@ -3852,20 +3822,17 @@ mod tests {
     #[test]
     fn lookup_shift_key_ignores_plain() {
         // A 'shift-p' binding should NOT match plain 'p'.
-        let bindings = RuntimeBindings::new(
-            |action| {
-                if action == Action::Quit {
-                    vec![crokey::parse("shift-p").unwrap()]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| {
+            if action == Action::Quit {
+                vec![crokey::parse("shift-p").unwrap()]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         assert_ne!(
             bindings.lookup(&plain_p, BindingScope::Global),
@@ -3877,22 +3844,19 @@ mod tests {
     #[test]
     fn lookup_shift_p_and_plain_p_coexist() {
         // 'p' and 'shift-p' bound to different actions should both resolve correctly.
-        let bindings = RuntimeBindings::new(
-            |action| {
-                if action == Action::Quit {
-                    vec![crokey::parse("p").unwrap()]
-                } else if action == Action::ToggleHelp {
-                    vec![crokey::parse("shift-p").unwrap()]
-                } else {
-                    BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| {
+            if action == Action::Quit {
+                vec![crokey::parse("p").unwrap()]
+            } else if action == Action::ToggleHelp {
+                vec![crokey::parse("shift-p").unwrap()]
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
         let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
         assert_eq!(

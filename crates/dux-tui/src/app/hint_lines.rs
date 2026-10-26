@@ -54,20 +54,17 @@ fn distinct_colors(app: &mut App) {
 
 /// Every action bound to one key nobody would pick by default, all different.
 fn unusual_bindings() -> RuntimeBindings {
-    RuntimeBindings::new(
-        |action| {
-            let index = BINDING_DEFS
-                .iter()
-                .position(|def| def.action == action)
-                .expect("every action has a definition");
-            let f = u8::try_from(index + 1).expect("fewer than 256 actions");
-            vec![crokey::KeyCombination::new(
-                KeyCode::F(f),
-                KeyModifiers::CONTROL | KeyModifiers::ALT,
-            )]
-        },
-        true,
-    )
+    RuntimeBindings::new(|action| {
+        let index = BINDING_DEFS
+            .iter()
+            .position(|def| def.action == action)
+            .expect("every action has a definition");
+        let f = u8::try_from(index + 1).expect("fewer than 256 actions");
+        vec![crokey::KeyCombination::new(
+            KeyCode::F(f),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        )]
+    })
 }
 
 /// Every label the rebound bindings can print.
