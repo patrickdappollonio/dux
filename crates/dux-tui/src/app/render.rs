@@ -775,6 +775,7 @@ fn fit_agent_meta_line(
     counts: MetaCounts,
     style: &MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
+    const SEP_W: u16 = 3; // " · "
     let MetaLineStyle {
         sep: sep_style,
         highlight,
@@ -789,7 +790,6 @@ fn fit_agent_meta_line(
     let name_min_cut = |s: &Span<'static>| cols(name_cut.min_width(s.content.as_ref()));
     let branch_min_cut = |s: &Span<'static>| cols(FieldCut::End.min_width(s.content.as_ref()));
     let sep = || Span::styled(" · ", *sep_style);
-    const SEP_W: u16 = 3; // " · "
     let with_sep = |s: &Span<'static>| SEP_W.saturating_add(width(s));
 
     // Never given up: the marker and the word. A marker with no name after it
@@ -3548,6 +3548,15 @@ impl App {
         area: Rect,
         tab_id: Option<&str>,
     ) {
+        // RANKS, first to drop last: the standing resume rule is the same on
+        // every dormant card and the user can read it any time, so it is the
+        // first thing a small pane gives up; the run's own last output is the
+        // one thing on this card that could not be learned anywhere else, so it
+        // outlives everything but the sentence that names the ending.
+        const RANK_RESUME_RULE: u16 = 3;
+        const RANK_KEY_HINT: u16 = 2;
+        const RANK_EXCERPT: u16 = 1;
+        const RANK_ENDING: u16 = 0;
         self.welcome_logo.visible = false;
         self.mouse_layout.dormant_tab_button = None;
 
@@ -3566,16 +3575,6 @@ impl App {
                     verdict.excerpt.clone(),
                 )
             });
-
-        // RANKS, first to drop last: the standing resume rule is the same on
-        // every dormant card and the user can read it any time, so it is the
-        // first thing a small pane gives up; the run's own last output is the
-        // one thing on this card that could not be learned anywhere else, so it
-        // outlives everything but the sentence that names the ending.
-        const RANK_RESUME_RULE: u16 = 3;
-        const RANK_KEY_HINT: u16 = 2;
-        const RANK_EXCERPT: u16 = 1;
-        const RANK_ENDING: u16 = 0;
 
         let mut blocks: Vec<PaneCardBlock> = Vec::new();
         if let Some((sentence, excerpt)) = &verdict {
@@ -3802,6 +3801,14 @@ impl App {
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
     /// single-tab agents look exactly as before.
     fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
+        // Label-cell text per tab, right of the ordinal segment's divider. Every
+        // pill is laid out identically: a one-column activity slot ahead of the
+        // label, mirrored by an equal gutter after it so the text sits centered.
+        // The slot is reserved here as a plain space and written cell-by-cell
+        // later with a style of its own, so the pill's width never depends on
+        // what the tab is doing and the strip cannot reflow or jitter. The active
+        // tab is marked by its highlight alone, so no marker is prefixed here.
+        const GLYPH_SLOT: &str = " ";
         self.agent_tab_regions.clear();
 
         let Some(session) = self.selected_session() else {
@@ -3874,14 +3881,6 @@ impl App {
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
-        // Label-cell text per tab, right of the ordinal segment's divider. Every
-        // pill is laid out identically: a one-column activity slot ahead of the
-        // label, mirrored by an equal gutter after it so the text sits centered.
-        // The slot is reserved here as a plain space and written cell-by-cell
-        // later with a style of its own, so the pill's width never depends on
-        // what the tab is doing and the strip cannot reflow or jitter. The active
-        // tab is marked by its highlight alone, so no marker is prefixed here.
-        const GLYPH_SLOT: &str = " ";
         let mut seg_content: Vec<String> = items
             .iter()
             .map(|item| {
@@ -4263,6 +4262,24 @@ impl App {
         area: Rect,
         card: &crate::app::pty_ownership::PtyTakeoverCard,
     ) {
+        // A comfortable measure for the sentence, capped by the pane. `-2` is
+        // the border ring the card is drawn with.
+        const PREFERRED_INNER: u16 = 46;
+        // `Active on {device}` is ten characters of chrome plus the two padding
+        // spaces, so a pane with no room for a name falls back to the title that
+        // needs none rather than printing an ellipsis where the device goes.
+        const NAMED_TITLE_CHROME: u16 = 12;
+        // One column of padding on each side, the way the web's card pads its
+        // body: prose that touches the border ring reads as clipped.
+        const SIDE_PADDING: u16 = 1;
+        // One blank row under the title border, matching the blank row above the
+        // button: the card's body sits inside a ring of space rather than
+        // starting hard against the line that names the device.
+        // One blank row under the title, the prose, one blank row, then the
+        // button sitting on the frame's bottom edge, the spacing the other
+        // modals use between their prose and their buttons.
+        const TOP_PADDING: u16 = 1;
+        const PROSE_GAP: u16 = 1;
         // COVER THE WHOLE GRID first, exactly as the web's card is an
         // `absolute inset-0` over its pane: the child keeps streaming
         // underneath and none of it is on screen. Through
@@ -4308,15 +4325,8 @@ impl App {
             return;
         }
 
-        // A comfortable measure for the sentence, capped by the pane. `-2` is
-        // the border ring the card is drawn with.
-        const PREFERRED_INNER: u16 = 46;
         let inner_w = PREFERRED_INNER.min(area.width.saturating_sub(2)).max(1);
 
-        // `Active on {device}` is ten characters of chrome plus the two padding
-        // spaces, so a pane with no room for a name falls back to the title that
-        // needs none rather than printing an ellipsis where the device goes.
-        const NAMED_TITLE_CHROME: u16 = 12;
         // The kind sits inside a different sentence in each arm, so each arm
         // carries its whole prose rather than an opening a shared tail is glued
         // to: the free card's sentence names what happened to the pty, and the
@@ -4348,9 +4358,6 @@ impl App {
             ),
         };
 
-        // One column of padding on each side, the way the web's card pads its
-        // body: prose that touches the border ring reads as clipped.
-        const SIDE_PADDING: u16 = 1;
         let prose_w = inner_w.saturating_sub(SIDE_PADDING * 2).max(1);
         let prose_lines = wrap_styled_lines(
             &[Line::from(Span::styled(
@@ -4361,14 +4368,6 @@ impl App {
         );
         let prose_rows = u16::try_from(prose_lines.len()).unwrap_or(u16::MAX);
 
-        // One blank row under the title border, matching the blank row above the
-        // button: the card's body sits inside a ring of space rather than
-        // starting hard against the line that names the device.
-        // One blank row under the title, the prose, one blank row, then the
-        // button sitting on the frame's bottom edge, the spacing the other
-        // modals use between their prose and their buttons.
-        const TOP_PADDING: u16 = 1;
-        const PROSE_GAP: u16 = 1;
         let available_h = area.height.saturating_sub(2);
         let (show_prose, inner_h) =
             if available_h >= prose_rows.saturating_add(TOP_PADDING + PROSE_GAP + button_h) {
@@ -7533,6 +7532,9 @@ impl App {
     }
 
     fn render_pick_project_prompt(&mut self, frame: &mut Frame<'_>) {
+        // The path keeps room for its leaf on a narrow screen: the name gives
+        // up width first, then the base, each down to its floor.
+        const PATH_FLOOR: usize = 14;
         let PromptState::PickProject {
             intent,
             entries,
@@ -7639,9 +7641,6 @@ impl App {
             .clamp(8, 20);
         // margin(1) warn(1) sp(1) name sp(2) count sp(2) base sp(2) path margin(1)
         let gutters = 1 + 1 + 1 + 2 + count_col + 2 + 2 + 1;
-        // The path keeps room for its leaf on a narrow screen: the name gives
-        // up width first, then the base, each down to its floor.
-        const PATH_FLOOR: usize = 14;
         let room = usize::from(list_inner.width).saturating_sub(gutters + PATH_FLOOR);
         if name_col + base_col > room {
             name_col = room.saturating_sub(base_col).max(8);
@@ -12364,13 +12363,13 @@ impl App {
         state: &MacroEditState,
         label_style: Style,
     ) -> [Rect; 3] {
+        const PREFIX: &str = " Surface:  ";
+        const GAP: &str = "    ";
         let options = [
             (MacroSurface::Agent, "Agent"),
             (MacroSurface::Terminal, "Terminal"),
             (MacroSurface::Both, "Both"),
         ];
-        const PREFIX: &str = " Surface:  ";
-        const GAP: &str = "    ";
         let mut spans = vec![Span::styled(PREFIX, label_style)];
         let mut option_areas = [Rect::default(); 3];
         let mut cursor_x = area.x + usize_to_u16_wrapping(PREFIX.chars().count());
@@ -14113,10 +14112,10 @@ fn render_single_line_cursor_input(
     cursor_fill: Color,
     focused: FocusState,
 ) -> Line<'static> {
+    use unicode_segmentation::UnicodeSegmentation;
     if focused == FocusState::Unfocused {
         return Line::from(Span::raw(format!("{prefix}{text}")));
     }
-    use unicode_segmentation::UnicodeSegmentation;
 
     let cursor = glyph_start(text, cursor);
     if cursor < text.len() {
@@ -14447,11 +14446,11 @@ fn bare_repositories_kept_line(
     contents: &dux_core::model::FolderContents,
     theme: &Theme,
 ) -> Option<Line<'static>> {
+    const NAMED: usize = 3;
     let bare = &contents.bare_repositories;
     if bare.is_empty() {
         return None;
     }
-    const NAMED: usize = 3;
     let one = bare.len() == 1;
     let mut spans = vec![Span::raw(if one {
         " The bare repository "
@@ -19110,15 +19109,15 @@ mod tests {
 
     #[test]
     fn a_working_agent_name_carries_no_animated_band() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
         // Line one is the glyph and the name and nothing else: the cue lives
         // entirely on line two now.
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].status = crate::model::SessionStatus::Active;
         let slot = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.pty_activity.insert(slot, Instant::now());
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::widgets::List;
 
         let session = app.engine.sessions[0].clone();
         let width = 60;
@@ -19352,6 +19351,11 @@ mod tests {
     /// border, and painting a spinner over a border breaks the frame.
     #[test]
     fn the_activity_slot_stays_inside_the_narrowest_possible_pill() {
+        // ` 100 ` is 5 columns; the recorded region is the box (the segment
+        // minus its trailing inter-box gap), so the label cell is squeezed to
+        // exactly the 2 columns the guard floors at. If this stops holding, the
+        // guard's reachability argument has changed and needs re-deriving.
+        const ORD_W: u16 = 5;
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.sessions[0].status = crate::model::SessionStatus::Active;
@@ -19387,11 +19391,6 @@ mod tests {
             .map(|(_, r)| *r)
             .expect("the focused pill must be rendered even at the minimum width");
 
-        // ` 100 ` is 5 columns; the recorded region is the box (the segment
-        // minus its trailing inter-box gap), so the label cell is squeezed to
-        // exactly the 2 columns the guard floors at. If this stops holding, the
-        // guard's reachability argument has changed and needs re-deriving.
-        const ORD_W: u16 = 5;
         let label_w = rect.width + 1 - ORD_W - 4;
         assert_eq!(
             label_w, 2,
@@ -24325,6 +24324,8 @@ mod tests {
 
     #[test]
     fn the_startup_log_marker_clears_the_search_bar() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         // The search bar overlays the bottom three rows of the modal's INNER
         // area, which includes the marker's row. It must not reach the border
         // column the marker uses.
@@ -24334,8 +24335,6 @@ mod tests {
         if let Some(viewer) = &mut app.startup_log_viewer {
             viewer.searching = true;
         }
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))

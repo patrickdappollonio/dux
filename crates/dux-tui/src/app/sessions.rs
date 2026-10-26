@@ -178,6 +178,7 @@ impl App {
     }
 
     pub(crate) fn add_project(&mut self, raw_path: &str, name: String) -> Result<()> {
+        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
         let path = match self.engine.validate_project_add_path(raw_path) {
             Ok(path) => path,
             Err(message) => {
@@ -207,7 +208,6 @@ impl App {
         };
         let plan = dux_core::add_project_plan::add_project_plan(&inspection);
 
-        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
         if matches!(plan.action, AddProjectAction::NeedsInitialCommit) {
             self.prompt = PromptState::ConfirmCreateInitialCommit {
                 path: path.to_string_lossy().to_string(),

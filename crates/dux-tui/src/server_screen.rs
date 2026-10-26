@@ -56,6 +56,7 @@ use dux_core::serve_log::{LogLine, LogRole, LogTone};
 
 /// What the status screen asks the binary to do after a tick. The binary maps
 /// these straight onto `dux_web::ServerTick`.
+#[derive(Debug)]
 pub enum ServerScreenTick {
     /// No exit key pressed: keep serving.
     Continue,
@@ -436,11 +437,26 @@ pub struct ServerStatusScreen {
     shutdown_done: bool,
 }
 
+impl std::fmt::Debug for ServerStatusScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerStatusScreen")
+            .field("urls", &self.urls)
+            .field("browsers", &self.browsers)
+            .field("shutdown_message", &self.shutdown_message)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ServerStatusScreen {
     /// Enter the alternate screen + raw mode + hide the cursor, load the theme
     /// and the key bindings, and draw the first frame. The caller (binary) falls
     /// back to a plain line if this returns `Err`: the server must still run
     /// even if the status screen cannot be set up.
+    ///
+    /// # Errors
+    ///
+    /// When the terminal refuses raw mode or the alternate screen, or the
+    /// first frame cannot be drawn.
     pub fn new(
         urls: &[String],
         theme_name: &str,
@@ -611,14 +627,13 @@ impl ServerStatusScreen {
         let drawn = TERMINAL_GATE.draw_while_held(|| {
             terminal
                 .draw(|frame| {
+                    // Inset the whole screen so nothing is glued to the terminal edges.
+                    const V_MARGIN: u16 = 1;
+                    const H_MARGIN: u16 = 2;
                     let area = frame.area();
                     frame.render_widget(Clear, area);
                     let bg = Block::default().style(Style::default().bg(theme.app_bg));
                     frame.render_widget(bg, area);
-
-                    // Inset the whole screen so nothing is glued to the terminal edges.
-                    const V_MARGIN: u16 = 1;
-                    const H_MARGIN: u16 = 2;
 
                     let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
                     let footer = footer_lines(theme, bindings, shutdown, inner_width);

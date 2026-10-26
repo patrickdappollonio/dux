@@ -4644,10 +4644,10 @@ impl App {
 
         // Validate and build runtime keybindings from config.
         if let Err(msg) = validate_keys(&config.keys) {
-            eprintln!(
+            crate::line_to_stderr(format_args!(
                 "Configuration error in {}: {msg}",
                 paths.config_path.display()
-            );
+            ));
             std::process::exit(1);
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
@@ -5382,10 +5382,10 @@ impl App {
             return;
         }
         let grace = dux_core::config::shutdown_grace(self.engine.config.shutdown_timeout_seconds);
-        eprintln!(
+        crate::line_to_stderr(format_args!(
             "{}",
             dux_core::engine::format_shutdown_start(agents, terminals, grace)
-        );
+        ));
         // Consume the signal that may have triggered this quit, then watch for a
         // fresh one during the wait.
         self.shutdown_flag
@@ -5393,7 +5393,10 @@ impl App {
         let report = self
             .engine
             .shutdown_ptys_interruptible(grace, Some(&self.shutdown_flag));
-        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+        crate::line_to_stderr(format_args!(
+            "{}",
+            dux_core::engine::format_shutdown_result(&report)
+        ));
     }
 
     fn should_poll_raw_input(&self) -> bool {

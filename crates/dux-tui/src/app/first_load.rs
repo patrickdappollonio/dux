@@ -278,8 +278,10 @@ pub(crate) enum FirstLoadAction {
 pub(crate) fn button_action(prompt: &FirstLoadPrompt) -> FirstLoadAction {
     match (&prompt.screen, prompt.focus) {
         (FirstLoadScreen::Welcome(_), FirstLoadButton::Primary) => FirstLoadAction::AddProject,
-        (FirstLoadScreen::Welcome(_), FirstLoadButton::Secondary)
-        | (FirstLoadScreen::WhatsNew(_), FirstLoadButton::Secondary) => FirstLoadAction::Dismiss,
+        (
+            FirstLoadScreen::Welcome(_) | FirstLoadScreen::WhatsNew(_),
+            FirstLoadButton::Secondary,
+        ) => FirstLoadAction::Dismiss,
         (FirstLoadScreen::WhatsNew(_), FirstLoadButton::Primary) => {
             FirstLoadAction::OpenUrl(prompt.link())
         }

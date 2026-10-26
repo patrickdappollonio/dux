@@ -40,6 +40,7 @@ pub(crate) use dux_core::{
     editor, git, io_retry, lockfile, logger, model, pty, startup, statusline, storage,
 };
 
+use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::Result;
@@ -53,10 +54,16 @@ use dux_core::engine::Engine;
 /// [`resume_after_server`] when the server stops. LOCAL MODE may bind more than
 /// one address (loopback + Tailscale), so `listeners`/`urls` are vectors.
 pub enum TuiExit {
+    /// The user quit: the process ends.
     Done,
+    /// The user switched to the web server, which takes over this process.
     FlipToServer {
+        /// The live engine, its PTYs still running and the single-instance lock
+        /// inside it.
         engine: Box<Engine>,
+        /// The listeners already bound for the server to accept on.
         listeners: Vec<std::net::TcpListener>,
+        /// The URL each listener is reached at, in the same order.
         urls: Vec<String>,
         /// What the pre-flight learned (its warnings, the Tailscale bind
         /// failures, whether an address was detected), so the server's log opens
@@ -65,8 +72,25 @@ pub enum TuiExit {
     },
 }
 
+impl std::fmt::Debug for TuiExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Done => f.write_str("Done"),
+            Self::FlipToServer { urls, .. } => f
+                .debug_struct("FlipToServer")
+                .field("urls", urls)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Run `dux config <args>`, given the arguments after the word `config` exactly
 /// as typed; every message and exit code is the config code's own.
+///
+/// # Errors
+///
+/// When the config folder cannot be located or locked, or when the
+/// subcommand refuses or fails; the error carries the message it prints.
 pub fn run_config(config_args: &[String]) -> Result<()> {
     let paths = config::DuxPaths::discover()?;
     // Help anywhere in a config command (before a literal `--`) prints the
@@ -80,7 +104,11 @@ pub fn run_config(config_args: &[String]) -> Result<()> {
         // The one look at whether there is anything to reset. A reset that
         // went on would look again without the lock.
         ConfigLock::NothingToReset => {
-            println!("nothing to reset: {} does not exist", paths.root.display());
+            writeln!(
+                std::io::stdout(),
+                "nothing to reset: {} does not exist",
+                paths.root.display()
+            )?;
             return Ok(());
         }
     };
@@ -90,6 +118,12 @@ pub fn run_config(config_args: &[String]) -> Result<()> {
 
 /// Run the terminal UI; the `dux` binary calls it when no command was given.
 /// `companion` is the background web server it may serve through, which the binary implements.
+///
+/// # Errors
+///
+/// When the config folder cannot be located or created, when the terminal UI
+/// cannot start (the config, the session database or the terminal refuses),
+/// or when its event loop stops on an error.
 pub fn run(
     companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
 ) -> Result<TuiExit> {
@@ -98,7 +132,9 @@ pub fn run(
     // Before the lock: `kill -USR1` reaches whoever holds it, and the signal's
     // default action would end this process. Idempotent.
     if let Err(err) = dux_core::reload_signal::install() {
-        eprintln!("warning: {err}; `kill -USR1` cannot reload this dux, use Reload config in it");
+        line_to_stderr(format_args!(
+            "warning: {err}; `kill -USR1` cannot reload this dux, use Reload config in it"
+        ));
     }
 
     // TUI: always create the root directory (so the lockfile can be
@@ -115,6 +151,11 @@ pub fn run(
 /// owns the live providers and the single-instance lock, so this rebuilds the
 /// App view state around it (no session relaunch) and runs the loop. A resumed
 /// TUI can flip to the server again, so the flip↔serve cycle repeats.
+///
+/// # Errors
+///
+/// When the terminal cannot be taken back or the event loop stops on an
+/// error.
 pub fn resume_after_server(
     mut engine: Box<Engine>,
     companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
@@ -204,6 +245,12 @@ fn lock_for_config_subcommand(
     })
 }
 
+/// One line on standard error, for what the terminal UI says on its way in or
+/// out. A line that cannot be written is dropped: there is nowhere else to say it.
+pub(crate) fn line_to_stderr(line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr().lock(), "{line}");
+}
+
 /// Create the config folder owner-only, before any path opens the lock file in it.
 fn create_private_root(paths: &config::DuxPaths) -> Result<()> {
     dux_core::file_modes::create_private_dir_all(&paths.root)?;
@@ -214,7 +261,7 @@ fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
     match lockfile::SingleInstanceLock::acquire(path) {
         Ok(lock) => lock,
         Err(err) => {
-            eprintln!("{err}");
+            line_to_stderr(format_args!("{err}"));
             std::process::exit(1);
         }
     }

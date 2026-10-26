@@ -602,11 +602,12 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
             Action::OpenMacroBar
             | Action::ToggleFullscreen
             | Action::OpenPalette
-            | Action::FocusAgent,
+            | Action::FocusAgent
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown,
             _,
             _,
         )
-        | RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _)
         | RawSeqAction::Mouse(..) => false,
         RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
             !(*scroll == RawScroll::WhenScrolledBack
@@ -19510,6 +19511,31 @@ not_a_real_action = ["x"]
 
     #[test]
     fn inactive_rule_shows_only_when_the_toggle_is_unselected() {
+        // The rule keeps the right padding: its last column stops a gutter short
+        // of the pane edge, so the rightmost cell of the label row stays blank.
+        fn toggle_rule_right_pad_is_blank(app: &mut App) -> bool {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let toggle_idx = app
+                .left_items()
+                .iter()
+                .position(|i| matches!(i, LeftItem::InactiveToggle))
+                .expect("toggle");
+            let rel = app
+                .mouse_layout
+                .left_row_to_item
+                .iter()
+                .rposition(|&i| i == toggle_idx)
+                .expect("toggle row");
+            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
+            let lx = app.mouse_layout.left_list.x;
+            let lw = app.mouse_layout.left_list.width;
+            let buf = terminal.backend().buffer();
+            buf[(lx + lw - 1, y)].symbol() == " "
+        }
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -19557,32 +19583,6 @@ not_a_real_action = ["x"]
             .iter()
             .position(|i| matches!(i, LeftItem::InactiveToggle))
             .expect("toggle");
-
-        // The rule keeps the right padding: its last column stops a gutter short
-        // of the pane edge, so the rightmost cell of the label row stays blank.
-        fn toggle_rule_right_pad_is_blank(app: &mut App) -> bool {
-            let backend = TestBackend::new(120, 30);
-            let mut terminal = Terminal::new(backend).expect("terminal");
-            terminal
-                .draw(|frame| app.render(frame))
-                .expect("render frame");
-            let toggle_idx = app
-                .left_items()
-                .iter()
-                .position(|i| matches!(i, LeftItem::InactiveToggle))
-                .expect("toggle");
-            let rel = app
-                .mouse_layout
-                .left_row_to_item
-                .iter()
-                .rposition(|&i| i == toggle_idx)
-                .expect("toggle row");
-            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
-            let lx = app.mouse_layout.left_list.x;
-            let lw = app.mouse_layout.left_list.width;
-            let buf = terminal.backend().buffer();
-            buf[(lx + lw - 1, y)].symbol() == " "
-        }
 
         // Selection on the active agent (not the toggle): the rule shows.
         app.selected_left = app

@@ -1736,6 +1736,13 @@ pub(crate) mod tests {
     /// on a neighbour it was never on.
     #[test]
     fn a_change_made_elsewhere_rebuilds_the_sidebar_and_the_cursor_keeps_its_agent() {
+        type Case = (
+            &'static str,
+            Lend,
+            EngineChange,
+            Option<&'static str>,
+            &'static [&'static str],
+        );
         enum Lend {
             Service,
             Fanout,
@@ -1746,13 +1753,6 @@ pub(crate) mod tests {
         let delete = |id: &'static str| -> EngineChange {
             Box::new(move |engine: &mut Engine| engine.sessions.retain(|s| s.id != id))
         };
-        type Case = (
-            &'static str,
-            Lend,
-            EngineChange,
-            Option<&'static str>,
-            &'static [&'static str],
-        );
         let cases: Vec<Case> = vec![
             (
                 "a delete above",

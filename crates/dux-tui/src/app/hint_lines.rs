@@ -221,6 +221,8 @@ fn fixed_keys(name: &str) -> &'static [&'static str] {
 
 /// Everything that paints a hint line, painted with `bindings`.
 fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> Vec<Painted> {
+    // The footer in each focus context it has hints for.
+    type Setup = fn(&mut App);
     let mut out = Vec::new();
     let fresh = || {
         let mut app = test_app(bindings());
@@ -509,8 +511,6 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
         });
     }
 
-    // The footer in each focus context it has hints for.
-    type Setup = fn(&mut App);
     let footer_contexts: [(&str, Setup); 5] = [
         ("footer: project row", |app| {
             app.focus = FocusPane::Left;

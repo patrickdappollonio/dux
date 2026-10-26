@@ -53,7 +53,6 @@ fn get_agent_sort_reports_the_sort_the_terminal_ui_uses() {
 /// string to logging.level, which dux then silently reads as info.
 #[test]
 fn set_logging_level_refuses_a_level_dux_does_not_know() {
-    crate::config::install_canonical_renderer();
     struct NoSecrets;
     impl SecretSource for NoSecrets {
         fn read_stdin(&mut self) -> Result<Password> {
@@ -67,6 +66,7 @@ fn set_logging_level_refuses_a_level_dux_does_not_know() {
             Ok(None)
         }
     }
+    crate::config::install_canonical_renderer();
     let (_t, paths) = paths_with("");
     let mut out = Vec::new();
     let result = run_set(
@@ -137,8 +137,8 @@ fn get_shutdown_timeout_reports_the_clamped_wait_dux_uses() {
 /// `get` without `--show` must place it by its line, never print it.
 #[test]
 fn get_never_prints_a_name_inside_an_array_without_show() {
-    crate::config::install_canonical_renderer();
     const TOKEN: &str = "sk-proj-AbCdEf0123456789";
+    crate::config::install_canonical_renderer();
     let mut leaked = Vec::new();
     for (body, key) in [
         (

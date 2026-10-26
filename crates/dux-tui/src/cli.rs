@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
@@ -66,6 +67,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                 } else {
                     ResetScope::ConfigOnly
                 },
+                &mut ResetReport::terminal(),
             )
         }
         "diff" => {
@@ -78,6 +80,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                 } else {
                     DiffForm::Summary
                 },
+                &mut std::io::stdout(),
             )
         }
         "regenerate" => {
@@ -96,6 +99,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                     ConfigRewrite::Preview
                 },
                 held_back,
+                &mut std::io::stdout(),
             )
         }
         "restore-docs" => {
@@ -114,10 +118,11 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
                     ConfigRewrite::Preview
                 },
                 held_back,
+                &mut std::io::stdout(),
             )
         }
         "path" => {
-            println!("{}", paths.config_path.display());
+            writeln!(std::io::stdout(), "{}", paths.config_path.display())?;
             Ok(())
         }
         "get" => crate::config_cli::run_get(
@@ -132,10 +137,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             &mut crate::config_cli::TerminalSecrets,
             &mut std::io::stdout(),
         ),
-        "" | "--help" | "-h" => {
-            print_config_help();
-            Ok(())
-        }
+        "" | "--help" | "-h" => print_config_help(&mut std::io::stdout()),
         other => bail!("unknown config subcommand: {other}\nRun `dux config --help` for usage."),
     }
 }
@@ -149,8 +151,9 @@ fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn print_config_help() {
-    println!(
+fn print_config_help(out: &mut dyn std::io::Write) -> Result<()> {
+    writeln!(
+        out,
         "\
 dux config: manage the dux configuration file
 
@@ -191,7 +194,8 @@ Subcommands:
                            values like regenerate; --show reveals them)
   dux config restore-docs --yes
                            Apply it (writes a timestamped backup first)"
-    );
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -284,16 +288,44 @@ impl std::fmt::Display for ResetFailed {
 
 impl std::error::Error for ResetFailed {}
 
-/// The reset itself. Prints what it removed as it goes.
-fn run_reset(paths: &DuxPaths, scope: ResetScope) -> Result<()> {
+/// Where `dux config reset` reports as it goes: what it removed on `out`, its
+/// warnings on `err`.
+struct ResetReport {
+    out: Box<dyn std::io::Write>,
+    err: Box<dyn std::io::Write>,
+}
+
+impl ResetReport {
+    /// Standard output and standard error.
+    fn terminal() -> Self {
+        Self {
+            out: Box::new(std::io::stdout()),
+            err: Box::new(std::io::stderr()),
+        }
+    }
+
+    /// A line of the report. One that cannot be written is dropped: a closed
+    /// pipe must not stop a reset half-way through removing things.
+    fn say(&mut self, line: std::fmt::Arguments<'_>) {
+        let _ = writeln!(self.out, "{line}");
+    }
+
+    /// A warning, dropped the same way when standard error is gone.
+    fn warn(&mut self, line: std::fmt::Arguments<'_>) {
+        let _ = writeln!(self.err, "{line}");
+    }
+}
+
+/// The reset itself. Reports what it removed as it goes.
+fn run_reset(paths: &DuxPaths, scope: ResetScope, report: &mut ResetReport) -> Result<()> {
     let (log_path, server_log_path) = resolve_reset_log_paths(paths);
 
     if scope == ResetScope::Everything {
-        reset_agent_data(paths)?;
+        reset_agent_data(paths, report)?;
     }
 
-    if let Err(error) = remove_file_with_message(&log_path) {
-        eprintln!("warning: {error}");
+    if let Err(error) = remove_file_with_message(&log_path, report) {
+        report.warn(format_args!("warning: {error}"));
     }
     prune_empty_ancestors(&log_path, &paths.root)?;
     // Only from inside the config folder: a server log path that leaves it, by an
@@ -305,22 +337,22 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope) -> Result<()> {
             .into_iter()
             .chain([server_log_path.clone()])
         {
-            if let Err(error) = remove_file_with_message(&copy) {
-                eprintln!("warning: {error}");
+            if let Err(error) = remove_file_with_message(&copy, report) {
+                report.warn(format_args!("warning: {error}"));
             }
         }
         prune_empty_ancestors(&server_log_path, &paths.root)?;
     } else {
-        println!(
+        report.say(format_args!(
             "left {} alone: it is outside the config folder {}, or reached through a \
              symlinked folder, so dux does not delete it. Remove it yourself if you want it gone",
             server_log_path.display(),
             paths.root.display()
-        );
+        ));
     }
-    remove_file_with_message(&paths.root.join("remotes.toml"))?;
-    remove_file_with_message(&paths.root.join("remotes.toml.lock"))?;
-    remove_file_with_message(&paths.config_path)?;
+    remove_file_with_message(&paths.root.join("remotes.toml"), report)?;
+    remove_file_with_message(&paths.root.join("remotes.toml.lock"), report)?;
+    remove_file_with_message(&paths.config_path, report)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
 
     // The lockfile (`dux.lock`) is left in place: unlinking it while holding
@@ -328,8 +360,8 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope) -> Result<()> {
     // a fresh file at the same path and break the single-instance guarantee.
     // `remove_root_if_empty` therefore skips the root when the lockfile is the
     // sole remaining entry.
-    remove_root_if_empty_with_message(&paths.root)?;
-    println!("reset complete");
+    remove_root_if_empty_with_message(&paths.root, report)?;
+    report.say(format_args!("reset complete"));
     Ok(())
 }
 
@@ -337,9 +369,13 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope) -> Result<()> {
 // dux config diff
 // ---------------------------------------------------------------------------
 
-fn run_diff(paths: &DuxPaths, form: DiffForm) -> Result<()> {
+fn run_diff(paths: &DuxPaths, form: DiffForm, out: &mut dyn std::io::Write) -> Result<()> {
     if !paths.config_path.exists() {
-        println!("no config file found at {}", paths.config_path.display());
+        writeln!(
+            out,
+            "no config file found at {}",
+            paths.config_path.display()
+        )?;
         return Ok(());
     }
 
@@ -357,15 +393,15 @@ fn run_diff(paths: &DuxPaths, form: DiffForm) -> Result<()> {
     current.source_text = dux_core::config::SourceText::of(&current_raw);
 
     if form == DiffForm::Raw {
-        run_diff_raw(&current_raw, &current);
+        run_diff_raw(&current_raw, &current, out)
     } else {
-        run_diff_summary(&current);
+        run_diff_summary(&current, out)
     }
-    Ok(())
 }
 
-fn run_diff_raw(_current_raw: &str, current: &Config) {
-    print!("{}", raw_diff_text(current));
+fn run_diff_raw(_current_raw: &str, current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
+    write!(out, "{}", raw_diff_text(current))?;
+    Ok(())
 }
 
 /// What `dux config diff --raw` prints for `current`.
@@ -380,15 +416,16 @@ pub(crate) fn raw_diff_text(current: &Config) -> String {
     unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
-fn run_diff_summary(current: &Config) {
+fn run_diff_summary(current: &Config, out: &mut dyn std::io::Write) -> Result<()> {
     let changes = collect_config_changes(current);
     if changes.is_empty() {
-        println!("config matches defaults, so there are no differences");
+        writeln!(out, "config matches defaults, so there are no differences")?;
     } else {
         for line in &changes {
-            println!("  {line}");
+            writeln!(out, "  {line}")?;
         }
     }
+    Ok(())
 }
 
 /// Every setting whose current value differs from the default, as display lines.
@@ -632,6 +669,7 @@ fn run_regenerate(
     paths: &DuxPaths,
     rewrite: ConfigRewrite,
     held_back: dux_core::config_keys::HeldBack,
+    out: &mut dyn std::io::Write,
 ) -> Result<()> {
     let fresh = config::render_default_config();
 
@@ -640,17 +678,26 @@ fn run_regenerate(
             let current =
                 fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
             if current == fresh {
-                println!("config already matches defaults, so there is nothing to do");
+                writeln!(
+                    out,
+                    "config already matches defaults, so there is nothing to do"
+                )?;
                 return Ok(());
             }
-            print!("{}", regenerate_preview(&current, &fresh, held_back));
+            write!(out, "{}", regenerate_preview(&current, &fresh, held_back))?;
             if let Some(note) = regenerate_password_note(&current) {
-                println!("\n{note}");
+                writeln!(out, "\n{note}")?;
             }
-            println!("\nRun `dux config regenerate --yes` to overwrite with these defaults.");
+            writeln!(
+                out,
+                "\nRun `dux config regenerate --yes` to overwrite with these defaults."
+            )?;
         } else {
-            println!("no config file exists; regenerate --yes will create one at:");
-            println!("  {}", paths.config_path.display());
+            writeln!(
+                out,
+                "no config file exists; regenerate --yes will create one at:"
+            )?;
+            writeln!(out, "  {}", paths.config_path.display())?;
         }
         return Ok(());
     }
@@ -661,9 +708,9 @@ fn run_regenerate(
     paths.ensure_dirs()?;
     dux_core::config_write::write_config_secure(&paths.config_path, &fresh)
         .with_context_path(&paths.config_path)?;
-    println!("config regenerated at {}", paths.config_path.display());
+    writeln!(out, "config regenerated at {}", paths.config_path.display())?;
     if let Some(note) = note {
-        println!("{note}");
+        writeln!(out, "{note}")?;
     }
     Ok(())
 }
@@ -709,10 +756,18 @@ fn run_restore_docs(
     paths: &DuxPaths,
     rewrite: ConfigRewrite,
     held_back: dux_core::config_keys::HeldBack,
+    out: &mut dyn std::io::Write,
 ) -> Result<()> {
     if !paths.config_path.exists() {
-        println!("no config file found at {}", paths.config_path.display());
-        println!("dux writes a fully commented config the first time it starts.");
+        writeln!(
+            out,
+            "no config file found at {}",
+            paths.config_path.display()
+        )?;
+        writeln!(
+            out,
+            "dux writes a fully commented config the first time it starts."
+        )?;
         return Ok(());
     }
 
@@ -733,15 +788,25 @@ fn run_restore_docs(
     })?;
 
     if restored.is_noop(&raw) {
-        println!("config documentation is already up to date, so there is nothing to do");
+        writeln!(
+            out,
+            "config documentation is already up to date, so there is nothing to do"
+        )?;
         return Ok(());
     }
 
     if rewrite == ConfigRewrite::Preview {
-        print!("{}", restore_docs_preview(&raw, &restored.text, held_back));
-        print_restore_report(&restored);
-        println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
-        println!("of your current config is written first).");
+        write!(
+            out,
+            "{}",
+            restore_docs_preview(&raw, &restored.text, held_back)
+        )?;
+        print_restore_report(&restored, out)?;
+        writeln!(
+            out,
+            "\nRun `dux config restore-docs --yes` to apply this (a timestamped backup"
+        )?;
+        writeln!(out, "of your current config is written first).")?;
         return Ok(());
     }
 
@@ -768,39 +833,55 @@ fn run_restore_docs(
         })
         .with_context_path(&paths.config_path)?;
 
-    println!("documentation restored in {}", paths.config_path.display());
-    println!("backup of the previous config: {}", backup_path.display());
-    print_restore_report(&restored);
+    writeln!(
+        out,
+        "documentation restored in {}",
+        paths.config_path.display()
+    )?;
+    writeln!(
+        out,
+        "backup of the previous config: {}",
+        backup_path.display()
+    )?;
+    print_restore_report(&restored, out)?;
     Ok(())
 }
 
 /// Print what the restore changed beyond adding comments. A dropped section is
 /// reported even though its data was inert: a silent drop is still data loss.
-fn print_restore_report(restored: &config::RestoredConfig) {
+fn print_restore_report(
+    restored: &config::RestoredConfig,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
     if !restored.dropped.is_empty() {
-        println!("\nRemoved (dux no longer reads these):");
+        writeln!(out, "\nRemoved (dux no longer reads these):")?;
         for path in &restored.dropped {
-            println!("  [{path}]");
+            writeln!(out, "  [{path}]")?;
         }
     }
     if !restored.preserved.is_empty() {
-        println!("\nKept as-is (not settings dux knows, carried over unchanged):");
+        writeln!(
+            out,
+            "\nKept as-is (not settings dux knows, carried over unchanged):"
+        )?;
         for path in &restored.preserved {
-            println!("  {path}");
+            writeln!(out, "  {path}")?;
         }
     }
     // Not reachable through any config the canonical renderer can produce, and
     // printed anyway: a key that could not be placed is data loss, and the one
     // thing worse than losing it is losing it quietly.
     if !restored.unplaceable.is_empty() {
-        println!(
+        writeln!(
+            out,
             "\nCOULD NOT BE KEPT (this is a dux bug, please report it, and \
              recover these from the backup above):"
-        );
+        )?;
         for path in &restored.unplaceable {
-            println!("  {path}");
+            writeln!(out, "  {path}")?;
         }
     }
+    Ok(())
 }
 
 /// Write `raw` beside the config as `config.toml.backup-<UTC timestamp>`.
@@ -915,7 +996,7 @@ pub(crate) fn restore_docs_preview(
 // Agent data reset
 // ---------------------------------------------------------------------------
 
-fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
+fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // Folders a standalone agent occupies: the sweep of the whole worktrees
     // root below is otherwise indiscriminate, and nothing stops a user pointing
     // a standalone agent at a directory inside dux's managed area, which dux
@@ -969,7 +1050,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
     // Nothing is deleted until everything dux started has stopped and one last
     // look finds nothing left in the way.
     let removing = folders_reset_removes(paths, &sessions, &occupied_folders);
-    stop_recorded_programs(paths, &recorded)?;
+    stop_recorded_programs(paths, &recorded, report)?;
     ensure_nothing_runs(&recorded, &removing)?;
 
     let mut removed: Vec<PathBuf> = Vec::new();
@@ -977,7 +1058,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
         let Some(managed) = session.workspace.as_managed() else {
             continue;
         };
-        match remove_session_worktree(paths, managed, &occupied_folders) {
+        match remove_session_worktree(paths, managed, &occupied_folders, report) {
             SessionWorktreeReset::Removed => removed.push(PathBuf::from(&managed.worktree_path)),
             SessionWorktreeReset::Skipped => {}
             SessionWorktreeReset::Left(failed) => {
@@ -985,7 +1066,7 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
             }
         }
     }
-    println!("{}", removed_worktrees_line(removed.len()));
+    report.say(format_args!("{}", removed_worktrees_line(removed.len())));
 
     // What the loop above could not account for goes with the root, except a folder
     // a standalone agent occupies; it stops at the first entry it cannot remove.
@@ -994,18 +1075,19 @@ fn reset_agent_data(paths: &DuxPaths) -> Result<()> {
         &occupied_folders,
         &recorded_folders,
         &mut removed,
+        report,
     )?;
-    remove_file_with_message(&paths.sessions_db_path)?;
+    remove_file_with_message(&paths.sessions_db_path, report)?;
     // The welcome screen was already seen, and a reset does not make it new
     // again: the fresh database starts with that one record.
     if let Some(version) = seen_welcome {
         let kept = SessionStore::open(&paths.sessions_db_path)
             .and_then(|store| store.set_last_seen_version(&version));
         if let Err(error) = kept {
-            eprintln!(
+            report.warn(format_args!(
                 "warning: could not keep the record that you saw the welcome screen, so it \
                  opens again on the next start: {error}"
-            );
+            ));
         }
     }
     Ok(())
@@ -1064,14 +1146,14 @@ fn folders_reset_removes(
 /// The grace a factory reset gives each process before forcing it. A config
 /// dux cannot load still gets a reset: the grace falls back to the default
 /// rather than stopping the reset over an unrelated setting.
-fn reset_grace(paths: &DuxPaths) -> std::time::Duration {
+fn reset_grace(paths: &DuxPaths, report: &mut ResetReport) -> std::time::Duration {
     let timeout_seconds = match dux_core::config::load_config(paths) {
         Ok(config) => config.shutdown_timeout_seconds,
         Err(error) => {
-            eprintln!(
+            report.warn(format_args!(
                 "warning: could not read config.toml, so processes get the default grace \
                  period before they are forced to stop: {error}"
-            );
+            ));
             dux_core::config::Config::default().shutdown_timeout_seconds
         }
     };
@@ -1083,12 +1165,13 @@ fn reset_grace(paths: &DuxPaths) -> std::time::Duration {
 fn stop_recorded_programs(
     paths: &DuxPaths,
     recorded: &[dux_core::process_sessions::StoredSession],
+    report: &mut ResetReport,
 ) -> std::result::Result<(), ResetRefused> {
     use dux_core::process_sessions as ps;
     if recorded.is_empty() {
         return Ok(());
     }
-    let grace = reset_grace(paths);
+    let grace = reset_grace(paths, report);
     let mut running: Vec<ResetLeftover> = Vec::new();
     for entry in recorded {
         let table = ps::read_process_table_strict().map_err(ResetRefused::unknown)?;
@@ -1171,6 +1254,7 @@ fn sweep_worktrees_root(
     occupied: &[PathBuf],
     recorded: &[PathBuf],
     removed: &mut Vec<PathBuf>,
+    report: &mut ResetReport,
 ) -> std::result::Result<(), ResetFailed> {
     if !root.exists() {
         return Ok(());
@@ -1228,13 +1312,13 @@ fn sweep_worktrees_root(
         }
     }
     if kept > 0 {
-        println!(
+        report.say(format_args!(
             "reset {} but kept {kept} entr{} a standalone agent is running in",
             root.display(),
             if kept == 1 { "y" } else { "ies" }
-        );
+        ));
     } else if remove_dir_if_empty(root).unwrap_or(false) {
-        println!("removed {}", root.display());
+        report.say(format_args!("removed {}", root.display()));
     }
     Ok(())
 }
@@ -1283,21 +1367,22 @@ fn remove_session_worktree(
     paths: &DuxPaths,
     managed: &dux_core::model::ManagedWorkspace,
     occupied: &[PathBuf],
+    report: &mut ResetReport,
 ) -> SessionWorktreeReset {
     let worktree = Path::new(&managed.worktree_path);
     if !git::is_under(&paths.worktrees_root, worktree) {
-        eprintln!(
+        report.warn(format_args!(
             "warning: skipping worktree outside of managed root: {}",
             managed.worktree_path
-        );
+        ));
         return SessionWorktreeReset::Skipped;
     }
     if worktree_holds_occupied_folder(worktree, occupied) {
-        eprintln!(
+        report.warn(format_args!(
             "warning: keeping {}: a standalone agent is running in that directory or one \
              inside it, and dux never removes a folder it did not make",
             managed.worktree_path
-        );
+        ));
         return SessionWorktreeReset::Skipped;
     }
 
@@ -1341,11 +1426,11 @@ fn remove_session_worktree(
             .is_some_and(|err| err.downcast_ref::<git::RemovalWorthRetrying>().is_some())
             && let Err(err) = remove()
         {
-            eprintln!(
+            report.warn(format_args!(
                 "warning: removed {} but could not forget its registration in {project_path}: \
                  {err:#}",
                 worktree.display()
-            );
+            ));
         }
         return SessionWorktreeReset::Removed;
     }
@@ -1418,16 +1503,16 @@ fn is_plainly_inside(path: &Path, root: &Path) -> bool {
     true
 }
 
-fn remove_file_with_message(path: &Path) -> Result<()> {
+fn remove_file_with_message(path: &Path, report: &mut ResetReport) -> Result<()> {
     if remove_file_if_present(path)? {
-        println!("removed {}", path.display());
+        report.say(format_args!("removed {}", path.display()));
     }
     Ok(())
 }
 
-fn remove_root_if_empty_with_message(path: &Path) -> Result<()> {
+fn remove_root_if_empty_with_message(path: &Path, report: &mut ResetReport) -> Result<()> {
     if remove_dir_if_empty(path)? {
-        println!("removed {}", path.display());
+        report.say(format_args!("removed {}", path.display()));
     }
     Ok(())
 }
@@ -1494,6 +1579,17 @@ impl<T, E: std::fmt::Display> WithContextPath<T> for std::result::Result<T, E> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+impl ResetReport {
+    /// A report nobody reads, for the tests that drive a reset.
+    fn discarding() -> Self {
+        Self {
+            out: Box::new(std::io::sink()),
+            err: Box::new(std::io::sink()),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
@@ -1538,11 +1634,14 @@ mod tests {
         );
         fs::write(&paths.config_path, "this is [not toml\n").expect("write");
         assert!(dux_core::config::load_config(&paths).is_err());
-        assert_eq!(reset_grace(&paths), default_grace);
+        assert_eq!(
+            reset_grace(&paths, &mut ResetReport::discarding()),
+            default_grace
+        );
 
         fs::write(&paths.config_path, "shutdown_timeout_seconds = 3\n").expect("write");
         assert_eq!(
-            reset_grace(&paths),
+            reset_grace(&paths, &mut ResetReport::discarding()),
             dux_core::config::shutdown_grace(3),
             "a loadable file's own grace is used",
         );
@@ -1619,7 +1718,12 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        run_reset(&paths, ResetScope::Everything).expect("reset");
+        run_reset(
+            &paths,
+            ResetScope::Everything,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
 
         let still_running = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
@@ -1692,7 +1796,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        let _ = reset_agent_data(&paths, &mut ResetReport::discarding());
 
         let alive = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
@@ -1763,7 +1867,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        let _ = reset_agent_data(&paths, &mut ResetReport::discarding());
 
         let repo_job_alive = job.try_wait().expect("try_wait").is_none();
         // End the whole group we started, whatever the reset did.
@@ -1855,7 +1959,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        let _ = reset_agent_data(&paths, &mut ResetReport::discarding());
 
         let still_running = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
@@ -1873,6 +1977,13 @@ mod tests {
     /// the user's and stays.
     #[test]
     fn a_factory_reset_stops_a_recorded_standalone_process_and_keeps_its_folder() {
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
         use std::os::unix::process::CommandExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let paths = DuxPaths {
@@ -1896,13 +2007,6 @@ mod tests {
                 Ok(())
             });
         }
-        struct Kill(std::process::Child);
-        impl Drop for Kill {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
         let mut job = Kill(command.spawn().expect("spawn the job"));
         let session = dux_core::process_sessions::ProcessSession::started_now(job.0.id());
         let store = SessionStore::open(&paths.sessions_db_path).expect("store");
@@ -1918,7 +2022,12 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        run_reset(&paths, ResetScope::Everything).expect("reset");
+        run_reset(
+            &paths,
+            ResetScope::Everything,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
 
         assert!(
             job.0.try_wait().expect("try_wait").is_some(),
@@ -1948,8 +2057,12 @@ mod tests {
             .expect("make the body unreadable");
             drop(conn);
 
-            let refusal =
-                run_reset(&harness.paths, ResetScope::Everything).expect_err("the reset refuses");
+            let refusal = run_reset(
+                &harness.paths,
+                ResetScope::Everything,
+                &mut ResetReport::discarding(),
+            )
+            .expect_err("the reset refuses");
 
             let message = format!("{refusal:#}");
             assert!(
@@ -2014,7 +2127,7 @@ mod tests {
             .expect("upsert standalone");
         drop(store);
 
-        reset_agent_data(&paths).expect("reset");
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
 
         assert!(
             occupied.exists(),
@@ -2109,7 +2222,7 @@ mod tests {
             .expect("upsert standalone");
         drop(store);
 
-        reset_agent_data(&paths).expect("reset");
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
 
         assert_eq!(
             fs::read_to_string(occupied.join("notes.txt")).expect("the folder survives"),
@@ -2177,7 +2290,7 @@ mod tests {
             .expect("upsert project");
         drop(store);
 
-        reset_agent_data(&paths).expect("reset");
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
 
         assert!(
             project_repo.join("keep.txt").exists(),
@@ -2763,7 +2876,12 @@ mod tests {
         harness.write_log("logs/web-custom.log.notes.tmp");
         let worktree = harness.create_session("agent-1");
 
-        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
+        run_reset(
+            &harness.paths,
+            ResetScope::ConfigOnly,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
 
         assert!(!harness.paths.config_path.exists());
         assert!(!harness.paths.root.join("logs/custom.log").exists());
@@ -2817,7 +2935,12 @@ mod tests {
             for name in [kept.to_string(), format!("{kept}.1")] {
                 fs::write(outside.join(name), "not dux's to delete").expect("outside file");
             }
-            run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
+            run_reset(
+                &harness.paths,
+                ResetScope::ConfigOnly,
+                &mut ResetReport::discarding(),
+            )
+            .expect("reset");
             for name in [kept.to_string(), format!("{kept}.1")] {
                 assert!(
                     outside.join(&name).exists(),
@@ -2827,7 +2950,12 @@ mod tests {
         }
         fs::write(outside.join("target.log"), "behind the link").expect("link target");
         harness.write_config_with_server_log_path("leaf-link.log");
-        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
+        run_reset(
+            &harness.paths,
+            ResetScope::ConfigOnly,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
         assert!(
             fs::symlink_metadata(harness.paths.root.join("leaf-link.log")).is_err(),
             "the link itself is unlinked"
@@ -2863,7 +2991,12 @@ mod tests {
                     .expect("record the welcome screen as seen");
             }
 
-            run_reset(&harness.paths, ResetScope::Everything).expect("reset");
+            run_reset(
+                &harness.paths,
+                ResetScope::Everything,
+                &mut ResetReport::discarding(),
+            )
+            .expect("reset");
 
             assert!(!worktree.exists());
             assert!(!harness.paths.config_path.exists());
@@ -2886,7 +3019,12 @@ mod tests {
         let harness = ResetHarness::new();
         fs::create_dir_all(&harness.paths.root).expect("root");
 
-        run_reset(&harness.paths, ResetScope::ConfigOnly).expect("reset");
+        run_reset(
+            &harness.paths,
+            ResetScope::ConfigOnly,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
 
         assert!(!harness.paths.root.exists());
     }
@@ -2910,7 +3048,11 @@ mod tests {
         fs::write(locked.join("still-writing.log"), "x").expect("file");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).expect("chmod");
 
-        let result = run_reset(&harness.paths, ResetScope::Everything);
+        let result = run_reset(
+            &harness.paths,
+            ResetScope::Everything,
+            &mut ResetReport::discarding(),
+        );
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("chmod back");
 
         let refusal = result.expect_err("one stuck folder stops the reset");
@@ -2945,8 +3087,12 @@ mod tests {
             .spawn()
             .expect("spawn");
 
-        let refusal =
-            run_reset(&harness.paths, ResetScope::Everything).expect_err("the reset refuses");
+        let refusal = run_reset(
+            &harness.paths,
+            ResetScope::Everything,
+            &mut ResetReport::discarding(),
+        )
+        .expect_err("the reset refuses");
 
         let message = format!("{refusal:#}");
         assert!(message.contains(&stranger.id().to_string()), "{message}");
@@ -2956,7 +3102,12 @@ mod tests {
 
         stranger.kill().expect("kill");
         stranger.wait().expect("reap");
-        run_reset(&harness.paths, ResetScope::Everything).expect("reset");
+        run_reset(
+            &harness.paths,
+            ResetScope::Everything,
+            &mut ResetReport::discarding(),
+        )
+        .expect("reset");
 
         assert!(!harness.paths.root.exists());
     }
@@ -2965,7 +3116,7 @@ mod tests {
     fn diff_summary_reports_no_differences_for_defaults() {
         // Just verify it runs without error on defaults.
         let defaults = Config::default();
-        run_diff_summary(&defaults);
+        run_diff_summary(&defaults, &mut std::io::sink()).expect("a sink takes every line");
     }
 
     #[test]
@@ -3358,6 +3509,7 @@ mod tests {
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
             &[],
+            &mut ResetReport::discarding(),
         );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
@@ -3454,6 +3606,7 @@ mod tests {
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
             &[],
+            &mut ResetReport::discarding(),
         );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
@@ -3574,6 +3727,7 @@ mod tests {
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
             &[],
+            &mut ResetReport::discarding(),
         );
 
         assert!(!worktree.exists(), "the worktree directory must be removed");
@@ -3668,7 +3822,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        let _ = reset_agent_data(&paths, &mut ResetReport::discarding());
 
         let alive = job.try_wait().expect("try_wait").is_none();
         let _ = job.kill();
@@ -3741,7 +3895,7 @@ mod tests {
             .expect("save the registry");
         drop(store);
 
-        let _ = reset_agent_data(&paths);
+        let _ = reset_agent_data(&paths, &mut ResetReport::discarding());
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         let repo_job_alive = dux_core::process_sessions::read_process_table()
