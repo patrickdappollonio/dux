@@ -62,7 +62,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
 
 struct Fixture {
     addr: SocketAddr,
-    _tmp: dux_core::test_scratch::ScratchDir,
+    tmp: dux_core::test_scratch::ScratchDir,
     /// An adoptable, clean managed worktree.
     free: PathBuf,
     /// An adoptable managed worktree holding an untracked file.
@@ -133,7 +133,7 @@ async fn boot() -> Fixture {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -163,7 +163,7 @@ async fn boot() -> Fixture {
 
     Fixture {
         addr,
-        _tmp: tmp,
+        tmp,
         free,
         dirty,
         held,
@@ -287,7 +287,7 @@ async fn deleting_a_worktree_does_not_delete_its_branch() {
     assert_eq!(status, 200, "got {body}");
     let out = dux_core::test_git::fixture_git()
         .args(["branch", "--list", "free"])
-        .current_dir(f._tmp.path().join("repo"))
+        .current_dir(f.tmp.path().join("repo"))
         .output()
         .unwrap();
     assert!(
@@ -303,7 +303,7 @@ async fn deleting_a_worktree_with_delete_branch_removes_the_branch_too() {
     // worktree. Without this a deleted worktree leaves its branch behind, and
     // recreating an agent under that name fails with "branch already exists".
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     assert!(branch_exists(&repo, "free"));
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
@@ -334,7 +334,7 @@ async fn deleting_a_worktree_reports_a_branch_git_refused_to_delete() {
     // checkout's HEAD at `free` is what makes git refuse, and it is the same
     // refusal a user reaches by having the branch checked out elsewhere.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     git(&repo, &["symbolic-ref", "HEAD", "refs/heads/free"]);
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
@@ -365,7 +365,7 @@ async fn deleting_a_worktree_with_delete_branch_false_keeps_the_branch() {
     // An explicit `false` must behave exactly like the absent parameter, or the
     // checkbox has no off position.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=false").await;
 
@@ -384,11 +384,11 @@ async fn deleting_a_detached_worktree_with_delete_branch_still_works() {
     // anyway (a hand-written one, a stale tab) must not be an error: there is
     // simply no branch to delete, so the worktree goes and nothing else does.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     // The real path, the one git lists the worktree by (macOS reaches the temp
     // folder through a symlink).
     let loose = f
-        ._tmp
+        .tmp
         .path()
         .canonicalize()
         .unwrap()

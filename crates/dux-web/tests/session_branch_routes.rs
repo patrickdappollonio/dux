@@ -100,6 +100,47 @@ struct Fixture {
     _tmp: dux_core::test_scratch::ScratchDir,
 }
 
+/// Save the project and the three agents `boot` serves.
+fn seed_store(paths: &DuxPaths, repo: &Path, drifted_wt: &Path, duxs_wt: &Path, folder: &Path) {
+    let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
+    store
+        .upsert_project(&ProjectConfig {
+            id: "p1".to_string(),
+            path: repo.to_string_lossy().into_owned(),
+            name: Some("repo".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+        })
+        .expect("save the test project");
+    store
+        .create_session(&managed_session(
+            "drifted",
+            drifted_wt.to_string_lossy().as_ref(),
+            "develop-next",
+            "develop",
+            dux_core::model::BranchProvenance::AttachedExisting,
+        ))
+        .expect("save the test agent");
+    store
+        .create_session(&managed_session(
+            "duxs",
+            duxs_wt.to_string_lossy().as_ref(),
+            "dux/made-this",
+            "dux/made-this",
+            dux_core::model::BranchProvenance::CreatedByDux,
+        ))
+        .expect("save the test agent");
+    store
+        .create_session(&standalone_session(
+            "folder",
+            folder.to_string_lossy().as_ref(),
+        ))
+        .expect("save the test agent");
+}
+
 /// Boot a server over a real repo with three agents:
 ///
 /// - `drifted`, attached to `develop` and since moved onto `develop-next`,
@@ -164,45 +205,7 @@ async fn boot() -> Fixture {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    {
-        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
-        store
-            .upsert_project(&ProjectConfig {
-                id: "p1".to_string(),
-                path: repo.to_string_lossy().into_owned(),
-                name: Some("repo".to_string()),
-                default_provider: None,
-                leading_branch: None,
-                auto_reopen_agents: None,
-                startup_command: None,
-                env: Default::default(),
-            })
-            .expect("save the test project");
-        store
-            .create_session(&managed_session(
-                "drifted",
-                drifted_wt.to_string_lossy().as_ref(),
-                "develop-next",
-                "develop",
-                dux_core::model::BranchProvenance::AttachedExisting,
-            ))
-            .expect("save the test agent");
-        store
-            .create_session(&managed_session(
-                "duxs",
-                duxs_wt.to_string_lossy().as_ref(),
-                "dux/made-this",
-                "dux/made-this",
-                dux_core::model::BranchProvenance::CreatedByDux,
-            ))
-            .expect("save the test agent");
-        store
-            .create_session(&standalone_session(
-                "folder",
-                folder.to_string_lossy().as_ref(),
-            ))
-            .expect("save the test agent");
-    }
+    seed_store(&paths, &repo, &drifted_wt, &duxs_wt, &folder);
     let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);

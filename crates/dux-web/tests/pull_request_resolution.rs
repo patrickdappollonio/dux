@@ -94,7 +94,7 @@ async fn boot_with_lookup(
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .expect("save the test project");
         }
@@ -261,11 +261,31 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     assert!(value.get("clone").is_none(), "{body}");
     assert!(value.get("clone_unavailable").is_none(), "{body}");
 
+    let (hand_made, canonical) = the_folder_check_tells_checkouts_apart(addr, tmp.path()).await;
+    // For a checkout it also says whether the agent will need a review copy,
+    // from what the folder holds: a branch checked out in the folder or
+    // diverged from the pull request needs one, a branch the pull request has
+    // moved past or one that contains it does not, and a head commit the folder
+    // does not have leaves the question open. Nothing is fetched or written.
+    let head = branches_around_the_pull_request(&hand_made);
+    a_checkout_says_when_it_needs_a_review_copy(addr, tmp.path(), &hand_made, &canonical, &head)
+        .await;
+    a_typed_name_is_answered_for_itself(addr, tmp.path(), &hand_made).await;
+    a_pull_request_gh_finds_carries_the_clone_offer().await;
+}
+
+/// The folder a clone would go into: a hand-made checkout of the repository is
+/// a checkout, another repository's working copy is refused, and a folder that
+/// does not exist yet is free. Answers the checkout and its canonical spelling.
+async fn the_folder_check_tells_checkouts_apart(
+    addr: SocketAddr,
+    root: &Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     // The folder the clone would go into: a checkout somebody made by hand is
     // a checkout, another repository's working copy is refused, and a folder
     // that does not exist yet is free. Nothing is created.
-    let hand_made = tmp.path().join("hand-made");
-    std::fs::create_dir(&hand_made).unwrap();
+    let hand_made = root.join("hand-made");
+    std::fs::create_dir(&hand_made).expect("create the test directory");
     git_isolated(&hand_made, &["init", "-b", "feature"]);
     git_isolated(
         &hand_made,
@@ -292,11 +312,11 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     );
     let (status, body) = check_destination(addr, &hand_made, "acme/unknown").await;
     assert_eq!(status, 200, "{body}");
-    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&body).expect("the body is JSON");
     assert_eq!(value["state"], "checkout");
     // The answer names the folder by its canonical spelling, which on macOS
     // turns the temporary directory's /var into /private/var.
-    let canonical = std::fs::canonicalize(&hand_made).unwrap();
+    let canonical = std::fs::canonicalize(&hand_made).expect("the checkout has a canonical path");
     assert_eq!(value["path"], canonical.to_string_lossy().as_ref());
     let (status, body) = check_destination(addr, &hand_made, "acme/other").await;
     assert_eq!(status, 400, "{body}");
@@ -308,23 +328,23 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             canonical.display()
         )
     );
-    let not_yet = tmp.path().join("not-yet");
+    let not_yet = root.join("not-yet");
     let (status, body) = check_destination(addr, &not_yet, "acme/unknown").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"],
+        serde_json::from_str::<serde_json::Value>(&body).expect("the body is JSON")["state"],
         "free"
     );
     assert!(!not_yet.exists(), "the check created the folder");
+    (hand_made, canonical)
+}
 
-    // For a checkout it also says whether the agent will need a review copy,
-    // from what the folder holds: a branch checked out in the folder or
-    // diverged from the pull request needs one, a branch the pull request has
-    // moved past or one that contains it does not, and a head commit the folder
-    // does not have leaves the question open. Nothing is fetched or written.
+/// Branches around a pull request's head in `hand_made`: `behind` it, `ahead` of
+/// it, `side` diverged from it, and `feature` checked out on it. Answers the head.
+fn branches_around_the_pull_request(hand_made: &Path) -> String {
     let commit = |message: &str| {
         git_isolated(
-            &hand_made,
+            hand_made,
             &[
                 "-c",
                 "user.name=t",
@@ -338,28 +358,40 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             ],
         );
     };
-    git_isolated(&hand_made, &["branch", "behind"]);
+    git_isolated(hand_made, &["branch", "behind"]);
     commit("pull request work");
     let head = String::from_utf8(
         dux_core::test_git::fixture_git()
             .args(["-C"])
-            .arg(&hand_made)
+            .arg(hand_made)
             .args(["rev-parse", "HEAD"])
             .output()
-            .unwrap()
+            .expect("run git")
             .stdout,
     )
-    .unwrap()
+    .expect("the head prints as UTF-8")
     .trim()
     .to_string();
-    git_isolated(&hand_made, &["checkout", "-q", "-b", "ahead"]);
+    git_isolated(hand_made, &["checkout", "-q", "-b", "ahead"]);
     commit("more work");
-    git_isolated(&hand_made, &["checkout", "-q", "behind"]);
-    git_isolated(&hand_made, &["checkout", "-q", "-b", "side"]);
+    git_isolated(hand_made, &["checkout", "-q", "behind"]);
+    git_isolated(hand_made, &["checkout", "-q", "-b", "side"]);
     commit("my own work");
-    git_isolated(&hand_made, &["checkout", "-q", "feature"]);
+    git_isolated(hand_made, &["checkout", "-q", "feature"]);
+    head
+}
+
+/// For a checkout the folder check also says whether the agent will need a
+/// review copy, from what the folder holds.
+async fn a_checkout_says_when_it_needs_a_review_copy(
+    addr: SocketAddr,
+    root: &Path,
+    hand_made: &Path,
+    canonical: &Path,
+    head: &str,
+) {
     let review_copy = |branch: &'static str, oid: String| {
-        let (hand_made, canonical) = (hand_made.clone(), canonical.clone());
+        let (hand_made, canonical) = (hand_made.to_path_buf(), canonical.to_path_buf());
         async move {
             let res = reqwest::Client::new()
                 .post(format!(
@@ -377,12 +409,12 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
                 .await
                 .expect("check the folder");
             assert_eq!(res.status(), 200);
-            let value: serde_json::Value = res.json().await.unwrap();
+            let value: serde_json::Value = res.json().await.expect("the response body is JSON");
             assert_eq!(value["path"], canonical.to_string_lossy().as_ref());
             value["review_copy"].clone()
         }
     };
-    let checked_out = review_copy("feature", head.clone()).await;
+    let checked_out = review_copy("feature", head.to_string()).await;
     assert_eq!(
         checked_out,
         serde_json::json!({
@@ -407,12 +439,13 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
     );
     // The copy takes the name the create would pick, so a folder already
     // sitting where its worktree would go counts as taken.
-    std::fs::create_dir_all(tmp.path().join("worktrees/hand-made/feature-review")).unwrap();
+    std::fs::create_dir_all(root.join("worktrees/hand-made/feature-review"))
+        .expect("create the test directory");
     assert_eq!(
-        review_copy("feature", head.clone()).await["copy_branch"],
+        review_copy("feature", head.to_string()).await["copy_branch"],
         "feature-review-2"
     );
-    let diverged = review_copy("side", head.clone()).await;
+    let diverged = review_copy("side", head.to_string()).await;
     assert_eq!(diverged["state"], "needed");
     assert_eq!(diverged["reason"], "diverged");
     assert_eq!(diverged["copy_branch"], "side-review");
@@ -422,7 +455,7 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
         ("ahead", "a branch that contains the pull request"),
     ] {
         assert_eq!(
-            review_copy(branch, head.clone()).await,
+            review_copy(branch, head.to_string()).await,
             serde_json::json!({ "state": "not_needed" }),
             "{why}"
         );
@@ -432,6 +465,11 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
         serde_json::json!({ "state": "unknown" }),
         "a head commit the folder does not have cannot be compared"
     );
+}
+
+/// A typed agent name is answered for itself, and a caller that sends no pull
+/// request facts gets the answer it always did.
+async fn a_typed_name_is_answered_for_itself(addr: SocketAddr, root: &Path, hand_made: &Path) {
     // A typed name is answered for itself, whatever the folder holds: one
     // spelled like a review copy of the branch needs one, another needs none,
     // and the branch's own name is the branch's answer.
@@ -453,39 +491,45 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             .await
             .expect("check the folder");
         assert_eq!(res.status(), 200);
-        res.json::<serde_json::Value>().await.unwrap()
+        res.json::<serde_json::Value>()
+            .await
+            .expect("the response body is JSON")
     };
-    let in_checkout = named(hand_made.clone(), " feature-review-2 ").await["review_copy"].clone();
+    let in_checkout =
+        named(hand_made.to_path_buf(), " feature-review-2 ").await["review_copy"].clone();
     assert_eq!(in_checkout["state"], "needed");
     assert_eq!(in_checkout["reason"], "typed");
     assert_eq!(in_checkout["copy_branch"], "feature-review-2");
-    let free = named(tmp.path().join("not-made-yet"), "feature-review").await;
+    let free = named(root.join("not-made-yet"), "feature-review").await;
     assert_eq!(free["state"], "free");
     assert_eq!(free["review_copy"]["copy_branch"], "feature-review");
     assert_eq!(
-        named(hand_made.clone(), "something-else").await["review_copy"],
+        named(hand_made.to_path_buf(), "something-else").await["review_copy"],
         serde_json::json!({ "state": "not_needed" })
     );
     assert_eq!(
-        named(hand_made.clone(), "side").await["review_copy"],
+        named(hand_made.to_path_buf(), "side").await["review_copy"],
         serde_json::json!({ "state": "not_needed" }),
         "a branch of that name already in the folder is reused as it is"
     );
     assert_eq!(
-        named(hand_made.clone(), "feature").await["review_copy"]["reason"],
+        named(hand_made.to_path_buf(), "feature").await["review_copy"]["reason"],
         "busy",
         "the branch's own name is the branch's answer"
     );
     // A caller that sends no pull request facts gets the answer it always did.
-    let (_, body) = check_destination(addr, &hand_made, "acme/unknown").await;
+    let (_, body) = check_destination(addr, hand_made, "acme/unknown").await;
     assert!(
         serde_json::from_str::<serde_json::Value>(&body)
-            .unwrap()
+            .expect("the body is JSON")
             .get("review_copy")
             .is_none(),
         "{body}"
     );
+}
 
+/// With a pull request gh can find, the resolve reply carries the clone offer.
+async fn a_pull_request_gh_finds_carries_the_clone_offer() {
     // With a pull request gh can find, the reply carries the offer: the
     // address follows the host's ssh setting, and it says up front whether the
     // agent will need a review copy. A clone checks out the repository's
@@ -506,7 +550,7 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
             .await;
             let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
             assert_eq!(status, 200, "{body}");
-            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&body).expect("the body is JSON");
             assert!(value.get("clone_unavailable").is_none(), "{body}");
             (value["clone"].clone(), tmp)
         }

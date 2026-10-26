@@ -762,7 +762,10 @@ async fn index_references_a_real_hashed_asset_that_is_actually_served() {
         );
         total += body.len();
 
-        if !asset.ends_with(".js") {
+        if std::path::Path::new(&asset)
+            .extension()
+            .is_none_or(|extension| extension != "js")
+        {
             continue;
         }
         for chunk in chunk_refs(&String::from_utf8_lossy(&body)) {
@@ -991,7 +994,10 @@ async fn live_server_serves_the_built_page_and_accepts_a_websocket() {
             "/{asset} came back too small to be a real bundle"
         );
         total += body.len();
-        if !asset.ends_with(".js") {
+        if std::path::Path::new(&asset)
+            .extension()
+            .is_none_or(|extension| extension != "js")
+        {
             continue;
         }
         for chunk in chunk_refs(&String::from_utf8_lossy(&body)) {

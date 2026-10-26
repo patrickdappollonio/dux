@@ -96,7 +96,7 @@ async fn boot_full(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -186,7 +186,7 @@ async fn boot_with_broken_provider_and_claude(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -1070,12 +1070,11 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                closed = true;
-                break;
-            }
-            _ => continue,
+        if let Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await
+        {
+            closed = true;
+            break;
         }
     }
     assert!(
@@ -1130,7 +1129,7 @@ async fn every_established_socket_closes_when_its_client_stops_being_allowed() {
                 Ok(Some(Ok(Message::Close(None)) | Err(_)) | None) => {
                     panic!("the {what} socket ended without the auth close code")
                 }
-                _ => continue,
+                _ => {}
             }
         }
         panic!("the {what} socket stayed open after its client stopped being allowed");
@@ -1333,30 +1332,6 @@ async fn start_and_stop_refuse_a_tab_that_is_not_the_sessions() {
 /// written to the child come back out of it and reach every attached subscriber.
 #[tokio::test]
 async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
-    use futures_util::{SinkExt, StreamExt};
-
-    let (addr, _tmp) = boot().await;
-    let client = reqwest::Client::new();
-    // Launch the session-slot tab so both forms have a live child to talk to.
-    let launch = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
-        .json(&serde_json::json!({ "force": false }))
-        .send()
-        .await
-        .unwrap();
-    assert!(launch.status().is_success(), "reconnect should launch s1");
-    let slot = slot_tab_id(&client, addr, "s1").await;
-    assert_ne!(
-        slot, "s1",
-        "the slot tab is a generated id the session points at, not the session id"
-    );
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
-
-    let bare = format!("ws://{addr}/ws/sessions/s1/pty");
-    // The slot tab's own stable address. The bare form has to resolve it through
-    // the session's pointer, which is the whole point of the round trip below.
-    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/{slot}/pty");
-
     /// Write `line` on `writer` and wait for it to come back on `reader`,
     /// retrying the write: input is gated on pty ownership, and a previous
     /// socket's ownership is released asynchronously when it drops.
@@ -1388,6 +1363,30 @@ async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
         }
         false
     }
+
+    use futures_util::{SinkExt, StreamExt};
+
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    // Launch the session-slot tab so both forms have a live child to talk to.
+    let launch = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
+        .json(&serde_json::json!({ "force": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(launch.status().is_success(), "reconnect should launch s1");
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    assert_ne!(
+        slot, "s1",
+        "the slot tab is a generated id the session points at, not the session id"
+    );
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
+
+    let bare = format!("ws://{addr}/ws/sessions/s1/pty");
+    // The slot tab's own stable address. The bare form has to resolve it through
+    // the session's pointer, which is the whole point of the round trip below.
+    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/{slot}/pty");
 
     assert!(
         write_here_read_there(&per_tab, &bare, "alphaslot").await,

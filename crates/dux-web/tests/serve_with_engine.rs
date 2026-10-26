@@ -75,7 +75,7 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -139,6 +139,107 @@ fn socket_inode(path: &std::path::Path) -> u64 {
     std::fs::symlink_metadata(path).expect("the socket").ino()
 }
 
+/// Serve `engine` through the flip until `stop` is set, then come back under the
+/// terminal UI's own core. Answers the exit, whether the live terminal
+/// survived, the answer to a request sent after the flip, and the socket's inode.
+fn flip_and_come_back(
+    engine: Engine,
+    listener: TcpListener,
+    stop: &AtomicBool,
+    terminal_id: &str,
+    socket: &std::path::Path,
+) -> (ServerExit, bool, String, u64) {
+    let (returned_engine, exit) = serve_with_engine(
+        engine,
+        vec![listener],
+        dux_core::activity::ActivityRing::default(),
+        &dux_core::serve_log::StartupNotes::default(),
+        dux_web::FlipHooks::default(),
+        || {
+            if stop.load(Ordering::SeqCst) {
+                ServerTick::ReturnToTui
+            } else {
+                ServerTick::Continue
+            }
+        },
+        |_message| {},
+        || false,
+    )
+    .expect("serve_with_engine");
+
+    // The SAME engine came back: the terminal we created is still live and
+    // still writable (PTYs untouched by ReturnToTui).
+    let terminal = returned_engine.companion_terminals.get(terminal_id);
+    let survived = match terminal {
+        Some(t) => !t.client.is_exited() && t.client.write_bytes(b"ping\n").is_ok(),
+        None => false,
+    };
+
+    // Back under the terminal UI: a request sent before its core is up
+    // waits for it.
+    let mut engine = returned_engine;
+    let after_the_flip = request_over_socket(socket, "/api/v1/workspace");
+    let mut core = dux_web::background::BackgroundServer::start_control_only(&mut engine)
+        .expect("the socket core starts")
+        .expect("the engine still holds its socket");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !after_the_flip.is_finished() && std::time::Instant::now() < deadline {
+        core.service(&mut engine);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let answer = after_the_flip
+        .join()
+        .expect("the request thread does not panic")
+        .unwrap_or_else(|e| format!("unanswered: {e}"));
+    let _ = core.hand_over(&mut engine);
+    // Read here, while this engine still holds the socket: its lock removes
+    // the socket file when this thread drops it, so the test thread could
+    // otherwise look after it is gone.
+    let inode = socket_inode(socket);
+    (exit, survived, answer, inode)
+}
+
+/// Open an operation and have the command line wait on it over `socket`, giving
+/// the wait time to arrive before the caller moves on.
+fn an_operation_wait_in_flight(
+    operations: &dux_core::operations::Operations,
+    socket: &std::path::Path,
+) -> std::thread::JoinHandle<Result<String, String>> {
+    operations.open(
+        "op-across-the-flip",
+        dux_core::operations::OperationKind::TabClose,
+        dux_core::operations::OperationPolicy {
+            unknown_after: Duration::from_secs(600),
+            retention: Duration::from_secs(600),
+        },
+        std::time::Instant::now(),
+    );
+    let wait = request_over_socket(
+        socket,
+        "/api/v1/operations/op-across-the-flip?wait_seconds=25",
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    wait
+}
+
+/// Whether a `connected` frame arrives on `ws` within five seconds.
+async fn saw_connected_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"event\":\"connected\"")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// A ws client connects to `/ws/events` and receives the `connected` handshake
 /// frame, then a programmatic `ReturnToTui` tick stops serving: the engine comes
 /// back (proved by the returned `ServerExit::ReturnToTui` and a surviving
@@ -196,56 +297,16 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool, String, u64)>();
     let socket_for_thread = socket.clone();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(
+        let result = flip_and_come_back(
             engine,
-            vec![listener],
-            dux_core::activity::ActivityRing::default(),
-            &dux_core::serve_log::StartupNotes::default(),
-            dux_web::FlipHooks::default(),
-            || {
-                if stop_for_thread.load(Ordering::SeqCst) {
-                    ServerTick::ReturnToTui
-                } else {
-                    ServerTick::Continue
-                }
-            },
-            |_message| {},
-            || false,
-        )
-        .expect("serve_with_engine");
-
-        // The SAME engine came back: the terminal we created is still live and
-        // still writable (PTYs untouched by ReturnToTui).
-        let terminal = returned_engine
-            .companion_terminals
-            .get(&terminal_id_for_thread);
-        let survived = match terminal {
-            Some(t) => !t.client.is_exited() && t.client.write_bytes(b"ping\n").is_ok(),
-            None => false,
-        };
-
-        // Back under the terminal UI: a request sent before its core is up
-        // waits for it.
-        let mut engine = returned_engine;
-        let after_the_flip = request_over_socket(&socket_for_thread, "/api/v1/workspace");
-        let mut core = dux_web::background::BackgroundServer::start_control_only(&mut engine)
-            .expect("the socket core starts")
-            .expect("the engine still holds its socket");
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        while !after_the_flip.is_finished() && std::time::Instant::now() < deadline {
-            core.service(&mut engine);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let answer = after_the_flip
-            .join()
-            .unwrap()
-            .unwrap_or_else(|e| format!("unanswered: {e}"));
-        let _ = core.hand_over(&mut engine);
-        // Read here, while this engine still holds the socket: its lock removes
-        // the socket file when this thread drops it, so the test thread could
-        // otherwise look after it is gone.
-        let inode = socket_inode(&socket_for_thread);
-        result_tx.send((exit, survived, answer, inode)).unwrap();
+            listener,
+            &stop_for_thread,
+            &terminal_id_for_thread,
+            &socket_for_thread,
+        );
+        result_tx
+            .send(result)
+            .expect("the test thread waits for the result");
     });
 
     let answer = before_the_flip
@@ -265,34 +326,14 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("connect");
-    let mut saw_connected = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && !saw_connected {
-        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
-            && let Ok(t) = m.into_text()
-            && t.contains("\"event\":\"connected\"")
-        {
-            saw_connected = true;
-        }
-    }
-    assert!(saw_connected, "never received a connected frame");
+    assert!(
+        saw_connected_frame(&mut ws).await,
+        "never received a connected frame"
+    );
 
     // A command-line wait on an operation, in flight as the flip hands back,
     // answers the record as it stands at once instead of being waited out.
-    operations.open(
-        "op-across-the-flip",
-        dux_core::operations::OperationKind::TabClose,
-        dux_core::operations::OperationPolicy {
-            unknown_after: Duration::from_secs(600),
-            retention: Duration::from_secs(600),
-        },
-        std::time::Instant::now(),
-    );
-    let wait = request_over_socket(
-        &socket,
-        "/api/v1/operations/op-across-the-flip?wait_seconds=25",
-    );
-    std::thread::sleep(Duration::from_millis(300));
+    let wait = an_operation_wait_in_flight(&operations, &socket);
 
     // Ask the status-screen tick to flip back to the TUI.
     let handed_back = std::time::Instant::now();
@@ -590,6 +631,109 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     serve_thread.join().expect("serve thread joined");
 }
 
+/// The flip's log viewer shows the pre-flight warning, the banner, the access
+/// log, the client connecting and the shutdown.
+fn the_viewer_shows_the_serve_log(
+    ring: &dux_core::activity::ActivityRing,
+    addr: std::net::SocketAddr,
+) {
+    let lines: Vec<String> = ring
+        .snapshot()
+        .lines
+        .iter()
+        .map(dux_core::serve_log::LogLine::text)
+        .collect();
+    let joined = lines.join("\n");
+    // Timestamps are wall-clock, so each line is matched after its stamp.
+    let stamped = |rest: &str| {
+        lines
+            .iter()
+            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
+    };
+    assert!(
+        stamped("\u{26a0} Tailscale not detected (test)"),
+        "the pre-flight warning opens the log:\n{joined}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
+        "the banner header:\n{joined}"
+    );
+    assert!(
+        lines.contains(&format!("  \u{279c} Local (loopback): http://{addr}")),
+        "the banner names the URL:\n{joined}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("dux is not checking Tailscale")
+                && l.contains("tailscale = \"no\"")
+                && l.contains("signs in too")),
+        "tailscale = \"no\" says once what it costs:\n{joined}"
+    );
+    assert!(
+        stamped("GET /api/v1/build 200 "),
+        "the access log reaches the viewer:\n{joined}"
+    );
+    assert!(
+        stamped("\u{279c} client connected from 127.0.0.1"),
+        "the client connecting:\n{joined}"
+    );
+    assert!(
+        stamped("\u{279c} Requesting 0 agents and 1 terminal to gracefully shut down"),
+        "the shutdown progress:\n{joined}"
+    );
+}
+
+/// `server.log` holds the same lines as the viewer in the plain spelling, each
+/// leading with the full date and time.
+fn server_log_holds_the_plain_lines(server_log_path: &std::path::Path, addr: std::net::SocketAddr) {
+    // `server.log` holds the same lines in the plain spelling `dux server`
+    // prints with color off.
+    let file = std::fs::read_to_string(server_log_path).expect("server.log");
+    // Each line leads with the full date and time, in `dux.log`'s format.
+    let file_lines: Vec<&str> = file
+        .lines()
+        .map(|line| {
+            let (stamp, rest) = line.split_once(' ').expect("a dated line");
+            chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
+            rest
+        })
+        .collect();
+    let file_stamped = |rest: &str| {
+        file_lines
+            .iter()
+            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
+    };
+    assert!(
+        file_stamped("warn Tailscale not detected (test)"),
+        "the pre-flight warning opens the file:\n{file}"
+    );
+    assert!(
+        file_lines
+            .iter()
+            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
+        "the banner header:\n{file}"
+    );
+    assert!(
+        file_lines.contains(&format!("  -> Local (loopback): http://{addr}").as_str()),
+        "the banner names the URL:\n{file}"
+    );
+    assert!(
+        file_stamped("GET /api/v1/build 200 "),
+        "the access log reaches the file:\n{file}"
+    );
+    assert!(
+        file_stamped("info client connected from 127.0.0.1"),
+        "the client connecting:\n{file}"
+    );
+    assert!(
+        file_stamped("info Requesting 0 agents and 1 terminal to gracefully shut down"),
+        "the shutdown progress:\n{file}"
+    );
+}
+
 /// The flip's log viewer shows the log `dux server` prints. A user who flips the
 /// TUI into the server, opens it in a browser, and quits sees, in the viewer:
 /// the pre-flight's warning, the startup banner naming the loopback URL, the
@@ -652,97 +796,8 @@ async fn the_flip_logs_what_dux_server_prints() {
         .expect("serve thread finished");
     serve_thread.join().expect("serve thread joined");
 
-    let lines: Vec<String> = ring
-        .snapshot()
-        .lines
-        .iter()
-        .map(dux_core::serve_log::LogLine::text)
-        .collect();
-    let joined = lines.join("\n");
-    // Timestamps are wall-clock, so each line is matched after its stamp.
-    let stamped = |rest: &str| {
-        lines
-            .iter()
-            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
-    };
-    assert!(
-        stamped("\u{26a0} Tailscale not detected (test)"),
-        "the pre-flight warning opens the log:\n{joined}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
-        "the banner header:\n{joined}"
-    );
-    assert!(
-        lines.contains(&format!("  \u{279c} Local (loopback): http://{addr}")),
-        "the banner names the URL:\n{joined}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("dux is not checking Tailscale")
-                && l.contains("tailscale = \"no\"")
-                && l.contains("signs in too")),
-        "tailscale = \"no\" says once what it costs:\n{joined}"
-    );
-    assert!(
-        stamped("GET /api/v1/build 200 "),
-        "the access log reaches the viewer:\n{joined}"
-    );
-    assert!(
-        stamped("\u{279c} client connected from 127.0.0.1"),
-        "the client connecting:\n{joined}"
-    );
-    assert!(
-        stamped("\u{279c} Requesting 0 agents and 1 terminal to gracefully shut down"),
-        "the shutdown progress:\n{joined}"
-    );
-
-    // `server.log` holds the same lines in the plain spelling `dux server`
-    // prints with color off.
-    let file = std::fs::read_to_string(&server_log_path).expect("server.log");
-    // Each line leads with the full date and time, in `dux.log`'s format.
-    let file_lines: Vec<&str> = file
-        .lines()
-        .map(|line| {
-            let (stamp, rest) = line.split_once(' ').expect("a dated line");
-            chrono::DateTime::parse_from_rfc3339(stamp).expect("an RFC 3339 date");
-            rest
-        })
-        .collect();
-    let file_stamped = |rest: &str| {
-        file_lines
-            .iter()
-            .any(|l| l.len() > 9 && l.as_bytes()[2] == b':' && l[9..].starts_with(rest))
-    };
-    assert!(
-        file_stamped("warn Tailscale not detected (test)"),
-        "the pre-flight warning opens the file:\n{file}"
-    );
-    assert!(
-        file_lines
-            .iter()
-            .any(|l| l.starts_with("dux ") && l.ends_with("  plain HTTP")),
-        "the banner header:\n{file}"
-    );
-    assert!(
-        file_lines.contains(&format!("  -> Local (loopback): http://{addr}").as_str()),
-        "the banner names the URL:\n{file}"
-    );
-    assert!(
-        file_stamped("GET /api/v1/build 200 "),
-        "the access log reaches the file:\n{file}"
-    );
-    assert!(
-        file_stamped("info client connected from 127.0.0.1"),
-        "the client connecting:\n{file}"
-    );
-    assert!(
-        file_stamped("info Requesting 0 agents and 1 terminal to gracefully shut down"),
-        "the shutdown progress:\n{file}"
-    );
+    the_viewer_shows_the_serve_log(&ring, addr);
+    server_log_holds_the_plain_lines(&server_log_path, addr);
 }
 
 /// A bare HTTP/1.1 GET over a plain TCP socket, returning the raw response, so

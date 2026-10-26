@@ -926,7 +926,7 @@ async fn blocked_addresses_apply_with_no_password_and_close_sockets_with_4403() 
 /// The router on a real loopback listener, served the way every leg is.
 struct Serve {
     addr: SocketAddr,
-    _dux: Dux,
+    dux: Dux,
 }
 
 impl Serve {
@@ -943,7 +943,7 @@ impl Serve {
             )
             .await;
         });
-        Self { addr, _dux: dux }
+        Self { addr, dux }
     }
 
     async fn connect(
@@ -1026,7 +1026,7 @@ where
                 return Some(frame.map_or(1005, |f| u16::from(f.code)));
             }
             Ok(None | Some(Err(_))) => return Some(1006),
-            _ => continue,
+            _ => {}
         }
     }
     None
@@ -1034,6 +1034,8 @@ where
 
 #[tokio::test]
 async fn every_socket_family_is_accepted_then_closed_with_4401_without_a_session() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
     let server = Serve::start(Dux::with_password("")).await;
     let forwarded = [("x-forwarded-for", "198.51.100.9")];
     for path in [
@@ -1053,7 +1055,6 @@ async fn every_socket_family_is_accepted_then_closed_with_4401_without_a_session
     // From this machine under `network`, the events socket opens and stays.
     assert_eq!(server.ws_close_code("/ws/events", &[], None).await, None);
     // A cross-site page cannot even open one to be told why.
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = format!("ws://{}/ws/events", server.addr)
         .into_client_request()
         .unwrap();
@@ -1080,7 +1081,7 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
     );
 
     // A followed server log holds its session the way a socket does.
-    std::fs::write(server._dux.tmp.path().join("server.log"), "hello\n").unwrap();
+    std::fs::write(server.dux.tmp.path().join("server.log"), "hello\n").unwrap();
     let client = reqwest::Client::new();
     let follow = |cookie: String| {
         let client = client.clone();
@@ -1105,7 +1106,7 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
         let deadline = tokio::time::Instant::now() + within;
         loop {
             match tokio::time::timeout_at(deadline, reply.chunk()).await {
-                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(Some(_))) => {}
                 Ok(Ok(None)) => return true,
                 _ => return false,
             }
@@ -1169,60 +1170,11 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
     );
 }
 
-#[tokio::test]
-async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
-    let dux = Dux::start("");
-    let refused = dux
-        .send(
-            NETWORK,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
-        )
-        .await;
-    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
-    assert!(refused.json()["message"].is_string());
-    assert!(!dux.config().contains("$argon2id$"));
-
-    let weak = dux
-        .send(
-            THIS_MACHINE,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "password1234" })),
-        )
-        .await;
-    assert_eq!(
-        weak.error().as_deref(),
-        Some("weak_password"),
-        "{}",
-        weak.body
-    );
-    let body = weak.json();
-    assert!(
-        body["score"].is_number() && body["message"].is_string(),
-        "{body}"
-    );
-    assert!(body["feedback"]["suggestions"].is_array(), "{body}");
-    let short = dux
-        .send(
-            THIS_MACHINE,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "Qz7#vL9p" })),
-        )
-        .await;
-    assert_eq!(short.error().as_deref(), Some("password_too_short"));
-    assert_eq!(short.json()["minimum"], json!(12));
-
-    let set = dux
-        .send(
-            TAILNET,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
-        )
-        .await;
-    assert_eq!(set.status, StatusCode::NO_CONTENT, "{}", set.body);
-    let config = dux.config();
-    assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
-    assert!(!config.contains(PASSWORD));
-    assert!(config.contains("# a comment that must survive"));
-    assert_eq!(dux.status(NETWORK, None).await["password_set"], json!(true));
-    assert_eq!(dux.reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
-
+/// Changing the password needs the current one: missing is not "signed out",
+/// wrong is its own refusal accounted like a failed login, and neither changes
+/// anything; the right one, once the slow-down is waited out, changes it and ends
+/// every session from before.
+async fn changing_it_needs_the_current_one(dux: &Dux) {
     // Changing it needs the current one: missing is not "signed out", wrong
     // is its own refusal, and neither changes anything.
     let cookie = dux.signed_in(NETWORK).await;
@@ -1286,6 +1238,63 @@ async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
         dux.login(NETWORK, PASSWORD).await.status,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
+    let dux = Dux::start("");
+    let refused = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert!(refused.json()["message"].is_string());
+    assert!(!dux.config().contains("$argon2id$"));
+
+    let weak = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "password1234" })),
+        )
+        .await;
+    assert_eq!(
+        weak.error().as_deref(),
+        Some("weak_password"),
+        "{}",
+        weak.body
+    );
+    let body = weak.json();
+    assert!(
+        body["score"].is_number() && body["message"].is_string(),
+        "{body}"
+    );
+    assert!(body["feedback"]["suggestions"].is_array(), "{body}");
+    let short = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "Qz7#vL9p" })),
+        )
+        .await;
+    assert_eq!(short.error().as_deref(), Some("password_too_short"));
+    assert_eq!(short.json()["minimum"], json!(12));
+
+    let set = dux
+        .send(
+            TAILNET,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(set.status, StatusCode::NO_CONTENT, "{}", set.body);
+    let config = dux.config();
+    assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
+    assert!(!config.contains(PASSWORD));
+    assert!(config.contains("# a comment that must survive"));
+    assert_eq!(dux.status(NETWORK, None).await["password_set"], json!(true));
+    assert_eq!(dux.reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    changing_it_needs_the_current_one(&dux).await;
 }
 
 /// Wrong current passwords are guesses too: they count toward the block like
@@ -1462,13 +1471,13 @@ async fn a_login_flood_leaves_ordinary_requests_answering() {
          failed_login_delay_seconds = 0\nmax_failed_logins = 0\nmax_failed_logins_per_minute = 0",
     ));
     let cookie = dux.signed_in(NETWORK).await;
-    let flood: Vec<_> = (0..60)
+    let flood: Vec<_> = (0u8..60)
         .map(|n| {
             let dux = Arc::clone(&dux);
             tokio::spawn(async move {
                 let from = Arrival::Tcp {
                     peer: SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, n as u8)),
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, n)),
                         40000,
                     ),
                     local: NETWORK.local().unwrap(),
@@ -3372,7 +3381,7 @@ async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
         panic!("the socket never reached its opening check: {first:?}");
     }
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
@@ -3632,7 +3641,7 @@ async fn an_events_socket_signed_out_while_opening_gets_nothing() {
         .expect("the socket reached its opening check")
         .unwrap();
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
@@ -3702,7 +3711,7 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
     // The terminal goes away and the session ends: a subscribe now would fail
     // and answer 4001, so 4401 proves the session was judged first.
     let gone = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::DELETE, &format!("/api/v1/terminals/{tid}")).cookie(&cookie),
@@ -3710,7 +3719,7 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
         .await;
     assert!(gone.status.is_success(), "{} {}", gone.status, gone.body);
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),

@@ -80,7 +80,7 @@ async fn boot_with_extra_sessions(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -185,7 +185,7 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -277,12 +277,21 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
 /// A version past the editor's size ceiling answers 200 with the head of git's
 /// own patch rather than the 400 it used to, so the browser has something to
 /// show for a file it cannot hold.
+/// `count` lines reading `<word> 0` up to `<word> <count - 1>`, each ending in a newline.
+fn numbered_lines(word: &str, count: usize) -> String {
+    use std::fmt::Write as _;
+    (0..count).fold(String::new(), |mut lines, i| {
+        writeln!(lines, "{word} {i}").expect("writing to a String cannot fail");
+        lines
+    })
+}
+
 #[tokio::test]
 async fn http_file_diff_answers_a_huge_file_with_the_diff_head() {
     let (addr, tmp) = boot_with_repo().await;
     // Comfortably past the 5 MiB working-copy ceiling, in lines short enough
     // that the patch is far longer than the head cap.
-    let huge: String = (0..600_000).map(|i| format!("line {i}\n")).collect();
+    let huge = numbered_lines("line", 600_000);
     assert!(
         huge.len() > 5 * 1024 * 1024,
         "the fixture must be past the ceiling"
@@ -336,12 +345,12 @@ async fn http_file_diff_answers_a_huge_tracked_file_with_the_diff_head() {
     };
     // Committed over the ceiling, then rewritten line for line so the patch is
     // far longer than the head cap.
-    let committed: String = (0..600_000).map(|i| format!("old {i}\n")).collect();
+    let committed = numbered_lines("old", 600_000);
     assert!(committed.len() > 5 * 1024 * 1024);
     std::fs::write(root.join("tracked-big.txt"), &committed).expect("write");
     run(&["add", "--", "tracked-big.txt"]);
     run(&["commit", "-q", "-m", "big"]);
-    let rewritten: String = (0..600_000).map(|i| format!("new {i}\n")).collect();
+    let rewritten = numbered_lines("new", 600_000);
     std::fs::write(root.join("tracked-big.txt"), &rewritten).expect("rewrite");
 
     let client = reqwest::Client::new();
@@ -473,7 +482,7 @@ async fn boot_for_create_agent_window(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
     }
@@ -759,7 +768,7 @@ async fn boot_with_gated_startup_command() -> (
                 auto_reopen_agents: None,
                 // Blocks until the test opens the FIFO for writing.
                 startup_command: Some(format!("cat {}", gate.display())),
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -1368,6 +1377,57 @@ async fn connect_events_at(addr: SocketAddr, path: &str, user_agent: &str) -> (C
     )
 }
 
+/// A created standalone agent's wire shape: a folder workspace at `folder_path`
+/// with none of the git fields a screen could mistake for a branch.
+fn assert_a_folder_workspace(body: &serde_json::Value, folder_path: &str) {
+    assert_eq!(body["workspace"]["kind"].as_str(), Some("folder"));
+    assert_eq!(body["workspace"]["folder_path"].as_str(), Some(folder_path));
+    for absent in [
+        "branch_name",
+        "initial_branch",
+        "source_branch",
+        "project_id",
+    ] {
+        assert!(
+            body["workspace"][absent].is_null(),
+            "{absent} must not exist on a folder workspace, got {body}"
+        );
+    }
+    assert_eq!(body["title"].as_str(), Some("notes"));
+}
+
+/// Every branch-identity route refuses the standalone agent `id`, saying what
+/// the agent is.
+async fn every_branch_route_refuses_a_standalone_agent(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    id: &str,
+) {
+    for (method, path) in [
+        ("POST", format!("/api/v1/sessions/{id}/git/push")),
+        ("POST", format!("/api/v1/sessions/{id}/git/pull")),
+    ] {
+        let resp = client
+            .request(
+                method.parse().expect("a valid HTTP method"),
+                format!("http://{addr}{path}"),
+            )
+            .send()
+            .await
+            .expect("git route");
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(
+            (400..500).contains(&status),
+            "{path} must refuse a standalone agent, got {status}: {text}"
+        );
+        assert!(
+            text.contains("standalone agent"),
+            "{path} must say what this agent is, got {text}"
+        );
+    }
+}
+
 /// THE WHOLE JOURNEY for a standalone agent, over the real HTTP surface: create
 /// it in a plain folder, see it on the wire as a folder workspace, watch every
 /// branch-identity route refuse it, and delete it without the folder being
@@ -1408,23 +1468,7 @@ async fn a_standalone_agent_runs_in_a_plain_folder_and_survives_delete_untouched
 
     // THE WIRE SHAPE: a folder workspace, and NO git fields to be mistaken for
     // a branch. This is the guarantee the tagged union exists for.
-    assert_eq!(body["workspace"]["kind"].as_str(), Some("folder"));
-    assert_eq!(
-        body["workspace"]["folder_path"].as_str(),
-        Some(folder_path.as_str())
-    );
-    for absent in [
-        "branch_name",
-        "initial_branch",
-        "source_branch",
-        "project_id",
-    ] {
-        assert!(
-            body["workspace"][absent].is_null(),
-            "{absent} must not exist on a folder workspace, got {body}"
-        );
-    }
-    assert_eq!(body["title"].as_str(), Some("notes"));
+    assert_a_folder_workspace(&body, &folder_path);
 
     // It joins the ordinary flat agent list, and no sidebar group claims it.
     assert!(
@@ -1447,26 +1491,7 @@ async fn a_standalone_agent_runs_in_a_plain_folder_and_survives_delete_untouched
 
     // EVERY branch-identity route refuses it on the server. Hiding the buttons
     // is not an answer when each of these is reachable from a command line.
-    for (method, path) in [
-        ("POST", format!("/api/v1/sessions/{id}/git/push")),
-        ("POST", format!("/api/v1/sessions/{id}/git/pull")),
-    ] {
-        let resp = client
-            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
-            .send()
-            .await
-            .expect("git route");
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        assert!(
-            (400..500).contains(&status),
-            "{path} must refuse a standalone agent, got {status}: {text}"
-        );
-        assert!(
-            text.contains("standalone agent"),
-            "{path} must say what this agent is, got {text}"
-        );
-    }
+    every_branch_route_refuses_a_standalone_agent(&client, addr, &id).await;
 
     // A worktree-removing delete is refused OUT LOUD rather than quietly
     // downgraded: silent success theater about a destructive request is how a
@@ -2114,7 +2139,7 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("save the test project");
         store
@@ -2732,18 +2757,6 @@ async fn a_grid_change_is_forwarded_only_to_sockets_for_that_pty() {
 /// discard it as a stale duplicate.
 #[tokio::test]
 async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
-    let (addr, _tmp) = boot().await;
-
-    // A watcher on the events socket, subscribed to the coarse `sessions` topic
-    // that carries `pty.owner`.
-    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
-        .await
-        .expect("connect the events socket");
-    events
-        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
-        .await
-        .unwrap();
-
     /// Drain events until a `pty.owner` for `s1` arrives, or give up.
     async fn next_pty_owner(
         ws: &mut tokio_tungstenite::WebSocketStream<
@@ -2761,6 +2774,18 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
         }
         None
     }
+
+    let (addr, _tmp) = boot().await;
+
+    // A watcher on the events socket, subscribed to the coarse `sessions` topic
+    // that carries `pty.owner`.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
 
     // The driver attaches and claims the unowned pty with an ordinary resize.
     let url = format!("ws://{addr}/ws/sessions/s1/pty");
@@ -2813,21 +2838,6 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
 /// must see the first connection's id.
 #[tokio::test]
 async fn the_connected_handshake_names_the_ptys_current_owner() {
-    let (addr, _tmp) = boot().await;
-    let url = format!("ws://{addr}/ws/sessions/s1/pty");
-
-    // A watcher on the events socket, to capture the epoch the claim's own
-    // `pty.owner` broadcast carries. The handshake's `owner_epoch` must be read
-    // from the SAME counter in the same lock acquisition as the owner, so the
-    // two values must agree.
-    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
-        .await
-        .expect("connect the events socket");
-    events
-        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
-        .await
-        .unwrap();
-
     /// The first Text frame on a PTY socket is the `connected` handshake; the
     /// Binary frames around it are the scrollback replay and live output.
     async fn first_text(
@@ -2845,6 +2855,21 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
         }
         panic!("no connected frame arrived");
     }
+
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // A watcher on the events socket, to capture the epoch the claim's own
+    // `pty.owner` broadcast carries. The handshake's `owner_epoch` must be read
+    // from the SAME counter in the same lock acquisition as the owner, so the
+    // two values must agree.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
 
     let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -2924,9 +2949,6 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
 /// to what an older client already parses.
 #[tokio::test]
 async fn the_connected_handshake_names_the_owners_device() {
-    let (addr, _tmp) = boot().await;
-    let url = format!("ws://{addr}/ws/sessions/s1/pty");
-
     /// The first Text frame on a PTY socket is the `connected` handshake; the
     /// Binary frames around it are the scrollback replay and live output.
     async fn first_text(
@@ -2945,8 +2967,12 @@ async fn the_connected_handshake_names_the_owners_device() {
         panic!("no connected frame arrived");
     }
 
-    // The driver connects with a `User-Agent`, as every real browser does.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // The driver connects with a `User-Agent`, as every real browser does.
     let mut request = url.clone().into_client_request().expect("a client request");
     request.headers_mut().insert(
         axum::http::header::USER_AGENT,
@@ -3124,6 +3150,17 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
 /// 64 MiB default lets the same message through, failing the same way.
 #[tokio::test]
 async fn a_fragmented_message_past_the_message_cap_is_refused() {
+    // One byte over the MESSAGE cap in total, chopped into fragments far below
+    // the frame cap. The fragment size is fixed rather than "half the payload"
+    // so every frame stays under the frame cap regardless of the total.
+    //
+    // The marker leads the payload rather than trailing it: it therefore rides
+    // the FIRST fragment, so an accepted message starts echoing immediately
+    // instead of after 16 MiB have travelled. A trailing marker made the failure
+    // path take 8.4s against an 8s deadline under mutation, one slow machine away
+    // from an accepted payload being scored as a refusal.
+    const FRAGMENT: usize = 4 * 1024 * 1024;
+
     use tokio_tungstenite::tungstenite::protocol::frame::Frame;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
 
@@ -3138,16 +3175,6 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
         .await
         .unwrap();
 
-    // One byte over the MESSAGE cap in total, chopped into fragments far below
-    // the frame cap. The fragment size is fixed rather than "half the payload"
-    // so every frame stays under the frame cap regardless of the total.
-    //
-    // The marker leads the payload rather than trailing it: it therefore rides
-    // the FIRST fragment, so an accepted message starts echoing immediately
-    // instead of after 16 MiB have travelled. A trailing marker made the failure
-    // path take 8.4s against an 8s deadline under mutation, one slow machine away
-    // from an accepted payload being scored as a refusal.
-    const FRAGMENT: usize = 4 * 1024 * 1024;
     let marker = b"dux-fragmented-oversize-marker\n";
     let mut payload = marker.to_vec();
     payload.resize(OVER_MESSAGE_CAP_BYTES, b'x');
@@ -3955,12 +3982,11 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                closed = true;
-                break;
-            }
-            _ => continue,
+        if let Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            closed = true;
+            break;
         }
     }
     assert!(
