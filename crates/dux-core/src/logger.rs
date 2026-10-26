@@ -1,3 +1,6 @@
+//! Writes dux.log: the process-wide logger, its level, its rotation and the
+//! redaction of names a log line must not carry.
+
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;

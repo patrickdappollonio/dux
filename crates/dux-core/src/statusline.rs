@@ -1,3 +1,7 @@
+//! The keyed status controller: the one source of the engine's busy, info,
+//! warning and error messages, which the terminal UI shows as its status line
+//! and the web as toasts.
+
 use crate::prose::ProseSegment;
 use crate::status_text::StatusText;
 use indexmap::IndexMap;

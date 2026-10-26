@@ -1,3 +1,6 @@
+//! Opens an address in the user's default browser through the platform
+//! launcher, reporting a launcher that fails at once.
+
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};

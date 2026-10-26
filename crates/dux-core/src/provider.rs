@@ -1,3 +1,6 @@
+//! A configured provider: the CLI command dux runs in a PTY for an agent, with
+//! its launch settings.
+
 use crate::config::ProviderCommandConfig;
 
 /// A config-driven provider wrapping a CLI command and its launch configuration.

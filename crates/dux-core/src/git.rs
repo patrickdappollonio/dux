@@ -1,3 +1,7 @@
+//! The git commands dux runs: worktrees, branches, status, diffs, pushes and
+//! pulls, each shelled out in a form immune to the user's own git
+//! configuration.
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io;

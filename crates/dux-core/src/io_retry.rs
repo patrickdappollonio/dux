@@ -1,3 +1,6 @@
+//! Retries a system call that a signal interrupted (EINTR) until it gives a
+//! real answer.
+
 use std::io::{self, ErrorKind};
 
 pub fn retry_on_interrupt<T, F>(mut op: F) -> io::Result<T>

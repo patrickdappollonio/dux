@@ -1,3 +1,6 @@
+//! The domain records both surfaces share: projects, agent sessions and their
+//! tabs, providers, changed files and the runtime state around them.
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};

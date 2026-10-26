@@ -1,3 +1,6 @@
+//! Finds the code editors installed on this machine (Cursor, VS Code, Zed and
+//! the rest), picks the one the config names, and opens a worktree in it.
+
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;

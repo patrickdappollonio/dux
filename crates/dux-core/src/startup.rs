@@ -1,3 +1,6 @@
+//! Runs a project's startup command in a new worktree and keeps, lists and
+//! reads the logs those runs write.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

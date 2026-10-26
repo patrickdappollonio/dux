@@ -1,3 +1,6 @@
+//! Checks that this platform's pseudo-terminal spawns a child, carries its
+//! output and input, resizes, and reports the child's exit.
+
 use std::thread;
 use std::time::Duration;
 

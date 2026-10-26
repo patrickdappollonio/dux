@@ -1,3 +1,6 @@
+//! The SQLite session database (sessions.sqlite3): projects, agent sessions,
+//! tabs and pull-request associations, with its migrations.
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
