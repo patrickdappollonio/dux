@@ -315,7 +315,7 @@ fn the_manager_claims_nothing_for_a_folder_inside_a_live_agents_worktree() {
     std::fs::create_dir_all(&inside).unwrap();
 
     let admission = engine
-        .admit_manager_removal("p1", &inside, false)
+        .admit_manager_removal("p1", &inside, crate::worktree_manager::BranchRemoval::Keep)
         .expect("known project");
     let claimed = engine.worktree_ops().is_being_removed(&inside);
     let save = engine.worktree_ops().hold(

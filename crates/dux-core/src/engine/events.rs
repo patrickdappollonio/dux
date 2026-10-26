@@ -1754,7 +1754,11 @@ impl Engine {
                     &tab_id,
                     client,
                     repo_path,
-                    *owns_worktree,
+                    if *owns_worktree {
+                        crate::agent_job::WorktreeOwnership::CreatedByThisJob
+                    } else {
+                        crate::agent_job::WorktreeOwnership::Preexisting
+                    },
                 );
                 let create_final = self.resolve_create_op(
                     &status_op_id,

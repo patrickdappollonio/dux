@@ -436,12 +436,7 @@ impl Engine {
 }
 
 /// What a discard of `path` says once it is done, given how many files went.
-/// Whether the file a discard removes was ever committed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FileTracking {
-    Untracked,
-    Tracked,
-}
+use crate::git::FileTracking;
 
 fn discard_message(
     path: &str,

@@ -148,7 +148,9 @@ fn review13_a_manager_removal_requested_through_a_link_waits_for_work_in_the_wor
         .worktree_ops()
         .hold(&worktree, WorktreeOpKind::Push)
         .unwrap();
-    let admission = engine.admit_manager_removal("p1", &link, false).unwrap();
+    let admission = engine
+        .admit_manager_removal("p1", &link, crate::worktree_manager::BranchRemoval::Keep)
+        .unwrap();
     let crate::worktree_manager::RemovalAdmission::Admitted(ticket) = admission else {
         // Refused: nothing to show.
         return;

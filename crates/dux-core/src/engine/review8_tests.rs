@@ -141,7 +141,11 @@ fn review8_the_manager_recheck_under_the_claim_sees_a_standalone_agent_inside() 
     engine.sessions.retain(|session| session.id != "s-left");
 
     let admission = engine
-        .admit_manager_removal("p1", &worktree, false)
+        .admit_manager_removal(
+            "p1",
+            &worktree,
+            crate::worktree_manager::BranchRemoval::Keep,
+        )
         .expect("known project");
     let crate::worktree_manager::RemovalAdmission::Admitted(removal) = admission else {
         panic!("the free worktree was not admitted");

@@ -125,7 +125,11 @@ fn the_manager_refuses_a_worktree_a_new_agent_is_being_created_in() {
         .any(|entry| entry.path.to_string_lossy().contains("fresh") && entry.is_removable());
 
     let admission = engine
-        .admit_manager_removal("p1", &created, true)
+        .admit_manager_removal(
+            "p1",
+            &created,
+            crate::worktree_manager::BranchRemoval::Delete,
+        )
         .expect("known project");
     let admitted = matches!(admission, RemovalAdmission::Admitted(_));
     let mut removed_under_create = false;
@@ -197,7 +201,11 @@ fn the_manager_does_not_remove_a_worktree_a_stopping_agent_still_runs_in() {
     );
 
     let admission = engine
-        .admit_manager_removal("p1", &worktree, false)
+        .admit_manager_removal(
+            "p1",
+            &worktree,
+            crate::worktree_manager::BranchRemoval::Keep,
+        )
         .expect("known project");
     let removed = match admission {
         RemovalAdmission::Admitted(ticket) => {
@@ -431,7 +439,11 @@ fn the_manager_lists_a_folder_a_stopping_agent_still_runs_in_as_busy() {
         row.busy.as_deref(),
         Some("a process dux started there that is still stopping")
     );
-    match engine.admit_manager_removal("p1", &worktree, false) {
+    match engine.admit_manager_removal(
+        "p1",
+        &worktree,
+        crate::worktree_manager::BranchRemoval::Keep,
+    ) {
         Some(RemovalAdmission::Refused(crate::worktree_manager::RemovalOutcome::Busy {
             reason,
         })) => assert_eq!(reason, "a process dux started there that is still stopping"),
@@ -534,7 +546,11 @@ fn the_manager_lists_an_agent_held_worktree_as_held_and_still_refuses_it() {
     assert!(!row.is_removable());
     assert!(
         matches!(
-            engine.admit_manager_removal("p1", &worktree, false),
+            engine.admit_manager_removal(
+                "p1",
+                &worktree,
+                crate::worktree_manager::BranchRemoval::Keep
+            ),
             Some(RemovalAdmission::Refused(
                 crate::worktree_manager::RemovalOutcome::Attached
             ))

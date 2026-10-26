@@ -3001,9 +3001,9 @@ impl EngineService {
             // The engine applied this config only to drain the commands it had
             // deferred, and left the `gh` probe a reload owes to this apply.
             engine.probe_gh_after_reload(if github_was_enabled {
-                dux_core::engine::GithubIntegration::On
+                dux_core::engine::GithubIntegration::Enabled
             } else {
-                dux_core::engine::GithubIntegration::Off
+                dux_core::engine::GithubIntegration::Disabled
             });
             self.config_in_force(engine, &before, github_was_enabled, true);
             let _ = self.status.send(WireStatus::from_update(
@@ -3069,9 +3069,9 @@ impl EngineService {
         for_reload: bool,
     ) -> Option<String> {
         engine.retune_pr_sync_after_reload(if github_was_enabled {
-            dux_core::engine::GithubIntegration::On
+            dux_core::engine::GithubIntegration::Enabled
         } else {
-            dux_core::engine::GithubIntegration::Off
+            dux_core::engine::GithubIntegration::Disabled
         });
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
@@ -4843,7 +4843,15 @@ fn handle_request(
             delete_branch,
             reply,
         } => {
-            let _ = reply.send(engine.admit_manager_removal(&project_id, &path, delete_branch));
+            let _ = reply.send(engine.admit_manager_removal(
+                &project_id,
+                &path,
+                if delete_branch {
+                    dux_core::worktree_manager::BranchRemoval::Delete
+                } else {
+                    dux_core::worktree_manager::BranchRemoval::Keep
+                },
+            ));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine

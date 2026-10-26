@@ -140,9 +140,15 @@ impl App {
         // Decided by the engine against LIVE state at this moment (the agents
         // now, an agent being created now, a removal already under way), never
         // against the listing on screen, and announced before it returns.
-        let admission = self
-            .engine
-            .admit_manager_removal(&prompt.project.id, &path, delete_branch);
+        let admission = self.engine.admit_manager_removal(
+            &prompt.project.id,
+            &path,
+            if delete_branch {
+                dux_core::worktree_manager::BranchRemoval::Delete
+            } else {
+                dux_core::worktree_manager::BranchRemoval::Keep
+            },
+        );
         let outcome_final = move |outcome: &dux_core::worktree_manager::RemovalOutcome| {
             worktree_removal_final(&display_path, outcome)
         };

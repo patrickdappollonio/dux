@@ -6259,9 +6259,9 @@ impl App {
     /// setting that is not in force.
     pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
         self.engine.probe_gh_after_reload(if github_was_enabled {
-            dux_core::engine::GithubIntegration::On
+            dux_core::engine::GithubIntegration::Enabled
         } else {
-            dux_core::engine::GithubIntegration::Off
+            dux_core::engine::GithubIntegration::Disabled
         });
         self.sync_view_state_from_config();
 
@@ -6275,9 +6275,9 @@ impl App {
         self.engine.update_branch_sync_sessions();
         self.engine
             .retune_pr_sync_after_reload(if github_was_enabled {
-                dux_core::engine::GithubIntegration::On
+                dux_core::engine::GithubIntegration::Enabled
             } else {
-                dux_core::engine::GithubIntegration::Off
+                dux_core::engine::GithubIntegration::Disabled
             });
         self.reload_changed_files();
         self.refresh_current_diff();

@@ -153,7 +153,11 @@ fn the_manager_refuses_a_worktree_a_standalone_agent_runs_inside() {
     standalone_running_in(&mut engine, &inside);
 
     let admission = engine
-        .admit_manager_removal("p1", &worktree, false)
+        .admit_manager_removal(
+            "p1",
+            &worktree,
+            crate::worktree_manager::BranchRemoval::Keep,
+        )
         .expect("known project");
     assert!(
         matches!(admission, RemovalAdmission::Refused(_)),
@@ -383,7 +387,11 @@ fn the_manager_refuses_a_first_worktree_being_created_through_a_symlinked_root()
     );
 
     let admission = engine
-        .admit_manager_removal("p1", &created, true)
+        .admit_manager_removal(
+            "p1",
+            &created,
+            crate::worktree_manager::BranchRemoval::Delete,
+        )
         .expect("known project");
     let admitted = matches!(admission, RemovalAdmission::Admitted(_));
     drop(admission);

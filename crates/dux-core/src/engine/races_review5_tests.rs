@@ -266,7 +266,11 @@ fn a_job_left_before_a_clean_quit_is_ended_before_the_manager_removes_its_folder
     next.config.shutdown_timeout_seconds = 1;
     next.projects
         .push(sample_project("p1", repo.to_str().unwrap()));
-    let admission = next.admit_manager_removal("p1", &worktree, false);
+    let admission = next.admit_manager_removal(
+        "p1",
+        &worktree,
+        crate::worktree_manager::BranchRemoval::Keep,
+    );
     let outcome = match admission {
         Some(crate::worktree_manager::RemovalAdmission::Admitted(removal)) => Some(removal.run()),
         _ => None,
@@ -295,8 +299,12 @@ fn the_managers_recheck_sees_an_agent_attached_after_admission() {
     let worktree = agent_worktree(&mut engine, tmp.path(), &repo, "late");
     // Admitted while no agent holds the folder.
     let session = engine.sessions.pop().unwrap();
-    let Some(crate::worktree_manager::RemovalAdmission::Admitted(removal)) =
-        engine.admit_manager_removal("p1", &worktree, false)
+    let Some(crate::worktree_manager::RemovalAdmission::Admitted(removal)) = engine
+        .admit_manager_removal(
+            "p1",
+            &worktree,
+            crate::worktree_manager::BranchRemoval::Keep,
+        )
     else {
         panic!("nothing occupies the folder at admission");
     };

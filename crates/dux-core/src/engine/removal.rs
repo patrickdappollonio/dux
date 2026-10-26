@@ -615,8 +615,9 @@ impl Engine {
         tab_id: &crate::ids::TabId,
         client: crate::pty::PtyClient,
         repo_path: &str,
-        owns_worktree: bool,
+        ownership: crate::agent_job::WorktreeOwnership,
     ) -> StatusText {
+        let owns_worktree = ownership == crate::agent_job::WorktreeOwnership::CreatedByThisJob;
         let label = session.display_label();
         let removal = match session.workspace.as_managed() {
             Some(managed) if owns_worktree => {
@@ -715,8 +716,9 @@ impl Engine {
         &self,
         project_id: &str,
         requested: &Path,
-        delete_branch: bool,
+        branch: crate::worktree_manager::BranchRemoval,
     ) -> Option<crate::worktree_manager::RemovalAdmission> {
+        let delete_branch = branch == crate::worktree_manager::BranchRemoval::Delete;
         use crate::worktree_manager::{AdmittedRemoval, RemovalAdmission, RemovalOutcome};
         let project = self
             .projects
@@ -1412,7 +1414,11 @@ mod tests {
         assert!(listed[0].being_removed && !listed[0].is_removable());
 
         let admission = engine
-            .admit_manager_removal("p1", &listed[0].path, true)
+            .admit_manager_removal(
+                "p1",
+                &listed[0].path,
+                crate::worktree_manager::BranchRemoval::Delete,
+            )
             .unwrap();
         assert!(matches!(
             admission,
@@ -1440,7 +1446,11 @@ mod tests {
             )
             .unwrap();
         let admission = engine
-            .admit_manager_removal("p1", &worktrees[0], true)
+            .admit_manager_removal(
+                "p1",
+                &worktrees[0],
+                crate::worktree_manager::BranchRemoval::Delete,
+            )
             .unwrap();
         assert!(matches!(
             admission,
@@ -1463,7 +1473,11 @@ mod tests {
             .hold(&worktrees[0], WorktreeOpKind::Push)
             .unwrap();
         let crate::worktree_manager::RemovalAdmission::Admitted(ticket) = engine
-            .admit_manager_removal("p1", &worktrees[0], false)
+            .admit_manager_removal(
+                "p1",
+                &worktrees[0],
+                crate::worktree_manager::BranchRemoval::Keep,
+            )
             .unwrap()
         else {
             panic!("a free worktree is admitted");

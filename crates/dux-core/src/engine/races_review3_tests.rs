@@ -128,7 +128,7 @@ fn the_manager_kills_nothing_for_a_folder_it_then_refuses_as_not_managed() {
     register_leaderless(&engine, UNOWNED_PTYS, session, &repo);
 
     let admission = engine
-        .admit_manager_removal("p1", &repo, false)
+        .admit_manager_removal("p1", &repo, crate::worktree_manager::BranchRemoval::Keep)
         .expect("known project");
     let outcome = match admission {
         RemovalAdmission::Refused(outcome) => Ok(outcome),
@@ -434,7 +434,7 @@ fn a_manager_refusal_leaves_nothing_claimed() {
         .push(sample_project("p1", repo.to_str().unwrap()));
     for path in [repo.clone(), tmp.path().to_path_buf(), PathBuf::from("/")] {
         let admission = engine
-            .admit_manager_removal("p1", &path, false)
+            .admit_manager_removal("p1", &path, crate::worktree_manager::BranchRemoval::Keep)
             .expect("known project");
         assert!(
             matches!(

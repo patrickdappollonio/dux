@@ -78,7 +78,7 @@ fn the_manager_never_removes_a_folder_a_dormant_agents_worktree_lives_in() {
     engine.sessions.retain(|session| session.id != "s-a");
 
     let admission = engine
-        .admit_manager_removal("p1", &outer, false)
+        .admit_manager_removal("p1", &outer, crate::worktree_manager::BranchRemoval::Keep)
         .expect("known project");
     if let RemovalAdmission::Admitted(removal) = admission {
         let outcome = removal.run();
@@ -165,7 +165,11 @@ fn a_removal_this_run_does_not_kill_an_unrelated_program_that_reused_a_session_n
     engine.sessions.retain(|session| session.id != "s-kept");
 
     let admission = engine
-        .admit_manager_removal("p1", &worktree, false)
+        .admit_manager_removal(
+            "p1",
+            &worktree,
+            crate::worktree_manager::BranchRemoval::Keep,
+        )
         .expect("known project");
     let RemovalAdmission::Admitted(removal) = admission else {
         panic!("nothing occupies the worktree, so the manager admits its removal");

@@ -2383,7 +2383,7 @@ fn compare_copy_heads(source: &Path, destination: &Path) -> CopyHeadCheck {
 /// Whether the create made the agent's worktree, and so takes it back when the
 /// create fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorktreeOwnership {
+pub(crate) enum WorktreeOwnership {
     /// The create made the worktree.
     CreatedByThisJob,
     /// The worktree was there before the create, and outlives its failure.

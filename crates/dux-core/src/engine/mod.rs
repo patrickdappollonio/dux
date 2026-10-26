@@ -1835,12 +1835,7 @@ pub enum ReconnectMode {
     Force,
 }
 
-/// Whether the GitHub integration is switched on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GithubIntegration {
-    On,
-    Off,
-}
+pub use crate::gh::GithubIntegration;
 
 /// Who asks `gh` again for the answer a config reload owes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3065,7 +3060,7 @@ impl Engine {
     /// no-op, because there is nothing to recover and a probe costs a process.
     pub fn probe_gh_after_reload(&mut self, before: GithubIntegration) {
         if self.github_integration_enabled
-            && (before == GithubIntegration::Off
+            && (before == GithubIntegration::Disabled
                 || !matches!(self.gh_status, crate::model::GhStatus::Available))
         {
             self.spawn_gh_status_check();
@@ -3087,9 +3082,9 @@ impl Engine {
     /// against what it turns it into.
     pub fn github_integration(&self) -> GithubIntegration {
         if self.github_integration_enabled {
-            GithubIntegration::On
+            GithubIntegration::Enabled
         } else {
-            GithubIntegration::Off
+            GithubIntegration::Disabled
         }
     }
 
@@ -3140,7 +3135,7 @@ impl Engine {
         if !self.github_integration_enabled {
             self.pr_statuses.clear();
             self.disarm_pr_sync();
-        } else if before == GithubIntegration::On
+        } else if before == GithubIntegration::Enabled
             && matches!(self.gh_status, crate::model::GhStatus::Available)
         {
             self.seed_pr_statuses_from_store();
