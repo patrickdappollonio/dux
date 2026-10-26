@@ -380,6 +380,13 @@ impl ChangesService {
     /// Record a full listing read outside the cache (see
     /// `fresh_validation_reads`).
     /// Nothing outside tests.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "the counter this bumps exists only in test builds"
+        )
+    )]
     pub(crate) fn note_fresh_validation_read(&self) {
         #[cfg(test)]
         self.fresh_validation_reads.fetch_add(1, Ordering::SeqCst);

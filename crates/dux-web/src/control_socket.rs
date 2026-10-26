@@ -79,7 +79,7 @@ pub(crate) async fn fallback(request: Request) -> Response {
         return not_on_control_socket();
     }
     let (parts, _) = request.into_parts();
-    crate::web_assets::static_handler(parts.uri, parts.headers).await
+    crate::web_assets::static_handler(&parts.uri, &parts.headers)
 }
 
 /// The control socket's listener: accepts only connections whose peer runs as

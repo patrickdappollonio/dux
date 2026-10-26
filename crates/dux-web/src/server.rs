@@ -2544,7 +2544,7 @@ impl AttachedPtySocket<'_> {
 
     async fn handle_text_frame(&self, text: &str) {
         if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text) {
-            self.handle_resize_frame(frame);
+            self.handle_resize_frame(&frame);
             return;
         }
         if let Ok(frame) = serde_json::from_str::<PtyBeatFrame>(text) {
@@ -2552,7 +2552,7 @@ impl AttachedPtySocket<'_> {
         }
     }
 
-    fn handle_resize_frame(&self, frame: PtyResizeFrame) {
+    fn handle_resize_frame(&self, frame: &PtyResizeFrame) {
         let pty_id = self.target.pty_id();
         let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
         let outcome = self.owners.claim_for_resize(

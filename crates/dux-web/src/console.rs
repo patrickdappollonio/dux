@@ -144,7 +144,7 @@ impl LineWriter {
         let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(bound);
         std::thread::Builder::new()
             .name(format!("dux-console-{name}"))
-            .spawn(move || writer_loop(writer, rx))
+            .spawn(move || writer_loop(writer, &rx))
             .expect("spawn console writer thread");
         Self {
             tx,
@@ -757,7 +757,7 @@ impl Console {
 /// The dedicated writer thread body: own the writer, drain the channel, write +
 /// flush each line, acknowledge each barrier once everything before it has been
 /// written. The loop ends, and the thread exits, when the channel closes.
-fn writer_loop(mut writer: Box<dyn Write + Send>, rx: std::sync::mpsc::Receiver<WriterMsg>) {
+fn writer_loop(mut writer: Box<dyn Write + Send>, rx: &std::sync::mpsc::Receiver<WriterMsg>) {
     while let Ok(msg) = rx.recv() {
         match msg {
             WriterMsg::Line(line) => {

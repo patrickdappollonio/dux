@@ -145,7 +145,7 @@ impl BackgroundServer {
             listeners,
             crate::control_socket::listener_of(engine),
             &engine.config,
-            console,
+            &console,
             // Gated by the console too: with no `server.log` to write, the console
             // records nothing and a request line costs nothing.
             engine.config.server.access_log,

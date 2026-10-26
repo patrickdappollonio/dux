@@ -115,7 +115,7 @@ pub fn run_server(
     version: String,
     startup_warnings: Vec<StartupWarning>,
 ) -> Result<()> {
-    run_plain_http(paths, plan, version, startup_warnings)
+    run_plain_http(&paths, plan, version, &startup_warnings)
 }
 
 /// A warning `dux server` raised before anything was loaded, for the head of
@@ -536,10 +536,10 @@ pub fn safety_note(
 /// watcher's doing) go to `dux.log` and the console, which is this terminal for
 /// `dux server` and the status screen's log viewer for the flip.
 fn run_plain_http(
-    paths: DuxPaths,
+    paths: &DuxPaths,
     plan: ServerPlan,
     version: String,
-    startup_warnings: Vec<StartupWarning>,
+    startup_warnings: &[StartupWarning],
 ) -> Result<()> {
     let ServerPlan {
         addrs,
@@ -548,7 +548,7 @@ fn run_plain_http(
         forced_no,
     } = plan;
     warn_if_ui_not_built();
-    let mut engine = bootstrap_or_report(&paths, &startup_warnings, &mut std::io::stderr())?;
+    let mut engine = bootstrap_or_report(paths, startup_warnings, &mut std::io::stderr())?;
     // The lock is held and the config read, so the control socket is bound
     // now, before anything is served; a dux without it still serves the web.
     let socket_path = engine.paths.socket_path.clone();
@@ -557,10 +557,10 @@ fn run_plain_http(
     let control_listener = control_socket::listener_of(&engine);
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
-    let (console, access_log) = build_console(&engine.config, &paths);
+    let (console, access_log) = build_console(&engine.config, paths);
     // What the caller learned before anything was loaded prints first, ahead of
     // the bind, so it is on screen even if a bind then fails.
-    for warning in &startup_warnings {
+    for warning in startup_warnings {
         if warning.already_on_stderr {
             console.warn_already_on_stderr(&warning.text);
         } else {
@@ -1247,7 +1247,7 @@ impl TailscaleLoop {
     /// changed about it: a rename, a serve route arriving or leaving, Funnel.
     fn apply_identity(
         &mut self,
-        identity: TailscaleIdentity,
+        identity: &TailscaleIdentity,
         console: &Console,
         status: &LegStatus,
     ) {
@@ -1271,12 +1271,17 @@ impl TailscaleLoop {
     /// CLI that fails leaves it unknown, which distrusts loopback on a serve that
     /// never got an answer and keeps whatever an earlier answer decided (a Funnel
     /// stays one).
-    fn look_failed(&mut self, reason: TailscaleUnavailable, console: &Console, status: &LegStatus) {
+    fn look_failed(
+        &mut self,
+        reason: &TailscaleUnavailable,
+        console: &Console,
+        status: &LegStatus,
+    ) {
         let first_look = !std::mem::replace(&mut self.first_look_landed, true);
         if self.identity_confirmed.load(Ordering::SeqCst) {
             self.identity_lost();
         }
-        let next = crate::serve_legs::funnel_state_after_failure(self.exposure.funnel(), &reason);
+        let next = crate::serve_legs::funnel_state_after_failure(self.exposure.funnel(), reason);
         self.settle_funnel_state(
             next,
             crate::serve_legs::Because::NoTailscaleHere,
@@ -1311,8 +1316,8 @@ impl TailscaleLoop {
         status: &LegStatus,
     ) {
         match look {
-            Ok(identity) => self.apply_identity(identity, console, status),
-            Err(reason) => self.look_failed(reason, console, status),
+            Ok(identity) => self.apply_identity(&identity, console, status),
+            Err(reason) => self.look_failed(&reason, console, status),
         }
     }
 
@@ -1755,11 +1760,11 @@ async fn apply_current_generation_command(
     let command = match event {
         WatchEvent::Leg(command) => command,
         WatchEvent::IdentityFailed(reason) => {
-            ts.look_failed(reason, console, status);
+            ts.look_failed(&reason, console, status);
             return;
         }
         WatchEvent::Identity(identity) => {
-            ts.apply_identity(identity, console, status);
+            ts.apply_identity(&identity, console, status);
             return;
         }
     };
@@ -1963,10 +1968,10 @@ async fn finish_detection(
     // The name is read whatever became of the address: `yes` is the mode's one
     // look, and a name that answered is worth holding either way.
     match identified {
-        Ok(identity) => ts.apply_identity(identity, console, status),
+        Ok(identity) => ts.apply_identity(&identity, console, status),
         // A failed look is handled exactly as a watcher's: the name is
         // withdrawn and the reason decides the Funnel state.
-        Err(reason) => ts.look_failed(reason, console, status),
+        Err(reason) => ts.look_failed(&reason, console, status),
     }
     // `yes` looked for the address once, just now, and never looks again; the
     // name it keeps watching, so a Funnel switched on later is noticed. The
@@ -2342,7 +2347,7 @@ impl ServeCore {
         listeners: Vec<std::net::TcpListener>,
         control_socket: Option<std::os::unix::net::UnixListener>,
         config: &dux_core::config::Config,
-        console: Console,
+        console: &Console,
         access_log: bool,
         signals: SignalPolicy,
         // Passed straight through to `build_app`. Default for every serve but the
@@ -2470,7 +2475,7 @@ impl ServeCore {
                 None,
             );
             tailscale_loop.start_watcher_if_wanted();
-            tailscale_loop.say_not_checking(&console);
+            tailscale_loop.say_not_checking(console);
             tailscale_loop
         };
         let leg_commands = tailscale_loop.take_leg_receiver();
@@ -2845,7 +2850,7 @@ pub fn serve_with_engine(
         listeners,
         control_socket::listener_of(&engine),
         &engine.config,
-        console.clone(),
+        &console,
         // `[server] access_log` governs the flip exactly as it does `dux server`:
         // the user decided (2026-10-02) that the two logs match completely, so
         // the viewer carries the access log too.
@@ -6741,7 +6746,7 @@ mod auth_warning_mode_tests {
             vec![listener],
             None,
             &config,
-            Console::capture(ring.clone()),
+            &Console::capture(ring.clone()),
             false,
             SignalPolicy::Inherited,
             BackgroundHooks::default(),

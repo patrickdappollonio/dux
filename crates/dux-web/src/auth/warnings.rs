@@ -93,11 +93,11 @@ impl Speaker {
         self.say(Loudness::Warning, WEAK_KEY, &weak_sentence(), false);
     }
 
-    pub(crate) fn blocked(&self, entry: &str, failures: u32, path: &str, kept: BanKept) {
+    pub(crate) fn blocked(&self, entry: &str, failures: u32, path: &str, kept: &BanKept) {
         self.say(
             Loudness::Warning,
             BLOCKED_KEY,
-            &blocked_sentence(entry, failures, path, &kept),
+            &blocked_sentence(entry, failures, path, kept),
             false,
         );
     }

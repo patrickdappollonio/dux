@@ -2796,7 +2796,7 @@ impl EngineService {
         // Known-default reaction: spawn the switch (worker 2). Its completion
         // posts NonDefaultBranchCheckoutCompleted, whose status flows through
         // the wire_statuses_from_reaction drain above on the next iteration.
-        if self.web_owns(engine, reaction, routing) {
+        if Self::web_owns(engine, reaction, routing) {
             for status in engine.drive_checkout_followup(reaction) {
                 let _ = self.status.send(status);
             }
@@ -2883,12 +2883,7 @@ impl EngineService {
     }
 
     /// Whether the web owns the routable follow-ups for `reaction`.
-    fn web_owns(
-        &self,
-        engine: &Engine,
-        reaction: &EventReaction,
-        routing: FollowupRouting,
-    ) -> bool {
+    fn web_owns(engine: &Engine, reaction: &EventReaction, routing: FollowupRouting) -> bool {
         match routing {
             FollowupRouting::RunEverything => true,
             FollowupRouting::ByOrigin => {
@@ -4220,28 +4215,28 @@ fn poll_attention_transitions(
     }
 }
 
-fn handle_pty_write(engine: &mut Engine, id: String, bytes: Vec<u8>) {
-    let wrote = pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
+fn handle_pty_write(engine: &mut Engine, id: &str, bytes: &[u8]) {
+    let wrote = pty_for(engine, id).is_some_and(|client| client.write_bytes(bytes).is_ok());
     if wrote
-        && (engine.providers.contains_key(TabIdRef::new(&id))
-            || engine.companion_terminals.contains_key(&id))
+        && (engine.providers.contains_key(TabIdRef::new(id))
+            || engine.companion_terminals.contains_key(id))
     {
-        engine.note_pty_write(&id, &bytes);
+        engine.note_pty_write(id, bytes);
     }
 }
 
 fn handle_pty_resize(
     engine: &Engine,
     input_owners: &PtySizeOwners,
-    id: String,
+    id: &str,
     rows: u16,
     cols: u16,
     seq: u64,
 ) {
-    let client = pty_for(engine, &id);
+    let client = pty_for(engine, id);
     let had_client = client.is_some();
     let outcome = input_owners.apply_grid_in_order(
-        &id,
+        id,
         seq,
         rows,
         cols,
@@ -4345,14 +4340,14 @@ fn handle_apply_wire_request(
 
 fn handle_attach_pull_request(
     engine: &mut Engine,
-    session_id: String,
-    raw: String,
+    session_id: &str,
+    raw: &str,
     origin: StatusScope,
     reply: oneshot::Sender<Result<String, String>>,
     status_tx: &mut StatusEmitter,
 ) {
     engine.current_origin = origin;
-    let result = engine.dispatch_attach_pull_request(&session_id, &raw);
+    let result = engine.dispatch_attach_pull_request(session_id, raw);
     engine.current_origin = StatusScope::All;
     let result = match result {
         Ok((op_id, pending)) => {
@@ -4370,7 +4365,7 @@ fn handle_attach_pull_request(
 
 fn handle_create_agent_branch_plan(
     engine: &Engine,
-    project_id: String,
+    project_id: &str,
     name: String,
     reply: oneshot::Sender<Option<dux_core::git::CreateAgentBranchPlan>>,
 ) {
@@ -4523,17 +4518,17 @@ fn handle_request(
             let _ = reply.send(status_tx.late_finals_waiting());
         }
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
-            handle_attach_pull_request(engine, session_id, raw, origin, reply, status_tx);
+            handle_attach_pull_request(engine, &session_id, &raw, origin, reply, status_tx);
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => {
-            handle_pty_write(engine, id, bytes);
+            handle_pty_write(engine, &id, &bytes);
         }
         EngineRequest::ResizePty(id, rows, cols, seq) => {
-            handle_pty_resize(engine, input_owners, id, rows, cols, seq);
+            handle_pty_resize(engine, input_owners, &id, rows, cols, seq);
         }
         EngineRequest::PtyGridSize(id, reply) => {
             let _ = reply.send(pty_for(engine, &id).and_then(dux_core::pty::PtyClient::grid_size));
@@ -4555,21 +4550,21 @@ fn handle_request(
             // Headless spawn: seed a default 24x80 and let the first attaching
             // client resize the PTY to its real viewport.
             let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
-            let res = create_terminal_operation(engine, owner, ticket, |engine| {
+            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
                 engine.create_companion_terminal(&session_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateProjectTerminal(project_id, ticket, reply) => {
             let owner = dux_core::model::TerminalOwner::Project(project_id.clone());
-            let res = create_terminal_operation(engine, owner, ticket, |engine| {
+            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
                 engine.create_project_terminal(&project_id, 24, 80)
             });
             let _ = reply.send(res);
         }
         EngineRequest::CreateStandaloneTerminal(ticket, reply) => {
             let owner = dux_core::model::TerminalOwner::Standalone;
-            let res = create_terminal_operation(engine, owner, ticket, |engine| {
+            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
                 engine.create_standalone_terminal(24, 80)
             });
             let _ = reply.send(res);
@@ -4708,7 +4703,7 @@ fn handle_request(
             let _ = reply.send(owner);
         }
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
-            handle_create_agent_branch_plan(engine, project_id, name, reply);
+            handle_create_agent_branch_plan(engine, &project_id, name, reply);
         }
         EngineRequest::PtyKeyForPaneId(pane_id, reply) => {
             let _ = reply.send(engine.pty_key_for_pane_id(&pane_id));
@@ -5139,22 +5134,22 @@ fn handle_subscribe(
 /// asked: the record opens before the call and ends with it (a terminal raises no status).
 fn create_terminal_operation(
     engine: &mut Engine,
-    owner: dux_core::model::TerminalOwner,
-    ticket: Option<OperationTicket>,
+    owner: &dux_core::model::TerminalOwner,
+    ticket: Option<&OperationTicket>,
     create: impl FnOnce(&mut Engine) -> anyhow::Result<(String, String)>,
 ) -> Result<(String, String), String> {
-    if let Some(ticket) = &ticket {
+    if let Some(ticket) = ticket {
         engine.open_operation(&ticket.id, ticket.kind);
     }
     // Refused while another change holds the agent or project it opens in.
     let admitted = engine.admit(
-        ticket.as_ref().map(|ticket| ticket.id.as_str()),
-        &engine.inside_admission(&owner),
+        ticket.map(|ticket| ticket.id.as_str()),
+        &engine.inside_admission(owner),
     );
     let res = admitted
         .map_err(|e| e.to_string())
         .and_then(|()| create(engine).map_err(|e| e.to_string()));
-    if let Some(ticket) = &ticket {
+    if let Some(ticket) = ticket {
         match &res {
             Ok((terminal_id, _)) => {
                 engine.operations.note(

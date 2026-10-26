@@ -60,6 +60,10 @@ pub fn routes() -> Router<AppState> {
 
 // ── Add ──────────────────────────────────────────────────────────────────────
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is its own optional key in the add-project request body; add_project_command resolves their precedence"
+)]
 #[derive(Deserialize)]
 struct AddProjectBody {
     path: String,

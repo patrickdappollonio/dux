@@ -182,7 +182,7 @@ fn run_browser(
     engine: &mut Engine,
     server: &mut BackgroundServer,
     browser: std::thread::JoinHandle<()>,
-    asks: mpsc::Receiver<Ask>,
+    asks: &mpsc::Receiver<Ask>,
 ) {
     let seat = server
         .ownership()
@@ -314,7 +314,7 @@ fn a_browser_finds_everything_running_driven_by_the_tui_until_it_takes_over() {
         &mut engine,
         &mut server,
         on_its_own_runtime(journey),
-        ask_rx,
+        &ask_rx,
     );
 
     let still_mine = seat.owners.is_owner("s1-slot", seat.conn_id);
@@ -350,7 +350,7 @@ fn a_serve_started_without_the_claim_leaves_everything_free() {
         &mut engine,
         &mut server,
         on_its_own_runtime(journey),
-        ask_rx,
+        &ask_rx,
     );
     server.stop();
 }

@@ -186,13 +186,13 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
 /// paths so client-side routing works. `/ws` and `/healthz` are matched before this
 /// fallback and never reach here, and `offline.html` is a real embedded asset served
 /// directly rather than shadowed by that fallback.
-pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
-    let accepts_br = accepts_br(&headers);
+pub fn static_handler(uri: &Uri, headers: &HeaderMap) -> Response {
+    let accepts_br = accepts_br(headers);
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     if let Some(content) = WebAssets::get(path) {
         let mime = content.metadata.mimetype().to_string();
-        return serve_embedded(&mime, path, content, accepts_br, &headers);
+        return serve_embedded(&mime, path, content, accepts_br, headers);
     }
     // A miss under `assets/` means a chunk URL from a stale `index.html`. Falling
     // back to the SPA `index.html` would hand HTML to a `*.js` import(), which the
@@ -202,7 +202,7 @@ pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
         return (StatusCode::NOT_FOUND, "asset not found").into_response();
     }
     match WebAssets::get("index.html") {
-        Some(content) => serve_embedded("text/html", "index.html", content, accepts_br, &headers),
+        Some(content) => serve_embedded("text/html", "index.html", content, accepts_br, headers),
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
@@ -566,7 +566,7 @@ mod tests {
     async fn index_html_revalidates_to_304_with_matching_etag() {
         // First request: full body plus the validator headers.
         let uri: Uri = "/".parse().unwrap();
-        let first = static_handler(uri.clone(), HeaderMap::new()).await;
+        let first = static_handler(&uri, &HeaderMap::new());
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(
             first.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -577,7 +577,7 @@ mod tests {
         // Second request presenting the ETag: 304, no re-download.
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, etag.clone());
-        let second = static_handler(uri, headers).await;
+        let second = static_handler(&uri, &headers);
         assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(second.headers().get(header::ETAG).unwrap(), &etag);
     }
