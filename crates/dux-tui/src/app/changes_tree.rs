@@ -1543,7 +1543,7 @@ mod tests {
     fn discarding_a_folder_asks_first_then_deletes_it_on_a_worker() {
         let (mut app, worktree) = repo_app();
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         let PromptState::ConfirmDiscardFile {
             file_path,
             kind,
@@ -1566,7 +1566,7 @@ mod tests {
         app.resolve_confirm_discard_file(ConfirmAnswer::Cancel);
         assert!(worktree.join("node_modules/top.js").exists());
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         assert_eq!(app.status.tone(), StatusTone::Busy);
         settle(&mut app, idle);
@@ -1668,7 +1668,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -1724,7 +1724,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
 
         app.files_index = 0;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status
@@ -1735,7 +1735,7 @@ mod tests {
         );
 
         app.files_index = 1;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status.text().contains("worktree manager"),
@@ -1783,7 +1783,7 @@ mod tests {
             let mut app = test_app(default_bindings());
             repositories_only_rows(&mut app);
             app.files_index = index;
-            app.confirm_discard_selected_file().unwrap();
+            app.confirm_discard_selected_file();
             assert!(matches!(app.prompt, PromptState::None));
             let text = app.status.text();
             assert!(text.contains(holds), "{text}");
@@ -1897,7 +1897,7 @@ mod tests {
     #[test]
     fn a_folder_that_grew_after_the_dialog_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         std::fs::write(worktree.join("node_modules/late.js"), "late\n").unwrap();
 
         app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
@@ -1917,7 +1917,7 @@ mod tests {
     #[test]
     fn a_folder_that_shrank_after_the_dialog_reports_what_went() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         std::fs::remove_file(worktree.join("node_modules/top.js")).unwrap();
 
         app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
@@ -1938,7 +1938,7 @@ mod tests {
     fn a_file_that_became_a_folder_after_the_dialog_is_not_cleaned() {
         let (mut app, worktree) = repo_app();
         app.files_index = 1;
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
         std::fs::remove_file(worktree.join("notes.md")).unwrap();
         std::fs::create_dir_all(worktree.join("notes.md")).unwrap();
@@ -1967,7 +1967,7 @@ mod tests {
     #[test]
     fn a_folder_that_became_a_repository_after_the_dialog_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         run_git(&worktree.join("node_modules"), &["init", "-q"]);
 
         app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
@@ -1998,7 +1998,7 @@ mod tests {
             .position(|row| row.starts_with("clone/"))
             .expect("the repository row");
 
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
@@ -2013,7 +2013,7 @@ mod tests {
     #[test]
     fn a_folder_that_became_tracked_is_not_deleted() {
         let (mut app, worktree) = repo_app();
-        app.confirm_discard_selected_file().unwrap();
+        app.confirm_discard_selected_file();
         // An agent commits the folder before the user confirms.
         run_git(&worktree, &["add", "--", "node_modules"]);
         run_git(&worktree, &["commit", "-q", "-m", "vendor"]);

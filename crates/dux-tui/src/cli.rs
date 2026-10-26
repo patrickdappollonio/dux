@@ -356,16 +356,15 @@ fn run_diff(paths: &DuxPaths, form: DiffForm) -> Result<()> {
     current.source_text = dux_core::config::SourceText::of(&current_raw);
 
     if form == DiffForm::Raw {
-        run_diff_raw(&current_raw, &current)?;
+        run_diff_raw(&current_raw, &current);
     } else {
-        run_diff_summary(&current)?;
+        run_diff_summary(&current);
     }
     Ok(())
 }
 
-fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
+fn run_diff_raw(_current_raw: &str, current: &Config) {
     print!("{}", raw_diff_text(current));
-    Ok(())
 }
 
 /// What `dux config diff --raw` prints for `current`.
@@ -380,7 +379,7 @@ pub(crate) fn raw_diff_text(current: &Config) -> String {
     unified_diff("default", "current", &default_rendered, &current_rendered)
 }
 
-fn run_diff_summary(current: &Config) -> Result<()> {
+fn run_diff_summary(current: &Config) {
     let changes = collect_config_changes(current);
     if changes.is_empty() {
         println!("config matches defaults, so there are no differences");
@@ -389,7 +388,6 @@ fn run_diff_summary(current: &Config) -> Result<()> {
             println!("  {line}");
         }
     }
-    Ok(())
 }
 
 /// Every setting whose current value differs from the default, as display lines.
@@ -2952,7 +2950,7 @@ mod tests {
     fn diff_summary_reports_no_differences_for_defaults() {
         // Just verify it runs without error on defaults.
         let defaults = Config::default();
-        run_diff_summary(&defaults).expect("diff summary");
+        run_diff_summary(&defaults);
     }
 
     #[test]

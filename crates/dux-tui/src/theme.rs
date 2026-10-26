@@ -649,7 +649,7 @@ pub(crate) enum FocusState {
 
 impl FocusState {
     /// Whether the control at `stop` has focus while focus rests on `current`.
-    pub(crate) fn of<T: PartialEq>(current: T, stop: T) -> Self {
+    pub(crate) fn of<T: PartialEq + Copy>(current: T, stop: T) -> Self {
         if current == stop {
             Self::Focused
         } else {

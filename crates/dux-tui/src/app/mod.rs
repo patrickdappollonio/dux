@@ -4761,7 +4761,7 @@ impl App {
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
         };
-        Self::assemble(
+        Ok(Self::assemble(
             engine,
             bindings,
             interactive_patterns,
@@ -4769,7 +4769,7 @@ impl App {
             status,
             theme,
             &SessionRestore::Restore,
-        )
+        ))
     }
 
     /// Shared App-struct construction used by both first-boot bootstrap and the
@@ -4788,7 +4788,7 @@ impl App {
         status: KeyedStatusController,
         theme: Theme,
         restore: &SessionRestore,
-    ) -> Result<Self> {
+    ) -> App {
         let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
             &engine.config.ui.pr_banner_position,
         ) == dux_core::config_effective::PrBannerPosition::Bottom;
@@ -4974,7 +4974,7 @@ impl App {
         app.rebuild_left_items();
         app.reload_changed_files();
         app.engine.update_branch_sync_sessions();
-        Ok(app)
+        app
     }
 
     /// Rebuild an App around an EXISTING engine after the web server hands it
@@ -5001,7 +5001,7 @@ impl App {
             theme_warning,
             None,
         );
-        Self::assemble(
+        Ok(Self::assemble(
             engine,
             bindings,
             interactive_patterns,
@@ -5009,7 +5009,7 @@ impl App {
             status,
             theme,
             &SessionRestore::Skip,
-        )
+        ))
     }
 
     /// Consume the App and hand back its engine. Used by the TUI→server flip:
@@ -5996,14 +5996,38 @@ impl App {
     pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
         match command {
-            "new-agent" => self.create_agent_for_selected_project(),
-            "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
-            "clone-project" => self.open_clone_project_prompt(),
-            "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
-            "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
-            "manage-worktrees" => self.manage_project_worktrees(),
-            "fork-agent" => self.fork_selected_session(),
-            "change-agent-provider" => self.open_change_agent_provider_prompt(),
+            "new-agent" => {
+                self.create_agent_for_selected_project();
+                Ok(())
+            }
+            "new-agent-from-pr" => {
+                self.open_new_agent_from_pr_prompt();
+                Ok(())
+            }
+            "clone-project" => {
+                self.open_clone_project_prompt();
+                Ok(())
+            }
+            "new-agent-from-worktree" => {
+                self.create_agent_from_existing_worktree();
+                Ok(())
+            }
+            "manage-projects" => {
+                self.open_project_chooser(ProjectChooserIntent::Manage);
+                Ok(())
+            }
+            "manage-worktrees" => {
+                self.manage_project_worktrees();
+                Ok(())
+            }
+            "fork-agent" => {
+                self.fork_selected_session();
+                Ok(())
+            }
+            "change-agent-provider" => {
+                self.open_change_agent_provider_prompt();
+                Ok(())
+            }
             "new-agent-tab" => self.open_new_tab_provider_prompt(),
             "close-tab" => {
                 self.close_focused_tab_prompt();
@@ -6013,9 +6037,15 @@ impl App {
                 self.stop_focused_tab_prompt();
                 Ok(())
             }
-            "change-default-provider" => self.open_change_default_provider_prompt(),
+            "change-default-provider" => {
+                self.open_change_default_provider_prompt();
+                Ok(())
+            }
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
-            "change-theme" => self.open_change_theme_prompt(),
+            "change-theme" => {
+                self.open_change_theme_prompt();
+                Ok(())
+            }
             "reload-config" => self.reload_config_from_disk(),
             "start-web-server" => {
                 self.start_web_server();
@@ -6040,28 +6070,58 @@ impl App {
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "configure-startup-command" => self.open_configure_startup_command(),
-            "configure-global-env" => self.open_configure_global_env(),
+            "configure-global-env" => {
+                self.open_configure_global_env();
+                Ok(())
+            }
             "configure-project-env" => self.open_configure_project_env(),
-            "rerun-startup-command-on-agent" => self.rerun_startup_command_on_agent(),
+            "rerun-startup-command-on-agent" => {
+                self.rerun_startup_command_on_agent();
+                Ok(())
+            }
             "read-startup-command-logs" => self.open_startup_command_logs(),
             "pull-project" => self.refresh_selected_project(),
             "checkout-project-default-branch" => self.checkout_selected_project_default_branch(),
             "change-project-base-branch" => self.change_selected_project_base_branch(),
             "delete-project" => self.delete_selected_project(),
-            "remove-project" => self.remove_selected_project(),
-            "delete-agent" => self.confirm_delete_selected_session(),
-            "rename-agent" => self.open_rename_session(),
-            "agent-info" => self.open_agent_info(),
-            "kill-running" => self.open_kill_running(),
+            "remove-project" => {
+                self.remove_selected_project();
+                Ok(())
+            }
+            "delete-agent" => {
+                self.confirm_delete_selected_session();
+                Ok(())
+            }
+            "rename-agent" => {
+                self.open_rename_session();
+                Ok(())
+            }
+            "agent-info" => {
+                self.open_agent_info();
+                Ok(())
+            }
+            "kill-running" => {
+                self.open_kill_running();
+                Ok(())
+            }
             "clear-status-line" => {
                 self.clear_status_line();
                 Ok(())
             }
-            "detach-agent" => self.confirm_detach_selected_session(),
-            "recreate-working-copy" => self.confirm_recreate_selected_working_copy(),
+            "detach-agent" => {
+                self.confirm_detach_selected_session();
+                Ok(())
+            }
+            "recreate-working-copy" => {
+                self.confirm_recreate_selected_working_copy();
+                Ok(())
+            }
             "reconnect-agent" => self.reconnect_selected_session(LaunchView::Minimized),
             "force-reconnect-agent" => self.force_reconnect_agent(),
-            "refresh-changes" => self.refresh_changed_files_now(),
+            "refresh-changes" => {
+                self.refresh_changed_files_now();
+                Ok(())
+            }
             "move-agent-up" => {
                 self.move_selected_agent(reorder::MoveDir::Up);
                 Ok(())
@@ -6078,7 +6138,10 @@ impl App {
                 self.move_selected_agent(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "delete-terminal" => self.delete_terminal_from_palette(),
+            "delete-terminal" => {
+                self.delete_terminal_from_palette();
+                Ok(())
+            }
             "filter-agents" => {
                 self.filter_agents_from_palette();
                 Ok(())
@@ -6100,24 +6163,52 @@ impl App {
                 Ok(())
             }
             "show-agent" => self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized),
-            "show-terminal" => self.show_or_open_first_terminal(),
-            "new-terminal-for-agent" => self.new_companion_terminal(),
-            "new-terminal-for-project" => {
-                self.open_project_chooser(ProjectChooserIntent::ProjectTerminal)
+            "show-terminal" => {
+                self.show_or_open_first_terminal();
+                Ok(())
             }
-            "new-standalone-agent" => self.open_standalone_agent_browser(),
-            "new-standalone-terminal" => self.show_standalone_terminal(),
-            "add-project" => self.open_project_browser(),
+            "new-terminal-for-agent" => {
+                self.new_companion_terminal();
+                Ok(())
+            }
+            "new-terminal-for-project" => {
+                self.open_project_chooser(ProjectChooserIntent::ProjectTerminal);
+                Ok(())
+            }
+            "new-standalone-agent" => {
+                self.open_standalone_agent_browser();
+                Ok(())
+            }
+            "new-standalone-terminal" => {
+                self.show_standalone_terminal();
+                Ok(())
+            }
+            "add-project" => {
+                self.open_project_browser();
+                Ok(())
+            }
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
-            "open-worktree-with" => self.open_worktree_editor_picker(),
+            "open-worktree-with" => {
+                self.open_worktree_editor_picker();
+                Ok(())
+            }
             "open-current-pr" => {
                 self.open_current_pr_in_browser();
                 Ok(())
             }
-            "attach-pull-request" => self.open_attach_pull_request_prompt(),
-            "detach-pull-request" => self.detach_pull_request(),
-            "resume-pull-request-autodetection" => self.resume_pull_request_autodetection(),
+            "attach-pull-request" => {
+                self.open_attach_pull_request_prompt();
+                Ok(())
+            }
+            "detach-pull-request" => {
+                self.detach_pull_request();
+                Ok(())
+            }
+            "resume-pull-request-autodetection" => {
+                self.resume_pull_request_autodetection();
+                Ok(())
+            }
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())
@@ -6175,8 +6266,14 @@ impl App {
             // Both first-load screens can be opened deliberately even when their
             // `[ui] disable_*` flag is set: the flags suppress only what dux does
             // on its own, never what the user asks for.
-            "show-welcome-screen" => self.show_welcome_screen_command(),
-            "show-release-notes" => self.show_release_notes_command(),
+            "show-welcome-screen" => {
+                self.show_welcome_screen_command();
+                Ok(())
+            }
+            "show-release-notes" => {
+                self.show_release_notes_command();
+                Ok(())
+            }
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
                 self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
@@ -6732,15 +6829,17 @@ impl App {
     /// terminal row is the selection: the remembered terminal index outlives
     /// the cursor moving back onto an agent, and deleting a terminal the
     /// user is not looking at is not what they asked for.
-    pub(crate) fn delete_terminal_from_palette(&mut self) -> Result<()> {
+    pub(crate) fn delete_terminal_from_palette(&mut self) {
         if self.left_section != LeftSection::Terminals {
             self.set_error(
                 "Select a terminal in the agents pane first, then run delete-terminal again to \
                  close it.",
             );
-            return Ok(());
+            return;
         }
-        self.confirm_delete_selected_terminal()
+        {
+            self.confirm_delete_selected_terminal();
+        }
     }
 
     pub(crate) fn open_agent_filter(&mut self) {
@@ -7080,12 +7179,12 @@ impl App {
     /// [`Self::apply_changed_files_refresh_outcome`] resolves the keyed busy
     /// when the worker's `ChangedFilesReady` drains, in both the success and the
     /// failure branch, so the busy always reaches a final.
-    pub(crate) fn refresh_changed_files_now(&mut self) -> Result<()> {
+    pub(crate) fn refresh_changed_files_now(&mut self) {
         let Some(session) = self.selected_session() else {
             self.set_warning(
                 "Select an agent first: refreshing changed files needs a worktree to read.",
             );
-            return Ok(());
+            return;
         };
         let session_id = session.id.clone();
         let key = format!("refresh-changes:{session_id}");
@@ -7104,7 +7203,7 @@ impl App {
             self.set_warning(format!(
                 "Could not refresh the changed files for \"{name}\": {reason}"
             ));
-            return Ok(());
+            return;
         };
         self.clamp_files_cursor();
         self.begin_changed_files_refresh(key, name, worktree, ChangedFilesReadVoice::Spoken);
@@ -7113,7 +7212,6 @@ impl App {
         // changed files does not over-poll `gh`.
         self.engine
             .spawn_pr_check_for_session(&session_id, dux_core::engine::PR_CHECK_MIN_INTERVAL);
-        Ok(())
     }
 
     /// Show a keyed busy for a changed-files read and hand the read to a
@@ -7354,7 +7452,7 @@ impl App {
 
     /// Open the read-only Agent Info modal for the focused agent. Routed through
     /// `PromptState` so `Esc` closes it uniformly with every other prompt.
-    pub(crate) fn open_agent_info(&mut self) -> Result<()> {
+    pub(crate) fn open_agent_info(&mut self) {
         if let Some(session) = self.selected_session().cloned() {
             let label = session.display_label();
             // A standalone agent has no project, so there is no project default
@@ -7386,10 +7484,9 @@ impl App {
         } else {
             self.set_error("No agent session selected. Select an agent to see its info.");
         }
-        Ok(())
     }
 
-    pub(crate) fn open_rename_session(&mut self) -> Result<()> {
+    pub(crate) fn open_rename_session(&mut self) {
         if let Some(session) = self.selected_session().cloned() {
             if self
                 .engine
@@ -7400,7 +7497,7 @@ impl App {
                 self.set_error(
                     "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
                 );
-                return Ok(());
+                return;
             }
             let branch_named = session.supports_branch_git();
             self.input_target = InputTarget::None;
@@ -7435,7 +7532,6 @@ impl App {
         } else {
             self.set_error("No agent session selected.");
         }
-        Ok(())
     }
 
     /// Ask, off the UI thread, whether the agent's branch has a pushed copy, so
@@ -8464,7 +8560,7 @@ mod tests {
     #[test]
     fn the_palette_asks_before_deleting_the_selected_terminal() {
         let mut app = test_support::test_app(test_support::default_bindings());
-        app.show_companion_terminal().expect("launch a terminal");
+        app.show_companion_terminal();
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
@@ -8480,7 +8576,7 @@ mod tests {
     #[test]
     fn the_palette_refuses_to_delete_a_terminal_that_is_not_selected() {
         let mut app = test_support::test_app(test_support::default_bindings());
-        app.show_companion_terminal().expect("launch a terminal");
+        app.show_companion_terminal();
         app.left_section = LeftSection::Projects;
         app.selected_terminal_index = 0;
 

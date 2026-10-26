@@ -759,11 +759,7 @@ impl App {
         };
         self.pending_pr_reference = Some(form.reference.clone());
         self.pr_clone_check_rx = None;
-        if let Err(err) =
-            self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None)
-        {
-            self.set_error(format!("{err:#}"));
-        }
+        self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None);
     }
 
     /// The remembered clone this surface started, when `asked` is its pull

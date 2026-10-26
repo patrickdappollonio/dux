@@ -1005,17 +1005,16 @@ impl App {
     /// The `show-welcome-screen` palette command. Works even when
     /// `disable_automated_welcome_screen` is set: the flag suppresses only what
     /// dux does on its own.
-    pub(crate) fn show_welcome_screen_command(&mut self) -> Result<()> {
+    pub(crate) fn show_welcome_screen_command(&mut self) {
         let screen = dux_core::welcome_screen::welcome_screen(&self.engine.paths.config_path);
         self.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(screen, SeenNote::Skip));
-        Ok(())
     }
 
     /// The `show-release-notes` palette command. Works even when
     /// `disable_release_notes` is set, and may fetch, because the user asked for
     /// it. `load_release_notes` already routes a real version to its own tag and
     /// a development build to the newest release.
-    pub(crate) fn show_release_notes_command(&mut self) -> Result<()> {
+    pub(crate) fn show_release_notes_command(&mut self) {
         if self.notes_fetch_rx.is_some() {
             // The running fetch may have been dispatched as AUTOMATIC, whose
             // failure branch is silent. Tell it that someone is waiting, so a
@@ -1027,10 +1026,9 @@ impl App {
             self.set_info(
                 "Already loading the dux release notes from GitHub. They will open when they arrive.",
             );
-            return Ok(());
+            return;
         }
         self.spawn_release_notes_fetch(NotesFetchPurpose::Explicit);
-        Ok(())
     }
 
     /// Dismiss the first-load modal, honoring the stamp-on-dismissal contract.
@@ -1062,9 +1060,7 @@ impl App {
         self.dismiss_first_load_prompt();
         match action {
             FirstLoadAction::AddProject => {
-                if let Err(err) = self.open_project_browser() {
-                    self.set_error(format!("Could not open the project browser: {err:#}"));
-                }
+                self.open_project_browser();
             }
             FirstLoadAction::OpenUrl(url) => {
                 let success = format!("Opened {url} in your default browser.");
@@ -1834,7 +1830,7 @@ mod tests {
     #[test]
     fn an_explicitly_opened_screen_never_stamps() {
         let mut app = test_app(default_bindings());
-        app.show_welcome_screen_command().expect("open welcome");
+        app.show_welcome_screen_command();
         app.dismiss_first_load_prompt();
         assert_eq!(
             app.engine.session_store.last_seen_version().unwrap(),
@@ -2057,7 +2053,7 @@ mod tests {
         // Stand in for a fetch in flight: a channel whose sender is still alive.
         let (tx, rx) = mpsc::channel::<NotesFetched>();
         app.notes_fetch_rx = Some(rx);
-        app.show_release_notes_command().expect("command runs");
+        app.show_release_notes_command();
         assert!(
             app.notes_fetch_explicit_request.load(Ordering::SeqCst),
             "the running fetch must learn that someone is now waiting on it"

@@ -25,6 +25,17 @@ pub(crate) enum CheckboxState {
     Focused,
 }
 
+impl CheckboxState {
+    /// The look of the checkbox at `stop` while focus rests on `current`.
+    pub(crate) fn of<T: PartialEq + Copy>(current: T, stop: T) -> Self {
+        if current == stop {
+            Self::Focused
+        } else {
+            Self::Normal
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CheckboxLayout {
     pub(crate) lines: Vec<Line<'static>>,

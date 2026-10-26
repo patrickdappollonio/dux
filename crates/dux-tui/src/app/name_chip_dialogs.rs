@@ -457,8 +457,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
             None,
         )
         .unwrap();
-    app.confirm_delete_selected_session()
-        .expect("open the delete dialog");
+    app.confirm_delete_selected_session();
 
     app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
 
@@ -537,8 +536,7 @@ fn a_double_click_on_a_refused_delete_never_presses_the_override() {
     let agent = app.engine.sessions[0].id.clone();
     let tab = app.engine.sessions[0].slot_tab_id().to_string();
     crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
-    app.confirm_delete_selected_session()
-        .expect("open the delete dialog");
+    app.confirm_delete_selected_session();
     let click = |app: &mut App, rect: ratatui::layout::Rect| {
         let (column, row) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
         for kind in [

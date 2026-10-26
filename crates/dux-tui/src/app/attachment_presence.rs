@@ -302,8 +302,7 @@ mod tests {
         let session_id = app.engine.sessions[0].id.clone();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let first = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
-        app.confirm_delete_selected_session()
-            .expect("open the delete dialog");
+        app.confirm_delete_selected_session();
         app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
         assert_eq!(app.prompt.attached().len(), 1);
         if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
@@ -429,8 +428,7 @@ mod tests {
         let _watch = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
         let recreating = dux_core::engine::InFlightKey::RecreateWorkingCopy(session_id.clone());
 
-        app.confirm_recreate_selected_working_copy()
-            .expect("open the recreate dialog");
+        app.confirm_recreate_selected_working_copy();
         let PromptState::ConfirmRecreateWorkingCopy {
             restart_offer,
             restart_tabs,
@@ -676,8 +674,7 @@ mod tests {
             .expect("standalone terminal");
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
-        app.open_terminal_from_terminal_list()
-            .expect("open the terminal");
+        app.open_terminal_from_terminal_list();
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         render(&mut app);
         assert_eq!(attached_here(&app), vec![terminal.clone()]);

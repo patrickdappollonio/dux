@@ -561,15 +561,13 @@ impl App {
             && answer.status_op_id.is_some();
         if current {
             self.pending_pr_reference_op = None;
-            if let Err(error) = self.apply_pull_request_reference_resolution(
+            self.apply_pull_request_reference_resolution(
                 answer.raw_input,
                 &answer.repository,
                 answer.result,
                 answer.offer,
                 answer.clone_unavailable,
-            ) {
-                self.set_error(format!("{error:#}"));
-            }
+            );
         }
         if let Some(id) = answer.status_op_id
             && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
@@ -1016,14 +1014,10 @@ impl App {
                 "Project branch was detected, but config.toml could not be updated: {error:#}"
             )),
         }
-        if let Err(error) = self.continue_create_agent_after_branch_inspection(project, inspection)
-        {
-            self.set_error(format!("{error:#}"));
-        } else {
-            self.set_info(format!(
-                "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
-            ));
-        }
+        self.continue_create_agent_after_branch_inspection(project, inspection);
+        self.set_info(format!(
+            "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+        ));
     }
 
     fn apply_dispatch_project_default_branch_checkout(
@@ -1521,14 +1515,11 @@ impl App {
             agents: Vec::new(),
             cloned: None,
         };
-        if let Err(err) = self.open_name_new_agent_prompt(request) {
-            self.set_error(format!("{err:#}"));
-        } else {
-            self.set_info(format!(
-                "Resolved PR #{}: {}. Confirm or edit the branch name.",
-                pr.number, pr.title
-            ));
-        }
+        self.open_name_new_agent_prompt(request);
+        self.set_info(format!(
+            "Resolved PR #{}: {}. Confirm or edit the branch name.",
+            pr.number, pr.title
+        ));
     }
 
     fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, window: CpuWindow) {

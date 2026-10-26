@@ -13,8 +13,10 @@ use super::*;
 impl App {
     /// `manage-worktrees`: open the project chooser, then (per project) load
     /// that project's manageable worktrees into [`PromptState::ManageWorktrees`].
-    pub(crate) fn manage_project_worktrees(&mut self) -> Result<()> {
-        self.open_project_chooser(ProjectChooserIntent::ManageWorktrees)
+    pub(crate) fn manage_project_worktrees(&mut self) {
+        {
+            self.open_project_chooser(ProjectChooserIntent::ManageWorktrees);
+        }
     }
 
     /// Per-project body for `ManageWorktrees`: opens the manager and spawns the
@@ -23,11 +25,11 @@ impl App {
         &mut self,
         project: Project,
         return_to: Option<Box<ProjectActionsPrompt>>,
-    ) -> Result<()> {
+    ) {
         if project.path_missing {
             self.prompt = PromptState::None;
             self.set_warning(format!("Project path not found: {}", project.path));
-            return Ok(());
+            return;
         }
 
         self.input_target = InputTarget::None;
@@ -64,7 +66,6 @@ impl App {
         self.engine
             .spawn_manageable_worktrees_worker(project, Some(op_id));
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
-        Ok(())
     }
 
     /// Open the removal confirmation for the manager's selected row.
@@ -72,13 +73,13 @@ impl App {
     /// A row an agent holds is refused with the same sentence the web route's
     /// 409 carries; the worktree stays listed, since hiding it would leave the
     /// user hunting for a directory they can see.
-    pub(crate) fn confirm_delete_selected_worktree(&mut self) -> Result<()> {
+    pub(crate) fn confirm_delete_selected_worktree(&mut self) {
         let PromptState::ManageWorktrees(prompt) = &self.prompt else {
-            return Ok(());
+            return;
         };
         let Some(entry) = prompt.selected.and_then(|index| prompt.entries.get(index)) else {
             self.set_error("No worktree is selected.");
-            return Ok(());
+            return;
         };
         if !entry.is_removable() {
             self.set_error(
@@ -86,7 +87,7 @@ impl App {
                  standalone agent, deleting it leaves the directory in place, so remove that one \
                  yourself.",
             );
-            return Ok(());
+            return;
         }
         let confirm = ConfirmDeleteWorktreePrompt {
             previous: prompt.clone(),
@@ -102,7 +103,6 @@ impl App {
             focus: DeleteWorktreeFocus::Cancel,
         };
         self.prompt = PromptState::ConfirmDeleteWorktree(Box::new(confirm));
-        Ok(())
     }
 
     /// Resolve the removal confirmation. Cancelling returns to the manager
@@ -336,8 +336,7 @@ mod tests {
         // rather than one per layer.
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        app.begin_manage_worktrees_for_project(project, None)
-            .expect("opening the manager succeeds");
+        app.begin_manage_worktrees_for_project(project, None);
 
         let op_id = app
             .pending_worktree_ops
@@ -450,7 +449,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         let PromptState::ConfirmDeleteWorktree(prompt) = &app.prompt else {
             panic!("expected the confirmation, got {:?}", app.prompt);
         };
@@ -478,7 +477,7 @@ mod tests {
         let mut prompt = manager(entries);
         prompt.selected = Some(0);
         app.prompt = PromptState::ManageWorktrees(prompt);
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         assert!(
             matches!(app.prompt, PromptState::ManageWorktrees(_)),
             "the manager stays open"
@@ -502,7 +501,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         let PromptState::ConfirmDeleteWorktree(prompt) = &app.prompt else {
             panic!("expected the confirmation");
         };
@@ -525,7 +524,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         // Focus moves Cancel -> Delete -> Checkbox with the horizontal key.
         app.handle_key(key(KeyCode::Right)).unwrap();
         app.handle_key(key(KeyCode::Right)).unwrap();
@@ -553,7 +552,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         app.handle_key(key(KeyCode::Right)).unwrap();
         app.handle_key(key(KeyCode::Right)).unwrap();
         let PromptState::ConfirmDeleteWorktree(prompt) = &app.prompt else {
@@ -578,7 +577,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         app.handle_key(key(KeyCode::Esc)).unwrap();
         assert!(
             matches!(app.prompt, PromptState::ManageWorktrees(_)),
@@ -599,7 +598,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         app.handle_key(key(KeyCode::Enter)).unwrap();
         assert!(matches!(app.prompt, PromptState::ManageWorktrees(_)));
         assert!(
@@ -623,7 +622,7 @@ mod tests {
                 crate::app::test_support::WorktreeState::Clean,
             )],
         );
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         app.handle_key(key(KeyCode::Right)).unwrap();
         app.handle_key(key(KeyCode::Enter)).unwrap();
         assert!(
@@ -666,8 +665,7 @@ mod tests {
 
         // Load the manager the way the palette command does, then wait for the
         // listing worker (a real dependency, bounded).
-        app.begin_manage_worktrees_for_project(project, None)
-            .unwrap();
+        app.begin_manage_worktrees_for_project(project, None);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             app.drain_events();
@@ -688,7 +686,7 @@ mod tests {
             prompt.entries
         );
 
-        app.confirm_delete_selected_worktree().unwrap();
+        app.confirm_delete_selected_worktree();
         if let PromptState::ConfirmDeleteWorktree(prompt) = &mut app.prompt {
             prompt.delete_branch =
                 branch_removal == dux_core::worktree_manager::BranchRemoval::Delete;

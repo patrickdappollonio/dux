@@ -1877,14 +1877,10 @@ mod tests {
         assert_eq!(input.text, "y");
     }
 
-    /// A mapper that converts 'a' to 'A'.
-    fn upcase_a(_text: &str, _cursor: usize, ch: char) -> Option<char> {
-        if ch == 'a' { Some('A') } else { Some(ch) }
-    }
-
     #[test]
     fn map_transforms_char() {
-        let mut input = TextInput::new().with_char_map(upcase_a);
+        let mut input =
+            TextInput::new().with_char_map(|_, _, ch| Some(if ch == 'a' { 'A' } else { ch }));
         input.handle_key(key(KeyCode::Char('a')));
         input.handle_key(key(KeyCode::Char('b')));
         input.handle_key(key(KeyCode::Char('a')));

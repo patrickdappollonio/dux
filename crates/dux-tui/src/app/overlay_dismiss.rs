@@ -1235,7 +1235,7 @@ mod tests {
     #[test]
     fn clicking_a_list_row_inside_a_modal_still_selects_it() {
         let mut app = test_app(default_bindings());
-        app.open_change_theme_prompt().expect("theme picker");
+        app.open_change_theme_prompt();
         render(&mut app);
         let (list, offset) = match app.overlay_layout.active {
             OverlayMouseLayout::ChangeTheme { list, offset, .. } => (list, offset),
@@ -1654,7 +1654,7 @@ mod tests {
     /// live preview is actually applied. Otherwise "cancel reverts the
     /// preview" has nothing to revert and the test would pass vacuously.
     fn open_theme_picker_with_live_preview(app: &mut App) {
-        app.open_change_theme_prompt().expect("open theme picker");
+        app.open_change_theme_prompt();
         let before = format!("{:?}", app.theme.app_bg);
         let enough_themes = match &mut app.prompt {
             PromptState::ChangeTheme(prompt) => {

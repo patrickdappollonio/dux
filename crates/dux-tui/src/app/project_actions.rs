@@ -75,10 +75,11 @@ impl App {
     /// project, or, with no agent selected (or an agent with no project),
     /// open the project list and run it on the pick.
     pub(crate) fn run_project_command(&mut self, action: ProjectAction) -> Result<()> {
-        match self.selected_project().cloned() {
-            Some(project) => self.run_project_action(&project, action, None),
-            None => self.open_project_chooser(ProjectChooserIntent::Action(action)),
-        }
+        let Some(project) = self.selected_project().cloned() else {
+            self.open_project_chooser(ProjectChooserIntent::Action(action));
+            return Ok(());
+        };
+        self.run_project_action(&project, action, None)
     }
 
     /// Run `action` on `project` through its existing flow. `return_to` is the
@@ -92,7 +93,10 @@ impl App {
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) -> Result<()> {
         match action {
-            ProjectAction::NewAgent => self.begin_new_agent_for_project(project.clone()),
+            ProjectAction::NewAgent => {
+                self.begin_new_agent_for_project(project.clone());
+                Ok(())
+            }
             ProjectAction::NewAgentFromPr => {
                 if !self.github_pr_agent_command_available() {
                     self.set_error(
@@ -101,14 +105,21 @@ impl App {
                     );
                     return Ok(());
                 }
-                self.begin_pr_agent_for_project(project.clone())
+                {
+                    self.begin_pr_agent_for_project(project.clone());
+                    Ok(())
+                }
             }
             ProjectAction::Worktrees => {
-                self.begin_manage_worktrees_for_project(project.clone(), return_to)
+                self.begin_manage_worktrees_for_project(project.clone(), return_to);
+                Ok(())
             }
             ProjectAction::NewTerminal => {
                 self.prompt = PromptState::None;
-                self.show_project_terminal(project)
+                {
+                    self.show_project_terminal(project);
+                    Ok(())
+                }
             }
             ProjectAction::Pull => self.pull_project(project),
             ProjectAction::CheckoutDefaultBranch => {
@@ -124,13 +135,18 @@ impl App {
                 Ok(())
             }
             ProjectAction::DefaultProvider => {
-                self.open_change_project_default_provider_for(project, return_to)
+                self.open_change_project_default_provider_for(project, return_to);
+                Ok(())
             }
             ProjectAction::AutoReopen => self.toggle_project_auto_reopen_agents_for(project),
             ProjectAction::StartupCommand => {
-                self.open_configure_startup_command_for(project, return_to)
+                self.open_configure_startup_command_for(project, return_to);
+                Ok(())
             }
-            ProjectAction::Environment => self.open_configure_project_env_for(project, return_to),
+            ProjectAction::Environment => {
+                self.open_configure_project_env_for(project, return_to);
+                Ok(())
+            }
             ProjectAction::StartupLogs => {
                 // The logs open in their own modal once they are read, over
                 // whatever is open then: the action list stays up meanwhile

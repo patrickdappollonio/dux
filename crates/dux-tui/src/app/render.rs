@@ -7203,11 +7203,7 @@ impl App {
         let has_checkbox = prompt.has_branch_checkbox();
         let checkbox_label = delete_worktree_checkbox_prose(prompt.branch.as_deref());
         let checkbox_height = if has_checkbox {
-            let state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
             let checkbox = Checkbox::with_prose(&checkbox_label, &self.theme)
                 .checked(if prompt.delete_branch {
                     CheckMark::Checked
@@ -7300,11 +7296,7 @@ impl App {
         let checkbox_area = layout.controls;
 
         let checkbox_rect = if has_checkbox {
-            let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 checkbox_area,
@@ -8201,17 +8193,14 @@ impl App {
         let dialog_width = 68.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox_label = "Recover last working config";
-        let checkbox_state = if *focus == ConfigReloadFailedFocus::Checkbox {
-            CheckboxState::Focused
+        let checkbox_state = CheckboxState::of(*focus, ConfigReloadFailedFocus::Checkbox);
+        let recover_mark = if *recover_old_config {
+            CheckMark::Checked
         } else {
-            CheckboxState::Normal
+            CheckMark::Unchecked
         };
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(if *recover_old_config {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            })
+            .checked(recover_mark)
             .state(checkbox_state);
         let checkbox_height = checkbox
             .layout(
@@ -8262,11 +8251,7 @@ impl App {
             frame,
             checkbox_area,
             checkbox_label,
-            if *recover_old_config {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            },
+            recover_mark,
             checkbox_state,
             None,
         );
@@ -8774,18 +8759,15 @@ impl App {
         lines.extend(self.attached_section(attached, inner_width));
         let checkbox_label = (!restart_offer.is_empty())
             .then(|| dux_core::working_copy::recreate_restart_checkbox_prose(restart_offer));
-        let checkbox_state = if *focus == RecreateWorkingCopyFocus::RestartCheckbox {
-            CheckboxState::Focused
+        let checkbox_state = CheckboxState::of(*focus, RecreateWorkingCopyFocus::RestartCheckbox);
+        let restart_tabs = if *restart_tabs {
+            CheckMark::Checked
         } else {
-            CheckboxState::Normal
+            CheckMark::Unchecked
         };
         let checkbox_height = checkbox_label.as_ref().map_or(0, |label| {
             let checkbox = Checkbox::with_prose(label, &self.theme)
-                .checked(if *restart_tabs {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                })
+                .checked(restart_tabs)
                 .state(checkbox_state);
             checkbox
                 .layout(
@@ -8796,11 +8778,6 @@ impl App {
                 .height
         });
         let confirm_label = guarded_confirm_label("Recreate", attached);
-        let restart_tabs = if *restart_tabs {
-            CheckMark::Checked
-        } else {
-            CheckMark::Unchecked
-        };
         let focus = *focus;
         // The frame keeps a blank row between the checkbox and the buttons, so
         // the checkbox never sits flush against the destructive button.
@@ -9434,11 +9411,7 @@ impl App {
             let BranchWarningKind::Known { default_branch } = kind else {
                 unreachable!("has_checkbox requires a known default branch");
             };
-            let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let checkbox = Checkbox::with_prose(&label, &self.theme)
                 .checked(if *checkout_default {
@@ -9495,11 +9468,7 @@ impl App {
             let BranchWarningKind::Known { default_branch } = kind else {
                 unreachable!("has_checkbox requires a known default branch");
             };
-            let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
@@ -9600,11 +9569,7 @@ impl App {
         else {
             return;
         };
-        let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
-            CheckboxState::Focused
-        } else {
-            CheckboxState::Normal
-        };
+        let checkbox_state = CheckboxState::of(*focus, RenameSessionFocus::RenameBranchCheckbox);
         let checkbox = Checkbox::new("Also rename the git branch")
             .checked(if *rename_branch {
                 CheckMark::Checked
@@ -9814,11 +9779,7 @@ impl App {
         else {
             return;
         };
-        let checkbox_state = if *focus == CloneProjectFocus::RandomizedNameCheckbox {
-            CheckboxState::Focused
-        } else {
-            CheckboxState::Normal
-        };
+        let checkbox_state = CheckboxState::of(*focus, CloneProjectFocus::RandomizedNameCheckbox);
         let checkbox_label = "Use randomized pet name";
         let dialog_width = 80.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
@@ -10139,11 +10100,7 @@ impl App {
                 } else {
                     CheckMark::Unchecked
                 },
-                if *focus == CloneProjectFocus::ReviewCopyCheckbox {
-                    CheckboxState::Focused
-                } else {
-                    CheckboxState::Normal
-                },
+                CheckboxState::of(*focus, CloneProjectFocus::ReviewCopyCheckbox),
                 None,
             );
             Some(rect)
@@ -11530,11 +11487,7 @@ impl App {
             stack_rows(layout.controls, [checkbox_height, branch_checkbox_height]);
 
         let checkbox_rect = if offers_checkbox {
-            let checkbox_state = if *focus == DeleteAgentFocus::WorktreeCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::WorktreeCheckbox);
             let (rect, _) = self.render_overlay_checkbox(
                 frame,
                 checkbox_area,
@@ -11557,11 +11510,7 @@ impl App {
         // Published only where it is actually painted, so a click cannot land
         // on a control the user cannot see.
         let branch_checkbox_rect = if offers_branch_checkbox {
-            let checkbox_state = if *focus == DeleteAgentFocus::BranchCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::BranchCheckbox);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 branch_checkbox_area,
@@ -11610,11 +11559,10 @@ impl App {
             } else {
                 CheckMark::Unchecked
             })
-            .state(if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            });
+            .state(CheckboxState::of(
+                *focus,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ));
         let dialog_width = 60.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let randomize_checkbox_height = randomize_checkbox
@@ -11794,11 +11742,7 @@ impl App {
             } else {
                 CheckMark::Unchecked
             },
-            if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            },
+            CheckboxState::of(*focus, NameNewAgentFocus::RandomizedNameCheckbox),
             Some(Line::from(Span::styled(
                 format!(
                     "{}Fills this prompt with a fresh pet-tool name",
@@ -11818,11 +11762,7 @@ impl App {
                 } else {
                     CheckMark::Unchecked
                 },
-                if *focus == NameNewAgentFocus::CopyChangesCheckbox {
-                    CheckboxState::Focused
-                } else {
-                    CheckboxState::Normal
-                },
+                CheckboxState::of(*focus, NameNewAgentFocus::CopyChangesCheckbox),
                 Some(Line::from(Span::styled(
                     format!(
                         "{}Requires the checkout to be on the same commit",
@@ -11848,11 +11788,7 @@ impl App {
                     } else {
                         CheckMark::Unchecked
                     },
-                    if *focus == NameNewAgentFocus::ReviewCopyCheckbox {
-                        CheckboxState::Focused
-                    } else {
-                        CheckboxState::Normal
-                    },
+                    CheckboxState::of(*focus, NameNewAgentFocus::ReviewCopyCheckbox),
                     None,
                 );
                 Some(rect)
@@ -15428,7 +15364,7 @@ mod tests {
             dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
                 folder_path: "/home/someone/My Notes".to_string(),
             });
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
 
         let PromptState::RenameSession {
             input,
@@ -15467,7 +15403,7 @@ mod tests {
         // workspace and not about the modal having lost its checkbox.
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))
@@ -15496,7 +15432,7 @@ mod tests {
             dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
                 folder_path: "/home/someone/My Notes".to_string(),
             });
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(
             rows.contains("leave empty to show the folder's name"),
@@ -15524,7 +15460,7 @@ mod tests {
     fn the_rename_modal_warns_about_what_a_branch_rename_leaves_behind() {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(rows.contains("agent-branch"), "{rows}");
         assert!(rows.contains("to the new name."), "neutral: {rows}");
@@ -15576,7 +15512,7 @@ mod tests {
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
 
-        app.refresh_changed_files_now().expect("refresh is handled");
+        app.refresh_changed_files_now();
         let message = app.status.message();
         assert!(
             message.contains("This folder has no git repository"),
@@ -26244,8 +26180,7 @@ mod tests {
         }
 
         let mut app = test_app(default_bindings());
-        app.open_project_chooser(ProjectChooserIntent::NewAgent)
-            .expect("open the project chooser");
+        app.open_project_chooser(ProjectChooserIntent::NewAgent);
 
         let resting = footer(&mut app);
         for word in ["down", "up", "search", "choose", "cancel"] {
@@ -26730,11 +26665,11 @@ mod tests {
 
     /// A counted answer from a repository that HAS remote-tracking refs, which
     /// is what "not pushed anywhere" is allowed to be said about.
-    fn pushed_nowhere(count: u32) -> Option<dux_core::git::UnpushedCommits> {
-        Some(dux_core::git::UnpushedCommits {
+    fn pushed_nowhere(count: u32) -> dux_core::git::UnpushedCommits {
+        dux_core::git::UnpushedCommits {
             count,
             has_remote_refs: true,
-        })
+        }
     }
 
     #[test]
@@ -26744,7 +26679,7 @@ mod tests {
             None
         );
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(0), BranchSpread::Single),
+            super::unpushed_commits_sentence(Some(pushed_nowhere(0)), BranchSpread::Single),
             None
         );
     }
@@ -26752,11 +26687,13 @@ mod tests {
     #[test]
     fn the_unpushed_sentence_counts_and_pluralizes_per_branch_count() {
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(1), BranchSpread::Single).unwrap(),
+            super::unpushed_commits_sentence(Some(pushed_nowhere(1)), BranchSpread::Single)
+                .unwrap(),
             " It has 1 commit not pushed anywhere."
         );
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(3), BranchSpread::Drifted).unwrap(),
+            super::unpushed_commits_sentence(Some(pushed_nowhere(3)), BranchSpread::Drifted)
+                .unwrap(),
             " They have 3 commits not pushed anywhere between them."
         );
     }
@@ -26788,7 +26725,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                pushed_nowhere(3)
+                Some(pushed_nowhere(3))
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 3 commits not pushed anywhere.")
@@ -26797,12 +26734,12 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                pushed_nowhere(1)
+                Some(pushed_nowhere(1))
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 1 commit not pushed anywhere.")
         );
-        for unknown in [None, pushed_nowhere(0)] {
+        for unknown in [None, Some(pushed_nowhere(0))] {
             assert_eq!(
                 super::delete_agent_branch_warning(
                     dux_core::model::BranchProvenance::AttachedExisting,
@@ -27114,7 +27051,7 @@ mod tests {
             "develop",
             dux_core::engine::WorktreeOnDelete::Remove,
             dux_core::worktree_manager::BranchRemoval::Delete,
-            pushed_nowhere(4),
+            Some(pushed_nowhere(4)),
         );
         let screen = rendered_screen(&mut app);
         // The chips make the label wrap at this width, so the label is read
@@ -27142,7 +27079,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["develop-next", "develop"],
-                pushed_nowhere(4)
+                Some(pushed_nowhere(4))
             )
             .as_deref(),
             Some(
@@ -27173,7 +27110,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::CreatedByDux,
                 &["dux/s1"],
-                pushed_nowhere(9)
+                Some(pushed_nowhere(9))
             ),
             None,
             "a branch dux created for an agent that stayed on it warns about nothing"

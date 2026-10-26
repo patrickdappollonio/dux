@@ -1049,7 +1049,7 @@ impl App {
             return Ok(KeyRoute::Return(false));
         }
         if self.macro_bar.is_some() {
-            return self.handle_macro_bar_key(key).map(KeyRoute::Return);
+            return Ok(KeyRoute::Return(self.handle_macro_bar_key(key)));
         }
         debug_assert!(
             !matches!(
@@ -1080,11 +1080,11 @@ impl App {
             return Ok(KeyRoute::Return(false));
         }
         if self.input_target == InputTarget::CommitMessage {
-            self.handle_commit_input_key(key)?;
+            self.handle_commit_input_key(key);
             return Ok(KeyRoute::Return(false));
         }
         if self.input_target == InputTarget::StartupCommand {
-            self.handle_startup_command_input_key(key)?;
+            self.handle_startup_command_input_key(key);
             return Ok(KeyRoute::Return(false));
         }
         Ok(KeyRoute::Continue)
@@ -1402,7 +1402,10 @@ impl App {
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.left_section == LeftSection::Terminals {
-            return self.handle_left_terminal_key(key);
+            return {
+                self.handle_left_terminal_key(key);
+                Ok(())
+            };
         }
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
@@ -1415,28 +1418,28 @@ impl App {
                 // `InteractAgent` stays the explicit jump-to-fullscreen.
                 Action::ToggleFullscreen => self.activate_selected_left_item(OnDormant::Leave)?,
                 Action::OpenProjectBrowser => {
-                    self.open_project_browser()?;
+                    self.open_project_browser();
                 }
                 Action::FilterAgents => self.open_agent_filter(),
-                Action::NewAgent => self.create_agent_for_selected_project()?,
-                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
+                Action::NewAgent => self.create_agent_for_selected_project(),
+                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree(),
                 // The same folder browser the palette command opens: one way
                 // in, two gestures.
-                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
-                Action::ForkAgent => self.fork_selected_session()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser(),
+                Action::ForkAgent => self.fork_selected_session(),
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
                     self.checkout_selected_project_default_branch()?;
                 }
                 Action::ChangeProjectBaseBranch => self.change_selected_project_base_branch()?,
-                Action::ShowTerminal => self.show_or_open_first_terminal()?,
-                Action::DeleteSession => self.confirm_delete_selected_session()?,
-                Action::RenameSession => self.open_rename_session()?,
-                Action::OpenAgentInfo => self.open_agent_info()?,
+                Action::ShowTerminal => self.show_or_open_first_terminal(),
+                Action::DeleteSession => self.confirm_delete_selected_session(),
+                Action::RenameSession => self.open_rename_session(),
+                Action::OpenAgentInfo => self.open_agent_info(),
                 Action::EditMacros => self.open_edit_macros(),
                 Action::CopyPath => self.copy_selected_path()?,
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
-                Action::ChooseWorktreeEditor => self.open_worktree_editor_picker()?,
+                Action::ChooseWorktreeEditor => self.open_worktree_editor_picker(),
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
                 Action::InteractAgent => {
                     if self.selected_session().is_some()
@@ -1493,7 +1496,7 @@ impl App {
                     .terminal_items()
                     .get(self.selected_terminal_index)
                     .map(|(id, _)| (*id).clone());
-                self.open_terminal_from_terminal_list()?;
+                self.open_terminal_from_terminal_list();
                 self.close_agent_filter();
                 if let Some(id) = keep {
                     self.reselect_left_terminal(&id);
@@ -1567,35 +1570,36 @@ impl App {
     /// surviving one is a pruned list waiting behind a modal under a query the
     /// user has forgotten typing. Both Left handlers route through here so the
     /// two cannot drift.
-    fn leave_pane_for_standalone_browser(&mut self) -> Result<()> {
+    fn leave_pane_for_standalone_browser(&mut self) {
         if self.agent_filter.is_some() {
             self.close_agent_filter();
         }
-        self.open_standalone_agent_browser()
+        {
+            self.open_standalone_agent_browser();
+        }
     }
 
-    fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_left_terminal_key(&mut self, key: KeyEvent) {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
                 Action::FocusAgent | Action::ToggleFullscreen => {
                     // Open terminal overlay for the selected terminal item.
-                    self.open_terminal_from_terminal_list()?;
+                    self.open_terminal_from_terminal_list();
                 }
                 Action::ShowTerminal => {
-                    self.spawn_terminal_for_selected_terminal()?;
+                    self.spawn_terminal_for_selected_terminal();
                 }
-                Action::DeleteSession => self.confirm_delete_selected_terminal()?,
+                Action::DeleteSession => self.confirm_delete_selected_terminal(),
                 // A standalone agent belongs to no row, so it is creatable
                 // from anywhere in the Left pane: the terminals subsection is
                 // still the agents pane, and the footer names the key there
                 // too.
-                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser()?,
+                Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser(),
                 _ => {}
             }
         }
-        Ok(())
     }
 
     fn focus_or_activate_center(&mut self, key: KeyEvent) -> Result<()> {
@@ -1661,10 +1665,10 @@ impl App {
             Action::FocusAgent => self.focus_or_activate_center(key)?,
             Action::ToggleFullscreen => self.toggle_center_fullscreen()?,
             Action::OpenMacroBar => self.open_center_macro_bar(),
-            Action::ShowTerminal => self.show_or_open_first_terminal()?,
-            Action::DeleteSession => self.confirm_delete_selected_session()?,
-            Action::RenameSession => self.open_rename_session()?,
-            Action::OpenAgentInfo => self.open_agent_info()?,
+            Action::ShowTerminal => self.show_or_open_first_terminal(),
+            Action::DeleteSession => self.confirm_delete_selected_session(),
+            Action::RenameSession => self.open_rename_session(),
+            Action::OpenAgentInfo => self.open_agent_info(),
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
                 self.open_current_pr_in_browser();
             }
@@ -2618,11 +2622,11 @@ impl App {
                             self.input_target = InputTarget::CommitMessage;
                         }
                     } else {
-                        self.open_diff_for_selected_file()?;
+                        self.open_diff_for_selected_file();
                     }
                 }
                 Action::DiscardChanges if self.right_section != RightSection::CommitInput => {
-                    self.confirm_discard_selected_file()?;
+                    self.confirm_discard_selected_file();
                 }
                 Action::EngageCommitInput if !self.engine.staged_files.is_empty() => {
                     self.input_target = InputTarget::CommitMessage;
@@ -2647,12 +2651,12 @@ impl App {
         Ok(())
     }
 
-    fn handle_commit_input_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_commit_input_key(&mut self, key: KeyEvent) {
         // Exit actions are dispatched via bindings; text input stays hardcoded.
         if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.input_target = InputTarget::None;
-            return Ok(());
+            return;
         }
         // The advertised "empty the focused full-text field" key. The commit
         // pane IS a focused full-text field, and `TextInput` does not answer
@@ -2661,19 +2665,18 @@ impl App {
         if let Some(Action::ClearTextField) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.commit_input.clear();
-            return Ok(());
+            return;
         }
         // TextInput handles Enter (newline), Up/Down (line nav), and all
         // editing keys in multiline mode.
         self.commit_input.handle_key(key);
-        Ok(())
     }
 
-    fn handle_startup_command_input_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_startup_command_input_key(&mut self, key: KeyEvent) {
         if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.input_target = InputTarget::None;
-            return Ok(());
+            return;
         }
         if let Some(input) = match &mut self.prompt {
             PromptState::ConfigureStartupCommand { input, .. }
@@ -2692,10 +2695,9 @@ impl App {
         } else {
             self.input_target = InputTarget::None;
         }
-        Ok(())
     }
 
-    fn handle_macro_bar_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_macro_bar_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
                 // The palette and the macro bar are the deliberate exception to the
@@ -2711,7 +2713,7 @@ impl App {
                 let (query, selected) = if let Some(bar) = &self.macro_bar {
                     (bar.input.text.clone(), bar.selected)
                 } else {
-                    return Ok(false);
+                    return false;
                 };
                 let filtered = self.filtered_macros(&query);
                 if let Some((name, payload)) = filtered.get(selected).map(|(name, text)| {
@@ -2791,7 +2793,7 @@ impl App {
                 }
             }
         }
-        Ok(false)
+        false
     }
 
     /// Open the macro bar over the focused center surface. Shared by the
@@ -2912,17 +2914,17 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn confirm_discard_selected_file(&mut self) -> Result<()> {
+    pub(crate) fn confirm_discard_selected_file(&mut self) {
         match self.right_section {
             RightSection::Unstaged => {}
             RightSection::Staged => {
                 self.set_error("Unstage the file first to discard changes.");
-                return Ok(());
+                return;
             }
-            RightSection::CommitInput => return Ok(()),
+            RightSection::CommitInput => return,
         }
         let Some(file) = self.selected_changed_file() else {
-            return Ok(());
+            return;
         };
         // Two folders a delete would not act on get a sentence, not a dialog
         // that offers a deletion: one holding only repositories of their own
@@ -2941,7 +2943,7 @@ impl App {
                     contents.linked_worktrees,
                     git::FolderAction::Delete,
                 ));
-                return Ok(());
+                return;
             }
             dux_core::model::ChangedFileKind::LinkedWorktree => {
                 let path = file.path.clone();
@@ -2949,7 +2951,7 @@ impl App {
                     "\"{path}/\" is a worktree of this same repository, not a repository of its \
                      own; remove it from the worktree manager so git forgets it too."
                 ));
-                return Ok(());
+                return;
             }
             dux_core::model::ChangedFileKind::File
             | dux_core::model::ChangedFileKind::Directory(_)
@@ -2963,7 +2965,6 @@ impl App {
             kind: file.kind.clone(),
             focus: ConfirmFocus::Cancel,
         };
-        Ok(())
     }
 
     fn execute_commit(&mut self) -> Result<()> {
@@ -3170,7 +3171,7 @@ impl App {
             return Ok(false);
         }
 
-        if self.process_raw_input_bytes(&buf[..n])? {
+        if self.process_raw_input_bytes(&buf[..n]) {
             return Ok(true);
         }
 
@@ -3273,7 +3274,7 @@ impl App {
             {
                 break;
             }
-            let should_exit = self.process_raw_input_bytes(&buf[..n2])?;
+            let should_exit = self.process_raw_input_bytes(&buf[..n2]);
             if should_exit {
                 return Ok(true);
             }
@@ -3312,11 +3313,11 @@ impl App {
                 crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
             };
             if n != 0 {
-                return self.process_raw_input_bytes(&buf[..n]);
+                return Ok(self.process_raw_input_bytes(&buf[..n]));
             }
         }
 
-        self.process_raw_input_bytes(&[])
+        Ok(self.process_raw_input_bytes(&[]))
     }
 
     fn parse_raw_input_sequences(&mut self, bytes: &[u8]) -> Vec<crate::raw_input::ParsedSequence> {
@@ -3804,7 +3805,7 @@ impl App {
     ///
     /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
     /// call it directly, without real stdin I/O.
-    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
         let sequences = self.parse_raw_input_sequences(bytes);
         let plan = self.classify_raw_input_sequences(&sequences);
         let actions = plan.actions;
@@ -3827,11 +3828,11 @@ impl App {
         };
 
         if let Some(should_exit) = self.execute_raw_input_actions(actions, &mut dispatch) {
-            return Ok(should_exit);
+            return should_exit;
         }
         dispatch.finish(self, paste);
 
-        Ok(false)
+        false
     }
 
     /// Record input that actually reached the focused PTY so the output it
@@ -4159,18 +4160,17 @@ impl App {
         };
     }
 
-    fn confirm_kill_running_prompt(&mut self) -> Result<()> {
+    fn confirm_kill_running_prompt(&mut self) {
         let focus = match &self.prompt {
             PromptState::KillRunning(prompt) => prompt.focus,
-            _ => return Ok(()),
+            _ => return,
         };
         match focus {
             KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
             KillRunningFocus::Footer(action) => {
-                self.execute_kill_running_footer_action(action)?;
+                self.execute_kill_running_footer_action(action);
             }
         }
-        Ok(())
     }
 
     fn handle_kill_running_search_key(&mut self, key: KeyEvent) {
@@ -4180,9 +4180,9 @@ impl App {
         }
     }
 
-    fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_kill_running_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         if !matches!(self.prompt, PromptState::KillRunning(..)) {
-            return Ok(None);
+            return None;
         }
 
         let is_searching = matches!(
@@ -4236,7 +4236,7 @@ impl App {
             Some(Action::Confirm) => {
                 // Confirm marks the highlighted row without leaving search, or
                 // activates the focused footer action.
-                self.confirm_kill_running_prompt()?;
+                self.confirm_kill_running_prompt();
             }
             _ => {
                 if is_searching {
@@ -4245,7 +4245,7 @@ impl App {
             }
         }
 
-        Ok(Some(false))
+        Some(false)
     }
 
     fn reset_project_browser_path_editor(&mut self) {
@@ -4734,19 +4734,18 @@ impl App {
                     prompt.selected = removable.into_iter().next();
                 }
             }
-            Some(Action::Confirm) => {
-                if let Err(err) = self.confirm_delete_selected_worktree() {
-                    self.set_error(format!("{err:#}"));
-                }
-            }
+            Some(Action::Confirm) => self.confirm_delete_selected_worktree(),
             _ => {}
         }
         Some(false)
     }
 
-    fn handle_pick_project_worktree_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_pick_project_worktree_prompt_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> std::option::Option<bool> {
         let PromptState::PickProjectWorktree(prompt) = &mut self.prompt else {
-            return Ok(None);
+            return None;
         };
         match self.bindings.lookup(&key, BindingScope::Palette) {
             Some(Action::CloseOverlay) => self.prompt = PromptState::None,
@@ -4772,10 +4771,10 @@ impl App {
                     prompt.selected = selectable.into_iter().next();
                 }
             }
-            Some(Action::Confirm) => self.open_selected_project_worktree_agent_prompt()?,
+            Some(Action::Confirm) => self.open_selected_project_worktree_agent_prompt(),
             _ => {}
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_set_tailscale_mode_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
@@ -4805,9 +4804,9 @@ impl App {
         Some(false)
     }
 
-    fn handle_change_theme_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_change_theme_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         let PromptState::ChangeTheme(prompt) = &mut self.prompt else {
-            return Ok(None);
+            return None;
         };
         let action = self
             .bindings
@@ -4815,7 +4814,7 @@ impl App {
             .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
         if matches!(action, Some(Action::CloseOverlay)) {
             self.cancel_change_theme();
-            return Ok(Some(false));
+            return Some(false);
         }
         let moved = match action {
             Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
@@ -4827,7 +4826,7 @@ impl App {
                 true
             }
             Some(Action::Confirm) => {
-                self.apply_change_theme()?;
+                self.apply_change_theme();
                 false
             }
             _ => false,
@@ -4835,7 +4834,7 @@ impl App {
         if moved {
             self.preview_change_theme_selection();
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_pick_project_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -4890,7 +4889,7 @@ impl App {
             self.confirm_project_chooser_selection()?;
         }
         if go_standalone {
-            self.open_standalone_agent_browser()?;
+            self.open_standalone_agent_browser();
         }
         Ok(Some(false))
     }
@@ -5469,9 +5468,9 @@ impl App {
         self.handle_confirm_use_existing_branch_prompt_key(key)
     }
 
-    fn handle_pull_request_input_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_pull_request_input_prompt_key(&mut self, key: KeyEvent) -> std::option::Option<bool> {
         let PromptState::PullRequestInput { focus, .. } = &self.prompt else {
-            return Ok(None);
+            return None;
         };
         let field_focused = *focus == PullRequestInputFocus::Input;
         let action = if binding_lookup_is_suppressed(
@@ -5500,12 +5499,12 @@ impl App {
                 self.pending_pr_reference = None;
                 self.invalidate_pull_request_resolution();
             }
-            ModalKeyStep::Confirm if field_focused => self.confirm_pull_request_input()?,
+            ModalKeyStep::Confirm if field_focused => self.confirm_pull_request_input(),
             ModalKeyStep::Confirm => {
-                self.open_pull_request_project_picker()?;
+                self.open_pull_request_project_picker();
             }
             ModalKeyStep::ActivateFocus if !field_focused => {
-                self.open_pull_request_project_picker()?;
+                self.open_pull_request_project_picker();
             }
             ModalKeyStep::ActivateFocus => {}
             ModalKeyStep::MoveFocus(direction) => self.focus_next_pull_request_control(direction),
@@ -5517,15 +5516,15 @@ impl App {
                 }
             }
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     fn handle_attach_pull_request_input_prompt_key(
         &mut self,
         key: KeyEvent,
-    ) -> Result<Option<bool>> {
+    ) -> std::option::Option<bool> {
         if !matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
-            return Ok(None);
+            return None;
         }
         let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
         {
@@ -5535,7 +5534,7 @@ impl App {
         };
         match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
-            ModalKeyStep::Confirm => self.confirm_attach_pull_request_input()?,
+            ModalKeyStep::Confirm => self.confirm_attach_pull_request_input(),
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
             ModalKeyStep::FallThroughToField => {
                 if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
@@ -5543,7 +5542,7 @@ impl App {
                 }
             }
         }
-        Ok(Some(false))
+        Some(false)
     }
 
     /// The standalone-agent name field. One single-line control, so the shape
@@ -6009,13 +6008,13 @@ impl App {
 
     fn handle_form_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
-            self.handle_edit_macros_key(key)?;
+            self.handle_edit_macros_key(key);
             return Ok(Some(false));
         }
-        if let Some(exit) = self.handle_pull_request_input_prompt_key(key)? {
+        if let Some(exit) = self.handle_pull_request_input_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_attach_pull_request_input_prompt_key(key)? {
+        if let Some(exit) = self.handle_attach_pull_request_input_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_name_new_agent_prompt_key(key)? {
@@ -6041,7 +6040,7 @@ impl App {
         if let Some(exit) = self.handle_command_palette_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_kill_running_prompt_key(key)? {
+        if let Some(exit) = self.handle_kill_running_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_project_browser_prompt_key(key) {
@@ -6053,7 +6052,7 @@ impl App {
         if let Some(exit) = self.handle_manage_worktrees_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key)? {
+        if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_pick_project_prompt_key(key)? {
@@ -6071,7 +6070,7 @@ impl App {
         if let Some(exit) = self.handle_set_tailscale_mode_prompt_key(key) {
             return Ok(Some(exit));
         }
-        if let Some(exit) = self.handle_change_theme_prompt_key(key)? {
+        if let Some(exit) = self.handle_change_theme_prompt_key(key) {
             return Ok(Some(exit));
         }
         Ok(self.handle_startup_logs_prompt_key(key))
@@ -6182,7 +6181,7 @@ impl App {
             Some(Action::MoveUp) => self.move_provider_picker_selection(FocusStep::Backward),
             Some(Action::Confirm) => match which {
                 ProviderPickerKind::Agent => self.apply_change_agent_provider()?,
-                ProviderPickerKind::GlobalDefault => self.apply_change_default_provider()?,
+                ProviderPickerKind::GlobalDefault => self.apply_change_default_provider(),
                 ProviderPickerKind::ProjectDefault => {
                     self.apply_change_project_default_provider()?;
                 }
@@ -6218,7 +6217,7 @@ impl App {
         }
     }
 
-    fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_edit_macros_key(&mut self, key: KeyEvent) -> bool {
         if matches!(
             self.prompt,
             PromptState::EditMacros {
@@ -6240,7 +6239,7 @@ impl App {
             ..
         } = &mut self.prompt
         else {
-            return Ok(false);
+            return false;
         };
 
         // ── List view: an ordinary Picker ─────────────────────────────────
@@ -6281,7 +6280,7 @@ impl App {
                 if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
                     let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
-                        return Ok(false);
+                        return false;
                     };
                     *pending_delete = Some(PendingMacroDelete {
                         name,
@@ -6291,7 +6290,7 @@ impl App {
             }
             _ => {}
         }
-        Ok(false)
+        false
     }
 
     /// Open the highlighted macro in the editor. Shared by the confirm key and
@@ -6339,14 +6338,14 @@ impl App {
     /// button). Escape cancels, except inside the engaged body, where it exits
     /// edit mode and leaves the modal open, the same contract
     /// `configure_startup_command_escape_exits_edit_mode_only` pins.
-    fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> Result<bool> {
+    fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> bool {
         // ── The engaged body owns every key but the exit binding ──────────
         if focus == MacroEditFocus::Text && self.macro_text_engaged() {
             if let Some(Action::ExitCommitInput) =
                 self.bindings.lookup(&key, BindingScope::CommitInput)
             {
                 self.input_target = InputTarget::None;
-                return Ok(false);
+                return false;
             }
             let clear = matches!(
                 self.bindings.lookup(&key, BindingScope::CommitInput),
@@ -6359,7 +6358,7 @@ impl App {
                     state.text_input.handle_key(key);
                 }
             }
-            return Ok(false);
+            return false;
         }
 
         // A focused text field owns the plain characters and the horizontal
@@ -6385,11 +6384,11 @@ impl App {
         match action {
             Some(Action::CloseOverlay) => {
                 self.cancel_macro_edit();
-                return Ok(false);
+                return false;
             }
             Some(Action::ToggleSelection) => {
                 self.focus_next_macro_edit_control(focus_move_step(key));
-                return Ok(false);
+                return false;
             }
             Some(Action::ClearTextField) if focus == MacroEditFocus::Text => {
                 // "Empty the focused full-text field", which the body is whether
@@ -6398,7 +6397,7 @@ impl App {
                 if let Some(state) = self.macro_edit_state_mut() {
                     state.text_input.clear();
                 }
-                return Ok(false);
+                return false;
             }
             Some(Action::Confirm) => {
                 // Enter acts on the focused control. On the unengaged BODY that
@@ -6411,7 +6410,7 @@ impl App {
                     MacroEditFocus::Text => self.engage_macro_text(),
                     _ => self.save_macro_edit(),
                 }
-                return Ok(false);
+                return false;
             }
             _ => {}
         }
@@ -6443,7 +6442,7 @@ impl App {
             }
             MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => {}
         }
-        Ok(false)
+        false
     }
 
     /// The three `Configure*` modals' key handling: an ordinary modal with a
@@ -6460,7 +6459,7 @@ impl App {
     ) -> Result<bool> {
         // ── The engaged field owns every key but the exit binding ─────────
         if self.input_target == InputTarget::StartupCommand {
-            self.handle_startup_command_input_key(key)?;
+            self.handle_startup_command_input_key(key);
             return Ok(false);
         }
 
@@ -6736,35 +6735,35 @@ impl App {
         }
     }
 
-    fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> bool {
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         let is_space = key.code == KeyCode::Char(' ');
         let activate = matches!(action, Some(Action::Confirm)) || is_space;
 
         let answer = {
             let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
-                return Ok(false);
+                return false;
             };
             let Some(pending) = pending_delete else {
-                return Ok(false);
+                return false;
             };
 
             if matches!(action, Some(Action::CloseOverlay)) {
                 *pending_delete = None;
-                return Ok(false);
+                return false;
             }
             if matches!(action, Some(Action::ToggleSelection)) {
                 pending.focus = pending.focus.toggled();
-                return Ok(false);
+                return false;
             }
             if !activate {
-                return Ok(false);
+                return false;
             }
             pending.focus.answer()
         };
 
         self.resolve_confirm_delete_macro(answer);
-        Ok(false)
+        false
     }
 
     pub(super) fn resolve_confirm_delete_macro(&mut self, answer: ConfirmAnswer) -> bool {
@@ -8053,10 +8052,7 @@ impl App {
         }
     }
 
-    fn execute_kill_running_footer_action(
-        &mut self,
-        action: KillRunningFooterAction,
-    ) -> Result<()> {
+    fn execute_kill_running_footer_action(&mut self, action: KillRunningFooterAction) {
         let enabled = match &self.prompt {
             PromptState::KillRunning(prompt) => Self::kill_running_footer_enabled(prompt, action),
             _ => true,
@@ -8067,7 +8063,7 @@ impl App {
                     "Select one or more runtimes before using Kill Selected. Press Space to mark the highlighted row.",
                 );
             }
-            return Ok(());
+            return;
         }
         match action {
             KillRunningFooterAction::Cancel => {
@@ -8076,11 +8072,10 @@ impl App {
             }
             _ => {
                 if let Some(action) = action.action() {
-                    self.open_confirm_kill_running_action(action)?;
+                    self.open_confirm_kill_running_action(action);
                 }
             }
         }
-        Ok(())
     }
 
     pub(crate) fn kill_running_footer_enabled(
@@ -8448,24 +8443,24 @@ impl App {
         }
     }
 
-    fn open_selected_project_worktree_agent_prompt(&mut self) -> Result<()> {
+    fn open_selected_project_worktree_agent_prompt(&mut self) {
         let (project, entry) = match &self.prompt {
             PromptState::PickProjectWorktree(prompt) => {
                 let Some(selected) = prompt.selected else {
                     self.set_error("No available worktree is selected.");
-                    return Ok(());
+                    return;
                 };
                 let Some(entry) = prompt.entries.get(selected).cloned() else {
                     self.set_error("No available worktree is selected.");
-                    return Ok(());
+                    return;
                 };
                 if !entry.is_selectable() {
                     self.set_error("That worktree already has an agent.");
-                    return Ok(());
+                    return;
                 }
                 (prompt.project.clone(), entry)
             }
-            _ => return Ok(()),
+            _ => return,
         };
 
         let request = if entry.is_external() {
@@ -8492,7 +8487,9 @@ impl App {
                 custom_name: Some(default_name),
             }
         };
-        self.open_name_new_agent_prompt_for_request(request)
+        {
+            self.open_name_new_agent_prompt_for_request(request);
+        }
     }
 
     fn set_change_agent_provider_selection(&mut self, index: usize) {
@@ -9469,16 +9466,20 @@ impl App {
     /// Confirm on the reference field. With a project already chosen this is the
     /// project-first lookup, exactly as before. With none, dux resolves the
     /// project from the reference.
-    pub(crate) fn confirm_pull_request_input(&mut self) -> Result<()> {
+    pub(crate) fn confirm_pull_request_input(&mut self) {
         let (project, raw_input) = match &self.prompt {
             PromptState::PullRequestInput { project, input, .. } => {
                 (project.clone(), input.text.trim().to_string())
             }
-            _ => return Ok(()),
+            _ => return,
         };
         match project {
-            Some(project) => self.dispatch_pull_request_lookup(project, raw_input),
-            None => self.dispatch_pull_request_reference(raw_input),
+            Some(project) => {
+                self.dispatch_pull_request_lookup(project, raw_input);
+            }
+            None => {
+                self.dispatch_pull_request_reference(raw_input);
+            }
         }
     }
 
@@ -9488,16 +9489,16 @@ impl App {
     /// text to the engine's one keyed resolve→attach op, whose pending busy is
     /// applied here as a reaction. The final (info/error) arrives through the
     /// normal `drain_events` path, so no per-op bookkeeping lives in the TUI.
-    pub(crate) fn confirm_attach_pull_request_input(&mut self) -> Result<()> {
+    pub(crate) fn confirm_attach_pull_request_input(&mut self) {
         let (session_id, raw_input) = match &self.prompt {
             PromptState::AttachPullRequestInput {
                 session_id, input, ..
             } => (session_id.clone(), input.text.trim().to_string()),
-            _ => return Ok(()),
+            _ => return,
         };
         if raw_input.is_empty() {
             self.set_error("Enter a GitHub PR URL, owner/repo#123, or a PR number.");
-            return Ok(());
+            return;
         }
         self.prompt = PromptState::None;
         match self
@@ -9509,13 +9510,12 @@ impl App {
             }
             Err(err) => self.set_error(format!("{err:#}")),
         }
-        Ok(())
     }
 
     /// The modal's secondary action: hand over to the existing project selector
     /// and come back in project-first mode. Whatever has been typed travels
     /// with it, so stepping out to choose a project never costs the reference.
-    pub(crate) fn open_pull_request_project_picker(&mut self) -> Result<()> {
+    pub(crate) fn open_pull_request_project_picker(&mut self) {
         let typed = match &self.prompt {
             PromptState::PullRequestInput { input, .. } => input.text.trim().to_string(),
             _ => String::new(),
@@ -9523,7 +9523,9 @@ impl App {
         self.pending_pr_reference = if typed.is_empty() { None } else { Some(typed) };
         // Stepping out to the picker supersedes any resolution still out.
         self.invalidate_pull_request_resolution();
-        self.open_project_chooser(ProjectChooserIntent::FromPr)
+        {
+            self.open_project_chooser(ProjectChooserIntent::FromPr);
+        }
     }
 
     /// Focus order for the Create-Agent-From-PR modal. The secondary action is
@@ -10029,19 +10031,16 @@ impl App {
     fn click_project_worktree_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         self.set_project_worktree_selection_from_visual_row(index);
-        if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.open_selected_project_worktree_agent_prompt();
         }
     }
 
     fn click_manage_worktree_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         let landed = self.set_manage_worktree_selection_from_visual_row(index);
-        if landed
-            && double_click
-            && let Err(err) = self.confirm_delete_selected_worktree()
-        {
-            self.set_error(format!("{err:#}"));
+        if landed && double_click {
+            self.confirm_delete_selected_worktree();
         }
     }
 
@@ -10094,8 +10093,8 @@ impl App {
         if moved {
             self.preview_change_theme_selection();
         }
-        if double_click && let Err(err) = self.apply_change_theme() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.apply_change_theme();
         }
     }
 
@@ -10110,8 +10109,8 @@ impl App {
     fn click_default_provider_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         self.set_change_default_provider_selection(index);
-        if double_click && let Err(err) = self.apply_change_default_provider() {
-            self.set_error(format!("{err:#}"));
+        if double_click {
+            self.apply_change_default_provider();
         }
     }
 
@@ -10369,9 +10368,7 @@ impl App {
             // end to end.
             ButtonPressedTarget::TakeOverCard | ButtonPressedTarget::DormantTabCard => false,
             ButtonPressedTarget::PullRequestChooseProject => {
-                if let Err(e) = self.open_pull_request_project_picker() {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.open_pull_request_project_picker();
                 false
             }
             ButtonPressedTarget::CloneChooseExisting => {
@@ -10379,35 +10376,19 @@ impl App {
                 false
             }
             ButtonPressedTarget::RuntimeKillCancel => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel);
                 false
             }
             ButtonPressedTarget::RuntimeKillHovered => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered);
                 false
             }
             ButtonPressedTarget::RuntimeKillSelected => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Selected)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Selected);
                 false
             }
             ButtonPressedTarget::RuntimeKillVisible => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Visible)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
+                self.execute_kill_running_footer_action(KillRunningFooterAction::Visible);
                 false
             }
             ButtonPressedTarget::ConfirmKillCancel => {
@@ -10725,7 +10706,7 @@ impl App {
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
             if on_dormant == OnDormant::Launch {
-                self.launch_focused_extra_tab(&session_id, &tab_id, view)?;
+                self.launch_focused_extra_tab(&session_id, &tab_id, view);
             } else {
                 self.exit_interactive_without_launch();
             }
@@ -10772,9 +10753,7 @@ impl App {
     }
 
     fn open_selected_file_diff_from_mouse(&mut self) {
-        if let Err(err) = self.open_diff_for_selected_file() {
-            self.set_error(format!("Mouse activation failed: {err}"));
-        }
+        self.open_diff_for_selected_file();
     }
 
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
@@ -11647,7 +11626,7 @@ impl App {
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 if double_click {
-                    let _ = self.open_terminal_from_terminal_list();
+                    let () = self.open_terminal_from_terminal_list();
                 } else {
                     self.arm_row_drag(RowDragList::Terminals, index);
                 }
@@ -12099,10 +12078,7 @@ impl App {
             return;
         };
         let tab_id = self.focused_tab_id(&session_id);
-        if let Err(err) = self.launch_focused_extra_tab(&session_id, &tab_id, LaunchView::Minimized)
-        {
-            self.set_error(format!("{err:#}"));
-        }
+        self.launch_focused_extra_tab(&session_id, &tab_id, LaunchView::Minimized);
     }
 
     /// The take-over card's answer to one mouse event. Returns whether the card
@@ -14603,10 +14579,6 @@ not_a_real_action = ["x"]
         assert_eq!(prompt.selected_ids, before);
     }
 
-    fn clipboard_ok(_: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     fn clipboard_fail(_: &str) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("linux clipboard unavailable"))
     }
@@ -14853,8 +14825,7 @@ not_a_real_action = ["x"]
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
 
-        app.open_diff_for_selected_file()
-            .expect("the refusal is not an error");
+        app.open_diff_for_selected_file();
 
         assert!(
             !matches!(app.center_mode, CenterMode::Diff { .. }),
@@ -14915,7 +14886,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
 
         let CenterMode::Diff { ref lines, .. } = app.center_mode else {
             panic!("the pane switched to the diff view");
@@ -14956,7 +14927,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
         let stale_key = app.pending_diff.as_ref().expect("pending").key.clone();
         let real_answer = app
             .pending_diff
@@ -14998,7 +14969,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         select_a_modified_file_in_a_repo(&mut app, repo.path());
 
-        app.open_diff_for_selected_file().expect("open the diff");
+        app.open_diff_for_selected_file();
         assert!(app.pending_diff.is_some());
 
         app.close_diff_view();
@@ -15141,7 +15112,7 @@ not_a_real_action = ["x"]
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
 
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
@@ -15154,7 +15125,7 @@ not_a_real_action = ["x"]
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
         // Opening the read-only modal drops any interactive/fullscreen surface.
@@ -15169,7 +15140,7 @@ not_a_real_action = ["x"]
         app.selected_left = 0;
         assert!(app.selected_session().is_none());
 
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -15182,7 +15153,7 @@ not_a_real_action = ["x"]
         // all return the read-only modal to PromptState::None.
         for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char(' ')] {
             let mut app = test_app(default_bindings());
-            app.open_agent_info().unwrap();
+            app.open_agent_info();
             assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
 
             app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -15201,7 +15172,7 @@ not_a_real_action = ["x"]
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.open_agent_info().unwrap();
+        app.open_agent_info();
 
         // Render once so the overlay layout (the Close button rect) is populated.
         let backend = TestBackend::new(100, 30);
@@ -16053,7 +16024,7 @@ not_a_real_action = ["x"]
     fn open_rename_session_starts_unticked_with_the_custom_name() {
         let mut app = test_app(default_bindings());
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         match &app.prompt {
             PromptState::RenameSession {
                 rename_branch,
@@ -16068,7 +16039,7 @@ not_a_real_action = ["x"]
         }
 
         app.engine.sessions[0].title = Some("shiny".to_string());
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         match &app.prompt {
             PromptState::RenameSession { input, .. } => assert_eq!(input.text, "shiny"),
             other => panic!("expected RenameSession, got {other:?}"),
@@ -16081,7 +16052,7 @@ not_a_real_action = ["x"]
     fn an_empty_rename_resets_the_label_to_the_branch() {
         let mut app = test_app(default_bindings());
         app.engine.sessions[0].title = Some("shiny".to_string());
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         if let PromptState::RenameSession { input, .. } = &mut app.prompt {
             *input = TextInput::with_text(String::new());
         }
@@ -16180,7 +16151,7 @@ not_a_real_action = ["x"]
                 url: "https://github.com/o/r/pull/42".to_string(),
             },
         );
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
         assert!(matches!(
             app.prompt,
             PromptState::RenameSession {
@@ -16218,7 +16189,7 @@ not_a_real_action = ["x"]
         app.engine
             .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid));
 
-        app.open_rename_session().unwrap();
+        app.open_rename_session();
 
         assert!(
             matches!(app.prompt, PromptState::None),
@@ -16293,7 +16264,7 @@ not_a_real_action = ["x"]
     fn open_kill_running_requires_live_runtimes() {
         let mut app = test_app(default_bindings());
 
-        app.open_kill_running().unwrap();
+        app.open_kill_running();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -16326,7 +16297,7 @@ not_a_real_action = ["x"]
             },
         );
 
-        app.open_kill_running().unwrap();
+        app.open_kill_running();
 
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
@@ -16595,8 +16566,7 @@ not_a_real_action = ["x"]
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Visible),
         });
 
-        app.open_confirm_kill_running_action(KillRunningAction::Visible)
-            .unwrap();
+        app.open_confirm_kill_running_action(KillRunningAction::Visible);
         app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert!(
@@ -17124,8 +17094,7 @@ not_a_real_action = ["x"]
                 .collect(),
                 focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
             });
-            app.open_confirm_kill_running_action(KillRunningAction::Selected)
-                .unwrap();
+            app.open_confirm_kill_running_action(KillRunningAction::Selected);
         };
 
         // Refused while a browser watches one of the targets: the
@@ -17188,7 +17157,7 @@ not_a_real_action = ["x"]
     fn fork_selected_session_sets_busy_state_and_keeps_fresh_create_flow() {
         let mut app = test_app(default_bindings());
 
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -17213,7 +17182,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
@@ -17255,7 +17224,7 @@ not_a_real_action = ["x"]
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         match &app.prompt {
@@ -17277,7 +17246,7 @@ not_a_real_action = ["x"]
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -17288,7 +17257,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -17520,7 +17489,7 @@ not_a_real_action = ["x"]
         app.engine.projects[0].leading_branch = Some("missing-main".to_string());
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         drain_until(&mut app, |app| {
             app.status
                 .text()
@@ -17594,7 +17563,7 @@ not_a_real_action = ["x"]
             .enable_randomized_pet_name_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -17620,7 +17589,7 @@ not_a_real_action = ["x"]
             .defaults
             .enable_randomized_pet_name_by_default = true;
 
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -17658,8 +17627,7 @@ not_a_real_action = ["x"]
             };
             // This is the branch-inspection completion the chooser's new-agent
             // path dispatches into; it is what opens the naming prompt.
-            app.continue_create_agent_after_branch_inspection(project, inspection)
-                .expect("open naming prompt");
+            app.continue_create_agent_after_branch_inspection(project, inspection);
             match &app.prompt {
                 PromptState::NameNewAgent {
                     request,
@@ -18197,7 +18165,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent { request, input, .. } => match request {
@@ -18247,7 +18215,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -18363,7 +18331,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent { request, input, .. } => match request {
@@ -18406,7 +18374,7 @@ not_a_real_action = ["x"]
             error: None,
         });
 
-        app.open_selected_project_worktree_agent_prompt().unwrap();
+        app.open_selected_project_worktree_agent_prompt();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -18432,7 +18400,7 @@ not_a_real_action = ["x"]
             .pull_before_creating_agent_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -18457,7 +18425,7 @@ not_a_real_action = ["x"]
             .pull_before_creating_agent_by_default = true;
 
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         let expect_focus = |app: &App, expected: NameNewAgentFocus| match &app.prompt {
@@ -18483,7 +18451,7 @@ not_a_real_action = ["x"]
     #[test]
     fn fork_prompt_has_no_copy_checkbox_focus_stop() {
         let mut app = test_app(default_bindings());
-        app.fork_selected_session().unwrap();
+        app.fork_selected_session();
         assert!(matches!(
             &app.prompt,
             PromptState::NameNewAgent {
@@ -18558,7 +18526,7 @@ not_a_real_action = ["x"]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -18636,7 +18604,7 @@ not_a_real_action = ["x"]
             .position(|i| matches!(i, LeftItem::Session(_)))
             .expect("session row");
 
-        app.fork_selected_session().expect("fork");
+        app.fork_selected_session();
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -18659,7 +18627,7 @@ not_a_real_action = ["x"]
             .managed_worktree()
             .expect("managed test session")
             .to_string();
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         app.copy_selected_path().unwrap();
         // Result arrives via WorkerEvent; wait for it.
@@ -18675,7 +18643,7 @@ not_a_real_action = ["x"]
     fn copy_path_copies_selected_agent_path() {
         let mut app = test_app(default_bindings());
         // Flat model: copy-path acts on the selected agent's worktree path.
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         app.copy_selected_path().unwrap();
         drain_until(&mut app, |app| {
@@ -18689,7 +18657,7 @@ not_a_real_action = ["x"]
     #[test]
     fn copy_path_with_no_agent_selected_copies_the_project_picked_from_the_list() {
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
 
         // An agent-less project has no row of its own to select.
         let mut agentless = app.engine.projects[0].clone();
@@ -19170,7 +19138,7 @@ not_a_real_action = ["x"]
     #[test]
     fn mouse_click_terminal_row_selects_the_terminal_section() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal().expect("launch terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -20431,8 +20399,7 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
-        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
-            .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M");
         assert!(
             app.pending_link_click
                 .as_ref()
@@ -20444,8 +20411,7 @@ not_a_real_action = ["x"]
             "the press must still start dux's own selection"
         );
 
-        app.process_raw_input_bytes(b"\x1b[<32;41;9M")
-            .expect("the drag is handled");
+        app.process_raw_input_bytes(b"\x1b[<32;41;9M");
         let dragged = app
             .terminal_selection
             .clone()
@@ -20455,8 +20421,7 @@ not_a_real_action = ["x"]
             "a drag that reached the selection covers more than the cell it started on"
         );
 
-        app.process_raw_input_bytes(b"\x1b[<0;41;9m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;41;9m");
 
         nothing_opened(&rx);
     }
@@ -20893,16 +20858,13 @@ not_a_real_action = ["x"]
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
-        app.process_raw_input_bytes(b"\x1b[<0;31;6M")
-            .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6M");
         assert!(app.pending_link_click.is_some());
 
-        app.process_raw_input_bytes(b"\x1b[O")
-            .expect("the focus report is handled");
+        app.process_raw_input_bytes(b"\x1b[O");
 
         assert!(app.pending_link_click.is_none());
-        app.process_raw_input_bytes(b"\x1b[<0;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6m");
         nothing_opened(&rx);
     }
 
@@ -21381,11 +21343,9 @@ not_a_real_action = ["x"]
     fn fullscreen_click_on_a_linked_cell_opens_it_and_the_child_sees_nothing() {
         let (mut app, rx) = interactive_link_app();
 
-        app.process_raw_input_bytes(&sgr_press(0, 31, 6))
-            .expect("the press is handled");
+        app.process_raw_input_bytes(&sgr_press(0, 31, 6));
         nothing_opened(&rx);
-        app.process_raw_input_bytes(b"\x1b[<0;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;31;6m");
         assert_eq!(opened_url(&rx), "https://example.com/pr/1");
 
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -21404,13 +21364,10 @@ not_a_real_action = ["x"]
         let (mut app, rx) = interactive_link_app();
 
         // cb 16 is a left press with Ctrl held; cb 48 the drag that follows it.
-        app.process_raw_input_bytes(&sgr_press(16, 31, 6))
-            .expect("the press is handled");
+        app.process_raw_input_bytes(&sgr_press(16, 31, 6));
         wait_for_forwarded_echo(&app, "[<0;10;5M");
-        app.process_raw_input_bytes(&sgr_press(48, 33, 6))
-            .expect("the drag is handled");
-        app.process_raw_input_bytes(b"\x1b[<16;33;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(&sgr_press(48, 33, 6));
+        app.process_raw_input_bytes(b"\x1b[<16;33;6m");
 
         let rendered = wait_for_forwarded_echo(&app, "[<0;12;5m");
         assert!(
@@ -21430,10 +21387,8 @@ not_a_real_action = ["x"]
         let (mut app, rx) = interactive_link_app();
 
         // cb 4 is a left press with Shift held.
-        app.process_raw_input_bytes(&sgr_press(4, 31, 6))
-            .expect("the press is handled");
-        app.process_raw_input_bytes(b"\x1b[<4;31;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(&sgr_press(4, 31, 6));
+        app.process_raw_input_bytes(b"\x1b[<4;31;6m");
 
         nothing_opened(&rx);
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -22229,8 +22184,7 @@ not_a_real_action = ["x"]
         set_forward_scroll(&mut app, ForwardScroll::Never);
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.terminal_selection.is_some(),
@@ -22351,8 +22305,7 @@ not_a_real_action = ["x"]
         set_forward_scroll(&mut app, ForwardScroll::Always);
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.terminal_selection.is_none(),
@@ -24924,7 +24877,7 @@ cyan = "#00ffff"
         )
         .expect("write theme");
 
-        app.open_change_theme_prompt().expect("open change theme");
+        app.open_change_theme_prompt();
         let item_count = match &app.prompt {
             PromptState::ChangeTheme(prompt) => prompt.options.len(),
             other => panic!("expected change theme prompt, got {other:?}"),
@@ -26146,8 +26099,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -26228,8 +26180,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the running session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -26303,8 +26254,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open provider picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let codex_option = prompt
@@ -26358,8 +26308,7 @@ cyan = "#00ffff"
             .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
             .expect("select the seeded session");
 
-        app.open_change_agent_provider_prompt()
-            .expect("open picker");
+        app.open_change_agent_provider_prompt();
         match &app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 let copilot = prompt
@@ -26395,8 +26344,7 @@ cyan = "#00ffff"
         // Regression: opening the ctrl+p retarget prompt (as opposed to the
         // new-agent-tab picker) must keep using ChangeAgentProviderMode::Retarget.
         let mut app = test_app(default_bindings());
-        app.open_change_agent_provider_prompt()
-            .expect("open retarget prompt");
+        app.open_change_agent_provider_prompt();
         match &app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 assert_eq!(prompt.mode, ChangeAgentProviderMode::Retarget);
@@ -26573,8 +26521,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         // The pane launches the shell and streams its prompt, which is the big
         // and unmistakable change a confirmation is not owed for.
@@ -26599,7 +26546,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
-        app.show_companion_terminal().expect("first terminal");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
 
         // Close overlay, launch another.
@@ -26607,7 +26554,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
 
-        app.show_companion_terminal().expect("second terminal");
+        app.show_companion_terminal();
         let second_id = app.active_terminal_id.clone().unwrap();
 
         // Neither launch announces itself: both stream into the pane.
@@ -26719,8 +26666,7 @@ cyan = "#00ffff"
     fn exit_interactive_from_terminal_overlay_resets_state() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
@@ -26770,7 +26716,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.process_raw_input_bytes(&[0x07]).unwrap();
+        app.process_raw_input_bytes(&[0x07]);
 
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -26804,7 +26750,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.process_raw_input_bytes(&[0x07]).unwrap();
+        app.process_raw_input_bytes(&[0x07]);
 
         assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
@@ -26935,7 +26881,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         // Ctrl-e is 0x05 on the wire; the raw path must honor the custom key.
-        app.process_raw_input_bytes(&[0x05]).unwrap();
+        app.process_raw_input_bytes(&[0x05]);
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.left_section, LeftSection::Projects);
@@ -27299,8 +27245,7 @@ cyan = "#00ffff"
     fn close_top_overlay_closes_terminal_overlay() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
 
@@ -27316,8 +27261,7 @@ cyan = "#00ffff"
     fn session_switch_closes_terminal_overlay_but_keeps_pty() {
         let mut app = test_app(default_bindings());
 
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
 
@@ -27337,8 +27281,7 @@ cyan = "#00ffff"
         assert!(app.terminal_items().is_empty());
 
         // Launch a terminal.
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.terminal_items().len(), 1);
     }
@@ -27346,8 +27289,7 @@ cyan = "#00ffff"
     #[test]
     fn left_section_navigation_crosses_to_terminals() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
         // Close overlay and go back to projects section.
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
@@ -27401,8 +27343,7 @@ cyan = "#00ffff"
 
         assert!(app.engine.companion_terminals.is_empty());
 
-        app.show_or_open_first_terminal()
-            .expect("should spawn new terminal");
+        app.show_or_open_first_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
@@ -27418,7 +27359,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn an initial terminal.
-        app.show_companion_terminal().expect("spawn first");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
         assert_eq!(app.engine.companion_terminals.len(), 1);
 
@@ -27428,8 +27369,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Now use the "open first" method: it should reuse, not spawn.
-        app.show_or_open_first_terminal()
-            .expect("should reuse existing terminal");
+        app.show_or_open_first_terminal();
 
         assert_eq!(
             app.engine.companion_terminals.len(),
@@ -27449,13 +27389,13 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn two terminals.
-        app.show_companion_terminal().expect("first");
+        app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
 
-        app.show_companion_terminal().expect("second");
+        app.show_companion_terminal();
         let second_id = app.active_terminal_id.clone().unwrap();
         assert_ne!(first_id, second_id);
         assert_eq!(app.engine.companion_terminals.len(), 2);
@@ -27466,8 +27406,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         // Should pick the first (lowest ID), not the second.
-        app.show_or_open_first_terminal()
-            .expect("should reuse first");
+        app.show_or_open_first_terminal();
 
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(
@@ -27482,7 +27421,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         // Spawn an initial terminal so the terminals list is populated.
-        app.show_companion_terminal().expect("initial terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -27493,8 +27432,7 @@ cyan = "#00ffff"
 
         let initial_count = app.engine.companion_terminals.len();
         let before = app.status.most_recent_tui().map(|(_, text)| text);
-        app.spawn_terminal_for_selected_terminal()
-            .expect("spawn from terminals pane");
+        app.spawn_terminal_for_selected_terminal();
 
         // Another terminal launches and streams, so nothing is owed.
         assert_eq!(
@@ -27519,8 +27457,7 @@ cyan = "#00ffff"
         // Deselect everything: no left item at this index.
         app.selected_left = usize::MAX;
 
-        app.new_companion_terminal()
-            .expect("should not error, just warn");
+        app.new_companion_terminal();
 
         assert_eq!(
             app.status.tone(),
@@ -27548,8 +27485,7 @@ cyan = "#00ffff"
             .expect("inactive toggle row");
         assert!(app.selected_session().is_none());
 
-        app.new_companion_terminal()
-            .expect("should not error, just warn");
+        app.new_companion_terminal();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("Select an agent first"));
@@ -27610,8 +27546,7 @@ cyan = "#00ffff"
     fn new_companion_terminal_spawns_when_session_selected() {
         let mut app = test_app(default_bindings());
 
-        app.new_companion_terminal()
-            .expect("should spawn new terminal");
+        app.new_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
@@ -27627,8 +27562,8 @@ cyan = "#00ffff"
     fn tui_terminal_spawn_stamps_distinct_sort_order_and_identity_label() {
         let mut app = test_app(default_bindings());
 
-        app.new_companion_terminal().expect("spawn first terminal");
-        app.new_companion_terminal().expect("spawn second terminal");
+        app.new_companion_terminal();
+        app.new_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 2);
         let mut orders: Vec<u64> = app
@@ -27795,8 +27730,7 @@ cyan = "#00ffff"
                 KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             ] {
                 let mut app = test_app(default_bindings());
-                app.open_project_chooser(intent)
-                    .expect("the chooser must open");
+                app.open_project_chooser(intent);
 
                 app.handle_key(key).expect("the key must be handled");
 
@@ -27901,8 +27835,7 @@ cyan = "#00ffff"
     /// That is the gesture the palette command, the agents-pane keys and the
     /// project chooser all end in.
     fn pick_standalone_folder(app: &mut App, folder: &std::path::Path) {
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         aim_and_pick(app, folder);
     }
 
@@ -27947,8 +27880,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
 
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
 
         match &app.prompt {
@@ -27970,8 +27902,7 @@ cyan = "#00ffff"
                 folder_path: folder.path().to_string_lossy().to_string(),
             });
 
-        app.open_standalone_agent_browser()
-            .expect("the folder browser must open");
+        app.open_standalone_agent_browser();
         type_path_and_confirm(&mut app, folder.path());
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
@@ -28001,8 +27932,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let folder = tempfile::tempdir().expect("folder");
 
-        app.open_project_browser()
-            .expect("the folder browser must open");
+        app.open_project_browser();
         type_path_and_confirm(&mut app, folder.path());
 
         assert!(
@@ -28762,8 +28692,7 @@ cyan = "#00ffff"
         app.files_index = 0;
 
         // Open the confirm prompt while the file is still untracked.
-        app.confirm_discard_selected_file()
-            .expect("open discard prompt");
+        app.confirm_discard_selected_file();
         assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
 
         // The worktree changes between prompt-open and confirm: the file is now
@@ -29574,7 +29503,7 @@ cyan = "#00ffff"
     #[test]
     fn startup_command_logs_drag_selection_copies_text() {
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
         app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
         install_startup_command_logs_overlay(&mut app, 2);
 
@@ -30211,7 +30140,7 @@ cyan = "#00ffff"
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.clipboard = Clipboard::from_fn(|_| Ok(()));
         app.startup_log_viewer = Some(crate::app::StartupLogViewer {
             scope_label: "project \"demo\"".to_string(),
             path: None,
@@ -30265,7 +30194,7 @@ cyan = "#00ffff"
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         let project = app.selected_project().cloned().expect("selected project");
-        app.begin_new_agent_for_project(project).unwrap();
+        app.begin_new_agent_for_project(project);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
         install_name_new_agent_overlay(&mut app);
 
@@ -30374,8 +30303,7 @@ cyan = "#00ffff"
             Ok(resolved(Vec::new())),
             Some(offer),
             None,
-        )
-        .expect("resolve");
+        );
         settle_pr_clone_check(app);
     }
 
@@ -31702,7 +31630,7 @@ cyan = "#00ffff"
     #[test]
     fn focus_navigation_visits_the_terminal_list_as_a_left_pane_section() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal().expect("launch terminal");
+        app.show_companion_terminal();
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
         app.session_surface = SessionSurface::Agent;
@@ -32321,7 +32249,7 @@ cyan = "#00ffff"
             .expect("ScrollPageUp has a binding");
         let bytes = crate::keybindings::key_combination_to_bytes(&combo)
             .expect("the bound scroll key has a byte encoding");
-        app.process_raw_input_bytes(&bytes).expect("raw input");
+        app.process_raw_input_bytes(&bytes);
 
         assert!(
             app.selected_terminal_surface_client()
@@ -32343,8 +32271,7 @@ cyan = "#00ffff"
     fn a_real_wheel_scroll_enters_scroll_mode() {
         let mut app = app_with_history_at_the_live_edge();
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             app.selected_terminal_surface_client()
@@ -32392,7 +32319,7 @@ cyan = "#00ffff"
     fn scrolled_back_suppresses_regular_key_forwarding() {
         let mut app = app_with_scrolled_back_pty();
         // Feed a regular ASCII character 'x' (0x78): should be dropped.
-        let result = app.process_raw_input_bytes(b"x").unwrap();
+        let result = app.process_raw_input_bytes(b"x");
         assert!(!result, "should not request exit");
         // The key was consumed without error; the PTY didn't receive it.
         // We can't directly assert write_bytes wasn't called without a mock,
@@ -32412,7 +32339,7 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Agent);
 
         // Feed Ctrl-g (0x07): the fullscreen toggle should still work.
-        let result = app.process_raw_input_bytes(&[0x07]).unwrap();
+        let result = app.process_raw_input_bytes(&[0x07]);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -32445,7 +32372,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "a keystroke in scroll mode must not reach the PTY"
@@ -32573,7 +32500,7 @@ cyan = "#00ffff"
             .unwrap()
             .set_scrollback(0);
 
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "the keystroke that raced the mode's death must not reach the PTY"
@@ -32582,7 +32509,7 @@ cyan = "#00ffff"
         assert!(app.status.message().contains("Scroll mode ended"));
 
         // The NEXT keystroke is forwarded normally: the user has been told.
-        assert!(app.process_raw_input_bytes(b"y").is_ok());
+        app.process_raw_input_bytes(b"y");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "typing must work again once the mode is over"
@@ -32687,7 +32614,7 @@ cyan = "#00ffff"
             );
             // And typing really is back, which is what made the silence
             // dangerous in the first place.
-            assert!(app.process_raw_input_bytes(b"z").is_ok());
+            app.process_raw_input_bytes(b"z");
             assert!(
                 app.engine.pty_input.contains_key(&slot_tab),
                 "{name}: the child took the view back, so typing must reach it"
@@ -32874,7 +32801,7 @@ cyan = "#00ffff"
         );
 
         // And the harm the mode exists to prevent must still be prevented.
-        assert!(app.process_raw_input_bytes(b"x").is_ok());
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&first),
             "a keystroke must not reach a pane whose view is frozen"
@@ -32904,7 +32831,7 @@ cyan = "#00ffff"
         let (mut app, slot_tab) = app_with_live_agent_pty();
         assert!(!app.engine.pty_input.contains_key(&slot_tab));
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "typing into the focused agent must record input so the echo isn't \
@@ -32922,7 +32849,7 @@ cyan = "#00ffff"
     fn input_flushed_on_the_exit_interactive_path_still_records_pty_input() {
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"x\x07").unwrap();
+        app.process_raw_input_bytes(b"x\x07");
 
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
@@ -32935,7 +32862,7 @@ cyan = "#00ffff"
         let (mut app, slot_tab) = app_with_live_agent_pty();
         app.raw_input_buf = b"\x1b[".to_vec();
 
-        app.process_raw_input_bytes(b"A").unwrap();
+        app.process_raw_input_bytes(b"A");
 
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
@@ -32956,7 +32883,7 @@ cyan = "#00ffff"
             },
         );
 
-        app.process_raw_input_bytes(b"x\x1c").unwrap();
+        app.process_raw_input_bytes(b"x\x1c");
 
         assert!(
             app.macro_bar.is_some(),
@@ -32985,7 +32912,7 @@ cyan = "#00ffff"
             "the fixture must start selected"
         );
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
 
         assert!(
             app.terminal_selection.is_none(),
@@ -33004,7 +32931,7 @@ cyan = "#00ffff"
         // record input: the earlier Forward-only check missed this path.
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"\x1b[A").unwrap();
+        app.process_raw_input_bytes(b"\x1b[A");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "arrow-key passthrough reaches the agent PTY and must record input"
@@ -33018,7 +32945,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
             "input suppressed by scrollback must not record a stamp"
@@ -33051,7 +32978,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Terminal;
         app.input_target = InputTarget::Terminal;
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
         assert!(
             app.engine.pty_input.contains_key("term-1"),
             "typing into a companion terminal must record input under the terminal id"
@@ -33076,8 +33003,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
 
-        app.process_raw_input_bytes(WHEEL_UP_IN_PANE)
-            .expect("raw input");
+        app.process_raw_input_bytes(WHEEL_UP_IN_PANE);
 
         assert!(
             !app.engine.pty_input.contains_key(&slot_tab),
@@ -33126,7 +33052,7 @@ cyan = "#00ffff"
     fn typing_still_stamps_only_the_typing_window() {
         let (mut app, slot_tab) = app_with_live_agent_pty();
 
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"x");
 
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
@@ -33528,10 +33454,10 @@ cyan = "#00ffff"
             "test setup: neither chord may be an Interactive-scope intercept"
         );
 
-        app.process_raw_input_bytes(&[0x0f]).expect("Ctrl-o");
+        app.process_raw_input_bytes(&[0x0f]);
         wait_for_grid_row(&mut app, "READY^O");
 
-        app.process_raw_input_bytes(&[0x19]).expect("Ctrl-y");
+        app.process_raw_input_bytes(&[0x19]);
         wait_for_grid_row(&mut app, "READY^O^Y");
 
         assert_eq!(
@@ -33999,7 +33925,7 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
         assert_eq!(
             app.input_target,
             InputTarget::Agent,
@@ -34007,7 +33933,7 @@ cyan = "#00ffff"
         );
         assert_eq!(app.raw_input_buf, b"\x1b");
 
-        app.process_raw_input_bytes(&[]).unwrap();
+        app.process_raw_input_bytes(&[]);
         assert_eq!(
             app.input_target,
             InputTarget::None,
@@ -34069,8 +33995,7 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b\x1b[<35;138;12M")
-            .unwrap();
+        app.process_raw_input_bytes(b"\x1b\x1b[<35;138;12M");
         assert_eq!(
             app.input_target,
             InputTarget::None,
@@ -34086,10 +34011,10 @@ cyan = "#00ffff"
     fn fragmented_pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
         let mut app = app_with_scrolled_back_pty();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
         assert_eq!(app.raw_input_buf, b"\x1b");
 
-        app.process_raw_input_bytes(b"\x1b[<35;").unwrap();
+        app.process_raw_input_bytes(b"\x1b[<35;");
         assert_eq!(
             app.input_target,
             InputTarget::Agent,
@@ -34100,7 +34025,7 @@ cyan = "#00ffff"
             "incomplete mouse report should stay pending with its ESC prefix"
         );
 
-        app.process_raw_input_bytes(b"138;12M").unwrap();
+        app.process_raw_input_bytes(b"138;12M");
         assert!(
             app.raw_input_buf.is_empty(),
             "completed mouse report must not leave a [<...M printable remainder"
@@ -34114,8 +34039,8 @@ cyan = "#00ffff"
         app.bindings = bindings;
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
 
-        app.process_raw_input_bytes(b"\x1b").unwrap();
-        app.process_raw_input_bytes(b"x").unwrap();
+        app.process_raw_input_bytes(b"\x1b");
+        app.process_raw_input_bytes(b"x");
 
         assert_eq!(
             app.input_target,
@@ -34150,7 +34075,7 @@ cyan = "#00ffff"
         );
 
         // Feed Ctrl-\ while scrolled back.
-        let result = app.process_raw_input_bytes(&[0x1c]).unwrap();
+        let result = app.process_raw_input_bytes(&[0x1c]);
         assert!(!result);
         assert!(
             app.macro_bar.is_none(),
@@ -34174,7 +34099,7 @@ cyan = "#00ffff"
         );
 
         // Feed a regular character: should be forwarded without error.
-        let result = app.process_raw_input_bytes(b"x").unwrap();
+        let result = app.process_raw_input_bytes(b"x");
         assert!(!result);
     }
 
@@ -34187,7 +34112,7 @@ cyan = "#00ffff"
             .scrollback_offset();
 
         // Feed PgUp (CSI 5~): should scroll further back.
-        let result = app.process_raw_input_bytes(b"\x1b[5~").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[5~");
         assert!(!result);
         let after = app
             .selected_terminal_surface_client()
@@ -34210,7 +34135,7 @@ cyan = "#00ffff"
         );
 
         // Feed 'q' (0x71): ScrollToBottom should reset scrollback.
-        let result = app.process_raw_input_bytes(b"q").unwrap();
+        let result = app.process_raw_input_bytes(b"q");
         assert!(!result);
         assert_eq!(
             app.selected_terminal_surface_client()
@@ -34242,7 +34167,7 @@ cyan = "#00ffff"
             .scrollback_offset();
 
         // Feed Home key escape sequence: ScrollToTop should maximize scrollback.
-        let result = app.process_raw_input_bytes(b"\x1b[H").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[H");
         assert!(!result);
         let after = app
             .selected_terminal_surface_client()
@@ -34265,7 +34190,7 @@ cyan = "#00ffff"
         );
 
         // Feed End key escape sequence: ScrollToBottom should reset scrollback.
-        let result = app.process_raw_input_bytes(b"\x1b[F").unwrap();
+        let result = app.process_raw_input_bytes(b"\x1b[F");
         assert!(!result);
         assert_eq!(
             app.selected_terminal_surface_client()
@@ -34313,7 +34238,7 @@ cyan = "#00ffff"
         // Click at (1,1) which is inside the left pane, outside agent_term
         // (agent_term starts at x=21). SGR coords are 1-based.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34335,7 +34260,7 @@ cyan = "#00ffff"
         // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         let bytes = sgr_mouse_down(31, 6);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34359,7 +34284,7 @@ cyan = "#00ffff"
 
         // Click outside agent_term.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34383,7 +34308,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
 
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -34412,7 +34337,7 @@ cyan = "#00ffff"
 
         // Click outside agent_term while scrolled back: the overlay must close.
         let bytes = sgr_mouse_down(2, 2);
-        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
         assert_eq!(
             app.input_target,
@@ -34815,8 +34740,7 @@ cyan = "#00ffff"
     #[test]
     fn ctrl_d_in_terminal_list_shows_confirm_dialog() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         // Close overlay so we're back in the normal left pane.
         app.fullscreen_overlay = FullscreenOverlay::None;
@@ -34838,8 +34762,7 @@ cyan = "#00ffff"
     #[test]
     fn confirm_delete_terminal_removes_terminal() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
@@ -34881,8 +34804,7 @@ cyan = "#00ffff"
     #[test]
     fn cancel_delete_terminal_keeps_terminal() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
@@ -34908,8 +34830,7 @@ cyan = "#00ffff"
     #[test]
     fn delete_last_terminal_switches_to_projects() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal()
-            .expect("launch companion terminal");
+        app.show_companion_terminal();
 
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.input_target = InputTarget::None;
@@ -34963,7 +34884,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"hi\nyou");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         // `cat -v` renders ESC as `^[` and CR as `^M`; the LF stays a real
         // line feed, so the body must arrive with no `^M` in it.
@@ -34989,7 +34910,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"a\nb");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         let rendered = wait_for_paste_echo(&app, "a^Mb");
         assert!(
@@ -35007,12 +34928,12 @@ cyan = "#00ffff"
         let mut first = Vec::new();
         first.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         first.extend_from_slice(b"x\r");
-        app.process_raw_input_bytes(&first).unwrap();
+        app.process_raw_input_bytes(&first);
 
         let mut second = Vec::new();
         second.extend_from_slice(b"\ny");
         second.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&second).unwrap();
+        app.process_raw_input_bytes(&second);
 
         let rendered = wait_for_paste_echo(&app, "x^My");
         assert!(
@@ -35054,7 +34975,7 @@ cyan = "#00ffff"
         input.push(0x07); // Ctrl-g, which would be ToggleFullscreen outside paste
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
 
-        let result = app.process_raw_input_bytes(&input).unwrap();
+        let result = app.process_raw_input_bytes(&input);
         assert!(!result, "should not request exit");
 
         // The key assertion: we should still be in interactive mode.
@@ -35088,7 +35009,7 @@ cyan = "#00ffff"
         let grace = std::time::Duration::from_secs(3);
 
         // Focus-out: the terminal window is unfocused, so viewing must stop.
-        app.process_raw_input_bytes(b"\x1b[O").unwrap();
+        app.process_raw_input_bytes(b"\x1b[O");
         assert!(
             !app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), grace),
@@ -35097,7 +35018,7 @@ cyan = "#00ffff"
 
         // Focus-in: a genuine unfocused->focused transition. With zero grace
         // (passed to should_stamp_viewed below) stamping resumes immediately.
-        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        app.process_raw_input_bytes(b"\x1b[I");
         assert!(
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
@@ -35134,7 +35055,7 @@ cyan = "#00ffff"
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        app.process_raw_input_bytes(b"\x1b[I");
         assert!(
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
@@ -35167,7 +35088,7 @@ cyan = "#00ffff"
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         input.extend_from_slice(b"\x1b[I");
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&input).unwrap();
+        app.process_raw_input_bytes(&input);
 
         // Focus state untouched: still fail-open (stamps under any grace).
         assert!(
@@ -35213,7 +35134,7 @@ cyan = "#00ffff"
             b"\x1b[?2004;2$y",
             b"\x1b[8;24;80t",
         ] {
-            app.process_raw_input_bytes(report).unwrap();
+            app.process_raw_input_bytes(report);
             assert!(
                 app.engine.pty_input.is_empty(),
                 "the host's answer {:?} must not reach the child",
@@ -35226,7 +35147,7 @@ cyan = "#00ffff"
         pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         pasted.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x07");
         pasted.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&pasted).unwrap();
+        app.process_raw_input_bytes(&pasted);
         assert!(
             !app.engine.pty_input.is_empty(),
             "a report-shaped bracketed paste is user data and must still forward"
@@ -35373,7 +35294,7 @@ cyan = "#00ffff"
         let mut chunk1 = Vec::new();
         chunk1.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         chunk1.extend_from_slice(b"abc");
-        app.process_raw_input_bytes(&chunk1).unwrap();
+        app.process_raw_input_bytes(&chunk1);
         assert!(
             app.in_bracket_paste,
             "should be in bracket paste after start marker"
@@ -35383,7 +35304,7 @@ cyan = "#00ffff"
         let mut chunk2 = Vec::new();
         chunk2.extend_from_slice(b"def");
         chunk2.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&chunk2).unwrap();
+        app.process_raw_input_bytes(&chunk2);
         assert!(
             !app.in_bracket_paste,
             "should exit bracket paste after end marker"
@@ -35417,7 +35338,7 @@ cyan = "#00ffff"
         // Reset in_bracket_paste first to simulate that the end marker
         // was never received (e.g. malformed paste), but we exit.
         app.in_bracket_paste = false;
-        app.process_raw_input_bytes(b"\x07").unwrap();
+        app.process_raw_input_bytes(b"\x07");
 
         assert!(!app.in_bracket_paste, "should be reset after exit");
         assert_eq!(app.input_target, InputTarget::None);
@@ -35447,7 +35368,7 @@ cyan = "#00ffff"
 
         // Feed 100 'x' characters: they should all be forwarded.
         let input = vec![b'x'; 100];
-        let result = app.process_raw_input_bytes(&input).unwrap();
+        let result = app.process_raw_input_bytes(&input);
         assert!(!result);
         // We should still be in interactive mode (nothing intercepted).
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -36411,8 +36332,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.macro_bar.is_none(), "macro bar closes after send");
         assert_eq!(app.status.message(), "Sent macro \"greet\".");
@@ -36478,8 +36398,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.status.message(), "Sent macro \"multi\".");
 
@@ -36587,8 +36506,7 @@ cyan = "#00ffff"
             previous_input_target: InputTarget::Agent,
         });
 
-        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("handle enter");
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.status.message(), "Sent macro \"quit\".");
         assert!(
             !app.engine.is_typing(slot_tab.as_str()),
@@ -36963,8 +36881,7 @@ cyan = "#00ffff"
 
         let original_session_provider = app.engine.sessions[0].provider.clone();
 
-        app.open_change_default_provider_prompt()
-            .expect("open default provider picker");
+        app.open_change_default_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeDefaultProvider(prompt) => {
                 prompt.selected = prompt
@@ -36976,8 +36893,7 @@ cyan = "#00ffff"
             other => panic!("expected change-default-provider prompt, got {other:?}"),
         }
 
-        app.apply_change_default_provider()
-            .expect("apply default provider");
+        app.apply_change_default_provider();
 
         // Config was updated in memory and on disk.
         assert_eq!(app.engine.config.defaults.provider, "claude");
@@ -37018,8 +36934,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.engine.config.defaults.provider = "codex".to_string();
 
-        app.open_change_default_provider_prompt()
-            .expect("open default provider picker");
+        app.open_change_default_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeDefaultProvider(prompt) => {
                 prompt.selected = prompt
@@ -37031,8 +36946,7 @@ cyan = "#00ffff"
             other => panic!("expected change-default-provider prompt, got {other:?}"),
         }
 
-        app.apply_change_default_provider()
-            .expect("apply no-op selection");
+        app.apply_change_default_provider();
 
         assert_eq!(app.engine.config.defaults.provider, "codex");
         assert!(matches!(app.prompt, PromptState::None));
@@ -37389,8 +37303,7 @@ cyan = "#00ffff"
             .expect("select the running session");
 
         // Swap provider while the agent is still running.
-        app.open_change_agent_provider_prompt()
-            .expect("open picker");
+        app.open_change_agent_provider_prompt();
         match &mut app.prompt {
             PromptState::ChangeAgentProvider(prompt) => {
                 prompt.selected = prompt
@@ -38194,8 +38107,7 @@ cyan = "#00ffff"
         // passes.
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
-        app.open_new_agent_from_pr_prompt()
-            .expect("open the reference-first modal");
+        app.open_new_agent_from_pr_prompt();
         match &app.prompt {
             PromptState::PullRequestInput { project, focus, .. } => {
                 assert!(
@@ -38212,7 +38124,7 @@ cyan = "#00ffff"
     fn a_bare_number_with_no_project_is_refused_inline_and_the_modal_stays_open() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "123");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
 
         let status = app.status.text();
         assert!(
@@ -38229,7 +38141,7 @@ cyan = "#00ffff"
     fn unreadable_text_is_refused_inline_before_any_worker_runs() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "not a reference");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
         assert!(
             app.status.text().contains("Enter a pull request URL"),
             "{}",
@@ -38241,8 +38153,7 @@ cyan = "#00ffff"
     fn the_secondary_action_reaches_the_project_picker_and_keeps_what_was_typed() {
         let mut app = test_app(default_bindings());
         reference_first_modal(&mut app, "acme/widget#7");
-        app.open_pull_request_project_picker()
-            .expect("open the picker");
+        app.open_pull_request_project_picker();
 
         assert!(
             matches!(
@@ -38350,8 +38261,7 @@ cyan = "#00ffff"
             Ok(resolved(vec![project.clone()])),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert!(
             matches!(app.prompt, PromptState::None),
             "one match proceeds with no further question, got {:?}",
@@ -38375,8 +38285,7 @@ cyan = "#00ffff"
             Err("worker panicked: boom".to_string()),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         let status = app.status.text();
         assert!(
@@ -38405,8 +38314,7 @@ cyan = "#00ffff"
             }),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         let status = app.status.text();
         assert!(
@@ -38439,8 +38347,7 @@ cyan = "#00ffff"
             Ok(resolved(vec![first.clone(), second.clone()])),
             None,
             None,
-        )
-        .expect("resolve");
+        );
 
         match &app.prompt {
             PromptState::PickProject {
@@ -38470,8 +38377,7 @@ cyan = "#00ffff"
             Ok(resolved(Vec::new())),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             app.status.text(),
             "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
@@ -38498,8 +38404,7 @@ cyan = "#00ffff"
             Ok(resolved(Vec::new())),
             None,
             Some("Failed to resolve PR #3 from acme/unknown: not found".to_string()),
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             app.status.text(),
             "No project in dux is a checkout of github.com/acme/unknown. Choose a project that \
@@ -38561,8 +38466,7 @@ cyan = "#00ffff"
                 dux_core::status_text::ReviewCopyOutlook::NotNeeded,
             )),
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(
             pr_form(&app).body().plain(),
             "dux could not find a checked project for github.com/acme/widget. dux could not \
@@ -38582,8 +38486,7 @@ cyan = "#00ffff"
             Ok(resolved(Vec::new())),
             None,
             None,
-        )
-        .expect("resolve");
+        );
         assert_eq!(app.pending_pr_reference.as_deref(), Some("acme/widget#7"));
 
         app.confirm_project_chooser_selection().expect("pick");
@@ -38642,7 +38545,7 @@ cyan = "#00ffff"
                 ["github.com".to_string()].into_iter().collect(),
             ));
         reference_first_modal(&mut app, "https://gitlab.com/acme/widget/pull/1");
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
 
         let status = app.status.text();
         assert!(
@@ -38680,7 +38583,7 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
 
         reference_first_modal(&mut app, "acme/widget#1");
-        app.confirm_pull_request_input().expect("submit the first");
+        app.confirm_pull_request_input();
         let stale_op = app
             .pending_pr_reference_op
             .clone()
@@ -38689,7 +38592,7 @@ cyan = "#00ffff"
         // Cancel, then open a new dialog for a different reference.
         app.handle_key(key(KeyCode::Esc)).expect("cancel");
         assert!(matches!(app.prompt, PromptState::None));
-        app.open_new_agent_from_pr_prompt().expect("reopen");
+        app.open_new_agent_from_pr_prompt();
         reference_first_modal(&mut app, "acme/gadget#2");
 
         // Now the first resolution finally answers, with a project it matched.
@@ -38789,8 +38692,7 @@ cyan = "#00ffff"
     fn the_project_first_path_still_dispatches_the_lookup_unchanged() {
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
-        app.begin_pr_agent_for_project(project)
-            .expect("project-first modal");
+        app.begin_pr_agent_for_project(project);
         match &app.prompt {
             PromptState::PullRequestInput { project, .. } => {
                 assert!(
@@ -38803,7 +38705,7 @@ cyan = "#00ffff"
         if let PromptState::PullRequestInput { input, .. } = &mut app.prompt {
             input.set_text("123".to_string());
         }
-        app.confirm_pull_request_input().expect("confirm");
+        app.confirm_pull_request_input();
         assert!(
             matches!(app.prompt, PromptState::None),
             "a bare number with a project chosen goes to the lookup exactly as before"
@@ -39203,8 +39105,7 @@ cyan = "#00ffff"
         extra2.name = "beta-two".to_string();
         app.engine.projects.push(extra);
         app.engine.projects.push(extra2);
-        app.open_project_chooser(ProjectChooserIntent::NewAgent)
-            .expect("open the project chooser");
+        app.open_project_chooser(ProjectChooserIntent::NewAgent);
         app
     }
 
@@ -40252,11 +40153,9 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         match which {
             "ConfirmDeleteTerminal" => {
-                app.show_companion_terminal()
-                    .expect("launch companion terminal");
+                app.show_companion_terminal();
                 app.selected_terminal_index = 0;
-                app.confirm_delete_selected_terminal()
-                    .expect("open the delete-terminal confirmation");
+                app.confirm_delete_selected_terminal();
             }
             "ConfirmCloseTab" => {
                 // Only an EXTRA tab reaches this confirmation; the first tab
@@ -40299,8 +40198,7 @@ cyan = "#00ffff"
                 }];
                 app.right_section = RightSection::Unstaged;
                 app.files_index = 0;
-                app.confirm_discard_selected_file()
-                    .expect("open the discard confirmation");
+                app.confirm_discard_selected_file();
             }
             "ConfirmCreateInitialCommit" => {
                 let repo = scratch_unborn_repo(&mut app);
@@ -40343,9 +40241,8 @@ cyan = "#00ffff"
                 app.engine
                     .providers
                     .insert(TabId::new(slot_tab.clone()), spawn_idle_pty(&worktree));
-                app.open_kill_running().expect("open the kill picker");
-                app.open_confirm_kill_running_action(KillRunningAction::Hovered)
-                    .expect("open the kill confirmation");
+                app.open_kill_running();
+                app.open_confirm_kill_running_action(KillRunningAction::Hovered);
             }
             "PendingMacroDelete" => {
                 app.engine.config.macros.entries.insert(
