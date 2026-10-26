@@ -613,6 +613,51 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
     }
 }
 
+/// Who a key pressed in the typeable center pane belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyClaim {
+    /// Typing: the agent would get it.
+    Typing,
+    /// A dux chord.
+    Dux,
+}
+
+/// Which of the selected agent's git verdicts a changes-panel action needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitUse {
+    /// A change to the repository (stage, discard, commit).
+    Mutation,
+    /// A read for the changes panel (a diff).
+    Read,
+}
+
+/// What a terminal focus report said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusChange {
+    /// The host terminal gained focus.
+    Gained,
+    /// It lost focus.
+    Lost,
+}
+
+/// Where a mouse press landed relative to the open overlay's frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressPlace {
+    /// Outside the frame, which dismisses most overlays.
+    Outside,
+    /// Inside it.
+    Inside,
+}
+
+/// Whether the screen shows the windowed layout or one maximized surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneLayout {
+    /// The windowed layout, with every pane on screen.
+    Windowed,
+    /// A fullscreen surface.
+    Maximized,
+}
+
 /// Whether the child asked for mouse reporting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseReporting {
@@ -1052,7 +1097,7 @@ impl App {
             && self.focused_pty_is_covered_by_card()
     }
 
-    fn handle_takeover_card_key(&mut self, key: KeyEvent, typing_owns_key: bool) -> bool {
+    fn handle_takeover_card_key(&mut self, key: KeyEvent, claim: KeyClaim) -> bool {
         let presses_button = self.bindings.lookup(&key, BindingScope::Center)
             == Some(Action::FocusAgent)
             || (key.code == KeyCode::Char(' ') && key.modifiers.is_empty());
@@ -1060,7 +1105,7 @@ impl App {
             self.take_over_focused_pty();
             return true;
         }
-        typing_owns_key && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+        claim == KeyClaim::Typing && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
     }
 
     fn route_minimized_center_key(&mut self, key: KeyEvent) -> bool {
@@ -1073,7 +1118,12 @@ impl App {
             },
         );
         let card_owns_center = self.takeover_card_owns_center_key();
-        if card_owns_center && self.handle_takeover_card_key(key, typing_owns_key) {
+        let claim = if typing_owns_key {
+            KeyClaim::Typing
+        } else {
+            KeyClaim::Dux
+        };
+        if card_owns_center && self.handle_takeover_card_key(key, claim) {
             return true;
         }
         if !card_owns_center && self.center_typeable() && typing_owns_key {
@@ -1706,8 +1756,8 @@ impl App {
         true
     }
 
-    fn forward_unbound_center_key(&mut self, key: &KeyEvent, in_diff: bool) {
-        if !in_diff && self.center_typeable() && !self.scroll_mode_active() {
+    fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
+        if self.center_typeable() && !self.scroll_mode_active() {
             self.forward_typing_key_to_center(key);
         }
     }
@@ -1715,7 +1765,9 @@ impl App {
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         let Some(action) = self.bindings.lookup(&key, BindingScope::Center) else {
-            self.forward_unbound_center_key(&key, in_diff);
+            if !in_diff {
+                self.forward_unbound_center_key(&key);
+            }
             return Ok(());
         };
 
@@ -2962,7 +3014,7 @@ impl App {
     /// The web twin is `git_routes::resolve_changes_worktree`, and both read the
     /// one engine verdict.
     pub(crate) fn changes_worktree_for_selection(&mut self) -> Option<PathBuf> {
-        self.selection_changes_directory(true)
+        self.selection_changes_directory(GitUse::Mutation)
     }
 
     /// The same directory for a changes-panel READ (the file diff). A separate
@@ -2973,15 +3025,15 @@ impl App {
     /// session's directory raw is what keeps a stale `WorkingRepo` verdict from
     /// rendering every file in a folder with no repository as fully added.
     pub(crate) fn diff_worktree_for_selection(&mut self) -> Option<PathBuf> {
-        self.selection_changes_directory(false)
+        self.selection_changes_directory(GitUse::Read)
     }
 
     /// `mutating` picks which of the two engine predicates decides. Both set the
     /// folder's own refusal sentence and answer `None`.
-    fn selection_changes_directory(&mut self, mutating: bool) -> Option<PathBuf> {
+    fn selection_changes_directory(&mut self, git_use: GitUse) -> Option<PathBuf> {
         let session_id = self.selected_session()?.id.clone();
         let access = self.engine.session_git_access(&session_id)?;
-        let allowed = if mutating {
+        let allowed = if git_use == GitUse::Mutation {
             access.mutations_allowed()
         } else {
             access.changes_panel_works()
@@ -3364,7 +3416,11 @@ impl App {
             return Some(RawSeqAction::Forward(bytes));
         }
         if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
-            self.observe_raw_terminal_focus(gained);
+            self.observe_raw_terminal_focus(if gained {
+                FocusChange::Gained
+            } else {
+                FocusChange::Lost
+            });
             return None;
         }
         // The rest of the host's report family, dropped for the same reason the
@@ -3388,8 +3444,8 @@ impl App {
         Some(RawSeqAction::Forward(seq.to_vec()))
     }
 
-    fn observe_raw_terminal_focus(&mut self, gained: bool) {
-        if gained {
+    fn observe_raw_terminal_focus(&mut self, change: FocusChange) {
+        if change == FocusChange::Gained {
             self.terminal_focus.on_focus_gained(Instant::now());
         } else {
             self.retire_pending_link_click();
@@ -9632,7 +9688,7 @@ impl App {
     fn handle_resource_monitor_mouse(
         &mut self,
         mouse: MouseEvent,
-        outside_press: bool,
+        press: PressPlace,
     ) -> Option<bool> {
         let PromptState::ResourceMonitor {
             scroll_offset,
@@ -9644,7 +9700,7 @@ impl App {
         else {
             return None;
         };
-        if outside_press {
+        if press == PressPlace::Outside {
             return None;
         }
 
@@ -9684,7 +9740,7 @@ impl App {
         Some(false)
     }
 
-    fn handle_debug_input_mouse(&mut self, mouse: MouseEvent, outside_press: bool) -> Option<bool> {
+    fn handle_debug_input_mouse(&mut self, mouse: MouseEvent, press: PressPlace) -> Option<bool> {
         let PromptState::DebugInput {
             lines,
             scroll_offset,
@@ -9692,7 +9748,7 @@ impl App {
         else {
             return None;
         };
-        if outside_press {
+        if press == PressPlace::Outside {
             return None;
         }
 
@@ -9828,7 +9884,11 @@ impl App {
             return result;
         }
         let outside_press =
-            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse);
+            if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse) {
+                PressPlace::Outside
+            } else {
+                PressPlace::Inside
+            };
         if let Some(result) = self.handle_resource_monitor_mouse(mouse, outside_press) {
             return result;
         }
@@ -11448,8 +11508,8 @@ impl App {
         self.handle_pending_pr_banner_mouse(mouse)
     }
 
-    fn handle_pr_banner_press(&mut self, mouse: MouseEvent, windowed: bool) -> bool {
-        if windowed
+    fn handle_pr_banner_press(&mut self, mouse: MouseEvent, layout: PaneLayout) -> bool {
+        if layout == PaneLayout::Windowed
             && let Some(band) = self.mouse_layout.pr_banner
             && contains_point(band, mouse.column, mouse.row)
         {
@@ -11741,7 +11801,7 @@ impl App {
         }
     }
 
-    fn handle_primary_mouse_down(&mut self, mouse: MouseEvent, windowed: bool) {
+    fn handle_primary_mouse_down(&mut self, mouse: MouseEvent, layout: PaneLayout) {
         // A new press retires any previous row drag, wherever it lands. A release
         // does not always come back: the take-over card swallows one that lands on
         // the covered pane, and a gesture left armed would be finished later by an
@@ -11749,15 +11809,19 @@ impl App {
         // a press on a row still starts its own gesture.
         self.row_drag = None;
         self.end_terminal_selection_drag();
-        if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
+        if layout == PaneLayout::Windowed
+            && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row)
+        {
             self.mouse_drag = Some(drag);
             self.update_dragged_panes(mouse.column, mouse.row);
             return;
         }
-        if windowed && self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
+        if layout == PaneLayout::Windowed
+            && self.handle_agent_tab_strip_click(mouse.column, mouse.row)
+        {
             return;
         }
-        if self.handle_pr_banner_press(mouse, windowed) {
+        if self.handle_pr_banner_press(mouse, layout) {
             return;
         }
         if self.handle_center_link_press(mouse) {
@@ -11792,10 +11856,10 @@ impl App {
         }
     }
 
-    fn dispatch_mouse_event(&mut self, mouse: MouseEvent, windowed: bool) {
+    fn dispatch_mouse_event(&mut self, mouse: MouseEvent, layout: PaneLayout) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_primary_mouse_down(mouse, windowed);
+                self.handle_primary_mouse_down(mouse, layout);
             }
             MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
                 self.begin_center_mouse_forward(mouse);
@@ -11815,7 +11879,7 @@ impl App {
             // A selection drag on the minimized grid. The press that started it
             // cleared the row drag, so the two can never be live at once.
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-                if windowed && self.terminal_selection_is_dragging() =>
+                if layout == PaneLayout::Windowed && self.terminal_selection_is_dragging() =>
             {
                 self.handle_terminal_selection_mouse(mouse);
             }
@@ -11854,7 +11918,11 @@ impl App {
             return false;
         }
 
-        let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+        let windowed = if matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            PaneLayout::Windowed
+        } else {
+            PaneLayout::Maximized
+        };
         if self.intercept_mouse_before_targets(mouse) {
             return false;
         }
