@@ -777,6 +777,10 @@ impl SessionStore {
     }
 
     /// Read one [`app_state`](Self::set_app_state) value.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn app_state(&self, key: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
@@ -803,11 +807,19 @@ impl SessionStore {
     ///
     /// Derived UI state, so it lives here and never in portable config. Shared
     /// by both surfaces on purpose: see [`crate::first_load`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn last_seen_version(&self) -> Result<Option<String>> {
         self.app_state(LAST_SEEN_VERSION_KEY)
     }
 
     /// Record `version` as seen, so its what's-new screen does not reappear.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_last_seen_version(&self, version: &str) -> Result<()> {
         self.set_app_state(LAST_SEEN_VERSION_KEY, version)
     }
@@ -819,6 +831,10 @@ impl SessionStore {
     ///
     /// A consistency check only: it is public and anyone can repeat it, so no
     /// auth, trust, ownership or ban decision may ever read it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write or read fails.
     pub fn instance_id(&self) -> Result<String> {
         // Insert-if-absent then read, so two connections minting at once both
         // read the one that won.
@@ -831,6 +847,10 @@ impl SessionStore {
     }
 
     /// Insert a new extra tab row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails, a duplicate tab id included.
     pub fn insert_agent_tab(&self, tab: &AgentTab) -> Result<()> {
         self.conn.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
@@ -917,6 +937,10 @@ impl SessionStore {
     }
 
     /// Replace the saved process registry with `stored`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the registry cannot be encoded or the database write fails.
     pub fn replace_process_registry(
         &self,
         stored: &[crate::process_sessions::StoredSession],
@@ -953,6 +977,10 @@ impl SessionStore {
 
     /// The saved process registry, where a body that does not parse is an error
     /// rather than the empty registry [`Self::load_process_registry`] answers.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails or the saved body does not parse.
     pub fn load_process_registry_strict(
         &self,
     ) -> Result<Vec<crate::process_sessions::StoredSession>> {
@@ -1175,6 +1203,10 @@ impl SessionStore {
     /// Load every tab, the slot tab included, ordered so a session's tabs come
     /// out in a stable creation order. A plain reader: orphan rows are swept once
     /// per open by [`Self::sweep_orphan_agent_tabs`], not on every read.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_agent_tabs(&self) -> Result<Vec<AgentTab>> {
         let mut stmt = self.conn.prepare(
             "select id, session_id, provider, sort_order, created_at \
@@ -1195,6 +1227,10 @@ impl SessionStore {
     /// its provider (see [`Self::set_slot_provider`]). Sessions and tabs are
     /// joined, so an orphan row cannot come back out even if
     /// [`Self::sweep_orphan_agent_tabs`] has not run.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_extra_agent_tabs(&self) -> Result<Vec<AgentTab>> {
         let mut stmt = self.conn.prepare(
             "select t.id, t.session_id, t.provider, t.sort_order, t.created_at \
@@ -1356,6 +1392,10 @@ impl SessionStore {
 
     /// How many tabs one session has, the slot tab included: every tab is a
     /// row, so this is the number the per-agent cap is compared against directly.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn count_agent_tabs(&self, session_id: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
             "select count(*) from agent_tabs where session_id = ?1",
@@ -1372,6 +1412,10 @@ impl SessionStore {
     /// (supported by the bundled SQLite in `rusqlite`) so it is the one chokepoint
     /// that guarantees a strictly-increasing, persisted `rev` per session, the
     /// ordering/dedup token web clients apply to changed-files GETs and events.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn next_changes_rev(&self, session_id: &str) -> rusqlite::Result<u64> {
         let rev: i64 = self.conn.query_row(
             "insert into changes_rev(session_id, rev) values(?1, 1) \
@@ -1385,6 +1429,10 @@ impl SessionStore {
     /// Insert or update a project. If a project with the same path already
     /// exists under a different id, keep the existing id so sessions remain
     /// attached and refresh the editable metadata.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read or write fails.
     pub fn upsert_project(&self, project: &ProjectConfig) -> Result<()> {
         let sort_order = self.next_project_sort_order()?;
         self.upsert_project_at(project, sort_order)
@@ -1508,6 +1556,10 @@ impl SessionStore {
     /// Kept separate from [`SessionStore::load_projects`] because `created_at` is
     /// persisted/runtime state, not portable `ProjectConfig`: surfacing it does
     /// not pollute the config representation that gets written back to disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails; a timestamp that does not parse is left out.
     pub fn load_project_created_ats(
         &self,
     ) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
@@ -1700,6 +1752,10 @@ impl SessionStore {
     }
 
     /// Insert a PR association or update its state and title if it already exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
             r"
@@ -1726,6 +1782,10 @@ impl SessionStore {
     }
 
     /// Load all known PRs for a session, ordered by `pr_number` descending (latest first).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1791,6 +1851,10 @@ impl SessionStore {
 
     /// Insert or replace a session's manually attached (pinned) pull request.
     /// One row per session: attaching again replaces the previous pin.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_pr_override(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
             r"
@@ -1819,6 +1883,10 @@ impl SessionStore {
     }
 
     /// Load every session's pinned pull request (at most one per session).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_pr_overrides(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1859,6 +1927,10 @@ impl SessionStore {
     /// Record that a session's pull-request autodetection is suppressed (the
     /// user detached). Idempotent: suppressing an already-suppressed session
     /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_pr_suppressed(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "insert into session_pr_suppressions (session_id) values (?1) \
@@ -1870,6 +1942,10 @@ impl SessionStore {
 
     /// Clear a session's suppression so autodetection runs again (a no-op when
     /// the session was not suppressed).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn delete_pr_suppression(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "delete from session_pr_suppressions where session_id = ?1",
@@ -1880,6 +1956,10 @@ impl SessionStore {
 
     /// Every session id whose pull-request autodetection is suppressed. Loaded
     /// once at boot into the engine's in-memory mirror.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_pr_suppressions(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -1944,6 +2024,11 @@ impl SessionStore {
     ///
     /// Existing sessions keep going through [`Self::upsert_session`], which is
     /// the hot path status churn takes and which never touches `agent_tabs`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction cannot start, a write fails or the commit fails; nothing is
+    /// written then.
     pub fn create_session(&self, session: &AgentSession) -> Result<()> {
         let tx = immediate_tx(&self.conn).context("failed to start creating the agent")?;
         tx.execute(
@@ -2141,6 +2226,10 @@ impl SessionStore {
     /// The smallest `sort_order` assigned to ANY session, or `None` when there
     /// are none. The placement rule for a standalone agent, which has no project
     /// whose top it could be placed at.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn min_session_sort_order_overall(&self) -> Result<Option<i64>> {
         min_session_sort_order_overall_in(&self.conn)
     }
@@ -2148,6 +2237,10 @@ impl SessionStore {
     /// The smallest `sort_order` currently assigned to any session in
     /// `project_id`, or `None` when the project has no sessions yet. Used to
     /// place a new session one position above the current top.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn min_session_sort_order(&self, project_id: &str) -> Result<Option<i64>> {
         min_session_sort_order_in(&self.conn, project_id)
     }
@@ -2158,6 +2251,10 @@ impl SessionStore {
     /// complete set of the project's sessions. That strict validation lives in
     /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
     /// so would corrupt the "sort by most recently updated" semantics.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; no position changes then.
     pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
         {
@@ -2195,6 +2292,10 @@ impl SessionStore {
     /// `projects.sort_order` column. Single transaction. Like
     /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
     /// of known projects lives in `Engine::apply`, not here.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; no position changes then.
     pub fn reorder_projects(&self, ordered_ids: &[String]) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
         {
@@ -2388,6 +2489,10 @@ impl SessionStore {
 
     /// Test builds only: make every later session delete fail, as a database
     /// that refuses a write would.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sessions table cannot be renamed aside.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_session_deletes_for_tests(&self) {
         // The table a delete names is moved out of its way, so the delete
@@ -2457,6 +2562,10 @@ impl SessionStore {
     /// [`crate::model::AgentSession::last_focused_tab`] for why. `updated_at` is
     /// intentionally NOT touched: a focus change is not a content change, and
     /// touching it would perturb "sort by most recently updated" ordering.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_last_focused_tab(&self, id: &str, tab_id: Option<&str>) -> Result<()> {
         self.conn.execute(
             "update agent_sessions set last_focused_tab = ?2 where id = ?1",
