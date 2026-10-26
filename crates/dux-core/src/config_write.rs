@@ -391,7 +391,7 @@ pub fn patch_config_file_with(
 /// it since it last read it: the text it read, plus every key it has written
 /// since. It answers one question: was this setting ever in the file? A
 /// setting that was, and is gone now, was deleted by hand.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SaveBase<'a> {
     /// The config the file last agreed with.
     pub config: &'a Config,
@@ -1520,6 +1520,15 @@ pub enum MissingConfig<'a> {
     /// template only when it passes. `dux config set` refuses here while a
     /// dux is running: a fresh default file would drop its password.
     CheckFirst(Box<dyn Fn() -> Result<()> + 'a>),
+}
+
+impl std::fmt::Debug for MissingConfig<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreateDocumented => f.write_str("CreateDocumented"),
+            Self::CheckFirst(_) => f.debug_tuple("CheckFirst").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// [`mutate_config_file`] with a choice of what a missing file means.

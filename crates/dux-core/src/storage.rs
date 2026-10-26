@@ -39,6 +39,7 @@ const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
 const INSTANCE_ID_KEY: &str = "instance_id";
 
 /// The open session database: the one connection dux reads and writes `sessions.sqlite3` through.
+#[derive(Debug)]
 pub struct SessionStore {
     conn: Connection,
 }

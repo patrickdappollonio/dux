@@ -861,7 +861,7 @@ impl std::fmt::Debug for DestructiveClaim {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DestructiveClaim")
             .field("path", &self.key)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -894,7 +894,7 @@ impl std::fmt::Debug for WorktreeOpGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorktreeOpGuard")
             .field("path", &self.key)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -948,6 +948,16 @@ pub struct RemovalLease {
     id: u64,
     slot: Arc<OutcomeSlot>,
     finished: bool,
+}
+
+impl std::fmt::Debug for RemovalLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalLease")
+            .field("key", &self.key)
+            .field("id", &self.id)
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemovalLease {
@@ -1064,6 +1074,14 @@ impl Drop for RemovalLease {
 pub struct RemovalJoin {
     key: PathBuf,
     slot: Arc<OutcomeSlot>,
+}
+
+impl std::fmt::Debug for RemovalJoin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalJoin")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemovalJoin {

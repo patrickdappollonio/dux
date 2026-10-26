@@ -350,6 +350,7 @@ fn remove_managed_worktree_once(
 /// registry at the moment of the request, and already announced, so nothing new
 /// starts in the folder from here on. [`Self::run`] does the slow part on a
 /// worker thread.
+#[derive(Debug)]
 pub struct AdmittedRemoval {
     /// The registry the removal claims the folder in, once git's own listing
     /// has confirmed it is one of the project's worktrees: nothing is claimed
@@ -544,6 +545,7 @@ impl AdmittedRemoval {
 }
 
 /// What the engine answered a manager removal request with.
+#[derive(Debug)]
 pub enum RemovalAdmission {
     /// Refused at once, against live state: an agent holds it, one is being
     /// created on it, or its removal has already begun.

@@ -26,6 +26,7 @@ use crate::config_resources::{
 };
 
 /// Where a listing is read from.
+#[derive(Debug)]
 pub enum Source<'a> {
     /// This machine's `config.toml`.
     File(&'a DuxPaths),
@@ -334,7 +335,7 @@ pub fn themes_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 // ---------------------------------------------------------------------------
 
 /// Where a change goes, and how long it waits for a running dux.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Writer<'a> {
     /// No dux is running on this machine: the change edits `config.toml`.
     File(&'a DuxPaths),

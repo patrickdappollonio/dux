@@ -21,7 +21,7 @@ pub struct OwnerRecord {
 /// The owner map plus the monotonic ownership epoch, guarded by ONE mutex so an
 /// epoch is assigned in the same critical section that records a new owner:
 /// epochs then follow true claim order even when two connections claim at once.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct OwnersState {
     /// pty id -> the connection that currently owns sizing+input.
     pub map: std::collections::HashMap<String, OwnerRecord>,
@@ -82,7 +82,7 @@ pub enum GridApplyOutcome<T> {
 /// [`Self::claim_for_resize`]). Only a resize carrying the take-over flag
 /// transfers ownership, and a non-owner's stdin is dropped by
 /// [`Self::write_if_owner`] and [`Self::may_write`].
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PtySizeOwners {
     /// The owner map and its counters, under one lock.
     pub owners: std::sync::Mutex<OwnersState>,

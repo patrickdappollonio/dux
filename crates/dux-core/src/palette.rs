@@ -25,6 +25,7 @@ pub mod search;
 use crate::action::Action;
 
 /// One row of the palette registry.
+#[derive(Debug)]
 pub struct PaletteCommand {
     /// The action this command dispatches (the join key to TUI keybindings).
     pub action: Action,

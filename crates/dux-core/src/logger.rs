@@ -735,6 +735,14 @@ fn resolve_under_root(configured: &str, paths: &DuxPaths, default_name: &str) ->
 /// `[server]`'s `log_*` settings, apart from `dux.log`'s.
 pub struct ServerLog(RotatingLog);
 
+impl std::fmt::Debug for ServerLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerLog")
+            .field("path", &self.0.path)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ServerLog {
     /// Append one line, adding its newline.
     pub fn write_line(&self, line: &str) {

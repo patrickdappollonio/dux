@@ -132,6 +132,7 @@ pub struct StoredSession {
 /// The `web_sessions` table in `sessions.sqlite3`, on a connection of its own:
 /// the engine keeps its own connection to the same file, and WAL plus a busy
 /// timeout let the two write without failing each other.
+#[derive(Debug)]
 pub struct WebSessionStore {
     conn: Connection,
 }

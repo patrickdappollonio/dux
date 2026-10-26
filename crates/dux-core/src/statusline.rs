@@ -490,6 +490,7 @@ pub enum StatusRetention {
 /// moment it is shown; a warning or an error pre-empts and drops the infos still
 /// waiting behind it; a busy takes the line at once and drops nothing. See
 /// [`Self::store_queued`] and [`Self::advance`].
+#[derive(Debug)]
 pub struct KeyedStatusController {
     /// The anonymous slot; most-recent-wins. Written under
     /// [`StatusRetention::Emit`] only: the TUI's queue needs a per-message

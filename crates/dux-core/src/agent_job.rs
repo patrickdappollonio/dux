@@ -2972,7 +2972,7 @@ fn launch_managed_create(
 /// The shared registries an agent create reports into: the process sessions
 /// its startup command runs in, and the per-worktree registry its folder is
 /// held in from before `git worktree add` until its launch lands.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct CreateJobRegistries {
     /// The process sessions the startup command runs in.
     pub processes: crate::process_sessions::AgentProcessRegistry,

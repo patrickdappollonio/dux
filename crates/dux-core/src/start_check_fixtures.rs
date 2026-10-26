@@ -5,6 +5,7 @@
 //! fails those tests.
 
 /// One file and which surfaces will not start with it.
+#[derive(Debug)]
 pub struct Fixture {
     /// What the file is, for a failure message.
     pub name: &'static str,
@@ -114,6 +115,7 @@ pub const FIXTURES: &[Fixture] = &[
 /// One case of the start corpus (`tests/fixtures/start_corpus.txt`): a
 /// whole config file and whether each surface starts with it, as pinned to
 /// the release before the config checks were rebuilt.
+#[derive(Debug)]
 pub struct CorpusCase {
     /// The whole config file.
     pub text: String,

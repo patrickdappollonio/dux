@@ -1488,6 +1488,7 @@ mod terminal_owner_tests {
 }
 
 /// A running terminal: its owner, its display label and its PTY.
+#[derive(Debug)]
 pub struct CompanionTerminal {
     /// What the terminal belongs to; it never changes after spawn.
     pub owner: TerminalOwner,

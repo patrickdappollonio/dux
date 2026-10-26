@@ -153,9 +153,21 @@ pub struct PendingClone {
     pub review_copy: crate::worker::ReviewCopyConsent,
 }
 
+impl std::fmt::Debug for PendingClone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingClone")
+            .field("from_web", &self.from_web)
+            .field("repository_key", &self.repository_key)
+            .field("mode", &self.mode)
+            .field("destination", &self.destination)
+            .field("review_copy", &self.review_copy)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The engine's clones: the operations waiting for their worker, and the git
 /// processes running, which quitting dux stops.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Clones {
     /// The clones waiting for their worker, by operation id.
     pub pending: HashMap<String, PendingClone>,
@@ -270,6 +282,7 @@ pub(crate) fn inspect_pr_destination(
 
 /// The pull request a folder check is for, when the answer for a checkout
 /// should also say whether the agent will need a review copy there.
+#[derive(Debug)]
 pub struct FolderReviewCopyQuery<'a> {
     /// The directory managed worktrees are created under.
     pub worktrees_root: &'a Path,

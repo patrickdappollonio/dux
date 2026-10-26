@@ -1017,6 +1017,17 @@ pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
 }
 
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the registry's state sits behind a lock a Debug print must not take"
+)]
+impl std::fmt::Debug for AgentProcessRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentProcessRegistry")
+            .finish_non_exhaustive()
+    }
+}
+
 /// A spawn under way (see [`AgentProcessRegistry::begin_spawn`]); dropping it
 /// says the spawn has registered its session or given up.
 pub struct SpawnTicket {
@@ -1043,7 +1054,7 @@ impl Drop for SpawnTicket {
 /// itself to the process registry first ([`AgentProcessRegistry::begin_spawn`])
 /// and only then checks that no removal has claimed the folder. Every PTY and
 /// startup command dux starts goes through one.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct SpawnGate {
     registry: AgentProcessRegistry,
     ops: crate::worktree_ops::WorktreeOps,
@@ -2416,6 +2427,7 @@ impl AgentProcessRegistry {
 /// The claim on an agent's one startup-command run. Registers the run's
 /// session for the agent, says whether the agent was deleted while it ran, and
 /// releases the claim when dropped.
+#[derive(Debug)]
 pub struct StartupRunGuard {
     registry: AgentProcessRegistry,
     agent_id: String,

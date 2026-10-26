@@ -63,6 +63,15 @@ struct ActivityInner {
 #[derive(Clone)]
 pub struct ActivityRing(Arc<ActivityInner>);
 
+impl std::fmt::Debug for ActivityRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivityRing")
+            .field("generation", &self.generation())
+            .field("browsers", &self.browsers())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for ActivityRing {
     fn default() -> Self {
         Self::new(crate::config::DEFAULT_LOG_VIEWER_LINES)

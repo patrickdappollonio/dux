@@ -775,6 +775,7 @@ fn fan_out_to_subscribers(subscribers: &SubscriberList, data: &[u8]) {
 /// RAII guard returned by [`PtyClient::subscribe`] and
 /// [`PtyClient::subscribe_with_repaint`]. Dropping it immediately removes the
 /// subscriber from the fan-out list without waiting for the next PTY output.
+#[derive(Debug)]
 pub struct PtyViewerGuard {
     id: u64,
     subs: SubscriberList,
@@ -980,6 +981,17 @@ pub struct PtyClient {
     /// exited (see `leader_exit_hook`). Once the child is reaped, its group
     /// is signalled only while one of these is alive in it.
     recorded_members: Mutex<Option<RecordedMembers>>,
+}
+
+impl std::fmt::Debug for PtyClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyClient")
+            .field("spawn_dir", &self.spawn_dir)
+            .field("scrollback_capacity", &self.scrollback_capacity)
+            .field("process_session", &self.process_session)
+            .field("spawned_at", &self.spawned_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Where a client reads the members recorded for its child's session.

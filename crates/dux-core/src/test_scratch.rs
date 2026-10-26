@@ -22,6 +22,7 @@ pub(crate) const REMOVAL_WINDOW: Duration = Duration::from_secs(2);
 const RETRY_PAUSE: Duration = Duration::from_millis(25);
 
 /// One scratch directory, removed with retries when it drops.
+#[derive(Debug)]
 pub struct ScratchDir(Option<tempfile::TempDir>);
 
 impl ScratchDir {
@@ -76,7 +77,7 @@ impl Drop for ScratchDir {
 /// Several scratch directories owned together (a test app's config root and the
 /// repositories a test hands it), removed against ONE shared deadline, so a
 /// fixture holding N of them waits at most one window rather than N.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScratchDirs(Vec<ScratchDir>);
 
 impl ScratchDirs {

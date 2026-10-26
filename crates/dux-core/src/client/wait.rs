@@ -98,6 +98,7 @@ pub struct OperationRecord {
 
 /// A change the dux refused, with the operation it named as in the way, when
 /// the refusal named one.
+#[derive(Debug)]
 pub struct Refused {
     /// The refusal.
     pub error: CliError,

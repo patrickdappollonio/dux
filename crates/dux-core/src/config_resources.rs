@@ -21,6 +21,7 @@ use crate::config_keys::{HeldBack, NOT_SHOWN, ValueForm};
 
 /// A config file as read for a listing: its text (empty when there is no
 /// file yet) and what dux loads from it.
+#[derive(Debug)]
 pub struct ConfigFile {
     /// The file's text; empty when there is no file yet.
     pub raw: String,

@@ -38,7 +38,7 @@ pub const TUI_DEVICE_LABEL: &str = "the dux TUI";
 /// it per gesture rather than caching it. That is what makes the toggle-off world
 /// byte-identical: nothing is serving, there is no seat, and every gate answers
 /// "allowed" without a registry existing at all.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TuiOwnership {
     /// The registry this serve built. One per serve: a stop/start cycle makes a
     /// new one, which is exactly why connection ids are process-global.

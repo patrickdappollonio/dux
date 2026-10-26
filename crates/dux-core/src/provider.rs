@@ -4,6 +4,7 @@
 use crate::config::ProviderCommandConfig;
 
 /// A config-driven provider wrapping a CLI command and its launch configuration.
+#[derive(Debug)]
 pub struct GenericProvider {
     /// The provider's name.
     pub name: String,

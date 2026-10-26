@@ -687,6 +687,7 @@ pub struct ProjectAddChoices {
 
 /// A change worked out and not sent yet: what to ask before it, and the
 /// request that makes it.
+#[derive(Debug)]
 pub struct Planned {
     /// The question asked before it goes ahead, naming what it changes.
     pub question: String,
@@ -887,6 +888,7 @@ pub fn projects_rm(
 }
 
 /// How `dux agents add` makes its agent.
+#[derive(Debug)]
 pub enum NewAgent {
     /// A new branch and worktree in a project.
     Branch {
@@ -1560,6 +1562,7 @@ pub fn tabs_stop(
 }
 
 /// Who a new terminal belongs to.
+#[derive(Debug)]
 pub enum TerminalFor {
     /// An agent's companion terminal, by the agent's id or name.
     Agent(String),

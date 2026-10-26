@@ -334,6 +334,7 @@ fn kept_copy(
 
 /// Reads `server.log` from where it left off, finishing a rotated-away file
 /// before the new one; two rotations inside one poll lose the file in between.
+#[derive(Debug)]
 pub struct FileFollower {
     path: PathBuf,
     file: Option<std::fs::File>,

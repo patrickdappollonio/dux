@@ -27,6 +27,14 @@ pub struct TuiTipContext<'a> {
     pub(crate) standalone_glyph: &'a str,
 }
 
+impl std::fmt::Debug for TuiTipContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TuiTipContext")
+            .field("standalone_glyph", &self.standalone_glyph)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> TuiTipContext<'a> {
     /// A context resolving key labels through `resolve`, drawing the standalone star as
     /// `standalone_glyph`.
@@ -44,6 +52,7 @@ impl<'a> TuiTipContext<'a> {
 }
 
 /// One welcome tip, in the web's and the terminal UI's words.
+#[derive(Debug)]
 pub struct WelcomeTip {
     /// Web rendering. Keybinding-free: reference web affordances (the cog app
     /// menu, buttons, the ⋯ menu). The web has NO command palette and no

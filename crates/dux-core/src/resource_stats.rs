@@ -27,6 +27,7 @@ const STALE_BASELINE: Duration = Duration::from_secs(5);
 
 /// Samples CPU/RSS for dux and a set of target process trees, holding the
 /// `sysinfo::System` across calls so CPU deltas are real. See the module docs.
+#[derive(Debug)]
 pub struct ResourceCollector {
     sys: sysinfo::System,
     /// When the last refresh happened, or `None` before the first sample. Drives

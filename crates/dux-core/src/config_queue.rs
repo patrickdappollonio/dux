@@ -37,6 +37,7 @@ enum WriteMsg {
 
 /// The process's one ordered, off-thread config writer: each save is an atomic three-way patch
 /// against the text dux last read.
+#[derive(Debug)]
 pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,
@@ -52,6 +53,7 @@ type LastWritten = Arc<std::sync::Mutex<(u64, Option<crate::config::SourceText>)
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
 /// guard lives; dropping it resumes the writer. Owns a `Sender<WriteMsg>` clone
 /// (not a borrow) so it can be stored on `Engine` as `reload_guard`.
+#[derive(Debug)]
 pub struct QuiesceGuard {
     tx: Sender<WriteMsg>,
     /// `true` when the writer explicitly acknowledged the `Pause` message (the
