@@ -4021,14 +4021,14 @@ impl App {
         }
     }
 
-    fn move_kill_running_selection(&mut self, down: bool) {
+    fn move_kill_running_selection(&mut self, direction: ScrollDirection) {
         let PromptState::KillRunning(prompt) = &mut self.prompt else {
             return;
         };
         if !matches!(prompt.focus, KillRunningFocus::List) {
             return;
         }
-        if down {
+        if direction == ScrollDirection::Down {
             let count = Self::visible_kill_running_indices(prompt).len();
             prompt.list.move_down(count);
         } else {
@@ -4103,10 +4103,10 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                self.move_kill_running_selection(true);
+                self.move_kill_running_selection(ScrollDirection::Down);
             }
             Some(Action::MoveUp) => {
-                self.move_kill_running_selection(false);
+                self.move_kill_running_selection(ScrollDirection::Up);
             }
             Some(Action::FocusNext) => {
                 self.move_kill_running_focus(FocusStep::Forward);
@@ -4236,7 +4236,7 @@ impl App {
         }
     }
 
-    fn move_project_browser_selection(&mut self, down: bool) {
+    fn move_project_browser_selection(&mut self, direction: ScrollDirection) {
         let PromptState::BrowseProjects {
             entries,
             selected,
@@ -4246,7 +4246,7 @@ impl App {
         else {
             return;
         };
-        if !down {
+        if direction == ScrollDirection::Up {
             *selected = selected.saturating_sub(1);
             return;
         }
@@ -4361,10 +4361,10 @@ impl App {
                 }
             }
             Some(Action::MoveDown) => {
-                self.move_project_browser_selection(true);
+                self.move_project_browser_selection(ScrollDirection::Down);
             }
             Some(Action::MoveUp) => {
-                self.move_project_browser_selection(false);
+                self.move_project_browser_selection(ScrollDirection::Up);
             }
             Some(Action::GoToPath) if !is_searching => {
                 self.begin_project_browser_path_editor();
@@ -4423,13 +4423,13 @@ impl App {
         handled
     }
 
-    fn move_startup_command_log_selection(&mut self, down: bool) {
+    fn move_startup_command_log_selection(&mut self, direction: ScrollDirection) {
         let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
             return;
         };
         let visible = Self::startup_command_log_filtered_indices(prompt);
         let visual = Self::startup_command_log_selected_visual_index(prompt, &visible).unwrap_or(0);
-        let next = if down {
+        let next = if direction == ScrollDirection::Down {
             visible.get(visual + 1).copied()
         } else if visual > 0 {
             visible.get(visual - 1).copied()
@@ -4502,8 +4502,10 @@ impl App {
                 );
             }
             Some(Action::SearchToggle) => prompt.searching = true,
-            Some(Action::MoveDown) => self.move_startup_command_log_selection(true),
-            Some(Action::MoveUp) => self.move_startup_command_log_selection(false),
+            Some(Action::MoveDown) => {
+                self.move_startup_command_log_selection(ScrollDirection::Down)
+            }
+            Some(Action::MoveUp) => self.move_startup_command_log_selection(ScrollDirection::Up),
             Some(Action::ScrollPageDown) => scroll_startup_command_log(prompt, body, page),
             Some(Action::ScrollPageUp) => scroll_startup_command_log(prompt, body, -page),
             Some(Action::ScrollLineDown) => scroll_startup_command_log(prompt, body, 1),
@@ -10525,8 +10527,8 @@ impl App {
             .set_cursor_from_display_pos(display_row, display_col);
     }
 
-    fn scroll_commit_input(&mut self, down: bool) {
-        let delta = if down {
+    fn scroll_commit_input(&mut self, direction: ScrollDirection) {
+        let delta = if direction == ScrollDirection::Down {
             MOUSE_WHEEL_LINES as isize
         } else {
             -(MOUSE_WHEEL_LINES as isize)
@@ -10534,7 +10536,7 @@ impl App {
         self.commit_input.scroll_by(delta);
     }
 
-    fn scroll_file_selection(&mut self, section: RightSection, down: bool) {
+    fn scroll_file_selection(&mut self, section: RightSection, direction: ScrollDirection) {
         self.set_file_selection(section, Some(self.files_index));
         if self.right_section == RightSection::CommitInput {
             return;
@@ -10545,7 +10547,7 @@ impl App {
             return;
         }
 
-        if down {
+        if direction == ScrollDirection::Down {
             if self.files_index + 1 < len {
                 self.files_index += 1;
             }
@@ -10554,14 +10556,14 @@ impl App {
         }
     }
 
-    fn handle_left_mouse_wheel(&mut self, down: bool, column: u16, row: u16) {
+    fn handle_left_mouse_wheel(&mut self, direction: ScrollDirection, column: u16, row: u16) {
         let target_index = match self.mouse_target(column, row) {
             Some(MouseTarget::LeftRow(index)) => index,
             _ => self.selected_left,
         };
         self.set_left_selection(target_index);
 
-        if down {
+        if direction == ScrollDirection::Down {
             if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
                 self.selected_left = next;
                 self.reload_changed_files();
@@ -11636,22 +11638,22 @@ impl App {
         }
     }
 
-    fn route_mouse_wheel(&mut self, mouse: MouseEvent, down: bool) {
+    fn route_mouse_wheel(&mut self, mouse: MouseEvent, direction: ScrollDirection) {
         match self.mouse_target(mouse.column, mouse.row) {
             Some(MouseTarget::LeftRow(_)) => {
-                self.handle_left_mouse_wheel(down, mouse.column, mouse.row);
+                self.handle_left_mouse_wheel(direction, mouse.column, mouse.row);
             }
             Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
             Some(MouseTarget::UnstagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Unstaged, down);
+                self.scroll_file_selection(RightSection::Unstaged, direction);
             }
             Some(MouseTarget::StagedFile(_)) => {
-                self.scroll_file_selection(RightSection::Staged, down);
+                self.scroll_file_selection(RightSection::Staged, direction);
             }
             Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
                 self.focus = FocusPane::Files;
                 self.right_section = RightSection::CommitInput;
-                self.scroll_commit_input(down);
+                self.scroll_commit_input(direction);
             }
             _ => {}
         }
@@ -11693,8 +11695,8 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.row_drag.is_some() => {
                 self.finish_row_drag();
             }
-            MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, true),
-            MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, false),
+            MouseEventKind::ScrollDown => self.route_mouse_wheel(mouse, ScrollDirection::Down),
+            MouseEventKind::ScrollUp => self.route_mouse_wheel(mouse, ScrollDirection::Up),
             _ => {}
         }
     }
