@@ -61,7 +61,7 @@ impl FakeDux {
         let listener = std::os::unix::net::UnixListener::bind(path).expect("bind the test socket");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler: Handler = Arc::new(handler);
-        let record = seen.clone();
+        let record = std::sync::Arc::clone(&seen);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
@@ -78,7 +78,7 @@ impl FakeDux {
         let addr = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler: Handler = Arc::new(handler);
-        let record = seen.clone();
+        let record = std::sync::Arc::clone(&seen);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };

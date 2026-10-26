@@ -708,7 +708,7 @@ impl fmt::Display for AddressBlock {
 pub fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
-        v4 => v4,
+        v4 @ IpAddr::V4(_) => v4,
     }
 }
 

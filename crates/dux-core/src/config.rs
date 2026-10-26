@@ -920,7 +920,7 @@ where
     impl serde::de::Visitor<'_> for TailscaleVisitor {
         type Value = String;
 
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("\"auto\", \"yes\", \"no\", or a legacy boolean")
         }
 
@@ -1658,7 +1658,7 @@ where
     impl serde::de::Visitor<'_> for ComposeBarVisitor {
         type Value = String;
 
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("\"auto\", \"always\", \"never\", or a legacy boolean")
         }
 
@@ -2840,7 +2840,7 @@ pub(crate) fn expand_path(raw: &str) -> Option<String> {
 
 /// The text a leading `~` expands to, empty when the path does not start with
 /// one. `None` rejects `~user`, whose home dux does not resolve.
-fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
     if chars.peek() != Some(&'~') {
         return Some(String::new());
     }
@@ -2857,7 +2857,7 @@ fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars>) -> Opt
 /// The text the `$VAR`/`${VAR}` reference starting at `chars` expands to, or
 /// the literal reference itself when the variable is unset, so the user can see
 /// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`.
-fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
     let braced = chars.peek() == Some(&'{');
     if braced {
         chars.next();

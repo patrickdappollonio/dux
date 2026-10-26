@@ -1853,7 +1853,7 @@ impl CreatePlanContext<'_> {
                 BusyBranchCheck::FreshCopy(copy) => {
                     // The copy is named after the branch it actually got, so
                     // the sidebar does not show two rows with the busy name.
-                    resolved_name = copy.new_branch.clone();
+                    resolved_name.clone_from(&copy.new_branch);
                     self.attempted_name = Some(resolved_name.clone());
                     agent_title = Some(copy.new_branch.clone());
                     Some(copy)
@@ -6061,7 +6061,7 @@ mod tests {
             .iter()
             .filter_map(|segment| match segment {
                 crate::prose::ProseSegment::Name { name, .. } => Some(name.clone()),
-                _ => None,
+                crate::prose::ProseSegment::Text(_) => None,
             })
             .collect();
         assert_eq!(names, ["dir/repo0", "dir/repo1", "dir/repo2"]);

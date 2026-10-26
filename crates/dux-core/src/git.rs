@@ -1029,13 +1029,10 @@ pub(crate) fn pull_current_branch(
     repo_path: &Path,
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
-    let branch = match current_branch_opt(repo_path)? {
-        Some(b) => b,
-        None => {
-            return Err(anyhow!(
-                "HEAD is detached; check out a branch before pulling"
-            ));
-        }
+    let Some(branch) = current_branch_opt(repo_path)? else {
+        return Err(anyhow!(
+            "HEAD is detached; check out a branch before pulling"
+        ));
     };
     pull_origin_branch(repo_path, &branch, guard)
 }
@@ -6447,13 +6444,10 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
 /// Fails when HEAD is detached, git cannot be run, or the push fails, with git's own reason.
 pub fn push(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
-    let branch = match current_branch_opt(worktree_path)? {
-        Some(b) => b,
-        None => {
-            return Err(anyhow!(
-                "HEAD is detached; check out a branch before pushing"
-            ));
-        }
+    let Some(branch) = current_branch_opt(worktree_path)? else {
+        return Err(anyhow!(
+            "HEAD is detached; check out a branch before pushing"
+        ));
     };
     // `--` so the branch is read as a REFSPEC and never as an option. Without
     // it, a checkout whose HEAD points at a ref named `--all` pushes EVERY
@@ -14692,7 +14686,7 @@ mod tests {
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let p = path.clone();
-                let b = barrier.clone();
+                let b = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     b.wait();
                     create_initial_commit(&p)

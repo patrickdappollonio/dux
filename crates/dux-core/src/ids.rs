@@ -127,7 +127,7 @@ macro_rules! id_pair {
                 // SAFETY: `Self` is `#[repr(transparent)]` over `str`, so the
                 // two have identical layout and metadata and the cast is the
                 // same one `Path::new` performs over `OsStr`.
-                unsafe { &*(id as *const str as *const Self) }
+                unsafe { &*(std::ptr::from_ref::<str>(id) as *const Self) }
             }
 
             /// The underlying string, for a storage or wire boundary. See the

@@ -543,7 +543,7 @@ impl ClonedFor {
             ]
         };
         question.project_id = Some(self.project_id.clone());
-        question.pull_request = self.pull_request.clone();
+        question.pull_request.clone_from(&self.pull_request);
         crate::status_text![
             self.done_so_far(),
             ". Agent ",

@@ -2869,7 +2869,7 @@ mod tests {
             let dur = to.duration_since(std::time::UNIX_EPOCH).unwrap();
             let ts = rustix::fs::Timespec {
                 tv_sec: dur.as_secs() as _,
-                tv_nsec: dur.subsec_nanos() as _,
+                tv_nsec: dur.subsec_nanos().into(),
             };
             utimensat(
                 CWD,

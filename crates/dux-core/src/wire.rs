@@ -4317,7 +4317,7 @@ impl Engine {
     /// initial-commit flows so the delicate status-op correlation lives in one
     /// place. Args are a named-field struct so the two adjacent branch strings
     /// can't be silently transposed.
-    fn finish_web_project_add(&mut self, args: WebProjectAdd) -> Vec<WireStatus> {
+    fn finish_web_project_add(&mut self, args: WebProjectAdd<'_>) -> Vec<WireStatus> {
         let WebProjectAdd {
             path,
             display_name,
@@ -4381,7 +4381,7 @@ impl Engine {
     /// `note_key`.
     pub(crate) fn add_project_without_op(
         &mut self,
-        args: ProjectAdd,
+        args: ProjectAdd<'_>,
         origin: crate::statusline::StatusScope,
         note_key: Option<&str>,
     ) -> ProjectAddResult {
@@ -6495,9 +6495,9 @@ mod tests {
             })
             .expect("reconstruct");
         assert!(matches!(command, Command::DiscardFileLive { .. }));
-        let busy = match engine.apply(command).expect("apply") {
-            crate::engine::EventReaction::Status(update) => update,
-            _ => panic!("expected a busy status"),
+        let crate::engine::EventReaction::Status(busy) = engine.apply(command).expect("apply")
+        else {
+            panic!("expected a busy status")
         };
         assert_eq!(busy.tone, crate::statusline::StatusTone::Busy);
         loop {
@@ -10862,7 +10862,7 @@ mod tests {
         // leading branch when it is added, the warning when one is raised,
         // else the end of the refusal)
         type Outcome<'a> = Result<(&'a str, &'a str, Option<String>), &'a str>;
-        let cases: Vec<(&str, &str, bool, Outcome)> = vec![
+        let cases: Vec<(&str, &str, bool, Outcome<'_>)> = vec![
             (
                 "added-single-branch",
                 "single-branch",

@@ -329,12 +329,11 @@ mod tests {
     #[test]
     fn the_pty_spawn_path_refuses_a_real_agent_cli() {
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            match crate::pty::PtyClient::spawn_with_env("claude", &[], tmp.path(), 24, 80, 10, &[])
-            {
-                Ok(_) => panic!("the guard let a real agent CLI spawn"),
-                Err(err) => err,
-            };
+        let Err(err) =
+            crate::pty::PtyClient::spawn_with_env("claude", &[], tmp.path(), 24, 80, 10, &[])
+        else {
+            panic!("the guard let a real agent CLI spawn")
+        };
         assert!(err.to_string().contains("test guard"), "{err}");
     }
 

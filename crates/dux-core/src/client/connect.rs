@@ -307,7 +307,7 @@ impl Client {
     ///
     /// Fails with [`Exit::NotRunning`] when no reply arrives.
     pub fn send(&self, mut request: Request) -> Result<Response, CliError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport
             .send(&request)
             .map_err(|error| self.no_reply(&error))
@@ -320,7 +320,7 @@ impl Client {
     ///
     /// Fails when no whole reply arrives, as the transport reports it.
     pub fn try_send(&self, mut request: Request) -> Result<Response, TransportError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport.send(&request)
     }
 
@@ -335,7 +335,7 @@ impl Client {
         mut request: Request,
         on_body: &mut dyn FnMut(u16, &[u8]) -> std::ops::ControlFlow<()>,
     ) -> Result<(), CliError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport
             .stream(&request, on_body)
             .map_err(|error| self.no_reply(&error))

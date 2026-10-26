@@ -123,8 +123,8 @@ impl ConfigWriteQueue {
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
-                let lazy_inflight = lazy_inflight.clone();
-                let last_written = last_written.clone();
+                let lazy_inflight = std::sync::Arc::clone(&lazy_inflight);
+                let last_written = std::sync::Arc::clone(&last_written);
                 move || {
                     writer_loop(
                         rx,
@@ -523,7 +523,7 @@ fn adopt_minted_ids(base: &mut Base, config: &Config) {
         .zip(entries.iter())
     {
         if !entry.contains_key("id") {
-            project.id = theirs.id.clone();
+            project.id.clone_from(&theirs.id);
         }
     }
 }

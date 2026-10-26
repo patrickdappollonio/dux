@@ -1459,7 +1459,7 @@ Its description.
         }
         from_ts.sort_unstable();
 
-        let mut from_rust: Vec<u32> = (0u32..=0x10FFFF)
+        let mut from_rust: Vec<u32> = (0u32..=0x0010_FFFF)
             .filter(|point| char::from_u32(*point).is_some_and(is_invisible_char))
             .collect();
         from_rust.sort_unstable();

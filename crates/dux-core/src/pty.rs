@@ -6148,9 +6148,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) else {
+            return;
         };
         let Some(child) = client.child_process_id() else {
             return;
@@ -6208,9 +6208,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, start.path(), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, start.path(), 24, 80, 100) else {
+            return;
         };
 
         // The marker is split in the typed text so the shell's ECHO of the
@@ -6249,9 +6249,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) else {
+            return;
         };
 
         // Make sure the shell is up and responsive before signaling it.

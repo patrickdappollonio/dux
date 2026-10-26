@@ -491,7 +491,7 @@ pub fn source_after_sync(
             .and_then(|text| crate::config::config_from_text_as_loaded(text).ok())
             .unwrap_or_else(|| synced.clone()),
     };
-    base.projects = synced.projects.clone();
+    base.projects.clone_from(&synced.projects);
     // What the read text expressed, its carried-over keys included.
     let read_seen = read
         .as_str()

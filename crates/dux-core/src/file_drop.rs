@@ -3639,7 +3639,7 @@ mod uploads_dir {
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let root = root.clone();
-                let barrier = barrier.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
                     DropDir::open_uploads(&root, ".dux/uploads", UploadGitignore::Write)

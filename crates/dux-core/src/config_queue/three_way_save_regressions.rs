@@ -2348,7 +2348,7 @@ mod randomized_model {
     fn random_hand_edits_saves_and_reloads_follow_the_three_way_rules() {
         let mut failures = Vec::new();
         for seed in 1..=SEEDS {
-            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let (_dir, path) = file(
                 "[ui]\nleft_width_pct = 20\nright_width_pct = 25\ncopy_on_select = true\n\n[server]\nport = 3890\n\n[env]\nAA = \"a\"\nBB = \"b\"\n",
             );
@@ -2514,7 +2514,7 @@ mod randomized_model {
         std::fs::create_dir_all(&r2).unwrap();
         let mut failures = Vec::new();
         for seed in 1..=SEEDS {
-            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let initial = format!(
                 "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"one\"\nstartup_command = \"make\"\n\n[[projects]]\nid = \"p2\"\npath = \"{}\"\nname = \"two\"\ndefault_provider = \"codex\"\n",
                 r1.display(),

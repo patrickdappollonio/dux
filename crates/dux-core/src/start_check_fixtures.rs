@@ -438,8 +438,8 @@ pub fn name_tokens() -> Vec<String> {
             let body: String = (0..20)
                 .map(|_| {
                     state = state
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     ALPHABET[(state >> 33) as usize % ALPHABET.len()] as char
                 })
                 .collect();

@@ -1556,9 +1556,9 @@ mod tests {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
         let racer = {
-            let owners = owners.clone();
-            let order = order.clone();
-            let gate = gate.clone();
+            let owners = std::sync::Arc::clone(&owners);
+            let order = std::sync::Arc::clone(&order);
+            let gate = std::sync::Arc::clone(&gate);
             std::thread::spawn(move || {
                 gate.wait();
                 owners.claim_for_resize(
@@ -1605,9 +1605,9 @@ mod tests {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
         let racer = {
-            let owners = owners.clone();
-            let order = order.clone();
-            let gate = gate.clone();
+            let owners = std::sync::Arc::clone(&owners);
+            let order = std::sync::Arc::clone(&order);
+            let gate = std::sync::Arc::clone(&gate);
             std::thread::spawn(move || {
                 gate.wait();
                 owners.claim_for_resize(

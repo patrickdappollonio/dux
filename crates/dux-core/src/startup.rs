@@ -1488,7 +1488,7 @@ mod tests {
         let newer = dir.join("20260101T010000Z-new.log");
         fs::write(&older, "older run output").expect("older log");
         fs::write(&newer, "newer run output").expect("newer log");
-        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(490896);
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(490_896);
         set_mtime(&older, base);
         set_mtime(&newer, base + std::time::Duration::from_secs(3600));
         (older, newer)

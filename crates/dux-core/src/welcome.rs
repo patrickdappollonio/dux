@@ -51,7 +51,7 @@ pub struct WelcomeTip {
     /// `None` = TUI-only tip.
     pub web: Option<&'static str>,
     /// TUI rendering, given the live key labels and glyphs. `None` = web-only tip.
-    pub tui: Option<fn(&TuiTipContext) -> String>,
+    pub tui: Option<fn(&TuiTipContext<'_>) -> String>,
 }
 
 /// Every welcome tip.

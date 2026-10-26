@@ -269,7 +269,7 @@ mod tests {
             let mut x: u64 = 0;
             while !flag.load(Ordering::Relaxed) {
                 // Opaque to the optimizer so the loop is not elided.
-                x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
             }
         });
         (stop, handle)

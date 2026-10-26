@@ -3164,7 +3164,7 @@ mod tests {
         let outcome = purge(&mut ops, &[session(100)], &known, Duration::from_secs(1));
         match outcome {
             PurgeOutcome::Survivors(rows) => assert_eq!(pids(&rows), vec![101]),
-            other => panic!("expected survivors, got {other:?}"),
+            other @ PurgeOutcome::Clean { .. } => panic!("expected survivors, got {other:?}"),
         }
         let waited = ops.clock - start;
         assert!(

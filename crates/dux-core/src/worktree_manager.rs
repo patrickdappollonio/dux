@@ -323,27 +323,24 @@ fn remove_managed_worktree_once(
         RemovalResolution::NotManaged => Ok(RemovalOutcome::NotManaged),
         RemovalResolution::Attached => Ok(RemovalOutcome::Attached),
         RemovalResolution::Removable { path, branch } => {
-            match branch_to_delete(branch_removal, branch.as_deref()) {
+            if let Some(branch) = branch_to_delete(branch_removal, branch.as_deref()) {
                 // The user asked for the branch too. `remove_worktree` deletes
                 // the branch the worktree is on; there is no second, drifted
                 // branch here, because a worktree with no agent has no record of
                 // what it was born on.
-                Some(branch) => {
-                    let removed = git::remove_worktree(&repo_path, &path, branch, None)?;
-                    Ok(RemovalOutcome::Removed {
-                        path,
-                        branch: Some(BranchOutcome {
-                            name: branch.to_string(),
-                            deletion: removed.branch,
-                        }),
-                    })
-                }
+                let removed = git::remove_worktree(&repo_path, &path, branch, None)?;
+                Ok(RemovalOutcome::Removed {
+                    path,
+                    branch: Some(BranchOutcome {
+                        name: branch.to_string(),
+                        deletion: removed.branch,
+                    }),
+                })
+            } else {
                 // Either the request did not ask, or the worktree is detached
                 // and there is no branch to delete. Worktree only.
-                None => {
-                    git::remove_worktree_keep_branch(&repo_path, &path)?;
-                    Ok(RemovalOutcome::Removed { path, branch: None })
-                }
+                git::remove_worktree_keep_branch(&repo_path, &path)?;
+                Ok(RemovalOutcome::Removed { path, branch: None })
             }
         }
     }

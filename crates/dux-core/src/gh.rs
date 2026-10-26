@@ -472,9 +472,9 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = (planned[i].emit_ref() as usize)
-                + (planned[i].emit_num() as usize)
-                + (planned[i].emit_head() as usize);
+            let cost = usize::from(planned[i].emit_ref())
+                + usize::from(planned[i].emit_num())
+                + usize::from(planned[i].emit_head());
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);

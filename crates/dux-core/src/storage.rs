@@ -3550,9 +3550,8 @@ mod tests {
                 .unwrap();
         }
 
-        let err = match SessionStore::open(&path) {
-            Ok(_) => panic!("a failed migration must stop startup"),
-            Err(err) => err,
+        let Err(err) = SessionStore::open(&path) else {
+            panic!("a failed migration must stop startup")
         };
         assert!(
             format!("{err:#}").contains("slot tab"),

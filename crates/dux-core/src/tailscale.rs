@@ -611,10 +611,10 @@ pub struct TailscaleIdentity {
 pub fn detect_identity(dux_port: u16) -> Result<TailscaleIdentity, TailscaleUnavailable> {
     let look = detect_identity_checked(CLI_CANDIDATES, DETECT_TIMEOUT, dux_port, &local_evidence);
     if let Ok(identity) = &look {
-        *KNOWN_TAILSCALE_IPS
+        (*KNOWN_TAILSCALE_IPS
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            identity.status.tailscale_ips.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
+        .clone_from(&identity.status.tailscale_ips);
     }
     look
 }
