@@ -562,11 +562,11 @@ impl CreateAgentRequest {
     /// final share an opaque `status_op_id`, which is already project-free.
     pub fn project_id(&self) -> Option<&str> {
         match self {
-            Self::NewProject { project, .. } => Some(&project.id),
-            Self::PullRequest { project, .. } => Some(&project.id),
-            Self::ForkSession { project, .. } => Some(&project.id),
-            Self::ExistingManagedWorktree { project, .. } => Some(&project.id),
-            Self::ForkExternalWorktree { project, .. } => Some(&project.id),
+            Self::NewProject { project, .. }
+            | Self::PullRequest { project, .. }
+            | Self::ForkSession { project, .. }
+            | Self::ExistingManagedWorktree { project, .. }
+            | Self::ForkExternalWorktree { project, .. } => Some(&project.id),
             Self::Standalone { .. } => None,
         }
     }

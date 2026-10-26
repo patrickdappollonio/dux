@@ -495,9 +495,9 @@ fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
 /// engine thread for a quarter second per PTY.
 #[test]
 fn review9_reaping_ptys_held_open_by_jobs_does_not_stall_the_engine_thread() {
+    const N: usize = 8;
     let (mut engine, tmp) = test_engine();
     let pidfile = tmp.path().join("jobs.pid");
-    const N: usize = 8;
     for i in 0..N {
         let mut client = PtyClient::spawn_with_env(
             "bash",

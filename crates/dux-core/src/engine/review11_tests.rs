@@ -44,6 +44,10 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
     worktree
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -85,6 +89,7 @@ fn spawn_shell(cwd: &Path, script: &str) -> (Shell, std::process::Child) {
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new("sh");
     command.args(["-c", script]).current_dir(cwd);
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
     unsafe {
         command.pre_exec(|| {
             rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -199,7 +204,7 @@ fn review11_a_rename_the_plan_accepts_always_holds_its_worktree() {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let claimer = {
         let ops = ops.clone();
-        let stop = stop.clone();
+        let stop = std::sync::Arc::clone(&stop);
         let worktree = worktree.clone();
         std::thread::spawn(move || {
             // An editor rooted at a folder around the worktree asks to delete

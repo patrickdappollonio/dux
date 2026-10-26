@@ -152,6 +152,10 @@ fn wait_for_writers(pidfile: &Path, count: usize) {
 
 /// Delete the agent with its worktree the way both surfaces do, driving the
 /// reaper as their tick does, and return what the removal worker reported.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
     let outcome =
         engine.begin_delete_session("s1", crate::engine::WorktreeOnDelete::Remove, Some(true));
@@ -168,7 +172,7 @@ fn delete_and_wait(engine: &mut Engine) -> Result<RemovedBranches, String> {
             Ok(crate::worker::WorkerEvent::WorktreeRemoveCompleted { result, .. }) => {
                 return result;
             }
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(_) => {
                 assert!(Instant::now() < deadline, "the removal never reported");
                 std::thread::sleep(Duration::from_millis(20));
@@ -814,9 +818,9 @@ fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
 
     fx.engine.resume_pending_worktree_removals();
 
-    let warning = match fx.engine.worker_rx.try_recv() {
-        Ok(crate::worker::WorkerEvent::PollerStatus(status)) => status,
-        _ => panic!("expected the refusal"),
+    let Ok(crate::worker::WorkerEvent::PollerStatus(warning)) = fx.engine.worker_rx.try_recv()
+    else {
+        panic!("expected the refusal")
     };
     assert_eq!(warning.tone, crate::statusline::StatusTone::Warning);
     assert!(

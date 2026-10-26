@@ -260,9 +260,8 @@ fn every_removal_path_keeps_a_folder_a_dormant_agents_worktree_lives_in() {
         })
         .unwrap();
     engine.resume_pending_worktree_removals();
-    let warning = match engine.worker_rx.try_recv() {
-        Ok(crate::worker::WorkerEvent::PollerStatus(status)) => status,
-        _ => panic!("the resumed removal is refused out loud"),
+    let Ok(crate::worker::WorkerEvent::PollerStatus(warning)) = engine.worker_rx.try_recv() else {
+        panic!("the resumed removal is refused out loud")
     };
     assert!(
         warning.message.contains("Kept the worktree"),

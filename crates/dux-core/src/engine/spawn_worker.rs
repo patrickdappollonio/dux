@@ -555,7 +555,6 @@ impl Engine {
                                     clean_iterations = 0;
                                 }
                             }
-                            continue;
                         }
                         Ok(LoopControl::Break) => break,
                         Err(payload) => {

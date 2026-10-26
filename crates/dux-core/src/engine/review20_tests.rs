@@ -248,7 +248,7 @@ fn a_switch_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_switch() {
     if !in_child() {
         return;
@@ -292,7 +292,7 @@ fn a_pull_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_pull() {
     if !in_child() {
         return;
@@ -357,7 +357,7 @@ fn a_worktree_add_never_recurses_into_submodules_under_a_global_setting() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "runs only as the child process run_with_global_recurse starts with its own global git config"]
 fn global_recurse_worktree_add() {
     if !in_child() {
         return;

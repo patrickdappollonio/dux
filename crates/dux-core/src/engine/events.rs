@@ -1385,13 +1385,11 @@ impl WorktreeRemoval {
             (WorktreeOnDelete::Keep, WorktreeSharing::SharedWithAnotherAgent, None) => {
                 WorktreeRemoval::PreservedShared
             }
-            (WorktreeOnDelete::Keep, WorktreeSharing::Alone, None) => {
-                WorktreeRemoval::PreservedOrphan
-            }
-            // delete requested, no siblings, but git did not run: impossible by
-            // the caller's contract. Default to the most truthful preserved
+            // A kept worktree with no siblings is an orphan. A delete requested
+            // with no siblings where git did not run is impossible by the
+            // caller's contract; it defaults to the most truthful preserved
             // state rather than panicking.
-            (WorktreeOnDelete::Remove, WorktreeSharing::Alone, None) => {
+            (WorktreeOnDelete::Keep | WorktreeOnDelete::Remove, WorktreeSharing::Alone, None) => {
                 WorktreeRemoval::PreservedOrphan
             }
         }
@@ -2042,7 +2040,11 @@ impl Engine {
 
         let view = match request.kind {
             AgentLaunchKind::Reconnect { status_message }
-            | AgentLaunchKind::ForceReconnect { status_message } => {
+            | AgentLaunchKind::ForceReconnect { status_message }
+            // An extra-tab ready behaves like a reconnect for the view (show the
+            // surface + info); it is never resumed and never moves the
+            // session-level running state.
+            | AgentLaunchKind::Tab { status_message, .. } => {
                 AgentLaunchReadyView::Reconnect { status_message }
             }
             AgentLaunchKind::ResumeFallback { status_message } => {
@@ -2052,12 +2054,6 @@ impl Engine {
                 }
             }
             AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
-            // An extra-tab ready behaves like a reconnect for the view (show the
-            // surface + info); it is never resumed and never moves the
-            // session-level running state.
-            AgentLaunchKind::Tab { status_message, .. } => {
-                AgentLaunchReadyView::Reconnect { status_message }
-            }
             AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
         };
 
@@ -2131,7 +2127,7 @@ impl Engine {
                 global_default,
             } => {
                 if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
-                    project.explicit_default_provider = provider.clone();
+                    project.explicit_default_provider.clone_from(provider);
                 }
                 self.refresh_project_defaults();
                 ProjectPersistenceView::DefaultProviderUpdated {
@@ -2159,7 +2155,7 @@ impl Engine {
                 startup_command,
             } => {
                 if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
-                    project.startup_command = startup_command.clone();
+                    project.startup_command.clone_from(startup_command);
                 }
                 ProjectPersistenceView::StartupCommandUpdated {
                     project_name: project_name.clone(),
@@ -3363,7 +3359,7 @@ impl Engine {
             && let Some(branch_name) = outcome.current_branch()
             && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
         {
-            existing.current_branch = branch_name.clone();
+            existing.current_branch.clone_from(branch_name);
             existing.branch_status =
                 if existing.leading_branch.as_deref() == Some(&existing.current_branch) {
                     ProjectBranchStatus::Leading
@@ -4043,7 +4039,9 @@ impl Engine {
             Ok(inspection) => {
                 if let Some(existing) = self.projects.iter_mut().find(|item| item.id == project.id)
                 {
-                    existing.current_branch = inspection.current_branch.clone();
+                    existing
+                        .current_branch
+                        .clone_from(&inspection.current_branch);
                     existing.leading_branch = Some(inspection.leading_branch.clone());
                     existing.branch_status = if existing.current_branch == inspection.leading_branch
                     {
@@ -4164,7 +4162,7 @@ impl Engine {
                     if let Some(existing) =
                         self.projects.iter_mut().find(|item| item.id == project.id)
                     {
-                        existing.current_branch = current_branch.clone();
+                        existing.current_branch.clone_from(&current_branch);
                         existing.branch_status = ProjectBranchStatus::Leading;
                     }
                     // The user asked for the default branch, and the folder is
@@ -4230,7 +4228,7 @@ impl Engine {
                     if let Some(existing) =
                         self.projects.iter_mut().find(|item| item.id == project.id)
                     {
-                        existing.current_branch = target_branch.clone();
+                        existing.current_branch.clone_from(&target_branch);
                         existing.branch_status = ProjectBranchStatus::Leading;
                     }
                     // Checking out the default branch means new worktrees
@@ -6164,7 +6162,9 @@ mod tests {
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // A check for feat/a is running, dispatched 9.5 seconds ago.
         engine.mark_in_flight(InFlightKey::PrCheck("s1".to_string()));
-        let dispatched = Instant::now() - std::time::Duration::from_millis(9_500);
+        let dispatched = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(9_500))
+            .expect("the monotonic clock reads later than the rewind");
         engine.pr_last_checked.insert("s1".to_string(), dispatched);
         let asked_for_a = pr_status_ready(&engine, vec![("s1".to_string(), None)]);
 
@@ -8605,7 +8605,9 @@ mod tests {
             "op-stale".to_string(),
             (
                 "s1".to_string(),
-                Instant::now() - (crate::engine::CREATED_SESSION_TTL + Duration::from_secs(1)),
+                Instant::now()
+                    .checked_sub(crate::engine::CREATED_SESSION_TTL + Duration::from_secs(1))
+                    .expect("the monotonic clock reads later than the rewind"),
             ),
         );
         assert_eq!(engine.created_session_for_op("op-stale"), None);
@@ -10392,7 +10394,7 @@ mod tests {
     fn apply_reload_config_opens_barrier_and_invokes_surface() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(Arc::clone(&recorder)));
 
         let reaction = engine
             .apply(crate::engine::Command::ReloadConfig)
@@ -11110,7 +11112,7 @@ mod tests {
     fn apply_recover_config_renders_via_surface_and_writes() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(Arc::clone(&recorder)));
 
         let reaction = engine
             .apply(crate::engine::Command::RecoverConfig)

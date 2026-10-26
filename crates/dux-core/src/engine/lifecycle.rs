@@ -2787,12 +2787,12 @@ impl Engine {
                     crate::engine::StatusUpdate::error(format!("{err:#}")),
                 ),
             };
-            let launched = matches!(
+            let did_launch = matches!(
                 &reaction,
                 crate::engine::EventReaction::DispatchAgentLaunchView(view) if view.launched
             );
             launches.push(reaction);
-            if launched {
+            if did_launch {
                 restart.launching.insert(
                     id.clone(),
                     RestartLaunch {
@@ -3533,7 +3533,7 @@ mod recreate_tests {
     ) -> (RecreateRestartSweep, Vec<(String, String)>) {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut launches = Vec::new();
-        let mut launched = Vec::new();
+        let mut answered = Vec::new();
         loop {
             let _ = engine.sweep_resume_fallbacks((24, 80));
             let _ = engine.reap_terminating_ptys();
@@ -3544,7 +3544,7 @@ mod recreate_tests {
                     _ => None,
                 };
                 if let Some(request) = request {
-                    launched.push((
+                    answered.push((
                         request.tab_id.as_str().to_string(),
                         request.provider.as_str().to_string(),
                     ));
@@ -3555,7 +3555,7 @@ mod recreate_tests {
             launches.append(&mut sweep.launches);
             if !sweep.finals.is_empty() {
                 sweep.launches = launches;
-                return (sweep, launched);
+                return (sweep, answered);
             }
             assert!(
                 Instant::now() < deadline,
@@ -6291,7 +6291,11 @@ mod tests {
     /// PTY anyway.
     #[test]
     fn agent_pty_ready_to_prune_wants_both_facts_and_falls_back_to_either_clock() {
-        let inside = Some(REAPED_DRAIN_GRACE - Duration::from_millis(1));
+        let inside = Some(
+            REAPED_DRAIN_GRACE
+                .checked_sub(Duration::from_millis(1))
+                .expect("the drain grace is longer than a millisecond"),
+        );
         let expired = Some(REAPED_DRAIN_GRACE);
 
         assert!(
@@ -8062,7 +8066,9 @@ mod tests {
         // Push it as already past its deadline, so one reap must force-kill it.
         engine.terminating_ptys.push(TerminatingPty {
             client,
-            deadline: Instant::now() - Duration::from_millis(1),
+            deadline: Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .expect("the monotonic clock reads later than the rewind"),
             kind: PrunedPtyKind::Terminal,
             id: "t1".to_string(),
             label: "scratch".to_string(),
@@ -8604,7 +8610,9 @@ mod tests {
 
         // Expire the survivor's deadline: the next reap force-kills it, empties the
         // group, and dispatches the worktree removal EXACTLY ONCE.
-        engine.terminating_ptys[0].deadline = Instant::now() - Duration::from_millis(1);
+        engine.terminating_ptys[0].deadline = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("the monotonic clock reads later than the rewind");
         let dispatched = engine.reap_terminating_ptys().removals;
         assert_eq!(
             dispatched.len(),

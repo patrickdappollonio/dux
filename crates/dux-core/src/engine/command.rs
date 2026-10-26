@@ -736,20 +736,18 @@ impl Engine {
                                 // logs, an action outside the toast. The
                                 // failure leads; what the create's notes said
                                 // is still true and follows it.
-                                let failure = match &cloned {
-                                    // The agent exists, so this is not
-                                    // "didn't create": the clone's context
-                                    // leads and the agent follows.
-                                    Some(cloned) => cloned.startup_failed(branch_name, error),
-                                    None => crate::status_text![
+                                let failure = if let Some(cloned) = &cloned {
+                                    cloned.startup_failed(branch_name, error)
+                                } else {
+                                    crate::status_text![
                                         "Startup command failed for agent ",
                                         q(branch_name),
                                         format!(
                                             ": {}. \
-                                     Open the startup command logs for details.",
+                                 Open the startup command logs for details.",
                                             error
                                         )
-                                    ],
+                                    ]
                                 };
                                 Final::error(match notes {
                                     Some(notes) => {
@@ -1348,7 +1346,8 @@ impl Engine {
                             Some(Ok(mut auth))
                                 if !auth.has_password() && running.server.auth.has_password() =>
                             {
-                                auth.password_hash = running.server.auth.password_hash.clone();
+                                auth.password_hash
+                                    .clone_from(&running.server.auth.password_hash);
                                 recovered.server.auth = auth;
                                 Some(Some(
                                     "The file's [server.auth] had no password but the running \
@@ -2281,9 +2280,8 @@ mod tests {
                 already_running_message: "A pull is already running.".to_string().into(),
             })
             .expect("apply succeeds");
-        let pull_busy = match engine.worker_rx.try_recv() {
-            Ok(WorkerEvent::CommandWorkerStarted(s)) => s,
-            _ => panic!("expected the pull busy ahead of anything the worker sends"),
+        let Ok(WorkerEvent::CommandWorkerStarted(pull_busy)) = engine.worker_rx.try_recv() else {
+            panic!("expected the pull busy ahead of anything the worker sends")
         };
         let pull_key = pull_busy.key.clone().expect("the pull busy is keyed");
         show(&mut status, &pull_busy);
@@ -2294,9 +2292,8 @@ mod tests {
                 worktree_path: tmp.path().to_path_buf(),
             })
             .expect("apply succeeds");
-        let push_busy = match reaction {
-            EventReaction::Status(s) => s,
-            _ => panic!("expected a pending busy from the push dispatch"),
+        let EventReaction::Status(push_busy) = reaction else {
+            panic!("expected a pending busy from the push dispatch")
         };
         let push_key = push_busy.key.clone().expect("the push busy is keyed");
         assert_eq!(push_busy.tone, StatusTone::Busy);
@@ -4114,7 +4111,7 @@ mod tests {
             PullOutcome::Pulled { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
-            other => panic!("expected Pulled, got {other:?}"),
+            other @ PullOutcome::NoOrigin { .. } => panic!("expected Pulled, got {other:?}"),
         }
     }
 
@@ -4134,7 +4131,7 @@ mod tests {
             PullOutcome::NoOrigin { current_branch } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
-            other => panic!("expected NoOrigin, got {other:?}"),
+            other @ PullOutcome::Pulled { .. } => panic!("expected NoOrigin, got {other:?}"),
         }
 
         // The op maps the no-origin outcome to an INFO final.
@@ -4145,7 +4142,9 @@ mod tests {
                 assert_eq!(tone, StatusTone::Info);
                 assert!(text.contains("no origin remote"), "got: {text}");
             }
-            other => panic!("expected a message final, got {other:?}"),
+            other @ crate::engine::Final::Clear => {
+                panic!("expected a message final, got {other:?}")
+            }
         }
     }
 
@@ -4177,7 +4176,9 @@ mod tests {
                     "got: {text}"
                 );
             }
-            other => panic!("expected a message final, got {other:?}"),
+            other @ crate::engine::Final::Clear => {
+                panic!("expected a message final, got {other:?}")
+            }
         }
     }
 

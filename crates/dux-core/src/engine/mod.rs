@@ -1944,12 +1944,12 @@ impl SessionGitAccess {
     /// Whether the branch-identity features exist for this agent.
     pub fn supports_branch_git(&self) -> bool {
         match self {
-            Self::Full { .. } => true,
+            Self::Full { .. }
             // A managed agent keeps its branch identity when the directory
             // goes: the branch is still in the repository, which is exactly what
             // makes recreating the working copy possible. What the FEATURES do
             // about a missing directory is their own refusal, not this gate's.
-            Self::WorkingCopyMissing { .. } => true,
+            | Self::WorkingCopyMissing { .. } => true,
             Self::ChangesOnly { .. } | Self::NoRepository { .. } => false,
         }
     }
@@ -3538,7 +3538,7 @@ impl Engine {
         let worktree = resolved.as_ref().map(|(_, path)| path.clone());
         // Keep the background poller in sync with the watched worktree.
         if let Ok(mut guard) = self.watched_worktree.lock() {
-            *guard = worktree.clone();
+            (*guard).clone_from(&worktree);
         }
         // The WATCHED SESSION is whichever session the panel is showing, even
         // when there is no repository to poll in it. Dropping the id here
@@ -4212,13 +4212,11 @@ impl Engine {
                     let mut swept_at = last_inactive_sweep
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let since = match *swept_at {
-                        Some(at) => at.elapsed(),
-                        // Never swept: start the clock, sweep nothing.
-                        None => {
-                            *swept_at = Some(Instant::now());
-                            Duration::ZERO
-                        }
+                    let since = if let Some(at) = *swept_at {
+                        at.elapsed()
+                    } else {
+                        *swept_at = Some(Instant::now());
+                        Duration::ZERO
                     };
                     if crate::gh::inactive_sweep_due(
                         since,
@@ -7137,7 +7135,7 @@ mod tests {
     /// pull-request sync kept running git in a deleted directory every cycle.
     #[test]
     fn a_pollers_own_failure_downgrades_the_verdict_and_takes_the_agent_out() {
-        let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        let (mut engine, tmp, _folder) = engine_with_a_standalone_agent();
         engine.update_branch_sync_sessions();
         assert_eq!(
             engine.branch_sync_sessions.lock().expect("lock").len(),
@@ -7146,7 +7144,7 @@ mod tests {
         );
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let gone = _tmp.path().join("never-existed");
+        let gone = tmp.path().join("never-existed");
         report_missing_directory(&tx, "s1", &gone);
         let event = rx.try_recv().expect("the poller reports the directory");
         let _ = engine.process_worker_event(event);
@@ -8036,7 +8034,9 @@ mod tests {
         // Older than the suppression window → not typing.
         engine.pty_input.insert(
             "b".to_string(),
-            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!engine.is_typing("b"));
 
@@ -8117,7 +8117,9 @@ mod tests {
         // Stamped past the window → not streaming.
         engine.pty_activity.insert(
             "stale".to_string(),
-            Instant::now() - (AGENT_STREAMING_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_STREAMING_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!engine.is_agent_streaming("stale"));
 
@@ -8162,7 +8164,9 @@ mod tests {
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert(
             "s1".to_string(),
-            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            Instant::now()
+                .checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(
             engine.is_agent_streaming("s1"),
@@ -8238,7 +8242,9 @@ mod tests {
             TabId::new("s1"),
             ProgressReport {
                 working: true,
-                at: Instant::now() - (PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50)),
+                at: Instant::now()
+                    .checked_sub(PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50))
+                    .expect("the monotonic clock reads later than the rewind"),
             },
         );
         assert!(
@@ -8453,7 +8459,9 @@ mod tests {
         engine.pty_pointer.insert(
             "s1".to_string(),
             PointerStamp {
-                at: Instant::now() - (POINTER_REPAINT_WINDOW + Duration::from_millis(50)),
+                at: Instant::now()
+                    .checked_sub(POINTER_REPAINT_WINDOW + Duration::from_millis(50))
+                    .expect("the monotonic clock reads later than the rewind"),
                 window: POINTER_REPAINT_WINDOW,
             },
         );
@@ -8524,7 +8532,8 @@ mod tests {
         // Stale view → not engaged.
         viewed.insert(
             TabId::new("s1"),
-            now - (ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50)),
+            now.checked_sub(ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!attention_engaged(
             &viewed,
@@ -8540,7 +8549,8 @@ mod tests {
         // Stale typing → not engaged.
         typed.insert(
             "s1".to_string(),
-            now - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+            now.checked_sub(AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
         );
         assert!(!attention_engaged(
             &viewed,
@@ -8999,8 +9009,11 @@ mod tests {
 
         // Rewind the timestamp past the interval to simulate elapsed wall-clock
         // time, then the next call runs again and re-stamps.
-        engine.last_foreground_refresh =
-            Some(first - (FOREGROUND_REFRESH_INTERVAL + Duration::from_millis(50)));
+        engine.last_foreground_refresh = Some(
+            first
+                .checked_sub(FOREGROUND_REFRESH_INTERVAL + Duration::from_millis(50))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.refresh_terminal_foregrounds();
         let second = engine
             .last_foreground_refresh
@@ -9359,14 +9372,22 @@ mod tests {
             "nothing is due until the interval has passed",
         );
 
-        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.gh_probe.last_probe_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(31))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.poll_gh_probe_schedule();
         assert_eq!(engine.gh_probe.generation, 1, "the re-check was spawned");
         settle_gh_probe(&mut engine);
         assert_eq!(engine.gh_status, GhStatus::Available);
 
         // And it stops asking, because there is nothing left to recover.
-        engine.gh_probe.last_probe_at = Some(Instant::now() - Duration::from_secs(31));
+        engine.gh_probe.last_probe_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(31))
+                .expect("the monotonic clock reads later than the rewind"),
+        );
         engine.poll_gh_probe_schedule();
         assert_eq!(engine.gh_probe.generation, 1, "no further probes");
     }
@@ -10653,7 +10674,7 @@ mod tests {
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(remaining) {
                 Ok(WorkerEvent::PollerStatus(status)) => return status,
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(_) => break,
             }
         }
@@ -11029,7 +11050,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|segment| match segment {
                     ProseSegment::Name { name, .. } => Some(name),
-                    _ => None,
+                    ProseSegment::Text(_) => None,
                 })
                 .collect();
             assert_eq!(names, want_names, "{plain}");
@@ -12799,9 +12820,15 @@ mod tab_ops_tests {
         });
         let _ = engine
             .drive_web_launch_followup(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
-        let state = |id: &str| engine.operations.view(id, now()).unwrap().state;
-        assert_eq!(state("op-slot"), crate::operations::OperationState::Failed);
-        assert_eq!(state("op-t2"), crate::operations::OperationState::Running);
+        let op_state = |id: &str| engine.operations.view(id, now()).unwrap().state;
+        assert_eq!(
+            op_state("op-slot"),
+            crate::operations::OperationState::Failed
+        );
+        assert_eq!(
+            op_state("op-t2"),
+            crate::operations::OperationState::Running
+        );
     }
 
     #[test]

@@ -177,6 +177,10 @@ fn review17_a_project_pull_never_deletes_another_projects_repository() {
 }
 
 /// What [`wait_pull`] waits for, with the worker's answer.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn pull_result(engine: &mut Engine) -> Result<crate::worker::PullOutcome, String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -324,13 +328,6 @@ fn a_pull_never_deletes_a_folder_a_process_dux_started_is_working_in() {
             rustix::process::setsid().map_err(std::io::Error::from)?;
             Ok(())
         });
-    }
-    struct Kill(std::process::Child);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
     }
     let sleeper = Kill(sleeper.spawn().expect("spawn"));
     let session = crate::process_sessions::ProcessSession::started_now(sleeper.0.id());
@@ -730,4 +727,14 @@ fn a_refused_switch_keeps_a_local_branch_dux_did_not_create() {
         crate::git::local_branch_exists(&repo, "feat"),
         "the user's own branch is kept"
     );
+}
+
+/// Kills and reaps the child it holds when dropped, so a failing test leaves
+/// no process behind.
+struct Kill(std::process::Child);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

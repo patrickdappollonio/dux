@@ -317,6 +317,10 @@ pub(crate) struct PipelineDelete {
 /// worktree-removing delete the reaper and the removal worker driven until it
 /// reports. `Ok(None)` for an unknown agent; a refusal or a removal failure
 /// is an `Err` carrying the sentence the surfaces would show.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Err is the refusal or removal failure under test, while a vanished agent or a removal that never reports fails the test by panicking"
+)]
 pub(crate) fn delete_through_pipeline(
     engine: &mut Engine,
     session_id: &str,

@@ -310,30 +310,25 @@ impl Engine {
             Err(outcome) => {
                 // No project follows this answer, so the repository is free.
                 self.release_repository_key(repository_key.as_deref());
-                match status_op_id
+                if let Some(pending) = status_op_id
                     .as_ref()
                     .and_then(|id| self.clones.pending.remove(id))
                 {
-                    Some(pending) => {
-                        self.release_repository_key(pending.repository_key.as_deref());
-                        pending.op.resolve(&outcome).into_reaction()
-                    }
-                    // The operation is gone, but its busy may still be on a
-                    // screen: the final carries its key so it replaces it.
-                    None => {
-                        let keyed = |update: StatusUpdate| match &status_op_id {
-                            Some(id) => update.with_key(id.clone()),
-                            None => update,
-                        };
-                        match outcome {
-                            CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
-                                EventReaction::Status(keyed(StatusUpdate::error(text)))
-                            }
-                            CloneOutcome::Kept(text) => {
-                                EventReaction::Status(keyed(StatusUpdate::warning(text).sticky()))
-                            }
-                            CloneOutcome::HandedOff => EventReaction::Nothing,
+                    self.release_repository_key(pending.repository_key.as_deref());
+                    pending.op.resolve(&outcome).into_reaction()
+                } else {
+                    let keyed = |update: StatusUpdate| match &status_op_id {
+                        Some(id) => update.with_key(id.clone()),
+                        None => update,
+                    };
+                    match outcome {
+                        CloneOutcome::Refused(text) | CloneOutcome::Failed(text) => {
+                            EventReaction::Status(keyed(StatusUpdate::error(text)))
                         }
+                        CloneOutcome::Kept(text) => {
+                            EventReaction::Status(keyed(StatusUpdate::warning(text).sticky()))
+                        }
+                        CloneOutcome::HandedOff => EventReaction::Nothing,
                     }
                 }
             }

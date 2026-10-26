@@ -152,7 +152,7 @@ impl Engine {
         let outcome = match result {
             Ok(switched) => {
                 if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
-                    existing.current_branch = branch.clone();
+                    existing.current_branch.clone_from(&branch);
                     existing.branch_status = ProjectBranchStatus::Leading;
                 }
                 let base = self.adopt_project_base(project, &branch);
@@ -178,14 +178,11 @@ impl Engine {
                 }
             }
         };
-        match self.pending_change_base_ops.remove(&status_op_id) {
-            Some(op) => op.resolve(&outcome).into_reaction(),
-            // Unreachable while the op is registered before the worker starts;
-            // answered on the same key rather than dropped all the same.
-            None => {
-                let final_ = change_base_final(&project.name, &outcome);
-                ResolvedFinal::new(status_op_id, final_).into_reaction()
-            }
+        if let Some(op) = self.pending_change_base_ops.remove(&status_op_id) {
+            op.resolve(&outcome).into_reaction()
+        } else {
+            let final_ = change_base_final(&project.name, &outcome);
+            ResolvedFinal::new(status_op_id, final_).into_reaction()
         }
     }
 }

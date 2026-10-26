@@ -172,7 +172,7 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // recurses, and the web's `drive_*` follow-ups match bare variants
             // only), so routing is decided per leaf where the leaf is handled.
             // Answering for the wrapper would skip unrelated siblings.
-            EventReaction::Multi(_) => FollowupOwner::Drainer,
+            EventReaction::Multi(_)
 
             // Everything below is safe on both surfaces at once, and each arm
             // says why rather than leaning on a wildcard. Statuses and clears:
@@ -183,7 +183,7 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // pending map and does nothing when it is absent. That works only
             // because they resolve a keyed op the web itself opened; the routed
             // arms above start new work, so they cannot use the same trick.
-            EventReaction::Nothing
+            | EventReaction::Nothing
             | EventReaction::Status(_)
             | EventReaction::ClearStatus(_)
             // View refreshes touch only the surface that runs them.

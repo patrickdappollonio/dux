@@ -44,6 +44,10 @@ fn agent_worktree(engine: &mut Engine, root: &Path, repo: &Path, name: &str) -> 
     worktree
 }
 
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "test helper: the Result is the worker's answer under test, and a worker that never answers fails the test by panicking"
+)]
 fn pump_until_removed(engine: &mut Engine) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
