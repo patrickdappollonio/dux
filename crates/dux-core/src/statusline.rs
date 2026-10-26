@@ -1889,7 +1889,10 @@ mod tests {
         );
         // Before the bound: untouched.
         let changes = c.tick(t0 + Duration::from_secs(19), busy_timeout);
-        assert!(changes.upgraded.is_empty());
+        assert_eq!(
+            changes.upgraded,
+            Vec::<crate::statusline::KeyedWireStatus>::new()
+        );
         assert_eq!(c.most_recent().unwrap().tone, "busy");
         // After the bound: upgraded to warning IN PLACE, broadcast in `upgraded`.
         let changes = c.tick(t0 + Duration::from_secs(20), busy_timeout);
@@ -1909,7 +1912,10 @@ mod tests {
         c.set(t0, None, StatusTone::Busy, "Loading…");
         // Before the bound: still Busy (anonymous slot never auto-expires Busy).
         let changes = c.tick(t0 + Duration::from_secs(19), busy_timeout);
-        assert!(changes.upgraded.is_empty());
+        assert_eq!(
+            changes.upgraded,
+            Vec::<crate::statusline::KeyedWireStatus>::new()
+        );
         assert_eq!(c.most_recent().unwrap().tone, "busy");
         // After the bound: upgraded in place to a timed-out Warning, broadcast.
         let changes = c.tick(t0 + Duration::from_secs(20), busy_timeout);
@@ -2013,7 +2019,10 @@ mod tests {
             c.set(t0, None, StatusTone::Busy, "still running");
             c.pin();
             let changes = c.tick(t0 + Duration::from_secs(3600), BUSY_TIMEOUT);
-            assert!(changes.upgraded.is_empty());
+            assert_eq!(
+                changes.upgraded,
+                Vec::<crate::statusline::KeyedWireStatus>::new()
+            );
             assert_eq!(c.snapshot()[0].tone, "busy");
         }
     }
@@ -2046,7 +2055,10 @@ mod tests {
         // At three windows it goes, announced.
         let changes = c.tick(t0 + window * 3, BUSY_TIMEOUT);
         assert_eq!(changes.cleared_keys, vec![None]);
-        assert!(c.snapshot().is_empty());
+        assert_eq!(
+            c.snapshot(),
+            Vec::<crate::statusline::KeyedWireStatus>::new()
+        );
 
         // An error takes the line and is still there an hour later.
         c.set(
@@ -2459,7 +2471,10 @@ mod tests {
             "and where to look, got {:?}",
             changes.upgraded[0].message
         );
-        assert!(changes.refreshed.is_empty());
+        assert_eq!(
+            changes.refreshed,
+            Vec::<crate::statusline::KeyedWireStatus>::new()
+        );
         assert!(
             !live.is_live("leaked"),
             "the leaked registration is dropped, or the ceiling fires every tick forever"
@@ -2483,7 +2498,10 @@ mod tests {
         assert_eq!(changes.upgraded.len(), 1, "got {:?}", changes.upgraded);
         assert_eq!(changes.upgraded[0].tone, "warning");
         assert_eq!(changes.upgraded[0].message, "timed out, check dux.log");
-        assert!(changes.refreshed.is_empty());
+        assert_eq!(
+            changes.refreshed,
+            Vec::<crate::statusline::KeyedWireStatus>::new()
+        );
     }
 
     #[test]
@@ -2857,8 +2875,11 @@ mod tests {
 
             let changes = c.tick(t0 + FINAL_REPLAY_WINDOW, BUSY_TIMEOUT);
             assert_eq!(changes.purged, 1);
-            assert!(changes.cleared_keys.is_empty());
-            assert!(c.snapshot().is_empty());
+            assert_eq!(changes.cleared_keys, Vec::<Option<String>>::new());
+            assert_eq!(
+                c.snapshot(),
+                Vec::<crate::statusline::KeyedWireStatus>::new()
+            );
         }
     }
 

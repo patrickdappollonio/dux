@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(cut.shown, 1);
 
         let nothing = fitted_hint_spans(&theme, HintTone::Modal, &hints, 0);
-        assert!(nothing.spans.is_empty());
+        assert_eq!(nothing.spans, Vec::<Span<'_>>::new());
         assert_eq!(nothing.shown, 0);
     }
 

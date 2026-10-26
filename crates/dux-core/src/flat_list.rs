@@ -189,7 +189,7 @@ mod tests {
         ];
         // Name mode: no active rows, tail stays in incoming order (old, newest, mid).
         let order = order_sessions(&sessions, FlatSortMode::NameAsc, &|_| false, &|_| true);
-        assert!(order.active.is_empty());
+        assert_eq!(order.active, Vec::<usize>::new());
         assert_eq!(order.inactive, vec![0, 1, 2]);
     }
 

@@ -19,7 +19,7 @@ fn an_unrelated_env_set_is_not_blocked_by_a_dotted_name() {
     let (_d, path) = seed("[env]\n\"FOO.BAR\" = \"x\"\n");
     // Precondition: the file already has a problem, about the entry FOO.BAR.
     let before = dux_core::config::start_problems_of(&std::fs::read_to_string(&path).unwrap());
-    assert!(!before.is_empty());
+    assert_ne!(before, Vec::<dux_core::config::StartProblem>::new());
     let key = config_keys::lookup("env.FOO").expect("a valid name");
     let result = config_keys::set_secret_text(&path, &key, &Password::new("y".to_string()));
     assert!(

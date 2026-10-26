@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(bus.interested_sessions(), vec!["s1".to_string()]);
         // Second drop returns the refcount to zero; the topic is removed entirely.
         bus.drop_interest(&topic);
-        assert!(bus.interested_sessions().is_empty());
+        assert_eq!(bus.interested_sessions(), Vec::<String>::new());
         assert!(!bus.has_interest(&topic));
     }
 
@@ -235,7 +235,7 @@ mod tests {
         let bus = EventBus::new();
         // Dropping with no prior interest must not panic and must stay at zero.
         bus.drop_interest(&changes_topic("ghost"));
-        assert!(bus.interested_sessions().is_empty());
+        assert_eq!(bus.interested_sessions(), Vec::<String>::new());
     }
 
     #[tokio::test]

@@ -871,7 +871,10 @@ mod tests {
             path: "sub".into(),
             gitlink: true,
         }];
-        assert!(places(tmp.path(), &entries).is_empty());
+        assert_eq!(
+            places(tmp.path(), &entries),
+            Vec::<(PathBuf, LocationKind)>::new()
+        );
     }
 
     #[test]
@@ -946,7 +949,7 @@ mod tests {
         );
         let deleting = b":100644 000000 1111 0000 D\0docs/guide.md\0";
         let changes = parse_raw_diff(deleting);
-        assert!(changes.entries.is_empty());
+        assert_eq!(changes.entries, Vec::<IncomingEntry>::new());
         assert_eq!(changes.deleted, vec![PathBuf::from("docs/guide.md")]);
         let tree = b"100644 blob 1111\tscratch\x00160000 commit 2222\tsub\x00";
         assert_eq!(

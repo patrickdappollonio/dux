@@ -3054,8 +3054,8 @@ mod tests {
             restored.is_noop(&raw),
             "a canonical config should restore to itself"
         );
-        assert!(restored.dropped.is_empty());
-        assert!(restored.preserved.is_empty());
+        assert_eq!(restored.dropped, Vec::<String>::new());
+        assert_eq!(restored.preserved, Vec::<String>::new());
     }
 
     #[test]
@@ -5428,7 +5428,7 @@ mod keys_names_tests {
         install_canonical_renderer();
         let raw = "[keys]\n\"sk-proj-AbCdEf0123456789\" = [\"x\"]\n";
         let problems = dux_core::config::start_problems_of(raw);
-        assert!(!problems.is_empty());
+        assert_ne!(problems, Vec::<StartProblem>::new());
         for problem in &problems {
             assert!(!problem.message.contains("sk-proj"), "{problem:?}");
         }

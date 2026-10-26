@@ -910,8 +910,14 @@ mod tests {
     fn capture_rejects_c0_control_bytes_in_payload() {
         // An OSC 9 whose body carries an embedded CR/LF must not be captured for
         // host forwarding (a control byte could break out of the sequence).
-        assert!(capture_once(b"\x1b]9;line1\rline2\x07").is_empty());
-        assert!(capture_once(b"\x1b]9;line1\nline2\x07").is_empty());
+        assert_eq!(
+            capture_once(b"\x1b]9;line1\rline2\x07"),
+            Vec::<CapturedSeq>::new()
+        );
+        assert_eq!(
+            capture_once(b"\x1b]9;line1\nline2\x07"),
+            Vec::<CapturedSeq>::new()
+        );
         // Attention classification is independent of capture: the same bytes still
         // register as a Notify for dux's own in-app chrome.
         assert_eq!(
@@ -923,12 +929,12 @@ mod tests {
     #[test]
     fn capture_never_records_clipboard_read() {
         // OSC 52 read (`?`) must never be captured (a reply would misroute).
-        assert!(capture_once(b"\x1b]52;c;?\x07").is_empty());
+        assert_eq!(capture_once(b"\x1b]52;c;?\x07"), Vec::<CapturedSeq>::new());
     }
 
     #[test]
     fn capture_never_records_kitty_query() {
-        assert!(capture_once(b"\x1b]99;p=?;\x07").is_empty());
+        assert_eq!(capture_once(b"\x1b]99;p=?;\x07"), Vec::<CapturedSeq>::new());
     }
 
     #[test]
@@ -943,8 +949,11 @@ mod tests {
     #[test]
     fn capture_ignores_unrelated_osc() {
         // Title, color query, and hyperlinks are not passthrough-captured.
-        assert!(capture_once(b"\x1b]0;title\x07").is_empty());
-        assert!(capture_once(b"\x1b]8;;https://x\x07").is_empty());
+        assert_eq!(capture_once(b"\x1b]0;title\x07"), Vec::<CapturedSeq>::new());
+        assert_eq!(
+            capture_once(b"\x1b]8;;https://x\x07"),
+            Vec::<CapturedSeq>::new()
+        );
     }
 
     #[test]

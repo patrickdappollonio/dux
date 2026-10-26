@@ -3927,7 +3927,7 @@ mod tests {
             run.failure.as_deref(),
             Some("Forking an agent requires choosing a name first.")
         );
-        assert!(run.progress.is_empty());
+        assert_eq!(run.progress, Vec::<String>::new());
     }
 
     #[test]
@@ -4176,7 +4176,7 @@ mod tests {
         // recorded as the immutable initial branch.
         assert_eq!(session.title, None);
         assert_eq!(session.initial_branch(), session.branch_name());
-        assert!(!session.branch_name().unwrap().is_empty());
+        assert_ne!(session.branch_name().unwrap(), "");
     }
 
     #[test]
@@ -4196,7 +4196,7 @@ mod tests {
         // branch, but the pet name still becomes the immutable initial branch.
         assert_eq!(session.title, None);
         assert_eq!(session.initial_branch(), session.branch_name());
-        assert!(!session.branch_name().unwrap().is_empty());
+        assert_ne!(session.branch_name().unwrap(), "");
     }
 
     // ── branch provenance ────────────────────────────────────────

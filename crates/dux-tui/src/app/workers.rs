@@ -2865,10 +2865,10 @@ mod tests {
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
         assert!(!app.raw_paste.in_bracket);
-        assert!(app.raw_input_buf.is_empty());
-        assert!(app.raw_input_parser.pending().is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(!app.raw_input_parser.in_bracket_paste());
-        assert!(app.loading_input_buf.is_empty());
+        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
     }
 
     /// The TUI exit-prune teardown must clear EVERY runtime map keyed by the

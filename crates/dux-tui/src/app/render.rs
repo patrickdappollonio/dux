@@ -17894,7 +17894,7 @@ mod tests {
         // Scrolled past the first agent: the window starts at item 1.
         assert_eq!(left_row_to_item(1, &heights, 5), vec![1, 1, 2]);
         // No items -> empty map.
-        assert!(left_row_to_item(0, &[], 5).is_empty());
+        assert_eq!(left_row_to_item(0, &[], 5), Vec::<usize>::new());
     }
 
     #[test]
@@ -22349,7 +22349,7 @@ mod tests {
     #[test]
     fn ellipsize_spans_zero_width_yields_nothing() {
         let spans = vec![Span::raw("anything".to_string())];
-        assert!(ellipsize_spans(spans, 0).is_empty());
+        assert_eq!(ellipsize_spans(spans, 0), Vec::<Span<'_>>::new());
     }
 
     #[test]

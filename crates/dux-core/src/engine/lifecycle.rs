@@ -6531,7 +6531,7 @@ mod tests {
         let terminal = terminal_seen.expect("terminal pruned");
         assert_eq!(terminal.exit_success, None);
         assert!(!terminal.is_minimal);
-        assert!(terminal.output_excerpt.is_empty());
+        assert_eq!(terminal.output_excerpt, "");
     }
 
     #[test]
@@ -6804,21 +6804,21 @@ mod tests {
     fn auto_reopen_candidates_empty_when_the_global_switch_is_off() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         engine.config.ui.auto_reopen_agents = false;
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
     fn auto_reopen_candidates_skip_a_session_without_desired_running() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         engine.sessions[0].desired_running = false;
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
     fn auto_reopen_candidates_skip_a_session_that_opted_out() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         engine.sessions[0].auto_reopen_enabled = false;
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
@@ -6833,14 +6833,14 @@ mod tests {
             .join("does-not-exist")
             .to_string_lossy()
             .to_string();
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
     fn auto_reopen_candidates_skip_a_project_that_opted_out() {
         let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
         engine.projects[0].auto_reopen_agents = Some(false);
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
@@ -6849,7 +6849,7 @@ mod tests {
         // Copilot ships with `resume_args: None` (excluded from resume by
         // design, see the tabs tenet), so it can never auto-reopen.
         engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     /// A restored standalone agent's folder is classified at STARTUP, not only
@@ -6980,14 +6980,14 @@ mod tests {
             crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
                 folder_path: gone.to_string_lossy().to_string(),
             });
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     #[test]
     fn a_standalone_agent_on_a_provider_that_cannot_resume_is_not_a_candidate() {
         let (mut engine, _tmp, _folder) = standalone_auto_reopen_fixture();
         engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
-        assert!(candidate_ids(&engine).is_empty());
+        assert_eq!(candidate_ids(&engine), Vec::<String>::new());
     }
 
     /// The user-initiated kill teardown must clear `desired_running` when the
@@ -8207,7 +8207,10 @@ mod tests {
         });
 
         let dispatched = engine.reap_terminating_ptys();
-        assert!(dispatched.removals.is_empty());
+        assert_eq!(
+            dispatched.removals,
+            Vec::<crate::engine::lifecycle::DeferredWorktreeRemoval>::new()
+        );
         assert!(
             engine.terminating_ptys.is_empty(),
             "a past-deadline straggler is force-killed and removed in one reap"
@@ -8218,8 +8221,14 @@ mod tests {
     fn reap_terminating_ptys_is_a_noop_when_empty() {
         let (mut engine, _tmp) = test_engine();
         let reaped = engine.reap_terminating_ptys();
-        assert!(reaped.removals.is_empty());
-        assert!(reaped.detach_finals.is_empty());
+        assert_eq!(
+            reaped.removals,
+            Vec::<crate::engine::lifecycle::DeferredWorktreeRemoval>::new()
+        );
+        assert_eq!(
+            reaped.detach_finals,
+            Vec::<crate::engine::status_op::ResolvedFinal>::new()
+        );
     }
 
     #[test]

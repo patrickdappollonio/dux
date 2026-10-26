@@ -1195,7 +1195,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        assert!(String::from_utf8_lossy(&staged.stdout).trim().is_empty());
+        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "");
     }
 
     /// Review 13: a changes-pane folder delete whose claim is refused leaves

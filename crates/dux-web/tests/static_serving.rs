@@ -568,10 +568,19 @@ fn hashed_asset_refs_finds_vite_bundles_and_ignores_hand_named_files() {
         "the hashed bundle entries must be found and the hand-named logo skipped"
     );
     // Names a human chose, of the shape a notice page or a static site would use.
-    assert!(hashed_asset_refs(r#"<img src="assets/logo.png">"#).is_empty());
-    assert!(hashed_asset_refs(r#"<script src="assets/main.js">"#).is_empty());
-    assert!(hashed_asset_refs(r#"<script src="assets/app-v2.js">"#).is_empty());
-    assert!(hashed_asset_refs("no assets at all").is_empty());
+    assert_eq!(
+        hashed_asset_refs(r#"<img src="assets/logo.png">"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        hashed_asset_refs(r#"<script src="assets/main.js">"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        hashed_asset_refs(r#"<script src="assets/app-v2.js">"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(hashed_asset_refs("no assets at all"), Vec::<String>::new());
 }
 
 #[test]
@@ -593,8 +602,14 @@ fn a_hash_containing_a_dash_is_still_a_hash() {
         vec!["assets/index-x8k-p4D8.js".to_string()]
     );
     // And the short hand-written names are still rejected, dash or no dash.
-    assert!(hashed_asset_refs(r#"<img src="assets/dux-logo.png">"#).is_empty());
-    assert!(hashed_asset_refs(r#"<img src="assets/a-b-c.png">"#).is_empty());
+    assert_eq!(
+        hashed_asset_refs(r#"<img src="assets/dux-logo.png">"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        hashed_asset_refs(r#"<img src="assets/a-b-c.png">"#),
+        Vec::<String>::new()
+    );
 }
 
 /// The smallest the whole embedded bundle graph can plausibly be.
@@ -652,13 +667,22 @@ fn chunk_refs_finds_lazy_imports_the_page_never_mentions() {
         vec!["a-ABCDEFGH.js".to_string()]
     );
     // Names a human chose, and things that merely look similar.
-    assert!(chunk_refs(r#"import("./helper.js")"#).is_empty());
-    assert!(chunk_refs(r#"import("./app-v2.js")"#).is_empty());
-    assert!(chunk_refs(r#"fetch("./api/thing-ABCDEFGH.js")"#).is_empty());
-    assert!(chunk_refs(r#"const s="./styles-ABCDEFGH.scss""#).is_empty());
-    assert!(chunk_refs("no imports at all").is_empty());
+    assert_eq!(chunk_refs(r#"import("./helper.js")"#), Vec::<String>::new());
+    assert_eq!(chunk_refs(r#"import("./app-v2.js")"#), Vec::<String>::new());
+    assert_eq!(
+        chunk_refs(r#"fetch("./api/thing-ABCDEFGH.js")"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        chunk_refs(r#"const s="./styles-ABCDEFGH.scss""#),
+        Vec::<String>::new()
+    );
+    assert_eq!(chunk_refs("no imports at all"), Vec::<String>::new());
     // The page-level form is NOT this form, which is the whole point.
-    assert!(chunk_refs(r#"<script src="assets/index-x8kEp4D8.js">"#).is_empty());
+    assert_eq!(
+        chunk_refs(r#"<script src="assets/index-x8kEp4D8.js">"#),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -696,9 +720,15 @@ fn chunk_refs_reads_backticks_and_a_missing_leading_dot_slash() {
     );
     // Loosening the delimiters must not loosen anything else: a hand-chosen name,
     // a nested path and a non-bundle extension are still rejected.
-    assert!(chunk_refs("const h=`./helper.js`").is_empty());
-    assert!(chunk_refs("const n=`./nested/thing-ABCDEFGH.js`").is_empty());
-    assert!(chunk_refs("const s=`./styles-ABCDEFGH.scss`").is_empty());
+    assert_eq!(chunk_refs("const h=`./helper.js`"), Vec::<String>::new());
+    assert_eq!(
+        chunk_refs("const n=`./nested/thing-ABCDEFGH.js`"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        chunk_refs("const s=`./styles-ABCDEFGH.scss`"),
+        Vec::<String>::new()
+    );
 }
 
 #[tokio::test]

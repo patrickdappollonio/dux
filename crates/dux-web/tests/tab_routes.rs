@@ -263,7 +263,7 @@ async fn post_tabs_creates_and_returns_an_attachable_id() {
         .unwrap();
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(!body["tab_id"].as_str().unwrap().is_empty());
+    assert_ne!(body["tab_id"].as_str().unwrap(), "");
     assert_eq!(body["provider"], "claude");
 
     // Followed as an operation, the create ends when the tab's launch reports,

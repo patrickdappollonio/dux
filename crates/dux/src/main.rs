@@ -607,7 +607,7 @@ mod tests {
             &mut stderr,
             &mut startup_warnings,
         );
-        assert!(stderr.is_empty());
+        assert_eq!(stderr, Vec::<u8>::new());
         assert_eq!(startup_warnings.len(), 1);
         assert!(
             !startup_warnings[0].already_on_stderr,

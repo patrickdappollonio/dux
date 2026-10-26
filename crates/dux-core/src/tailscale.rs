@@ -1699,7 +1699,10 @@ mod identity_tests {
             off, STATUS,
             "precondition: the fixture's CertDomains was replaced"
         );
-        assert!(parse_status_json(&off).unwrap().cert_domains.is_empty());
+        assert_eq!(
+            parse_status_json(&off).unwrap().cert_domains,
+            Vec::<String>::new()
+        );
     }
 
     // ── tailscale serve status --json ──────────────────────────────────────
@@ -2547,7 +2550,7 @@ mod identity_tests {
         );
         let identity = detect_identity_with(cli.program(), DETECT_TIMEOUT, 3890).unwrap();
         assert!(!identity.funnel && !identity.funnel_to_dux);
-        assert!(identity.serve.is_empty());
+        assert_eq!(identity.serve, Vec::<ServeRoute>::new());
 
         // Any other failure of `serve status` stays a failure.
         let failing = super::tests::StandIn::new(

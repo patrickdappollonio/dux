@@ -1029,7 +1029,7 @@ mod tests {
         // lead with a real one); what matters is that nothing after the second
         // heading leaks in.
         assert_eq!(n.headline, "What's Changed");
-        assert!(n.sections.is_empty());
+        assert_eq!(n.sections, Vec::<String>::new());
         assert!(
             !n.paragraphs.iter().any(|p| p.contains("brew install")),
             "{n:#?}"
@@ -1057,7 +1057,7 @@ mod tests {
             n.paragraphs,
             vec!["Fixes the thing that broke.", "Also faster now."]
         );
-        assert!(n.sections.is_empty());
+        assert_eq!(n.sections, Vec::<String>::new());
         assert!(n.has_renderable_body(), "prose is worth rendering");
     }
 
@@ -1089,7 +1089,7 @@ mod tests {
             n.paragraphs,
             vec!["# Big title", "Some prose.", "#### Deep thing"]
         );
-        assert!(n.sections.is_empty());
+        assert_eq!(n.sections, Vec::<String>::new());
     }
 
     #[test]
@@ -1099,7 +1099,7 @@ mod tests {
         let n = parse_release_body("##Title\n\n###Feature\n");
         assert_eq!(n.headline, "");
         assert_eq!(n.paragraphs, vec!["##Title", "###Feature"]);
-        assert!(n.sections.is_empty());
+        assert_eq!(n.sections, Vec::<String>::new());
     }
 
     #[test]
@@ -1722,7 +1722,7 @@ Its description.
             html_url: None,
         });
         assert_eq!(bare.version, "v0.6.1");
-        assert!(bare.headline.is_empty());
+        assert_eq!(bare.headline, "");
         assert_eq!(bare.html_url, crate::urls::RELEASES);
     }
 

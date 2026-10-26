@@ -4027,7 +4027,10 @@ port = 3890
     #[test]
     fn get_does_not_report_values_for_a_file_dux_will_not_start_with() {
         let body = "[server]\nhost = \"localhost\"\nport = 4000\n";
-        assert!(!crate::config::start_problems_of(body).is_empty());
+        assert_ne!(
+            crate::config::start_problems_of(body),
+            Vec::<crate::config::StartProblem>::new()
+        );
         let GetValue::Unknown { reason, .. } = get(body, &lookup("server.port").unwrap()).unwrap()
         else {
             panic!("expected Unknown");
@@ -4050,7 +4053,10 @@ port = 3890
         let first = set_password_if_current(&path, "", &Password::new(STRONG.to_string()), &[])
             .expect("first password over none");
         assert!(first.strength.score >= 2);
-        assert!(first.remaining_problems.is_empty());
+        assert_eq!(
+            first.remaining_problems,
+            Vec::<crate::config::StartProblem>::new()
+        );
         let hash = hash_in(&path);
         assert!(hash.starts_with("$argon2id$"), "{hash}");
         assert!(

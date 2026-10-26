@@ -1758,7 +1758,7 @@ mod tests {
     #[test]
     fn dux_version_is_projected() {
         let (engine, _tmp) = test_engine();
-        assert!(!engine.bootstrap().dux_version.is_empty());
+        assert_ne!(engine.bootstrap().dux_version, "");
     }
 
     #[test]
@@ -2017,7 +2017,7 @@ mod tests {
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
         let (mut engine, _tmp) = test_engine();
-        assert!(engine.bootstrap().macros.is_empty());
+        assert_eq!(engine.bootstrap().macros, Vec::<MacroView>::new());
 
         // Simulate a config reload that introduces a new macro.
         let mut new_config = engine.config.clone();
@@ -3322,7 +3322,7 @@ mod tests {
         assert_eq!(verdict.ending, "launch_failed");
         assert_eq!(verdict.status, None);
         assert_eq!(verdict.error.as_deref(), Some("no such file or directory"));
-        assert!(verdict.excerpt.is_empty());
+        assert_eq!(verdict.excerpt, Vec::<String>::new());
     }
 
     #[test]

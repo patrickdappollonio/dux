@@ -764,7 +764,10 @@ mod tests {
             !app.resize_pty_if_permitted("s1", 40, 120),
             "a non-owner must not resize the child"
         );
-        assert!(recorded.lock().expect("not poisoned").published.is_empty());
+        assert_eq!(
+            recorded.lock().expect("not poisoned").published,
+            Vec::<PtyOwnershipEvent>::new()
+        );
     }
 
     /// A granted resize publishes its grid, which is what a web watcher adopts.
@@ -2516,7 +2519,10 @@ mod tests {
             !seat.owners.is_owner("session-1-slot", seat.conn_id),
             "scrolling back is not driving the terminal"
         );
-        assert!(recorded.lock().expect("not poisoned").published.is_empty());
+        assert_eq!(
+            recorded.lock().expect("not poisoned").published,
+            Vec::<PtyOwnershipEvent>::new()
+        );
     }
 
     /// And a REAL keystroke claims nothing either, which is the whole change:
@@ -2541,7 +2547,10 @@ mod tests {
             !app.engine.is_typing("session-1-slot"),
             "and the key reaches nothing"
         );
-        assert!(recorded.lock().expect("not poisoned").published.is_empty());
+        assert_eq!(
+            recorded.lock().expect("not poisoned").published,
+            Vec::<PtyOwnershipEvent>::new()
+        );
     }
 
     /// A page key that IS forwarded consults the gate at the forward site, so a
@@ -3422,7 +3431,7 @@ mod tests {
         for pty_id in EVERYTHING_RUNNING {
             assert_eq!(app.pty_driver(pty_id), PtyDriver::Free, "{pty_id}");
         }
-        assert!(claimed_ids(&recorded).is_empty());
+        assert_eq!(claimed_ids(&recorded), Vec::<String>::new());
         assert_eq!(app.focused_pty_takeover_card(), Some(PtyTakeoverCard::Free));
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(flat.contains("Running in the background"), "{flat}");

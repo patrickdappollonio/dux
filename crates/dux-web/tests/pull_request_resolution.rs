@@ -240,7 +240,7 @@ async fn a_repository_dux_does_not_have_answers_with_its_name_and_no_projects() 
 
     let (status, body) = resolve(addr, "https://github.com/acme/unknown/pull/3").await;
     assert_eq!(status, 200, "{body}");
-    assert!(matched_names(&body).is_empty());
+    assert_eq!(matched_names(&body), Vec::<String>::new());
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         value["repository"], "github.com/acme/unknown",
@@ -703,7 +703,7 @@ async fn a_project_it_could_not_inspect_is_reported_rather_than_counted_as_a_non
 
     let (status, body) = resolve(addr, "acme/widget#5").await;
     assert_eq!(status, 200, "{body}");
-    assert!(matched_names(&body).is_empty());
+    assert_eq!(matched_names(&body), Vec::<String>::new());
     let value: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["uninspected_count"], 1, "{body}");
     assert_eq!(

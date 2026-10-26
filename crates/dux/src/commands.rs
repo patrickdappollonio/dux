@@ -1050,7 +1050,7 @@ mod tests {
 
         let split = split_config(&strings(&["--remote=box", "config"])).unwrap();
         assert_eq!(split.remote.as_deref(), Some("box"));
-        assert!(split.args.is_empty());
+        assert_eq!(split.args, Vec::<String>::new());
 
         let split = split_config(&strings(&["--local", "config", "get", "a"])).unwrap();
         assert!(split.local);

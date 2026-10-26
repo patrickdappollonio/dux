@@ -11743,12 +11743,12 @@ mod tests {
             .expect("attach");
 
         assert!(engine.pr_suppressions.is_empty());
-        assert!(
+        assert_eq!(
             engine
                 .session_store
                 .load_pr_suppressions()
-                .expect("load suppressions")
-                .is_empty()
+                .expect("load suppressions"),
+            Vec::<String>::new()
         );
         assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();

@@ -437,7 +437,7 @@ mod tests {
         let text: String = out.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "abc日…");
         assert_eq!(out.last().unwrap().style, blue);
-        assert!(ellipsize_spans(spans, 0).is_empty());
+        assert_eq!(ellipsize_spans(spans, 0), Vec::<Span<'_>>::new());
     }
 
     #[test]
@@ -450,6 +450,6 @@ mod tests {
         assert_eq!(text(mark_cut_row(row("日本語の名前"), 10)), "日本語の…");
         assert_eq!(text(mark_cut_row(row("日本語の名前"), 12)), "日本語の名…");
         assert_eq!(text(mark_cut_row(row("abc"), 1)), "…");
-        assert!(mark_cut_row(row("abc"), 0).is_empty());
+        assert_eq!(mark_cut_row(row("abc"), 0), Vec::<Span<'_>>::new());
     }
 }

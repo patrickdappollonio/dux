@@ -50,6 +50,6 @@ mod tests {
             b"BEARER third",
         ]);
         assert_eq!(read_all(&map), vec!["first", "second", "third"]);
-        assert!(read_all(&HeaderMap::new()).is_empty());
+        assert_eq!(read_all(&HeaderMap::new()), Vec::<String>::new());
     }
 }

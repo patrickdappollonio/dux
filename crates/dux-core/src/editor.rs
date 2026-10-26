@@ -358,7 +358,10 @@ mod tests {
             vec![("VS Code", "code".to_string()), ("Zed", "zed".to_string())]
         );
         let empty = tempfile::tempdir().unwrap();
-        assert!(detect_editors_on_path(empty.path().as_os_str()).is_empty());
+        assert_eq!(
+            detect_editors_on_path(empty.path().as_os_str()),
+            Vec::<DetectedEditor>::new()
+        );
     }
 
     #[test]

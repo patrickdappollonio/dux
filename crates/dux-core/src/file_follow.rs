@@ -614,7 +614,7 @@ mod tests {
         let (mut follower, _) = FileFollower::start(path.clone(), 10);
         std::fs::rename(&path, dir.path().join("server.log.3")).unwrap();
         std::os::unix::fs::symlink(&secret, &path).unwrap();
-        assert!(follower.poll().is_empty());
+        assert_eq!(follower.poll(), Vec::<String>::new());
         assert!(follower.refused());
         assert!(matches!(
             open_log(&path, None, 10, 100),
@@ -631,7 +631,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server.log");
         let (mut follower, first) = FileFollower::start(path.clone(), 10);
-        assert!(first.is_empty());
+        assert_eq!(first, Vec::<String>::new());
         std::fs::write(&path, "hello\n").unwrap();
         assert_eq!(follower.poll(), ["hello"]);
     }

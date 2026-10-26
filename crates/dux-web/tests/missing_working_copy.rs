@@ -244,8 +244,8 @@ async fn a_deleted_working_copy_answers_with_its_own_verdict() {
             .unwrap();
         if resp.status() == 200 {
             let body: serde_json::Value = resp.json().await.unwrap();
-            assert!(body["staged"].as_array().unwrap().is_empty());
-            assert!(body["unstaged"].as_array().unwrap().is_empty());
+            assert_eq!(body["staged"], serde_json::json!([]));
+            assert_eq!(body["unstaged"], serde_json::json!([]));
             settled = true;
             break;
         }

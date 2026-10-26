@@ -134,7 +134,7 @@ mod tests {
         );
         assert_eq!(read_all(&headers, 3890), ["mine"]);
         assert_eq!(read_all(&headers, 4000), ["other"]);
-        assert!(read_all(&headers, 5000).is_empty());
+        assert_eq!(read_all(&headers, 5000), Vec::<String>::new());
         headers.append(
             axum::http::header::COOKIE,
             "dux_session_3890=planted".parse().unwrap(),

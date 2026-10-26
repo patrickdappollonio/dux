@@ -233,8 +233,8 @@ mod tests {
         assert_eq!(tokenize("  New   Agent  "), vec!["new", "agent"]);
         assert_eq!(tokenize("open/current_pr!"), vec!["open", "current", "pr"]);
         assert_eq!(tokenize("v2 pane"), vec!["v2", "pane"]);
-        assert!(tokenize("").is_empty());
-        assert!(tokenize("---  ,.;").is_empty());
+        assert_eq!(tokenize(""), Vec::<String>::new());
+        assert_eq!(tokenize("---  ,.;"), Vec::<String>::new());
     }
 
     #[test]
@@ -283,15 +283,15 @@ mod tests {
         let corpus = fixture();
         // `wid` prefixes `widget`; `zzz` prefixes nothing, so the AND fails.
         assert_eq!(ranked_indices(&corpus, "alpha wid"), vec![0]);
-        assert!(ranked_indices(&corpus, "alpha zzz").is_empty());
+        assert_eq!(ranked_indices(&corpus, "alpha zzz"), Vec::<usize>::new());
         // Order does not matter.
         assert_eq!(
             ranked_indices(&corpus, "wid alpha"),
             ranked_indices(&corpus, "alpha wid")
         );
         // An empty and a punctuation-only query match nothing at all.
-        assert!(ranked_indices(&corpus, "").is_empty());
-        assert!(ranked_indices(&corpus, " -- .. ").is_empty());
+        assert_eq!(ranked_indices(&corpus, ""), Vec::<usize>::new());
+        assert_eq!(ranked_indices(&corpus, " -- .. "), Vec::<usize>::new());
     }
 
     #[test]
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn corpus_nonsense_query_matches_nothing() {
-        assert!(ranked_match_names("qqzzx").is_empty());
-        assert!(ranked_match_names("new qqzzx").is_empty());
+        assert_eq!(ranked_match_names("qqzzx"), Vec::<&str>::new());
+        assert_eq!(ranked_match_names("new qqzzx"), Vec::<&str>::new());
     }
 }

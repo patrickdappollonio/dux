@@ -323,7 +323,10 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
     let tabs = store.load_agent_tabs().expect("tabs");
     assert_eq!(tabs.len(), store.load_sessions().expect("sessions").len());
     assert!(store.load_extra_agent_tabs().expect("extras").is_empty());
-    assert!(store.load_prs("sess-1").expect("prs").is_empty());
+    assert_eq!(
+        store.load_prs("sess-1").expect("prs"),
+        Vec::<StoredPr>::new()
+    );
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
 }
 
@@ -566,7 +569,10 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 2);
 
     // `session_prs`: empty, and writable.
-    assert!(store.load_prs("sess-1").expect("load prs").is_empty());
+    assert_eq!(
+        store.load_prs("sess-1").expect("load prs"),
+        Vec::<StoredPr>::new()
+    );
     store
         .upsert_pr(&StoredPr {
             session_id: "sess-1".to_string(),
@@ -585,11 +591,9 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
 
     // `session_pr_overrides`: empty (nobody upgrading has a pin yet), and
     // immediately usable for a manual attach.
-    assert!(
-        store
-            .load_pr_overrides()
-            .expect("load overrides")
-            .is_empty()
+    assert_eq!(
+        store.load_pr_overrides().expect("load overrides"),
+        Vec::<StoredPr>::new()
     );
     store
         .upsert_pr_override(&StoredPr {
@@ -610,11 +614,9 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     // `session_pr_suppressions`: empty, so an upgrading database keeps every
     // agent's autodetection on (nobody detached before the table existed), and
     // immediately usable once someone does detach.
-    assert!(
-        store
-            .load_pr_suppressions()
-            .expect("load suppressions")
-            .is_empty()
+    assert_eq!(
+        store.load_pr_suppressions().expect("load suppressions"),
+        Vec::<String>::new()
     );
     store
         .set_pr_suppressed("sess-1")
@@ -626,11 +628,9 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     store
         .delete_pr_suppression("sess-1")
         .expect("resume autodetection");
-    assert!(
-        store
-            .load_pr_suppressions()
-            .expect("load suppressions")
-            .is_empty()
+    assert_eq!(
+        store.load_pr_suppressions().expect("load suppressions"),
+        Vec::<String>::new()
     );
 }
 

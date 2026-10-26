@@ -7101,7 +7101,7 @@ mod tests {
         let _ = e.send(WireStatus::keyed("pr", "error", "gh could not resolve it"));
         e.tick(Instant::now() + dux_core::statusline::FINAL_REPLAY_WINDOW);
 
-        assert!(e.take_late_finals().is_empty());
+        assert_eq!(e.take_late_finals(), Vec::<KeyedWireStatus>::new());
     }
 
     #[test]
@@ -9676,7 +9676,10 @@ mod tests {
         let (handle, _join) = spawn_engine_thread(engine);
         let opened = handle.read_raw_config().await.expect("read");
         let live = handle.live_limits().auth();
-        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            Vec::<String>::new()
+        );
         let edited = if opened.content.contains("blocked_addresses = []") {
             opened.content.replace(
                 "blocked_addresses = []",

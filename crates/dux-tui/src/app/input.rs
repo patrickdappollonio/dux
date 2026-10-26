@@ -14612,7 +14612,7 @@ not_a_real_action = ["x"]
         };
         assert!(!editing_path);
         assert!(path_input.is_empty());
-        assert!(tab_completions.is_empty());
+        assert_eq!(tab_completions, &Vec::<String>::new());
         assert_eq!(*tab_index, 0);
 
         let mut app = test_app(default_bindings());
@@ -17232,7 +17232,7 @@ not_a_real_action = ["x"]
                 ..
             } => {
                 assert!(matches!(request, CreateAgentRequest::ForkSession { .. }));
-                assert!(input.text.is_empty());
+                assert_eq!(input.text, "");
                 assert!(!*randomize_name);
                 assert_eq!(*focus, NameNewAgentFocus::Input);
             }
@@ -17259,7 +17259,7 @@ not_a_real_action = ["x"]
                 ..
             } => {
                 assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
-                assert!(input.text.is_empty());
+                assert_eq!(input.text, "");
                 assert!(!*randomize_name);
                 assert_eq!(*focus, NameNewAgentFocus::Input);
             }
@@ -17638,7 +17638,7 @@ not_a_real_action = ["x"]
                 ..
             } => {
                 assert!(*randomize_name);
-                assert!(!input.text.is_empty());
+                assert_ne!(input.text, "");
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
@@ -17665,7 +17665,7 @@ not_a_real_action = ["x"]
             } => {
                 assert!(matches!(request, CreateAgentRequest::ForkSession { .. }));
                 assert!(*randomize_name);
-                assert!(!input.text.is_empty());
+                assert_ne!(input.text, "");
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
@@ -18608,7 +18608,7 @@ not_a_real_action = ["x"]
             } => {
                 assert!(*randomize_name);
                 assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
-                assert!(!input.text.is_empty());
+                assert_ne!(input.text, "");
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
                 input.text.clone()
             }
@@ -21987,7 +21987,7 @@ not_a_real_action = ["x"]
     fn a_multi_row_selection_keeps_its_blank_rows() {
         let cells = [(1u16, 0u16, "a"), (3, 0, "b")];
         assert_eq!(assemble_selection_text(&cells, 0, 0, 4), "\na\n\nb\n");
-        assert!(assemble_selection_text(&[], 0, 0, 4).is_empty());
+        assert_eq!(assemble_selection_text(&[], 0, 0, 4), "");
     }
 
     /// Output arriving after the drag must not change what the copy yields.
@@ -25650,7 +25650,7 @@ cyan = "#00ffff"
             } => {
                 assert!(!*editing_path);
                 assert!(path_input.is_empty());
-                assert!(tab_completions.is_empty());
+                assert_eq!(tab_completions, &Vec::<String>::new());
             }
             other => panic!("expected browser prompt, got {other:?}"),
         }
@@ -30280,7 +30280,7 @@ cyan = "#00ffff"
             } => {
                 assert!(*randomize_name);
                 assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
-                assert!(!input.text.is_empty());
+                assert_ne!(input.text, "");
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
@@ -30476,7 +30476,7 @@ cyan = "#00ffff"
             panic!("expected the clone form, got {:?}", app.prompt);
         };
         assert!(*randomize_name);
-        assert!(!agent_name.text.is_empty());
+        assert_ne!(agent_name.text, "");
         tap(&mut app, KeyCode::Esc);
 
         app.engine
@@ -30507,7 +30507,7 @@ cyan = "#00ffff"
 
         // Space toggles the box and fills the name, then clears it again.
         tap(&mut app, KeyCode::Char(' '));
-        assert!(!clone_prompt_fields(&app).2.is_empty());
+        assert_ne!(clone_prompt_fields(&app).2, "");
         tap(&mut app, KeyCode::Char(' '));
         assert_eq!(clone_prompt_fields(&app).2, "");
 
@@ -32948,8 +32948,8 @@ cyan = "#00ffff"
 
         app.process_raw_input_bytes(b"A");
 
-        assert!(app.raw_input_buf.is_empty());
-        assert!(app.raw_input_parser.pending().is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "the completed arrow sequence must reach the focused PTY"
@@ -32974,8 +32974,8 @@ cyan = "#00ffff"
             "the intercept must open the macro bar"
         );
         assert_eq!(app.input_target, InputTarget::None);
-        assert!(app.raw_input_buf.is_empty());
-        assert!(app.raw_input_parser.pending().is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(
             app.engine.pty_input.contains_key(&slot_tab),
             "bytes before the intercept must be flushed and stamped first"
@@ -34023,7 +34023,7 @@ cyan = "#00ffff"
             InputTarget::None,
             "timed-out bare ESC should resolve as ToggleFullscreen"
         );
-        assert!(app.raw_input_buf.is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
     }
 
     #[test]
@@ -34048,10 +34048,10 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
         assert!(!app.raw_paste.in_bracket);
-        assert!(app.raw_input_buf.is_empty());
-        assert!(app.raw_input_parser.pending().is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        assert_eq!(app.raw_input_parser.pending(), b"");
         assert!(!app.raw_input_parser.in_bracket_paste());
-        assert!(app.loading_input_buf.is_empty());
+        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
     }
 
     #[test]
@@ -34066,9 +34066,9 @@ cyan = "#00ffff"
         assert!(!app.poll_and_forward_raw_input().expect("poll raw input"));
 
         assert_eq!(app.input_target, InputTarget::None);
-        assert!(app.raw_input_parser.pending().is_empty());
-        assert!(app.raw_input_buf.is_empty());
-        assert!(app.loading_input_buf.is_empty());
+        assert_eq!(app.raw_input_parser.pending(), b"");
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        assert_eq!(app.loading_input_buf, Vec::<u8>::new());
         assert_eq!(app.status.message(), "Agent disconnected.");
     }
 
@@ -35293,7 +35293,7 @@ cyan = "#00ffff"
         assert_eq!(app.raw_input_buf, b"\x1b");
         assert!(!app.scan_loading_phase(b"[I"));
 
-        assert!(app.raw_input_buf.is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
         assert!(
             app.terminal_focus
                 .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO)
@@ -35462,7 +35462,7 @@ cyan = "#00ffff"
         // We should still be in interactive mode (nothing intercepted).
         assert_eq!(app.input_target, InputTarget::Agent);
         // The raw_input_buf should be empty (no remainder).
-        assert!(app.raw_input_buf.is_empty());
+        assert_eq!(app.raw_input_buf, Vec::<u8>::new());
     }
 
     fn app_with_two_macros() -> App {
@@ -36904,7 +36904,7 @@ cyan = "#00ffff"
             !rendered.contains("hello"),
             "a paste with nothing focused must not reach the PTY; got {rendered:?}"
         );
-        assert!(app.commit_input.text.is_empty());
+        assert_eq!(app.commit_input.text, "");
     }
 
     /// A dormant center pane has no PTY to send to, so the Center-scope chord
@@ -38385,7 +38385,7 @@ cyan = "#00ffff"
             !status.contains("No project"),
             "dux never found out whether a project has it, so it must not say none does: {status}"
         );
-        assert!(app.dispatched_pr_lookups.is_empty());
+        assert_eq!(app.dispatched_pr_lookups, Vec::<(String, String)>::new());
     }
 
     #[test]

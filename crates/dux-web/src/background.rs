@@ -1077,7 +1077,10 @@ mod tests {
     #[test]
     fn no_legs_left_shows_no_addresses_rather_than_the_ones_bound_at_start() {
         let captured = vec!["http://127.0.0.1:8080".to_string()];
-        assert!(super::urls_to_show(Some(Vec::new()), &captured).is_empty());
+        assert_eq!(
+            super::urls_to_show(Some(Vec::new()), &captured),
+            Vec::<String>::new()
+        );
         assert_eq!(
             super::urls_to_show(Some(vec!["http://100.64.0.5:8080".to_string()]), &captured),
             vec!["http://100.64.0.5:8080".to_string()],

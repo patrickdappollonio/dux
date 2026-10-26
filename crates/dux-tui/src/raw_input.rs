@@ -501,28 +501,28 @@ mod tests {
                 b"\x1b[O".as_slice(),
             ]
         );
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
     fn single_printable_ascii() {
         let (seqs, rem) = split_sequences(b"a");
         assert_eq!(seqs, vec![b"a".as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
     fn single_control_char() {
         let (seqs, rem) = split_sequences(b"\x07");
         assert_eq!(seqs, vec![b"\x07".as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
     fn del_byte() {
         let (seqs, rem) = split_sequences(b"\x7f");
         assert_eq!(seqs, vec![b"\x7f".as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -530,7 +530,7 @@ mod tests {
         let input = "ñ".as_bytes(); // 0xc3 0xb1
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -538,7 +538,7 @@ mod tests {
         let input = "€".as_bytes(); // 0xe2 0x82 0xac
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -546,7 +546,7 @@ mod tests {
         let input = "𐍈".as_bytes(); // 4-byte UTF-8
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -554,7 +554,7 @@ mod tests {
         let input = b"\x1b[A";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input.as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -562,7 +562,7 @@ mod tests {
         let input = b"\x1b[5~";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input.as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
         let input = b"\x1b[1;5C";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input.as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         let input = b"\x1bOP";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input.as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -587,13 +587,13 @@ mod tests {
         let input = b"\x1ba";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs, vec![input.as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
     fn bare_esc_at_end() {
         let (seqs, rem) = split_sequences(b"\x1b");
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, b"\x1b");
     }
 
@@ -602,7 +602,7 @@ mod tests {
         // ESC [ 5: missing final byte
         let input = b"\x1b[5";
         let (seqs, rem) = split_sequences(input);
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, input.as_slice());
     }
 
@@ -611,7 +611,7 @@ mod tests {
         // First byte of a 2-byte UTF-8 sequence, missing continuation
         let input = b"\xc3";
         let (seqs, rem) = split_sequences(input);
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, input.as_slice());
     }
 
@@ -620,7 +620,7 @@ mod tests {
         // ESC O: missing the third byte
         let input = b"\x1bO";
         let (seqs, rem) = split_sequences(input);
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, input.as_slice());
     }
 
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(seqs[1], b"\x07");
         assert_eq!(seqs[2], b"\x1b[A");
         assert_eq!(seqs[3], "ñ".as_bytes());
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -654,8 +654,8 @@ mod tests {
     #[test]
     fn empty_buffer() {
         let (seqs, rem) = split_sequences(b"");
-        assert!(seqs.is_empty());
-        assert!(rem.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -666,14 +666,14 @@ mod tests {
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0], b"\x1b[5~");
         assert_eq!(seqs[1], b"\x1b[6~");
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
     fn space_byte() {
         let (seqs, rem) = split_sequences(b" ");
         assert_eq!(seqs, vec![b" ".as_slice()]);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -739,7 +739,7 @@ mod tests {
         let input = b"\x1b[<0;50;10M\x1b[<0;50;10m";
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs.len(), 2);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
         assert!(is_sgr_mouse(seqs[0]));
         assert!(is_sgr_mouse(seqs[1]));
     }
@@ -751,34 +751,40 @@ mod tests {
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0], b"\x1b");
         assert_eq!(seqs[1], b"\x1b[<35;138;12M");
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
         assert!(is_sgr_mouse(seqs[1]));
     }
 
     #[test]
     fn parser_keeps_fragmented_csi_pending_until_complete() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b[").is_empty());
+        assert_eq!(
+            parser.feed_sequences(b"\x1b["),
+            Vec::<ParsedSequence>::new()
+        );
         assert_eq!(parser.pending(), b"\x1b[");
 
         let seqs = parser.feed_sequences(b"5~");
         assert_eq!(seqs[0].bytes, b"\x1b[5~".to_vec());
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
     fn parser_resolves_timed_out_bare_esc() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        assert_eq!(parser.feed_sequences(b"\x1b"), Vec::<ParsedSequence>::new());
         assert_eq!(parser.pending(), b"\x1b");
         assert_eq!(parser.resolve_pending_esc(), Some(b"\x1b".to_vec()));
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
     fn parser_does_not_resolve_pending_csi_as_bare_esc() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b[").is_empty());
+        assert_eq!(
+            parser.feed_sequences(b"\x1b["),
+            Vec::<ParsedSequence>::new()
+        );
         assert_eq!(parser.pending(), b"\x1b[");
         assert!(parser.resolve_pending_esc().is_none());
         assert_eq!(parser.pending(), b"\x1b[");
@@ -787,26 +793,26 @@ mod tests {
     #[test]
     fn parser_keeps_alt_key_as_single_sequence() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        assert_eq!(parser.feed_sequences(b"\x1b"), Vec::<ParsedSequence>::new());
         let seqs = parser.feed_sequences(b"x");
         assert_eq!(seqs[0].bytes, b"\x1bx".to_vec());
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
     fn parser_does_not_strip_mouse_prefix_after_pending_esc() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        assert_eq!(parser.feed_sequences(b"\x1b"), Vec::<ParsedSequence>::new());
         let seqs = parser.feed_sequences(b"\x1b[<35;138;12M");
         assert_eq!(seqs[0].bytes, b"\x1b".to_vec());
         assert_eq!(seqs[1].bytes, b"\x1b[<35;138;12M".to_vec());
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
     fn parser_handles_fragmented_esc_then_sgr_mouse() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        assert_eq!(parser.feed_sequences(b"\x1b"), Vec::<ParsedSequence>::new());
         let first = parser.feed_sequences(b"\x1b[<35;");
         assert_eq!(
             first,
@@ -825,18 +831,21 @@ mod tests {
                 in_bracket_paste: false,
             }]
         );
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
     fn parser_completes_malformed_osc_before_new_escape() {
         let mut parser = RawInputParser::default();
-        assert!(parser.feed_sequences(b"\x1b]11;rgb").is_empty());
+        assert_eq!(
+            parser.feed_sequences(b"\x1b]11;rgb"),
+            Vec::<ParsedSequence>::new()
+        );
         let seqs = parser.feed_sequences(b"\x1b[A");
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0].bytes, b"\x1b]11;rgb");
         assert_eq!(seqs[1].bytes, b"\x1b[A");
-        assert!(parser.pending().is_empty());
+        assert_eq!(parser.pending(), b"");
     }
 
     #[test]
@@ -865,7 +874,7 @@ mod tests {
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs.len(), 1);
         assert_eq!(seqs[0], input.as_slice());
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -875,7 +884,7 @@ mod tests {
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs.len(), 1);
         assert_eq!(seqs[0], input.as_slice());
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -886,7 +895,7 @@ mod tests {
         let (seqs, rem) = split_sequences(input);
         assert_eq!(seqs.len(), 1);
         assert_eq!(seqs[0], input.as_slice());
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -894,7 +903,7 @@ mod tests {
         // Incomplete OSC: no terminator yet.
         let input = b"\x1b]11;rgb:0000/0000";
         let (seqs, rem) = split_sequences(input);
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, input.as_slice());
     }
 
@@ -903,7 +912,7 @@ mod tests {
         // OSC followed by ESC but no backslash yet.
         let input = b"\x1b]11;rgb:0000/0000/0000\x1b";
         let (seqs, rem) = split_sequences(input);
-        assert!(seqs.is_empty());
+        assert_eq!(seqs, Vec::<&[u8]>::new());
         assert_eq!(rem, input.as_slice());
     }
 
@@ -917,7 +926,7 @@ mod tests {
         assert_eq!(seqs.len(), 2);
         assert_eq!(seqs[0], b"\x1b]11;rgb:0000/0000/0000\x07");
         assert_eq!(seqs[1], b"a");
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -935,7 +944,7 @@ mod tests {
         );
         // The full OSC including terminator must be preserved.
         assert_eq!(seqs[0], input.as_slice());
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
     }
 
     #[test]
@@ -1185,7 +1194,7 @@ mod tests {
         input.extend_from_slice(BRACKET_PASTE_END);
 
         let (seqs, rem) = split_sequences(&input);
-        assert!(rem.is_empty());
+        assert_eq!(rem, b"");
         // 1 start marker + 5 chars + 1 end marker = 7 sequences
         assert_eq!(seqs.len(), 7);
         assert_eq!(seqs[0], BRACKET_PASTE_START);

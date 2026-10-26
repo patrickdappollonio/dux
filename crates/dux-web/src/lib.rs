@@ -5688,7 +5688,10 @@ mod live_tailscale_mode_tests {
         *slot.lock().unwrap() = Err(TailscaleUnavailable::CommandFailed);
         h.control.set_mode(TailscaleMode::Yes).await;
         // The name is withdrawn until a look succeeds.
-        assert!(h.control.own_magicdns_name().snapshot().is_empty());
+        assert_eq!(
+            h.control.own_magicdns_name().snapshot(),
+            Vec::<String>::new()
+        );
         assert_eq!(
             status_for(&app, "box.tail.ts.net").await,
             StatusCode::FORBIDDEN
@@ -5722,7 +5725,7 @@ mod live_tailscale_mode_tests {
             "precondition: the startup look admitted it"
         );
         ts.start_watcher_if_wanted();
-        assert!(control.own_magicdns_name().snapshot().is_empty());
+        assert_eq!(control.own_magicdns_name().snapshot(), Vec::<String>::new());
     }
 
     /// Funnel on for something dux does not show (a TCP forward, another port).

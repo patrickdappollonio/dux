@@ -2055,9 +2055,9 @@ pub(crate) mod tests {
 
         {
             let recorded = recorded.lock().expect("not poisoned");
-            assert!(recorded.reactions.is_empty());
+            assert_eq!(recorded.reactions, Vec::<String>::new());
             assert_eq!(recorded.serviced, 0);
-            assert!(recorded.activity.is_empty());
+            assert_eq!(recorded.activity, Vec::<u64>::new());
         }
 
         let socket_core = Arc::new(Mutex::new(Recorded::default()));

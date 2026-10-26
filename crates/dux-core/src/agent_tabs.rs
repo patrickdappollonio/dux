@@ -76,7 +76,7 @@ mod tests {
                 "claude 2".to_string()
             ]
         );
-        assert!(tab_labels(&[]).is_empty());
+        assert_eq!(tab_labels(&[]), Vec::<String>::new());
     }
 
     // ── SHARED VECTORS with agentTabs.test.ts `tabProseLabel` ──────────────────

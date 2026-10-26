@@ -439,7 +439,10 @@ mod tests {
     #[test]
     fn zero_width_yields_nothing() {
         // A paragraph with no room renders no rows, so the count must be 0 too.
-        assert!(wrap_styled_lines(&[Line::from("anything")], 0).is_empty());
+        assert_eq!(
+            wrap_styled_lines(&[Line::from("anything")], 0),
+            Vec::<Line<'_>>::new()
+        );
     }
 
     /// The appearance guarantee, MEASURED rather than argued: pre-wrapping and

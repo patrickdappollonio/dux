@@ -725,7 +725,7 @@ mod tests {
             .expect("a dormant agent sits under the Inactive toggle");
         app.selected_left = toggle;
         render(&mut app);
-        assert!(attached_here(&app).is_empty());
+        assert_eq!(attached_here(&app), Vec::<String>::new());
 
         let started = app.engine.sessions[0].clone();
         app.engine

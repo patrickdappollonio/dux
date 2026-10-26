@@ -2563,21 +2563,21 @@ mod tests {
         // One sentence for one event: the Funnel state says it, the name news
         // does not say it again.
         let plain = identity("box.tail.ts.net", &[]);
-        assert!(
+        assert_eq!(
             identity_news(
                 Some(&plain),
                 &tcp_funnelled("box.tail.ts.net"),
                 Password::Unset
-            )
-            .is_empty()
+            ),
+            Vec::<(dux_core::statusline::StatusTone, StatusText)>::new()
         );
-        assert!(
+        assert_eq!(
             identity_news(
                 Some(&tcp_funnelled("box.tail.ts.net")),
                 &plain,
                 Password::Unset
-            )
-            .is_empty()
+            ),
+            Vec::<(dux_core::statusline::StatusTone, StatusText)>::new()
         );
     }
 
@@ -2592,13 +2592,17 @@ mod tests {
     #[test]
     fn the_news_follows_the_name_dux_admits_not_the_one_tailscale_reports() {
         // A Headscale rename: dux never answered to either name.
-        assert!(
-            identity_news(Some(&headscale("box")), &headscale("box2"), Password::Unset).is_empty()
+        assert_eq!(
+            identity_news(Some(&headscale("box")), &headscale("box2"), Password::Unset),
+            Vec::<(dux_core::statusline::StatusTone, StatusText)>::new()
         );
         // A Headscale name going away: dux never answered to it.
         let mut gone = headscale("box");
         gone.status.dns_name = None;
-        assert!(identity_news(Some(&headscale("box")), &gone, Password::Unset).is_empty());
+        assert_eq!(
+            identity_news(Some(&headscale("box")), &gone, Password::Unset),
+            Vec::<(dux_core::statusline::StatusTone, StatusText)>::new()
+        );
         // A rename under Funnel: dux answers to neither, and only Funnel is news.
         let before = identity("box.old-tailnet.ts.net", &[]);
         let after = funnelled_elsewhere("box.example-tailnet.ts.net");

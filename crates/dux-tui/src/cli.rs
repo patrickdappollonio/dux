@@ -3392,7 +3392,7 @@ mod tests {
             broken,
             "a refused restore must leave the file byte-identical"
         );
-        assert!(backups(&harness).is_empty());
+        assert_eq!(backups(&harness), Vec::<PathBuf>::new());
     }
 
     #[test]

@@ -9674,7 +9674,10 @@ mod tests {
             })
             .expect("detach");
         assert_eq!(outcome.status.expect("detach confirmation").tone, "info");
-        assert!(engine.session_store.load_pr_overrides().unwrap().is_empty());
+        assert_eq!(
+            engine.session_store.load_pr_overrides().unwrap(),
+            Vec::<crate::storage::StoredPr>::new()
+        );
         assert!(engine.pr_overrides.is_empty());
         assert!(
             !engine.pr_statuses.contains_key("s1"),
@@ -11468,12 +11471,9 @@ mod tests {
         // The inline rollback undid both the in-memory list and the SQLite row,
         // so nothing persisted.
         assert!(engine.projects.is_empty());
-        assert!(
-            engine
-                .session_store
-                .load_projects()
-                .expect("load projects")
-                .is_empty()
+        assert_eq!(
+            engine.session_store.load_projects().expect("load projects"),
+            Vec::<crate::config::ProjectConfig>::new()
         );
 
         // A clone whose add fails keeps the clone, creates no agent, and says so.
@@ -12049,7 +12049,10 @@ mod tests {
                 "the worker stopped".into(),
             )),
         });
-        assert!(engine.worktree_ops().holders(&dest).is_empty());
+        assert_eq!(
+            engine.worktree_ops().holders(&dest),
+            Vec::<crate::worktree_ops::WorktreeOpKind>::new()
+        );
         assert!(!engine.is_in_flight(&key));
     }
 
@@ -12967,7 +12970,7 @@ mod tests {
                 agent_label: "feat".to_string(),
                 message: "nope".to_string(),
             }));
-        assert!(wire_statuses_from_reaction(&r).is_empty());
+        assert_eq!(wire_statuses_from_reaction(&r), Vec::<WireStatus>::new());
     }
 
     #[test]
@@ -12975,7 +12978,7 @@ mod tests {
         let r = EventReaction::AgentLaunchFailedView(Box::new(
             AgentLaunchFailedOutcome::ResumeFallback,
         ));
-        assert!(wire_statuses_from_reaction(&r).is_empty());
+        assert_eq!(wire_statuses_from_reaction(&r), Vec::<WireStatus>::new());
     }
 
     #[test]
@@ -12998,9 +13001,9 @@ mod tests {
                 startup_result_error: None,
             },
         };
-        assert!(
-            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(committed)))
-                .is_empty()
+        assert_eq!(
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(committed))),
+            Vec::<WireStatus>::new()
         );
 
         let startup_failed = crate::engine::AgentLaunchReadyOutcome {
@@ -13014,11 +13017,11 @@ mod tests {
                 error: "db error".to_string(),
             },
         };
-        assert!(
+        assert_eq!(
             wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
                 startup_failed
-            )))
-            .is_empty()
+            ))),
+            Vec::<WireStatus>::new()
         );
     }
 
@@ -13891,7 +13894,7 @@ mod tests {
             view: AgentLaunchReadyView::SessionMissing,
         }));
         let followup = engine.drive_web_launch_followup(&reaction);
-        assert!(followup.statuses.is_empty());
+        assert_eq!(followup.statuses, Vec::<WireStatus>::new());
         assert_eq!(followup.clear_keys, vec![op_id]);
         assert!(engine.pending_web_launch_ops.is_empty());
     }
@@ -17165,11 +17168,11 @@ mod tests {
                 status_quiet: QuietSurfaces::LOUD,
                 view,
             };
-            assert!(
+            assert_eq!(
                 wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
                     outcome
-                )))
-                .is_empty()
+                ))),
+                Vec::<WireStatus>::new()
             );
         }
 
@@ -17195,11 +17198,11 @@ mod tests {
             },
             AgentLaunchFailedOutcome::ResumeFallback,
         ] {
-            assert!(
+            assert_eq!(
                 wire_statuses_from_reaction(&EventReaction::AgentLaunchFailedView(Box::new(
                     outcome
-                )))
-                .is_empty()
+                ))),
+                Vec::<WireStatus>::new()
             );
         }
     }

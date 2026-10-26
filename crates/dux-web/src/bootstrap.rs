@@ -369,8 +369,14 @@ mod tests {
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let spine = engine.spine();
-        assert!(spine.projects.is_empty());
-        assert!(spine.sessions.is_empty());
+        assert_eq!(
+            spine.projects,
+            Vec::<dux_core::viewmodel::ProjectView>::new()
+        );
+        assert_eq!(
+            spine.sessions,
+            Vec::<dux_core::viewmodel::SessionView>::new()
+        );
     }
 
     #[test]

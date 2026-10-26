@@ -1087,7 +1087,7 @@ mod tests {
         let mut ti = TextInput::new();
         // Ctrl+a should not insert 'a'
         assert!(!ti.handle_key(key_ctrl(KeyCode::Char('a'))));
-        assert!(ti.text.is_empty());
+        assert_eq!(ti.text, "");
     }
 
     #[test]
@@ -1135,7 +1135,7 @@ mod tests {
     fn singleline_enter_not_consumed() {
         let mut ti = TextInput::new();
         assert!(!ti.handle_key(key(KeyCode::Enter)));
-        assert!(ti.text.is_empty());
+        assert_eq!(ti.text, "");
     }
 
     #[test]

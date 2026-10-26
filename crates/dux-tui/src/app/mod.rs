@@ -9341,7 +9341,7 @@ mod tests {
         // Path match (segment not in any name).
         assert_eq!(vis("work"), vec![1]);
         // No match.
-        assert!(vis("zzz").is_empty());
+        assert_eq!(vis("zzz"), Vec::<usize>::new());
     }
 
     #[test]

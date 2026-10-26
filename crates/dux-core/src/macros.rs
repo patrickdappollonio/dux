@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(macro_payload_bytes("\na\n").as_slice(), b"\x1b\ra\x1b\r");
 
         // Empty input yields empty payload.
-        assert!(macro_payload_bytes("").is_empty());
+        assert_eq!(macro_payload_bytes(""), Vec::<u8>::new());
     }
 
     #[test]

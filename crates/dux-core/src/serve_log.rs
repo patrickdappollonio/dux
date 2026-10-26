@@ -588,7 +588,7 @@ mod tests {
         let labels = rows.last().unwrap();
         assert!(labels.text().contains(QR_IP) && labels.text().contains(QR_NAME));
         assert!(labels.segments.iter().any(|s| s.role == LogRole::Url));
-        assert!(qr_lines("12:00:00", &[], 120).is_empty());
+        assert_eq!(qr_lines("12:00:00", &[], 120), Vec::<LogLine>::new());
     }
 
     #[test]

@@ -253,7 +253,7 @@ mod tests {
     fn ring_starts_empty_with_no_browsers() {
         let ring = ActivityRing::new(10);
         let snap = ring.snapshot();
-        assert!(snap.lines.is_empty());
+        assert_eq!(snap.lines, Vec::<LogLine>::new());
         assert_eq!(snap.browsers, 0);
         assert_eq!(snap.generation, 0);
     }
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn the_live_url_list_has_its_own_version_and_never_moves_the_line_count() {
         let ring = ActivityRing::new(10);
-        assert!(ring.serve_urls().is_empty());
+        assert_eq!(ring.serve_urls(), Vec::<String>::new());
         let before = (ring.generation(), ring.urls_version());
         let urls = vec!["http://127.0.0.1:3890".to_string()];
         ring.set_serve_urls(urls.clone());
@@ -342,7 +342,7 @@ mod tests {
         let (generation, new) = ring.lines_since(seen);
         assert_eq!(generation, 3);
         assert_eq!(texts_of(&new), vec!["b", "c"]);
-        assert!(ring.lines_since(generation).1.is_empty());
+        assert_eq!(ring.lines_since(generation).1, Vec::<LogLine>::new());
     }
 
     #[test]

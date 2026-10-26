@@ -1311,12 +1311,18 @@ mod tests {
         // list equal to the one before the ban, lifts it.
         live.store(&with_bans(&["198.51.100.1"]), Some("v1"));
         live.store(&with_bans(&[]), Some("v2 the owner's edit"));
-        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            Vec::<String>::new()
+        );
         // Even when the reload of the write's own text never landed.
         let live = LiveAuth::default();
         live.update(ban("198.51.100.1"), Some(wrote("v0", "v1")));
         live.store(&with_bans(&[]), Some("v2 the owner's edit"));
-        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            Vec::<String>::new()
+        );
         live.store(&with_bans(&[]), Some("v0"));
         assert!(
             live.snapshot().config.blocked_addresses.is_empty(),
@@ -1342,7 +1348,10 @@ mod tests {
         );
         live.store(&with_bans(&["198.51.100.2", "198.51.100.3"]), Some("v2"));
         live.store(&with_bans(&[]), Some("v3"));
-        assert!(live.snapshot().config.blocked_addresses.is_empty());
+        assert_eq!(
+            live.snapshot().config.blocked_addresses,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

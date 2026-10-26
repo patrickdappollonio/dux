@@ -5337,7 +5337,7 @@ id = \"b\"
             report.preserved,
             vec!["the entry on line 3 of [projects[0]]"]
         );
-        assert!(report.dropped.is_empty());
+        assert_eq!(report.dropped, Vec::<String>::new());
     }
 
     /// A key `insert_at_path` cannot place must be REPORTED, not silently
@@ -5397,7 +5397,7 @@ second_note = \"nowhere to go\"
 
         assert!(rendered.to_string().contains("auth = \"token\""));
         assert_eq!(report.preserved, vec!["server.auth"]);
-        assert!(report.dropped.is_empty());
+        assert_eq!(report.dropped, Vec::<String>::new());
     }
 
     #[test]

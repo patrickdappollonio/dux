@@ -1405,7 +1405,7 @@ mod tests {
             .unwrap();
         assert_eq!(ops.holders(&wt), vec![WorktreeOpKind::BranchRename]);
         ops.release_owner(&owner);
-        assert!(ops.holders(&wt).is_empty());
+        assert_eq!(ops.holders(&wt), Vec::<WorktreeOpKind>::new());
     }
 
     #[test]

@@ -1131,7 +1131,7 @@ fn an_inline_server_auth_keeps_its_password_and_bans() {
     );
     let (_d, path, loaded, q) = setup(&text);
     let mut m = loaded.clone();
-    assert!(!m.server.auth.blocked_addresses.is_empty());
+    assert_ne!(m.server.auth.blocked_addresses, Vec::<String>::new());
     for round in 0..3 {
         m.server.port = 4000 + round;
         m.ui.left_width_pct = 30 + round;

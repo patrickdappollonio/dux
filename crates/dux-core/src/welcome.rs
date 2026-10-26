@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn web_tips_is_non_empty() {
-        assert!(!web_tips().is_empty());
+        assert_ne!(web_tips(), Vec::<String>::new());
     }
 
     /// House style: em-dashes read as machine-written prose, so tip text uses

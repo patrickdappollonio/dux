@@ -2973,7 +2973,10 @@ mod tests {
         // A session whose leader is gone is still trusted only through what
         // was recorded: an unknown start time does not make a stranger ours.
         let table = vec![theirs, their_child];
-        assert!(members(&table, &[session(100)], &[], 9).is_empty());
+        assert_eq!(
+            members(&table, &[session(100)], &[], 9),
+            Vec::<ProcRow>::new()
+        );
     }
 
     /// A session registered while the prune is reading the process table is
@@ -3041,7 +3044,10 @@ mod tests {
         let mut leader = row(100, 1, 100);
         leader.start_time = 5_000 * SEC;
         let table = vec![leader, row(101, 100, 100)];
-        assert!(members(&table, &[session(100)], &[], 9).is_empty());
+        assert_eq!(
+            members(&table, &[session(100)], &[], 9),
+            Vec::<ProcRow>::new()
+        );
     }
 
     #[test]
@@ -3062,7 +3068,10 @@ mod tests {
             start_time: 999 * SEC,
             boot: current_boot(),
         }];
-        assert!(members(&table, &[session(100)], &stale, 9).is_empty());
+        assert_eq!(
+            members(&table, &[session(100)], &stale, 9),
+            Vec::<ProcRow>::new()
+        );
     }
 
     #[test]
@@ -3072,7 +3081,10 @@ mod tests {
             boot: current_boot().wrapping_add(1),
             ..session(100)
         };
-        assert!(members(&table, &[earlier_boot], &[], 9).is_empty());
+        assert_eq!(
+            members(&table, &[earlier_boot], &[], 9),
+            Vec::<ProcRow>::new()
+        );
     }
 
     #[test]
@@ -3128,7 +3140,7 @@ mod tests {
         };
         registry.register("a1", old, here);
         registry.register("a2", newer, std::path::Path::new("/work/a2"));
-        assert!(registry.sessions_of("a1").is_empty());
+        assert_eq!(registry.sessions_of("a1"), Vec::<ProcessSession>::new());
         assert_eq!(registry.sessions_of("a2"), vec![newer]);
     }
 
@@ -3231,7 +3243,7 @@ mod tests {
             purge(&mut ops, &[session(100)], &[], Duration::from_secs(5)),
             PurgeOutcome::Clean { stopped: 0 }
         );
-        assert!(ops.sent.is_empty());
+        assert_eq!(ops.sent, Vec::<(u32, rustix::process::Signal)>::new());
     }
 
     #[test]
@@ -3303,7 +3315,7 @@ mod tests {
         assert!(guard.agent_deleted());
         drop(guard);
         assert!(!registry.startup_running("a1"));
-        assert!(registry.sessions_of("a1").is_empty());
+        assert_eq!(registry.sessions_of("a1"), Vec::<ProcessSession>::new());
         assert_eq!(
             registry.sessions_in(std::path::Path::new("/work/a1")),
             vec![session(100)],
@@ -3408,7 +3420,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");
         let store = crate::storage::SessionStore::open(&db).unwrap();
-        assert!(store.load_process_registry_strict().unwrap().is_empty());
+        assert_eq!(
+            store.load_process_registry_strict().unwrap(),
+            Vec::<StoredSession>::new()
+        );
         store
             .replace_process_registry(&[StoredSession {
                 owner: Some("a1".to_string()),
@@ -3428,7 +3443,10 @@ mod tests {
         )
         .unwrap();
         assert!(store.load_process_registry_strict().is_err());
-        assert!(store.load_process_registry().unwrap().is_empty());
+        assert_eq!(
+            store.load_process_registry().unwrap(),
+            Vec::<StoredSession>::new()
+        );
     }
 
     /// review9: the persisted registry entry carries the session's label, so a

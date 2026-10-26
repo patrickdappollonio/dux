@@ -5745,10 +5745,9 @@ mod tests {
         };
         // Read with the registry's own clock far from the deadline: only the
         // revocation, not the registry's own quiet rule, can empty it here.
-        assert!(
-            attachments
-                .blockers(&scope, None, std::time::Instant::now())
-                .is_empty()
+        assert_eq!(
+            attachments.blockers(&scope, None, std::time::Instant::now()),
+            Vec::<dux_core::attachments::Blocker>::new()
         );
         assert_eq!(owners.current_owner("s1-slot").0, None);
         let cleared = events.try_recv().expect("the cleared owner is announced");
@@ -7827,7 +7826,7 @@ mod tests {
         };
         let new = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
 
-        assert!(new.fine.is_empty());
+        assert_eq!(new.fine, Vec::<String>::new());
         assert!(!new.workspace);
         assert!(!subscribed.contains(&topic));
         assert!(!bus.has_interest(&topic));

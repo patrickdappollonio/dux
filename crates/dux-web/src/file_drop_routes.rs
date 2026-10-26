@@ -1651,7 +1651,7 @@ mod tests {
             // hear about it now rather than up to ten seconds later.
             let world = drop_world().await;
             let (generation, refreshes) = world.refreshes();
-            assert!(refreshes.is_empty());
+            assert_eq!(refreshes, Vec::<String>::new());
 
             let resp = world
                 .app

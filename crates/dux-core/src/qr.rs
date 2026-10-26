@@ -357,7 +357,10 @@ mod tests {
     fn text_too_long_for_any_code_draws_nothing() {
         let huge = "x".repeat(8000);
         assert_eq!(code_rows(&huge, Polarity::DarkModulesFilled), None);
-        assert!(layout(&[&huge], 200, Polarity::DarkModulesFilled).is_empty());
+        assert_eq!(
+            layout(&[&huge], 200, Polarity::DarkModulesFilled),
+            Vec::<Vec<Segment>>::new()
+        );
     }
 
     #[test]
@@ -456,7 +459,10 @@ mod tests {
 
     #[test]
     fn no_urls_lay_out_to_nothing() {
-        assert!(layout(&[], 80, Polarity::DarkModulesFilled).is_empty());
+        assert_eq!(
+            layout(&[], 80, Polarity::DarkModulesFilled),
+            Vec::<Vec<Segment>>::new()
+        );
     }
 
     /// The code for [`IP_URL`], spaces written as `·` so no editor can trim

@@ -1796,7 +1796,10 @@ pub(super) mod tests {
             })
             .collect();
         assert_eq!(caret.len(), 1, "the caret sits on the one letter a");
-        assert!(split_chips(&buf, &probe, &baseline, chip).is_empty());
+        assert_eq!(
+            split_chips(&buf, &probe, &baseline, chip),
+            Vec::<(u16, String)>::new()
+        );
     }
 
     /// The scan itself, on the shapes it has to catch and the ones it must not.
@@ -1810,8 +1813,11 @@ pub(super) mod tests {
             quoted_runs("│ a \"b\" c \"d e\" │", ""),
             vec!["\"b\"".to_string(), "\"d e\"".to_string()]
         );
-        assert!(quoted_runs("│ Delete  feat/x  now? │", "").is_empty());
-        assert!(quoted_runs("│ a lone \" quote │", "").is_empty());
+        assert_eq!(
+            quoted_runs("│ Delete  feat/x  now? │", ""),
+            Vec::<String>::new()
+        );
+        assert_eq!(quoted_runs("│ a lone \" quote │", ""), Vec::<String>::new());
         assert!(
             quoted_runs("│ \"x\" │", "│ \"x\" │").is_empty(),
             "a run already on screen with no dialog open is not the dialog's"

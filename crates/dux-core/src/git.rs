@@ -9313,7 +9313,7 @@ mod tests {
         );
         assert!(!destination.join("junk.log").exists());
         assert_eq!(summary.copied, 2);
-        assert!(summary.skipped_paths.is_empty());
+        assert_eq!(summary.skipped_paths, Vec::<String>::new());
     }
 
     /// Catches routing `?? dir/` through a bulk directory copy (which would
@@ -12846,12 +12846,12 @@ mod tests {
             countless_paths(&[&stats]),
             vec!["countless.bin".to_string()]
         );
-        assert!(
+        assert_eq!(
             countless_paths(&[&HashMap::from([(
                 "counted.txt".to_string(),
                 DiffStat::Text(3, 1),
-            )])])
-            .is_empty()
+            )])]),
+            Vec::<String>::new()
         );
     }
 

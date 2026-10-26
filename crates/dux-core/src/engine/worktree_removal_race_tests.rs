@@ -719,7 +719,10 @@ fn a_clean_quit_finishes_a_removal_still_waiting_on_the_agent() {
     let _report = fx.engine.shutdown_ptys(Duration::from_secs(1));
 
     assert!(!fx.worktree.exists(), "the quit finished the removal");
-    assert!(pending_rows(&fx.engine).is_empty());
+    assert_eq!(
+        pending_rows(&fx.engine),
+        Vec::<crate::storage::PendingWorktreeRemoval>::new()
+    );
     let branches = crate::test_git::fixture_git()
         .args(["branch", "--list", "feat"])
         .current_dir(&fx.repo)
@@ -789,7 +792,10 @@ fn the_next_start_finishes_a_removal_the_last_run_left_behind() {
         update.message
     );
     assert!(!fx.worktree.exists(), "the removal was finished");
-    assert!(pending_rows(&fx.engine).is_empty());
+    assert_eq!(
+        pending_rows(&fx.engine),
+        Vec::<crate::storage::PendingWorktreeRemoval>::new()
+    );
 }
 
 /// A recorded removal whose directory another agent now works in is refused

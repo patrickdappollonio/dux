@@ -206,7 +206,7 @@ mod tests {
                 p.as_str(),
                 "paragraph has stray whitespace: {p:?}"
             );
-            assert!(!p.is_empty());
+            assert_ne!(p, "");
         }
     }
 

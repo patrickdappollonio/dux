@@ -47,7 +47,10 @@ fn require_written_under_server_is_not_silently_ignored() {
 #[test]
 fn require_in_a_near_miss_table_is_refused() {
     let text = "[server.auht]\nrequire = \"everywhere\"\n";
-    assert!(!dux_core::config::start_problems_of(text).is_empty());
+    assert_ne!(
+        dux_core::config::start_problems_of(text),
+        Vec::<dux_core::config::StartProblem>::new()
+    );
 }
 
 /// A password hash under `password-hash` (kebab case, as many TOML files

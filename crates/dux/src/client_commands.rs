@@ -1029,7 +1029,7 @@ mod tests {
             write_outcome(Ok(("x".to_string(), 0)), &mut gone, &mut err),
             0
         );
-        assert!(err.is_empty());
+        assert_eq!(err, Vec::<u8>::new());
 
         let mut full = Refusing(std::io::ErrorKind::StorageFull);
         assert_eq!(
@@ -1073,6 +1073,6 @@ mod tests {
             &mut err,
         );
         assert_eq!(lines, 1);
-        assert!(err.is_empty());
+        assert_eq!(err, Vec::<u8>::new());
     }
 }

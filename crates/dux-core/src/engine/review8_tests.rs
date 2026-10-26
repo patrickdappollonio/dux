@@ -387,12 +387,18 @@ fn a_leader_dux_has_not_reaped_leads_its_session_without_the_table() {
         exited: false,
     };
     let table = vec![member];
-    assert!(crate::process_sessions::members(&table, &[session], &[], 9).is_empty());
+    assert_eq!(
+        crate::process_sessions::members(&table, &[session], &[], 9),
+        Vec::<crate::process_sessions::ProcRow>::new()
+    );
     crate::process_sessions::note_spawned(session);
     let found = crate::process_sessions::members(&table, &[session], &[], 9);
     crate::process_sessions::note_reaped(session);
     assert_eq!(found.len(), 1, "led while dux has not reaped its leader");
-    assert!(crate::process_sessions::members(&table, &[session], &[], 9).is_empty());
+    assert_eq!(
+        crate::process_sessions::members(&table, &[session], &[], 9),
+        Vec::<crate::process_sessions::ProcRow>::new()
+    );
 }
 
 /// Every change reaches the database through the writer, and `flush` says

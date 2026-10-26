@@ -6645,11 +6645,14 @@ mod tests {
             assert_eq!(plaintext_password_problems(raw).len(), 1, "{raw:?}");
         }
         // A project's own env variable called that is the user's name.
-        assert!(
-            plaintext_passwords("[[projects]]\npath = \"/p\"\nenv = { password = \"s\" }\n")
-                .is_empty()
+        assert_eq!(
+            plaintext_passwords("[[projects]]\npath = \"/p\"\nenv = { password = \"s\" }\n"),
+            Vec::<PlaintextPassword>::new()
         );
-        assert!(plaintext_passwords("[env]\npassword = \"s\"\n").is_empty());
+        assert_eq!(
+            plaintext_passwords("[env]\npassword = \"s\"\n"),
+            Vec::<PlaintextPassword>::new()
+        );
         // `[keys]` names are actions, and `password` is none, whatever shape
         // its value has.
         for raw in ["[keys]\npassword = \"s\"\n", "[keys]\npassword = [\"s\"]\n"] {
@@ -6662,7 +6665,10 @@ mod tests {
                 "{raw:?}"
             );
         }
-        assert!(plaintext_passwords("password = \"s\"\nbroken =\n").is_empty());
+        assert_eq!(
+            plaintext_passwords("password = \"s\"\nbroken =\n"),
+            Vec::<PlaintextPassword>::new()
+        );
     }
 
     /// A printer holding only a value judges it as the start check judges
@@ -6682,7 +6688,10 @@ mod tests {
             ]]
         );
         let inner = value.get("env").expect("env").clone();
-        assert!(plaintext_passwords_at(&["env".to_string()], &inner).is_empty());
+        assert_eq!(
+            plaintext_passwords_at(&["env".to_string()], &inner),
+            Vec::<Vec<PathStep>>::new()
+        );
     }
 
     use std::path::Path;
@@ -8067,7 +8076,7 @@ auth = { minimum_password_score = 9 }
         let mut clean = toml::Table::new();
         clean.insert("left_width_pct".to_string(), toml::Value::Integer(33));
         let (fixed, reset) = prune_invalid_fields("ui", &clean).expect("a clean section is kept");
-        assert!(reset.is_empty());
+        assert_eq!(reset, Vec::<String>::new());
         assert_eq!(fixed, clean);
 
         let mut two_bad = toml::Table::new();
@@ -8523,7 +8532,7 @@ github_integration = false
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 3890);
         assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
-        assert!(config.server.allowed_hosts.is_empty());
+        assert_eq!(config.server.allowed_hosts, Vec::<String>::new());
     }
 
     #[test]
@@ -8804,7 +8813,7 @@ port = 9000
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9000);
         assert_eq!(config.server.tailscale_mode(), TailscaleMode::Auto);
-        assert!(config.server.allowed_hosts.is_empty());
+        assert_eq!(config.server.allowed_hosts, Vec::<String>::new());
     }
 
     /// Deserializing a `[server]` table that omits all three `max_websocket_*` keys
@@ -9006,7 +9015,10 @@ max_websocket_connections = 16
             );
         }
         // A `[projects]` table is no list of projects: its `env` holds no names.
-        assert!(!misplaced_auth_problems("[projects.env]\nrequire = \"everywhere\"\n").is_empty());
+        assert_ne!(
+            misplaced_auth_problems("[projects.env]\nrequire = \"everywhere\"\n"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -9383,7 +9395,10 @@ mod printed_paths_and_carried_values_tests {
         // A loopback bind writes nothing (the default already covers it),
         // and a new key the file sets beside the old one wins, so nothing
         // is carried over into it.
-        assert!(load_corrections_of("[server]\nbind = \"127.0.0.1:3890\"\n").is_empty());
+        assert_eq!(
+            load_corrections_of("[server]\nbind = \"127.0.0.1:3890\"\n"),
+            Vec::<(Vec<String>, String)>::new()
+        );
         assert!(
             load_corrections_of("[server]\nbind = \"0.0.0.0:4000\"\nhost = \"1.2.3.4\"\n")
                 .iter()
@@ -9926,7 +9941,10 @@ mod agent_tabs_cap_tests {
         assert_eq!(web_dragdrop_paste_warnings(&config.providers, "").len(), 2);
 
         // A clean config says nothing at all.
-        assert!(web_dragdrop_paste_warnings(&ProvidersConfig::default(), "").is_empty());
+        assert_eq!(
+            web_dragdrop_paste_warnings(&ProvidersConfig::default(), ""),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

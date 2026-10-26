@@ -344,7 +344,10 @@ fn a_landing_create_holds_its_folder_until_the_guard_drops() {
         vec![crate::worktree_ops::WorktreeOpKind::CreateAgent]
     );
     drop(guard);
-    assert!(engine.worktree_ops().holders(&folder).is_empty());
+    assert_eq!(
+        engine.worktree_ops().holders(&folder),
+        Vec::<crate::worktree_ops::WorktreeOpKind>::new()
+    );
 }
 
 /// The registry is written to its own table on every change and read back at

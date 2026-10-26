@@ -1088,7 +1088,7 @@ mod tests {
         let second = listed.iter().find(|c| c.id == "e2").unwrap();
         assert!(second.verified);
         assert!(!second.driving);
-        assert!(second.attachments.is_empty());
+        assert_eq!(second.attachments, Vec::<AttachmentView>::new());
     }
 
     /// Only the asking connection is exempt: a second browser tab on the same
@@ -1465,18 +1465,16 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            attachments
-                .blockers(&agent_scope("s1"), None, at(301))
-                .is_empty()
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), None, at(301)),
+            Vec::<Blocker>::new()
         );
 
         attachments.deregister("phone", Ending::Lost);
         attachments.inherit("phone", "phone-again");
-        assert!(
-            attachments
-                .blockers(&agent_scope("s1"), Some("phone-again"), at(60))
-                .is_empty()
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), Some("phone-again"), at(60)),
+            Vec::<Blocker>::new()
         );
     }
 
@@ -1497,10 +1495,9 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            attachments
-                .blockers(&agent_scope("s1"), None, now + Duration::from_secs(76))
-                .is_empty()
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), None, now + Duration::from_secs(76)),
+            Vec::<Blocker>::new()
         );
     }
 
@@ -1626,10 +1623,9 @@ mod tests {
         assert_eq!(blockers[0].surface, Surface::TerminalUi);
 
         attachments.set_terminal_ui(vec![tab("s2-slot", "s2")], None);
-        assert!(
-            attachments
-                .blockers(&agent_scope("s1"), None, now)
-                .is_empty()
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), None, now),
+            Vec::<Blocker>::new()
         );
         assert!(
             attachments

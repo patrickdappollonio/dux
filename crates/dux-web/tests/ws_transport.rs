@@ -1620,7 +1620,7 @@ async fn rest_create_session_returns_201_and_scopes_status() {
     );
     let body: serde_json::Value = resp.json().await.expect("created session json");
     let new_id = body["id"].as_str().expect("created session id");
-    assert!(!new_id.is_empty());
+    assert_ne!(new_id, "");
     assert_eq!(body["workspace"]["kind"].as_str(), Some("managed"));
     assert_eq!(body["workspace"]["project_id"].as_str(), Some("p1"));
 
@@ -4225,8 +4225,8 @@ async fn build_identity_is_stable_within_one_server_run_and_is_never_cached() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, vec!["api", "instance", "process", "version"]);
-    assert!(!first["process"].as_str().unwrap().is_empty());
-    assert!(!first["version"].as_str().unwrap().is_empty());
+    assert_ne!(first["process"].as_str().unwrap(), "");
+    assert_ne!(first["version"].as_str().unwrap(), "");
     assert_eq!(first["api"], 1);
 }
 

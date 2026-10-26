@@ -1767,7 +1767,7 @@ mod review16_tests {
         );
         let drain = OutputDrain::start(Some(read_end));
         FAIL_NEXT_DRAIN.with(|fail| fail.set(true));
-        assert!(drain.finish().is_empty());
+        assert_eq!(drain.finish(), Vec::<u8>::new());
         assert!(
             SPAWNED_DRAINS.with(|drains| drains.borrow().is_empty()),
             "no drain process started"
@@ -1974,7 +1974,10 @@ mod review16_tests {
         // A removal of the worktree ends the job (a session dux recorded
         // there) and is not held up by the drains, which then end by
         // themselves.
-        assert!(!sessions.is_empty());
+        assert_ne!(
+            sessions,
+            Vec::<crate::process_sessions::ProcessSession>::new()
+        );
         let outcome = crate::process_sessions::purge(
             &mut crate::process_sessions::SystemProcesses,
             &sessions,

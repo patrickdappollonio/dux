@@ -4027,7 +4027,10 @@ mod tests {
         assert!(kinds.contains(&crate::attention::CapturedKind::ClipboardSet));
         assert!(kinds.contains(&crate::attention::CapturedKind::Notify));
         // Draining consumed the ring.
-        assert!(client.take_passthrough().is_empty());
+        assert_eq!(
+            client.take_passthrough(),
+            Vec::<crate::attention::CapturedSeq>::new()
+        );
     }
 
     #[test]
@@ -4050,7 +4053,10 @@ mod tests {
         )
         .expect("spawn pty");
         wait_for_viewport(&client, "X");
-        assert!(client.take_passthrough().is_empty());
+        assert_eq!(
+            client.take_passthrough(),
+            Vec::<crate::attention::CapturedSeq>::new()
+        );
     }
 
     #[test]
@@ -5127,7 +5133,7 @@ mod tests {
         assert_eq!(y.link, None);
 
         // empty() clears the links table.
-        assert!(TerminalSnapshot::empty().links.is_empty());
+        assert_eq!(TerminalSnapshot::empty().links, Vec::<String>::new());
     }
 
     #[test]
@@ -7041,7 +7047,7 @@ mod tests {
         // The halves belong together, so the join is the line they came from.
         let ok = scan_line_ids(&[repaint_tail.as_slice(), b"0456\r\n"].concat());
         assert_eq!(ok.ids, vec![454, 455, 456]);
-        assert!(ok.malformed.is_empty());
+        assert_eq!(ok.malformed, Vec::<(usize, String)>::new());
 
         // They do not, because bytes went missing between them. Under a
         // variable-width format this join reads as a perfectly well-formed line
@@ -7059,7 +7065,7 @@ mod tests {
         // is not a fault.
         let cut = scan_line_ids(b"L00000454\r\nL0000");
         assert_eq!(cut.ids, vec![454]);
-        assert!(cut.malformed.is_empty());
+        assert_eq!(cut.malformed, Vec::<(usize, String)>::new());
 
         // A run LONGER than the fixed width is never a chunk cut short, so it is
         // a fault wherever it sits, end of stream included.
@@ -7086,7 +7092,7 @@ mod tests {
         // half, so it stays unrecorded.
         let trailing = scan_line_ids(b"L00000454\r\nL");
         assert_eq!(trailing.ids, vec![454]);
-        assert!(trailing.malformed.is_empty());
+        assert_eq!(trailing.malformed, Vec::<(usize, String)>::new());
     }
 
     #[test]

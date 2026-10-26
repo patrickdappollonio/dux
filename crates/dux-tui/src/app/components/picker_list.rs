@@ -222,7 +222,7 @@ mod tests {
         let (buf, layout) = draw(list, &theme);
         let text: String = (1..20).map(|x| buf[(x, 1)].symbol().to_string()).collect();
         assert!(text.starts_with("Nothing here."), "{text:?}");
-        assert!(highlighted(&buf, &theme).is_empty());
+        assert_eq!(highlighted(&buf, &theme), Vec::<u16>::new());
         assert_eq!(layout.items, 0);
         assert_eq!(
             layout.item_at(1, 3, 1),

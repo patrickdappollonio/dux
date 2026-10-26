@@ -2829,7 +2829,10 @@ mod tests {
             "only the renamed one moves"
         );
         store.delete_pending_worktree_removal("a1").expect("delete");
-        assert!(store.load_pending_worktree_removals().unwrap().is_empty());
+        assert_eq!(
+            store.load_pending_worktree_removals().unwrap(),
+            Vec::<PendingWorktreeRemoval>::new()
+        );
     }
 
     fn standalone_session(id: &str, folder: &str) -> AgentSession {
@@ -3158,7 +3161,7 @@ mod tests {
             session.title, None,
             "a frozen empty branch name would leave the row with no label at all"
         );
-        assert!(!session.display_label().is_empty());
+        assert_ne!(session.display_label(), "");
     }
 
     /// A standalone row stores empty text under `project_id` (the column is NOT
@@ -4129,7 +4132,7 @@ mod tests {
         assert!(store.load_sessions().unwrap().is_empty());
         // The ON DELETE CASCADE FK is unenforced (PRAGMA foreign_keys is off), so
         // the explicit session_prs delete is what keeps the PR row from leaking.
-        assert!(store.load_all_latest_prs().unwrap().is_empty());
+        assert_eq!(store.load_all_latest_prs().unwrap(), Vec::<StoredPr>::new());
     }
 
     #[test]
@@ -4157,7 +4160,7 @@ mod tests {
             vec![stored_pr("s1", 12)]
         );
         store.delete_pr_override("s1").unwrap();
-        assert!(store.load_pr_overrides().unwrap().is_empty());
+        assert_eq!(store.load_pr_overrides().unwrap(), Vec::<StoredPr>::new());
         // Deleting an absent override is a harmless no-op.
         store.delete_pr_override("s1").unwrap();
     }
@@ -4173,7 +4176,7 @@ mod tests {
             let store = SessionStore::open(&db).unwrap();
             store.upsert_session(&test_session("s1", now, now)).unwrap();
             store.upsert_session(&test_session("s2", now, now)).unwrap();
-            assert!(store.load_pr_suppressions().unwrap().is_empty());
+            assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
             store.set_pr_suppressed("s1").unwrap();
             // Suppressing twice is the same single row: presence is the whole
             // meaning, so the write is idempotent.
@@ -4189,7 +4192,7 @@ mod tests {
             vec!["s1".to_string()]
         );
         store.delete_pr_suppression("s1").unwrap();
-        assert!(store.load_pr_suppressions().unwrap().is_empty());
+        assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
         // Clearing an absent suppression is a harmless no-op.
         store.delete_pr_suppression("s1").unwrap();
     }
@@ -4207,8 +4210,11 @@ mod tests {
         // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
         // the explicit delete is what keeps a later session reusing the id from
         // inheriting a detach it never asked for.
-        assert!(store.load_pr_suppressions().unwrap().is_empty());
-        assert!(store.load_minted_branch_renames().unwrap().is_empty());
+        assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
+        assert_eq!(
+            store.load_minted_branch_renames().unwrap(),
+            Vec::<(String, String)>::new()
+        );
     }
 
     #[test]
@@ -4223,7 +4229,7 @@ mod tests {
         // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
         // the explicit delete is what keeps the override row from leaking to a
         // later session that reuses the id.
-        assert!(store.load_pr_overrides().unwrap().is_empty());
+        assert_eq!(store.load_pr_overrides().unwrap(), Vec::<StoredPr>::new());
     }
 
     #[test]
@@ -4290,7 +4296,7 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(remaining, vec!["c".to_string()]);
-        assert!(store.load_all_latest_prs().unwrap().is_empty());
+        assert_eq!(store.load_all_latest_prs().unwrap(), Vec::<StoredPr>::new());
         // p1's override row went with its sessions; p2's survives untouched.
         assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
         // Same for the suppression rows: p1's went, p2's stayed.

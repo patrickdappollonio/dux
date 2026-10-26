@@ -2684,7 +2684,7 @@ mod tests {
     fn hints_for_returns_dynamic_labels() {
         let bindings = default_bindings();
         let hints = bindings.hints_for(HintContext::LeftProject);
-        assert!(!hints.is_empty());
+        assert_ne!(hints, Vec::<(String, &str)>::new());
         // MoveDown hint should show combined j/k label
         let move_hint = hints.iter().find(|(_, desc)| *desc == "Move");
         assert!(move_hint.is_some());
@@ -2874,7 +2874,7 @@ mod tests {
     fn help_sections_produces_valid_sections() {
         let bindings = default_bindings();
         let sections = bindings.help_sections();
-        assert!(!sections.is_empty());
+        assert_ne!(sections, Vec::<(&str, Vec<(String, &str)>)>::new());
         let section_names: Vec<_> = sections.iter().map(|(n, _)| *n).collect();
         assert!(section_names.contains(&"Global"));
         assert!(section_names.contains(&"Projects pane"));
@@ -3469,7 +3469,7 @@ mod tests {
         // Ensure no action panics when asked for config_name
         for def in BINDING_DEFS {
             let name = def.action.config_name();
-            assert!(!name.is_empty());
+            assert_ne!(name, "");
         }
     }
 
@@ -3484,14 +3484,14 @@ mod tests {
         let palette = dux_core::palette::find_by_action(Action::StartWebServer)
             .expect("StartWebServer must expose a core palette entry");
         assert_eq!(palette.name, "start-web-server");
-        assert!(!palette.description.is_empty());
+        assert_ne!(palette.description, "");
 
         // …but has no default key binding (palette-only) and no help section.
         assert!(
             def.default_keys.is_empty(),
             "StartWebServer must have no default keybinding"
         );
-        assert!(def.scopes.is_empty());
+        assert_eq!(def.scopes, []);
         assert!(def.help.is_none());
         assert_eq!(Action::StartWebServer.config_name(), "start_web_server");
 
@@ -4102,7 +4102,7 @@ mod tests {
         // RuntimeBindings must still resolve defaults from BINDING_DEFS so runtime
         // keybindings are unchanged.
         let rb = RuntimeBindings::from_keys_config(&dux_core::config::KeysConfig::default());
-        assert!(!rb.label_for(Action::OpenPalette).is_empty());
-        assert!(!rb.label_for(Action::Quit).is_empty());
+        assert_ne!(rb.label_for(Action::OpenPalette), "");
+        assert_ne!(rb.label_for(Action::Quit), "");
     }
 }

@@ -961,7 +961,7 @@ mod tests {
         // a reply with no body is told apart from no reply.
         let mut statuses = Vec::new();
         let ended = transport.stream(&Request::get("/no-body"), &mut |status, piece| {
-            assert!(piece.is_empty());
+            assert_eq!(piece, b"");
             statuses.push(status);
             std::ops::ControlFlow::Continue(())
         });

@@ -171,7 +171,7 @@ mod tests {
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
         assert_eq!(model.groups[0].session_ids, vec!["s1".to_string()]);
-        assert!(model.groups[1].session_ids.is_empty());
+        assert_eq!(model.groups[1].session_ids, Vec::<String>::new());
         assert!(!model.groups[0].orphaned);
     }
 

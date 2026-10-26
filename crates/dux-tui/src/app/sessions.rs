@@ -6426,12 +6426,12 @@ mod tests {
         );
         // The rollback undid the in-memory list and the SQLite row.
         assert!(app.engine.projects.is_empty());
-        assert!(
+        assert_eq!(
             app.engine
                 .session_store
                 .load_projects()
-                .expect("load projects")
-                .is_empty()
+                .expect("load projects"),
+            Vec::<dux_core::config::ProjectConfig>::new()
         );
     }
 
@@ -10127,7 +10127,10 @@ mod tests {
         );
 
         assert!(matches!(app.prompt, PromptState::None));
-        assert!(app.engine.session_store.load_projects().unwrap().is_empty());
+        assert_eq!(
+            app.engine.session_store.load_projects().unwrap(),
+            Vec::<dux_core::config::ProjectConfig>::new()
+        );
         assert!(folder.is_dir(), "the source checkout stays on disk");
     }
 

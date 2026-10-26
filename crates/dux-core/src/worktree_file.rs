@@ -1719,7 +1719,7 @@ mod tests {
         std::fs::write(dir.path().join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
         let f = read_file(dir.path(), "blob.bin").unwrap();
         assert!(f.binary);
-        assert!(f.content.is_empty());
+        assert_eq!(f.content, "");
     }
 
     #[test]

@@ -6866,12 +6866,9 @@ mod tests {
         });
         let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
         assert_eq!(minted, None);
-        assert!(
-            engine
-                .session_store
-                .load_minted_branch_renames()
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            engine.session_store.load_minted_branch_renames().unwrap(),
+            Vec::<(String, String)>::new()
         );
     }
 
@@ -9858,12 +9855,9 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(stored_projects, vec!["p2".to_string()]);
-        assert!(
-            engine
-                .session_store
-                .load_all_latest_prs()
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            engine.session_store.load_all_latest_prs().unwrap(),
+            Vec::<StoredPr>::new()
         );
         // A single success status is emitted (no silent removal).
         let status = unwrap_status(reaction);

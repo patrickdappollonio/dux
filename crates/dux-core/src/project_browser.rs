@@ -1102,7 +1102,7 @@ mod tests {
         assert!(add.seeded_gitignore, "seeded_gitignore must be set");
         assert!(add.seed_warning.is_none());
         assert!(!add.branch.is_empty(), "the committed branch is persisted");
-        assert!(!add.leading_branch.is_empty());
+        assert_ne!(add.leading_branch, "");
         assert!(dir.path().join(".gitignore").exists());
         let out = crate::git::test_support::git_command()
             .args(["rev-list", "--count", "HEAD"])
