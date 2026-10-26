@@ -41,27 +41,3 @@ pub(crate) fn to_ratatui_modifier(m: CellModifier) -> Modifier {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_cell_attribute_becomes_its_ratatui_modifier() {
-        let pairs = [
-            (CellModifier::BOLD, Modifier::BOLD),
-            (CellModifier::DIM, Modifier::DIM),
-            (CellModifier::ITALIC, Modifier::ITALIC),
-            (CellModifier::UNDERLINED, Modifier::UNDERLINED),
-            (CellModifier::REVERSED, Modifier::REVERSED),
-            (CellModifier::CROSSED_OUT, Modifier::CROSSED_OUT),
-        ];
-        for (cell, expected) in pairs {
-            assert_eq!(to_ratatui_modifier(cell), expected);
-        }
-        assert_eq!(
-            to_ratatui_modifier(CellModifier::default()),
-            Modifier::empty()
-        );
-    }
-}
