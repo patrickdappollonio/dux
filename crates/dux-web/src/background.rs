@@ -159,8 +159,10 @@ impl BackgroundServer {
         let service = EngineService::new(engine, ends, ShutdownEcho::Silent);
         let core = ServeCore::start(
             handle,
-            listeners,
-            crate::control_socket::listener_of(engine),
+            crate::ServeListeners {
+                web: listeners,
+                control: crate::control_socket::listener_of(engine),
+            },
             &engine.config,
             &console,
             // Gated by the console too: with no `server.log` to write, the console

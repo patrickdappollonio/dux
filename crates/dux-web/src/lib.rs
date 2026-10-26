@@ -24,6 +24,7 @@ pub mod browse_routes;
 pub mod build_routes;
 pub mod changes;
 pub mod changes_routes;
+/// The asset extensions the embedded web UI carries Brotli-compressed.
 pub mod compressible_exts;
 pub mod config_routes;
 pub mod console;
@@ -68,7 +69,7 @@ pub mod workspace_routes;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write as _};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -109,6 +110,12 @@ use dux_core::tailscale::TailscaleIdentity;
 /// loaded (Tailscale detection, a non-loopback bind). They print as the first
 /// lines of the log, before any address is bound, so they are on screen even if
 /// a bind then fails.
+///
+/// # Errors
+///
+/// When dux cannot start (the engine does not bootstrap, the runtime cannot be
+/// built, or a required address does not bind), or when a required listener
+/// fails while serving.
 pub fn run_server(
     paths: &DuxPaths,
     plan: ServerPlan,
@@ -122,6 +129,7 @@ pub fn run_server(
 /// its log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupWarning {
+    /// The warning's sentence, as the log prints it.
     pub text: String,
     /// Already printed to stderr by the caller (the non-loopback alarm, printed
     /// the moment it is known), so neither the log's stderr echo nor a failed
@@ -526,13 +534,10 @@ pub fn safety_note(
     let pairs: Vec<(SocketAddr, bool)> =
         addrs.iter().map(|a| (a.addr(), a.is_required())).collect();
     match reachability(&pairs) {
-        Reachability::LoopbackOnly if tailscale.watches_interface() => {
+        Reachability::LoopbackOnly | Reachability::Tailscale if tailscale.watches_interface() => {
             Some(safety_note_tailnet_watched(auth))
         }
         Reachability::LoopbackOnly => None,
-        Reachability::Tailscale if tailscale.watches_interface() => {
-            Some(safety_note_tailnet_watched(auth))
-        }
         Reachability::Tailscale => Some(safety_note_tailnet(auth)),
         Reachability::Public => {
             let has_tailscale = pairs
@@ -568,17 +573,6 @@ fn run_plain_http(
     version: String,
     startup_warnings: &[StartupWarning],
 ) -> Result<()> {
-    let ServerPlan {
-        addrs,
-        primary,
-        tailscale,
-        forced_no,
-    } = plan;
-    let no_tailscale = if forced_no {
-        NoTailscaleFlag::Given
-    } else {
-        NoTailscaleFlag::Absent
-    };
     warn_if_ui_not_built();
     let mut engine = bootstrap_or_report(paths, startup_warnings, &mut std::io::stderr())?;
     // The lock is held and the config read, so the control socket is bound
@@ -590,29 +584,13 @@ fn run_plain_http(
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config, paths);
-    // What the caller learned before anything was loaded prints first, ahead of
-    // the bind, so it is on screen even if a bind then fails.
-    for warning in startup_warnings {
-        if warning.already_on_stderr {
-            console.warn_already_on_stderr(&warning.text);
-        } else {
-            console.warn(&warning.text);
-        }
-    }
-    if let Some(warning) = &socket_warning {
-        console.warn(warning);
-    }
+    print_startup_warnings(&console, startup_warnings, socket_warning.as_deref());
     // A second stop signal and the engine's shutdown share this, so a forced
     // quit kills the children and logs what the flip logs.
     let quit = Arc::new(QuitForce::default());
     // Held past the serve so the run's last lines (its shutdown) are flushed to
     // the terminal before the process exits.
     let exit_console = console.clone();
-    // The router's whole `[server]` input, snapshotted before the engine moves
-    // into the actor thread. One clone rather than a field-by-field capture, so
-    // this path and the two in-app ones derive their router from the same
-    // `router_params` recipe and a new limit cannot reach two of the three.
-    let router_config = engine.config.clone();
     // The engine thread's handle, kept so the run joins it (the engine drops and
     // its queued config writes land) before the process ends.
     let engine_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
@@ -620,253 +598,376 @@ fn run_plain_http(
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let engine_thread_slot = Arc::clone(&engine_thread);
-        let quit_for_serve = Arc::clone(&quit);
-        let result = runtime.block_on(async move {
-            let quit = quit_for_serve;
-            // Bind every address first, honoring the required/best-effort tags. A
-            // failed REQUIRED bind aborts here (with the address logged + in the
-            // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
-            // and the server proceeds on the rest. The best-effort warnings ride into
-            // the post-bind banner as ⚠ rows (and are already in dux.log).
-            let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
-
-            // Post-bind banner: built from what ACTUALLY bound, so it shows truth (no
-            // pre-bind hedging). Replaces main.rs's pre-bind URL println. Project the
-            // bound listeners into (addr, required) pairs for the pure banner builder.
-            let banner_legs: Vec<(SocketAddr, bool)> =
-                bound.iter().map(|b| (b.addr, b.required)).collect();
-            let initial_tailscale_leg = bound
-                .iter()
-                .find(|b| !b.required && !b.addr.ip().is_loopback())
-                .map(|b| b.addr);
-            // The PLAN says whether an address was detected (a best-effort address
-            // is only in it when one was); `bound` says whether it bound.
-            console.banner(&serve_banner(
-                &version,
-                &banner_legs,
-                &bind_warnings,
-                tailscale,
-                if addrs.iter().any(|p| !p.is_required()) {
-                    TailscaleDetection::Found
-                } else {
-                    TailscaleDetection::NotFound
-                },
-                &router_config.server.auth,
-            ));
-
-            // Spawn the engine on its own std thread (it runs the synchronous engine
-            // loop, not a tokio task). Its shutdown progress prints on this console.
-            let (handle, join) = engine_actor::spawn_engine_thread_with_console(
+        let result = runtime.block_on(
+            PlainServe {
+                plan,
+                version,
+                // The router's whole `[server]` input, snapshotted before the
+                // engine moves into the actor thread. One clone rather than a
+                // field-by-field capture, so this path and the two in-app ones
+                // derive their router from the same `router_params` recipe and a
+                // new limit cannot reach two of the three.
+                router_config: engine.config.clone(),
                 engine,
-                console.clone(),
-                Arc::clone(&quit),
-            );
-            *engine_thread_slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join);
-
-            // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
-            // failure flips its watch and every serve task awaits it. It carries the
-            // mode's watched-ness so a dying Tailscale leg can say truthfully whether
-            // anything is going to bind it again.
-            // The live-mode collaborators, created BEFORE the router so the Host
-            // guard can read the mode from the same cell the serve loop writes.
-            let (mode_control, mode_requests) = TailscaleModeControl::new(
-                tokio::runtime::Handle::current(),
-                Arc::new(AtomicBool::new(tailscale.watches_interface())),
-                Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
-            );
-            let mode_control = mode_control.with_password_set(password_set_of(&handle));
-            handle.set_tailscale_mode_control(mode_control.clone());
-            let shutdown = ServeShutdown::new(mode_control.watched());
-            // Collect the IPs the server actually bound to (for the host allowlist).
-            // Uses the bound addresses captured above, BEFORE the listeners move into
-            // the serve tasks. Together with `server.allowed_hosts` from config this
-            // drives the DNS-rebinding guard; loopback is always allowed regardless.
-            let bound_ips: Vec<std::net::IpAddr> = bound.iter().map(|b| b.addr.ip()).collect();
-
-            // Build ONE app, clone the router across listeners (it is a cheap
-            // `Arc`-backed service). The console + access-log toggle ride into the
-            // router so the WS handlers and the access middleware emit to the terminal.
-            // The host allowlist is threaded in via `with_host_allowlist` so
-            // `build_app` can wrap the whole router with the guard as its outermost
-            // layer (outside the access log, so rejected probes are not logged).
-            let app = server::build_app(
-                handle.clone(),
-                axum::Router::new(),
-                router_params(
-                    &router_config,
-                    console.clone(),
-                    access_log,
-                    bound_ips,
-                    BackgroundHooks::default(),
-                )
-                // `router_params` derives rule 5 from the CONFIGURED mode; this run
-                // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
-                // leave the guard admitting tailnet literals. The live cell is what
-                // the guard actually reads, and it starts from the effective mode.
-                .with_tailscale_host_literals(host_guard::TailscaleLiteralRule::for_mode(tailscale))
-                .with_live_tailscale_host_literals(mode_control.host_literals())
-                .with_live_own_magicdns_name(mode_control.own_magicdns_name())
-                .with_live_exposure(mode_control.exposure())
-                .with_tailscale_mode_control(mode_control.clone(), no_tailscale),
-            );
-
-            // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
-            // down gracefully (the same trigger a first-listener failure uses).
-            {
-                let shutdown = shutdown.clone();
-                let force_exit = ForceExit::new(console.clone(), None, Arc::clone(&quit));
-                tokio::spawn(async move {
-                    shutdown_signal(force_exit).await;
-                    shutdown.trigger();
-                });
+                console,
+                access_log,
+                control_listener,
+                engine_thread: Arc::clone(&engine_thread),
+                quit: Arc::clone(&quit),
             }
-            // SIGUSR1 (`kill -USR1`, for a hand edit) runs the engine actor's
-            // reload, until the serve stops.
-            tokio::spawn(reload_signal::reload_on_signal(
-                handle.clone(),
-                shutdown.subscribe(),
-            ));
-
-            // The control socket, served by the same router as every web leg
-            // and stopped by the same trigger.
-            let control_leg = control_listener.and_then(|listener| {
-                control_socket::spawn_control_leg(
-                    app.clone(),
-                    listener,
-                    crate::serve_legs::wait_for_shutdown(shutdown.subscribe()),
-                )
-                .inspect_err(|err| {
-                    let message = format!(
-                        "could not serve the control socket: {err}. Command-line clients \
-                         cannot reach this dux until it restarts."
-                    );
-                    dux_core::logger::error(&format!("[server] {message}"));
-                    console.warn(&message);
-                })
-                .ok()
-            });
-
-            // Serve every BOUND address, each on its own leg (its own stop lane), so
-            // the Tailscale leg can be added and dropped later without disturbing the
-            // required one.
-            //
-            // The leg's news goes to the surfaces as well as to the console: the
-            // console is this process's terminal, and a browser reaching dux over
-            // the tailnet is exactly the client that loses the address.
-            let leg_status = LegStatus::new(handle.clone());
-            let mut tasks = tokio::task::JoinSet::new();
-            for BoundListener {
-                listener,
-                addr,
-                required,
-            } in bound
-            {
-                spawn_leg(
-                    &mut tasks,
-                    app.clone(),
-                    listener,
-                    addr,
-                    if required {
-                        LegNeed::Required
-                    } else {
-                        LegNeed::BestEffort
-                    },
-                    &shutdown,
-                    console.clone(),
-                    leg_status.clone(),
-                );
-            }
-
-            // This machine's tailnet name, its `tailscale serve` routes and its
-            // Funnel state, read AFTER every listener is serving and on a
-            // blocking thread, never on this future's own: the CLI calls are
-            // bounded but can take seconds on a wedged daemon, and serving must
-            // not wait on them. Until this lands, loopback is not taken for this
-            // machine (the Funnel state starts checking on every mode but `no`),
-            // which is the fail-closed reading of "nobody has looked yet".
-            let identity_port = primary.port();
-            let first_look = if tailscale.wants_tailscale() {
-                Some(
-                    tokio::task::spawn_blocking(move || {
-                        dux_core::tailscale::detect_identity(identity_port)
-                    })
-                    .await
-                    .unwrap_or(Err(TailscaleUnavailable::CommandFailed)),
-                )
-            } else {
-                None
-            };
-
-            // On `auto`, watch the Tailscale interface for the rest of the run.
-            let mut tailscale_loop = TailscaleLoop::new(
-                tailscale,
-                no_tailscale,
-                Some(primary),
-                initial_tailscale_leg,
-                &mode_control,
-                Arc::new(dux_core::tailscale::detect_ip),
-            )
-            .with_identity(
-                Arc::new(move || dux_core::tailscale::detect_identity(identity_port)),
-                None,
-            );
-            // The first look's Funnel verdict and its warnings, before the
-            // watcher starts, so a look that succeeded leaves it parked rather
-            // than looking again at once. The tailnet rows and QR codes follow
-            // on the serve loop's first turn.
-            if let Some(look) = first_look {
-                tailscale_loop.apply_look(look, &console, &leg_status);
-            }
-            let leg_commands = tailscale_loop.take_leg_receiver();
-            tailscale_loop.start_watcher_if_wanted();
-            tailscale_loop.say_not_checking(&console);
-            tailscale_loop.say_serve_hint_once(&console);
-
-            run_serve_loop(
-                tasks,
-                shutdown.clone(),
-                leg_commands,
-                mode_requests,
-                app,
-                console.clone(),
-                leg_status,
-                tailscale_loop,
-            )
-            .await;
-            // SIGTERM the agents (they save state for a later resume), mark their
-            // sessions Detached, then exit; Drop hard-kills any straggler.
-            shutdown.trigger();
-            if let Some(control_leg) = control_leg {
-                let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, control_leg).await;
-            }
-            handle.shutdown().await;
-            match shutdown.take_error() {
-                Some(e) => Err(e),
-                None => Ok::<(), anyhow::Error>(()),
-            }
-        });
-        let join = engine_thread
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(join) = join {
-            match finish_engine_thread(join, &quit, &exit_console, FORCE_SETTLE_BOUND) {
-                OwnerExit::Normal => {}
-                // A second signal forced the quit and this thread took the exit:
-                // the engine is dropped and the log flushed, so it can go.
-                OwnerExit::Forced => std::process::exit(130),
-                // The hatch took the exit because this thread was late; it is
-                // exiting now, and a second exit must not race it.
-                OwnerExit::HatchExiting => loop {
-                    std::thread::park();
-                },
-            }
-        }
+            .run(),
+        );
+        join_engine_thread(&engine_thread, &quit, &exit_console);
         result
     })
+}
+
+/// Everything the `dux server` run's serving future takes over from the setup
+/// that ran before the runtime existed.
+struct PlainServe {
+    plan: ServerPlan,
+    version: String,
+    router_config: dux_core::config::Config,
+    engine: Engine,
+    console: Console,
+    access_log: server::AccessLog,
+    control_listener: Option<std::os::unix::net::UnixListener>,
+    /// Where the engine thread's handle is left, for the run to join.
+    engine_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    quit: Arc<QuitForce>,
+}
+
+impl PlainServe {
+    /// Bind, serve until a stop signal or a required listener's death, then
+    /// wind the engine down.
+    async fn run(self) -> Result<()> {
+        let Self {
+            plan:
+                ServerPlan {
+                    addrs,
+                    primary,
+                    tailscale,
+                    forced_no,
+                },
+            version,
+            router_config,
+            engine,
+            console,
+            access_log,
+            control_listener,
+            engine_thread,
+            quit,
+        } = self;
+        let no_tailscale = if forced_no {
+            NoTailscaleFlag::Given
+        } else {
+            NoTailscaleFlag::Absent
+        };
+        // Bind every address first, honoring the required/best-effort tags. A
+        // failed REQUIRED bind aborts here (with the address logged + in the
+        // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
+        // and the server proceeds on the rest. The best-effort warnings ride into
+        // the post-bind banner as ⚠ rows (and are already in dux.log).
+        let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
+
+        // Post-bind banner: built from what ACTUALLY bound, so it shows truth (no
+        // pre-bind hedging). Replaces main.rs's pre-bind URL println. Project the
+        // bound listeners into (addr, required) pairs for the pure banner builder.
+        let banner_legs: Vec<(SocketAddr, bool)> =
+            bound.iter().map(|b| (b.addr, b.required)).collect();
+        let initial_tailscale_leg = bound
+            .iter()
+            .find(|b| !b.required && !b.addr.ip().is_loopback())
+            .map(|b| b.addr);
+        // The PLAN says whether an address was detected (a best-effort address
+        // is only in it when one was); `bound` says whether it bound.
+        console.banner(&serve_banner(
+            &version,
+            &banner_legs,
+            &bind_warnings,
+            tailscale,
+            if addrs.iter().any(|p| !p.is_required()) {
+                TailscaleDetection::Found
+            } else {
+                TailscaleDetection::NotFound
+            },
+            &router_config.server.auth,
+        ));
+
+        // Spawn the engine on its own std thread (it runs the synchronous engine
+        // loop, not a tokio task). Its shutdown progress prints on this console.
+        let (handle, join) = engine_actor::spawn_engine_thread_with_console(
+            engine,
+            console.clone(),
+            Arc::clone(&quit),
+        );
+        *engine_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join);
+
+        // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
+        // failure flips its watch and every serve task awaits it. It carries the
+        // mode's watched-ness so a dying Tailscale leg can say truthfully whether
+        // anything is going to bind it again.
+        // The live-mode collaborators, created BEFORE the router so the Host
+        // guard can read the mode from the same cell the serve loop writes.
+        let (mode_control, mode_requests) =
+            live_mode_control(tokio::runtime::Handle::current(), tailscale, &handle);
+        let shutdown = ServeShutdown::new(mode_control.watched());
+        // Collect the IPs the server actually bound to (for the host allowlist).
+        // Uses the bound addresses captured above, BEFORE the listeners move into
+        // the serve tasks. Together with `server.allowed_hosts` from config this
+        // drives the DNS-rebinding guard; loopback is always allowed regardless.
+        let bound_ips: Vec<std::net::IpAddr> = bound.iter().map(|b| b.addr.ip()).collect();
+
+        // Build ONE app, clone the router across listeners (it is a cheap
+        // `Arc`-backed service). The console + access-log toggle ride into the
+        // router so the WS handlers and the access middleware emit to the terminal.
+        // The host allowlist is threaded in via `with_host_allowlist` so
+        // `build_app` can wrap the whole router with the guard as its outermost
+        // layer (outside the access log, so rejected probes are not logged).
+        let app = server::build_app(
+            handle.clone(),
+            axum::Router::new(),
+            router_params(
+                &router_config,
+                console.clone(),
+                access_log,
+                bound_ips,
+                BackgroundHooks::default(),
+            )
+            // `router_params` derives rule 5 from the CONFIGURED mode; this run
+            // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
+            // leave the guard admitting tailnet literals. The live cell is what
+            // the guard actually reads, and it starts from the effective mode.
+            .with_tailscale_host_literals(host_guard::TailscaleLiteralRule::for_mode(tailscale))
+            .with_live_tailscale_host_literals(mode_control.host_literals())
+            .with_live_own_magicdns_name(mode_control.own_magicdns_name())
+            .with_live_exposure(mode_control.exposure())
+            .with_tailscale_mode_control(mode_control.clone(), no_tailscale),
+        );
+
+        spawn_stop_signals(&shutdown, &handle, &console, &quit);
+
+        let control_leg = spawn_plain_control_leg(control_listener, &app, &shutdown, &console);
+
+        let shared = LegShared {
+            app,
+            shutdown: shutdown.clone(),
+            console: console.clone(),
+            status: LegStatus::new(handle.clone()),
+        };
+        let tasks = spawn_bound_legs(bound, &shared);
+
+        let (tailscale_loop, leg_commands) = plain_http_tailscale_loop(
+            tailscale,
+            no_tailscale,
+            primary,
+            initial_tailscale_leg,
+            &mode_control,
+            &shared,
+        )
+        .await;
+
+        run_serve_loop(tasks, shared, leg_commands, mode_requests, tailscale_loop).await;
+        // SIGTERM the agents (they save state for a later resume), mark their
+        // sessions Detached, then exit; Drop hard-kills any straggler.
+        shutdown.trigger();
+        if let Some(control_leg) = control_leg {
+            let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, control_leg).await;
+        }
+        handle.shutdown().await;
+        shutdown.take_error().map_or(Ok(()), Err)
+    }
+}
+
+/// Print what the caller learned before anything was loaded, and the control
+/// socket's warning, ahead of the bind, so they are on screen even if a bind
+/// then fails.
+fn print_startup_warnings(
+    console: &Console,
+    startup_warnings: &[StartupWarning],
+    socket_warning: Option<&str>,
+) {
+    for warning in startup_warnings {
+        if warning.already_on_stderr {
+            console.warn_already_on_stderr(&warning.text);
+        } else {
+            console.warn(&warning.text);
+        }
+    }
+    if let Some(warning) = socket_warning {
+        console.warn(warning);
+    }
+}
+
+/// Translate a SIGINT/SIGTERM into a trip of `shutdown`, so every listener winds
+/// down gracefully (the same trigger a first-listener failure uses), and run the
+/// engine actor's reload on SIGUSR1 (`kill -USR1`, for a hand edit) until the
+/// serve stops. Needs an entered runtime.
+fn spawn_stop_signals(
+    shutdown: &ServeShutdown,
+    handle: &engine_actor::EngineHandle,
+    console: &Console,
+    quit: &Arc<QuitForce>,
+) {
+    {
+        let shutdown = shutdown.clone();
+        let force_exit = ForceExit::new(console.clone(), None, Arc::clone(quit));
+        tokio::spawn(async move {
+            shutdown_signal(force_exit).await;
+            shutdown.trigger();
+        });
+    }
+    tokio::spawn(reload_signal::reload_on_signal(
+        handle.clone(),
+        shutdown.subscribe(),
+    ));
+}
+
+/// Serve the control socket, when there is one, with the same router as every
+/// web leg, stopped by the same trigger. A socket that cannot be served is said
+/// on the console and in the log, and the web is served without it.
+fn spawn_plain_control_leg(
+    control_listener: Option<std::os::unix::net::UnixListener>,
+    app: &Router,
+    shutdown: &ServeShutdown,
+    console: &Console,
+) -> Option<tokio::task::JoinHandle<()>> {
+    control_listener.and_then(|listener| {
+        control_socket::spawn_control_leg(
+            app.clone(),
+            listener,
+            crate::serve_legs::wait_for_shutdown(shutdown.subscribe()),
+        )
+        .inspect_err(|err| {
+            let message = format!(
+                "could not serve the control socket: {err}. Command-line clients \
+                 cannot reach this dux until it restarts."
+            );
+            dux_core::logger::error(&format!("[server] {message}"));
+            console.warn(&message);
+        })
+        .ok()
+    })
+}
+
+/// Serve every BOUND address, each on its own leg (its own stop lane), so the
+/// Tailscale leg can be added and dropped later without disturbing the required
+/// one.
+///
+/// The leg's news goes to the surfaces as well as to the console: the console
+/// is this process's terminal, and a browser reaching dux over the tailnet is
+/// exactly the client that loses the address.
+fn spawn_bound_legs(bound: Vec<BoundListener>, shared: &LegShared) -> tokio::task::JoinSet<()> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for BoundListener {
+        listener,
+        addr,
+        required,
+    } in bound
+    {
+        spawn_leg(
+            &mut tasks,
+            shared,
+            listener,
+            addr,
+            if required {
+                LegNeed::Required
+            } else {
+                LegNeed::BestEffort
+            },
+        );
+    }
+    tasks
+}
+
+/// The `dux server` run's Tailscale loop, after its first look, with its
+/// watcher started, and the command lane the serve loop listens on.
+///
+/// This machine's tailnet name, its `tailscale serve` routes and its Funnel
+/// state are read AFTER every listener is serving and on a blocking thread,
+/// never on the caller's own future: the CLI calls are bounded but can take
+/// seconds on a wedged daemon, and serving must not wait on them. Until this
+/// lands, loopback is not taken for this machine (the Funnel state starts
+/// checking on every mode but `no`), which is the fail-closed reading of
+/// "nobody has looked yet".
+async fn plain_http_tailscale_loop(
+    tailscale: TailscaleMode,
+    no_tailscale: NoTailscaleFlag,
+    primary: SocketAddr,
+    initial_tailscale_leg: Option<SocketAddr>,
+    mode_control: &TailscaleModeControl,
+    shared: &LegShared,
+) -> (
+    TailscaleLoop,
+    tokio::sync::mpsc::Receiver<(u64, WatchEvent)>,
+) {
+    let identity_port = primary.port();
+    let first_look = if tailscale.wants_tailscale() {
+        Some(
+            tokio::task::spawn_blocking(move || {
+                dux_core::tailscale::detect_identity(identity_port)
+            })
+            .await
+            .unwrap_or(Err(TailscaleUnavailable::CommandFailed)),
+        )
+    } else {
+        None
+    };
+
+    // On `auto`, watch the Tailscale interface for the rest of the run.
+    let mut tailscale_loop = TailscaleLoop::new(
+        tailscale,
+        no_tailscale,
+        Some(primary),
+        initial_tailscale_leg,
+        mode_control,
+        Arc::new(dux_core::tailscale::detect_ip),
+    )
+    .with_identity(
+        Arc::new(move || dux_core::tailscale::detect_identity(identity_port)),
+        None,
+    );
+    // The first look's Funnel verdict and its warnings, before the watcher
+    // starts, so a look that succeeded leaves it parked rather than looking
+    // again at once. The tailnet rows and QR codes follow on the serve loop's
+    // first turn.
+    if let Some(look) = first_look {
+        tailscale_loop.apply_look(look, &shared.console, &shared.status);
+    }
+    let leg_commands = tailscale_loop.take_leg_receiver();
+    tailscale_loop.start_watcher_if_wanted();
+    tailscale_loop.say_not_checking(&shared.console);
+    tailscale_loop.say_serve_hint_once(&shared.console);
+    (tailscale_loop, leg_commands)
+}
+
+/// Join the engine thread once the serve is over, so the engine drops and its
+/// queued config writes land before the process ends. Exits the process when a
+/// second stop signal forced the quit.
+fn join_engine_thread(
+    engine_thread: &std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    quit: &QuitForce,
+    console: &Console,
+) {
+    let join = engine_thread
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(join) = join {
+        match finish_engine_thread(join, quit, console, FORCE_SETTLE_BOUND) {
+            OwnerExit::Normal => {}
+            // A second signal forced the quit and this thread took the exit:
+            // the engine is dropped and the log flushed, so it can go.
+            OwnerExit::Forced => std::process::exit(130),
+            // The hatch took the exit because this thread was late; it is
+            // exiting now, and a second exit must not race it.
+            OwnerExit::HatchExiting => loop {
+                std::thread::park();
+            },
+        }
+    }
 }
 
 /// Run `body`, then flush `console` (bounded) whichever way it returned, so the
@@ -937,16 +1038,23 @@ pub(crate) fn bootstrap_or_report(
 /// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
 /// (server torn down, PTYs preserved); `QuitProcess` exits the whole process
 /// (server torn down, agents `SIGTERMed`).
+#[derive(Debug)]
 pub enum ServerTick {
+    /// Keep serving.
     Continue,
+    /// Stop serving and give the terminal back to the TUI, agents still running.
     ReturnToTui,
+    /// Stop serving and quit, winding the agents down.
     QuitProcess,
 }
 
 /// How `serve_with_engine` exited, so the binary's orchestration loop knows
 /// whether to resume the TUI or quit.
+#[derive(Debug)]
 pub enum ServerExit {
+    /// Resume the TUI around the same, still running agents.
     ReturnToTui,
+    /// Quit: the agents have been wound down.
     QuitProcess,
     /// A second Ctrl-c during the quit's shutdown wait cut it short: the
     /// children were killed rather than waited for. The caller gives the
@@ -960,6 +1068,12 @@ pub enum ServerExit {
 #[derive(Clone, Default)]
 pub struct ForceQuitHandle(pub(crate) Arc<QuitForce>);
 
+impl std::fmt::Debug for ForceQuitHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ForceQuitHandle").finish_non_exhaustive()
+    }
+}
+
 /// What the flip's status screen lends the serve, when it is on screen. Both are
 /// `None` without one (no TTY), and then there is nothing to restore and Ctrl-c
 /// is an ordinary signal.
@@ -968,6 +1082,14 @@ pub struct FlipHooks {
     /// Gives the terminal back before a second stop SIGNAL forces the process
     /// out, because that exit runs no destructor.
     pub restore_terminal: Option<RestoreTerminal>,
+}
+
+impl std::fmt::Debug for FlipHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlipHooks")
+            .field("restore_terminal", &self.restore_terminal.is_some())
+            .finish()
+    }
 }
 
 /// Upper bound on how long the flip waits for the axum server task to finish
@@ -989,6 +1111,17 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// bound exists so a wedged serve loop cannot make the watcher grow memory.
 const LEG_COMMAND_QUEUE: usize = 8;
 
+/// What every serve leg of one serve shares: the one router they all serve,
+/// the shutdown lanes they wind down on, and the console and surfaces a leg's
+/// news goes to. Cheap to clone; each leg's task holds its own clone.
+#[derive(Clone)]
+pub(crate) struct LegShared {
+    pub(crate) app: Router,
+    pub(crate) shutdown: ServeShutdown,
+    pub(crate) console: Console,
+    pub(crate) status: LegStatus,
+}
+
 /// Spawn one listener's serve task into `tasks`, registering its per-leg stop
 /// lane so it can be stopped on its own. The task's graceful-shutdown future
 /// waits on BOTH that lane and the parent's, so a per-leg stop and a whole-server
@@ -996,20 +1129,21 @@ const LEG_COMMAND_QUEUE: usize = 8;
 ///
 /// A REQUIRED leg's accept-loop death is fatal for the serve; a BEST-EFFORT leg's
 /// is logged and isolated. That split is the whole reason legs exist.
-#[allow(clippy::too_many_arguments)]
 fn spawn_leg(
     tasks: &mut tokio::task::JoinSet<()>,
-    app: Router,
+    shared: &LegShared,
     listener: tokio::net::TcpListener,
     addr: SocketAddr,
     need: LegNeed,
-    shutdown: &ServeShutdown,
-    console: Console,
-    status: LegStatus,
 ) {
+    let LegShared {
+        app,
+        shutdown,
+        console,
+        status,
+    } = shared.clone();
     let leg_lane = shutdown.register_leg(addr);
     let parent_lane = shutdown.subscribe();
-    let shutdown = shutdown.clone();
     tasks.spawn(async move {
         // Serve with both ends of each connection recorded: the auth layer
         // classifies a request by the address dux was reached at and the peer
@@ -1584,7 +1718,7 @@ impl TailscaleLoop {
         let bound = Arc::clone(&self.bound);
         let tx = self.leg_tx.clone();
         let detect = Arc::clone(&self.detect);
-        let identify = Arc::clone(&self.identify);
+        let name_probe = Arc::clone(&self.identify);
         let identity = Arc::clone(&self.identity);
         let confirmed = Arc::clone(&self.identity_confirmed);
         let period = self.watch_period;
@@ -1597,7 +1731,7 @@ impl TailscaleLoop {
                     probe_first: first == FirstLook::Immediately,
                     addresses,
                     detect: &*detect,
-                    identify: &*identify,
+                    identify: &*name_probe,
                     bound: &|| bound.lock().ok().and_then(|slot| *slot),
                     // An identity that is not current counts as unknown, so the
                     // next successful look is sent and re-admits the name.
@@ -1674,17 +1808,19 @@ impl TailscaleLoop {
 /// there, but a moment where every task has just been replaced is possible), and
 /// exiting on set-empty would end a server nobody asked to stop. The exit
 /// condition is the shutdown lane and nothing else.
-#[allow(clippy::too_many_arguments)]
 async fn run_serve_loop(
     mut tasks: tokio::task::JoinSet<()>,
-    shutdown: ServeShutdown,
+    shared: LegShared,
     mut commands: tokio::sync::mpsc::Receiver<(u64, WatchEvent)>,
     mut mode_requests: tokio::sync::mpsc::Receiver<crate::serve_legs::ModeRequest>,
-    app: Router,
-    console: Console,
-    status: LegStatus,
     mut ts: TailscaleLoop,
 ) {
+    let LegShared {
+        shutdown,
+        console,
+        status,
+        ..
+    } = &shared;
     let mut parent = shutdown.subscribe();
     // The address whose bind failed on the previous attempt, so a permanently
     // occupied Tailscale port is reported once instead of once every period. The
@@ -1697,7 +1833,7 @@ async fn run_serve_loop(
         // Every arm below can move a URL the QR codes carry (a leg bound or
         // dropped, a name read, a mode changed), so the codes are checked once
         // per turn rather than at each of those places.
-        ts.refresh_surfaces(shutdown.leg_addrs(), &console);
+        ts.refresh_surfaces(shutdown.leg_addrs(), console);
         tokio::select! {
             _ = parent.changed() => {}
             request = mode_requests.recv(), if mode_lane_open => {
@@ -1708,10 +1844,7 @@ async fn run_serve_loop(
                             &mut ts,
                             &mut pending_detect,
                             &mut tasks,
-                            &shutdown,
-                            &app,
-                            &console,
-                            &status,
+                            &shared,
                             &mut last_bind_failure,
                         )
                         .await;
@@ -1742,16 +1875,13 @@ async fn run_serve_loop(
                     )),
                     &mut ts,
                     &mut tasks,
-                    &shutdown,
-                    &app,
-                    &console,
-                    &status,
+                    &shared,
                     &mut last_bind_failure,
                 )
                 .await;
             }
             Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
-                finish_leg_task(joined, &shutdown, &ts.bound, &mut last_bind_failure);
+                finish_leg_task(joined, shutdown, &ts.bound, &mut last_bind_failure);
             }
             // The dwell a leg transition is held for. The status is the only
             // thing delayed: the console line and the log went out at once. A
@@ -1774,10 +1904,7 @@ async fn run_serve_loop(
                     command,
                     &mut ts,
                     &mut tasks,
-                    &shutdown,
-                    &app,
-                    &console,
-                    &status,
+                    &shared,
                     &mut last_bind_failure,
                 )
                 .await;
@@ -1804,17 +1931,16 @@ async fn run_serve_loop(
 /// change just let go. `None` cannot arrive while the loop runs: the loop holds a
 /// sender for its whole life, so a mode that runs no watcher simply has nobody
 /// sending.
-#[allow(clippy::too_many_arguments)]
 async fn apply_current_generation_command(
     command: Option<(u64, WatchEvent)>,
     ts: &mut TailscaleLoop,
     tasks: &mut tokio::task::JoinSet<()>,
-    shutdown: &ServeShutdown,
-    app: &Router,
-    console: &Console,
-    status: &LegStatus,
+    shared: &LegShared,
     last_bind_failure: &mut Option<SocketAddr>,
 ) {
+    let LegShared {
+        console, status, ..
+    } = shared;
     let Some((generation, event)) = command else {
         return;
     };
@@ -1832,17 +1958,7 @@ async fn apply_current_generation_command(
             return;
         }
     };
-    apply_leg_command(
-        command,
-        tasks,
-        shutdown,
-        app,
-        console,
-        status,
-        &ts.bound,
-        last_bind_failure,
-    )
-    .await;
+    apply_leg_command(command, tasks, shared, &ts.bound, last_bind_failure).await;
 }
 
 /// Account for one serve leg's task having ended.
@@ -1878,18 +1994,17 @@ fn finish_leg_task(
 /// Every request is answered exactly once: here for the steps that finish
 /// immediately, and in [`finish_detection`] for a `yes`, whose bounded probe runs
 /// as its own select arm so the parent lane and the legs keep flowing under it.
-#[allow(clippy::too_many_arguments)]
 async fn apply_mode_request(
     request: crate::serve_legs::ModeRequest,
     ts: &mut TailscaleLoop,
     pending_detect: &mut Option<PendingDetect>,
     tasks: &mut tokio::task::JoinSet<()>,
-    shutdown: &ServeShutdown,
-    app: &Router,
-    console: &Console,
-    status: &LegStatus,
+    shared: &LegShared,
     last_bind_failure: &mut Option<SocketAddr>,
 ) {
+    let LegShared {
+        console, status, ..
+    } = shared;
     let crate::serve_legs::ModeRequest { mode, reply } = request;
     // A request that arrives while a probe is in flight replaces it. The older
     // caller is told so rather than being left holding a lane that never answers.
@@ -1948,10 +2063,7 @@ async fn apply_mode_request(
                 apply_leg_command(
                     LegCommand::Unbind(addr),
                     tasks,
-                    shutdown,
-                    app,
-                    console,
-                    status,
+                    shared,
                     &ts.bound,
                     last_bind_failure,
                 )
@@ -2009,18 +2121,17 @@ async fn apply_mode_request(
 /// A FAILED probe deliberately leaves a leg that is already serving alone: `yes`
 /// means "bind it once and keep it", and dropping a working listener because one
 /// local daemon call did not answer is the wrong way to be wrong.
-#[allow(clippy::too_many_arguments)]
 async fn finish_detection(
     pending: PendingDetect,
     (detected, identified): OneShotLook,
     ts: &mut TailscaleLoop,
     tasks: &mut tokio::task::JoinSet<()>,
-    shutdown: &ServeShutdown,
-    app: &Router,
-    console: &Console,
-    status: &LegStatus,
+    shared: &LegShared,
     last_bind_failure: &mut Option<SocketAddr>,
 ) {
+    let LegShared {
+        console, status, ..
+    } = shared;
     let PendingDetect {
         generation,
         reply,
@@ -2066,17 +2177,7 @@ async fn finish_detection(
         LegStep::Unbind(addr) => vec![LegCommand::Unbind(addr)],
         LegStep::Rebind { old, new } => vec![LegCommand::Unbind(old), LegCommand::Bind(new)],
     } {
-        apply_leg_command(
-            command,
-            tasks,
-            shutdown,
-            app,
-            console,
-            status,
-            &ts.bound,
-            last_bind_failure,
-        )
-        .await;
+        apply_leg_command(command, tasks, shared, &ts.bound, last_bind_failure).await;
     }
     let bound = ts.bound_addr();
     let _ = reply.send(match (desired, bound) {
@@ -2129,31 +2230,24 @@ fn reconcile_bound_tailscale(
 /// Act on one watcher command: bind and start serving the Tailscale leg, or stop
 /// it. Records what is bound so the watcher's next period compares against
 /// reality (which is what makes a failed bind retry rather than vanish).
-#[allow(clippy::too_many_arguments)]
 async fn apply_leg_command(
     command: LegCommand,
     tasks: &mut tokio::task::JoinSet<()>,
-    shutdown: &ServeShutdown,
-    app: &Router,
-    console: &Console,
-    status: &LegStatus,
+    shared: &LegShared,
     bound_tailscale: &Arc<std::sync::Mutex<Option<SocketAddr>>>,
     last_bind_failure: &mut Option<SocketAddr>,
 ) {
+    let LegShared {
+        shutdown,
+        console,
+        status,
+        ..
+    } = shared;
     match command {
         LegCommand::Bind(addr) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 *last_bind_failure = None;
-                spawn_leg(
-                    tasks,
-                    app.clone(),
-                    listener,
-                    addr,
-                    LegNeed::BestEffort,
-                    shutdown,
-                    console.clone(),
-                    status.clone(),
-                );
+                spawn_leg(tasks, shared, listener, addr, LegNeed::BestEffort);
                 if let Ok(mut slot) = bound_tailscale.lock() {
                     *slot = Some(addr);
                 }
@@ -2301,6 +2395,27 @@ fn router_params(
     }
 }
 
+/// The serve's live Tailscale-mode handle and the request lane its serve loop
+/// answers, already handed to the engine actor. Created BEFORE the router, so
+/// the Host guard reads the mode from the same cell the serve loop writes.
+fn live_mode_control(
+    runtime: tokio::runtime::Handle,
+    tailscale: TailscaleMode,
+    handle: &engine_actor::EngineHandle,
+) -> (
+    TailscaleModeControl,
+    tokio::sync::mpsc::Receiver<crate::serve_legs::ModeRequest>,
+) {
+    let (mode_control, mode_requests) = TailscaleModeControl::new(
+        runtime,
+        Arc::new(AtomicBool::new(tailscale.watches_interface())),
+        Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
+    );
+    let mode_control = mode_control.with_password_set(password_set_of(handle));
+    handle.set_tailscale_mode_control(mode_control.clone());
+    (mode_control, mode_requests)
+}
+
 /// Whether the web password is set, read live from the engine's `[server.auth]`.
 fn password_set_of(handle: &engine_actor::EngineHandle) -> crate::host_guard::PasswordSet {
     let auth = handle.live_limits().auth();
@@ -2398,6 +2513,163 @@ impl ControlLeg {
     }
 }
 
+/// The pre-bound listeners a serve adopts: its web legs, and the control
+/// socket when this serve also serves that.
+pub(crate) struct ServeListeners {
+    pub(crate) web: Vec<std::net::TcpListener>,
+    pub(crate) control: Option<std::os::unix::net::UnixListener>,
+}
+
+/// Adopt the pre-bound std listeners into `runtime`.
+///
+/// The std listeners travel here already bound, so there is no rebind race;
+/// tokio needs them non-blocking. Adoption failures are rare (the bind already
+/// succeeded in the caller's pre-flight), but the failing address is logged
+/// before propagating so a serve that cannot start leaves a forensic record in
+/// dux.log, not just a status line.
+fn adopt_listeners(
+    runtime: &tokio::runtime::Runtime,
+    listeners: Vec<std::net::TcpListener>,
+) -> Result<Vec<tokio::net::TcpListener>> {
+    let _guard = runtime.enter();
+    let mut out = Vec::with_capacity(listeners.len());
+    for listener in listeners {
+        let addr = listener
+            .local_addr()
+            .map_or_else(|_| "<unknown address>".to_string(), |a| a.to_string());
+        if let Err(err) = listener.set_nonblocking(true) {
+            dux_core::logger::error(&format!(
+                "[server] could not adopt the pre-bound listener on {addr} \
+                 (set_nonblocking failed): {err}"
+            ));
+            return Err(err.into());
+        }
+        match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => out.push(l),
+            Err(err) => {
+                dux_core::logger::error(&format!(
+                    "[server] could not adopt the pre-bound listener on {addr} \
+                     (tokio from_std failed): {err}"
+                ));
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// An in-app serve's Tailscale loop, its watcher started. Needs an entered
+/// runtime. Neither in-app mode is ever a forced-no run: `--no-tailscale` is a
+/// `dux server` flag.
+fn in_app_tailscale_loop(
+    config: &dux_core::config::Config,
+    primary: Option<SocketAddr>,
+    tailscale_leg: Option<SocketAddr>,
+    mode_control: &TailscaleModeControl,
+    console: &Console,
+) -> TailscaleLoop {
+    let mut tailscale_loop = TailscaleLoop::new(
+        config.server.tailscale_mode(),
+        NoTailscaleFlag::Absent,
+        // No loopback listener address means no port to hang the leg on,
+        // so this deliberately starts no watcher rather than guessing one.
+        primary,
+        tailscale_leg,
+        mode_control,
+        Arc::new(dux_core::tailscale::detect_ip),
+    );
+    // Not read here: this runs on the terminal UI's thread, which must
+    // not wait on a subprocess. The watcher looks it up before its first
+    // park, and on `yes` a one-shot look runs off this thread.
+    // Every leg shares one port; the configured one is the last resort
+    // for a serve whose listener addresses could not be read, so the
+    // Funnel check runs whatever happened to the primary.
+    let identity_port = primary
+        .or(tailscale_leg)
+        .map_or(config.server.port, |addr| addr.port());
+    tailscale_loop = tailscale_loop.with_identity(
+        Arc::new(move || dux_core::tailscale::detect_identity(identity_port)),
+        None,
+    );
+    tailscale_loop.start_watcher_if_wanted();
+    tailscale_loop.say_not_checking(console);
+    tailscale_loop
+}
+
+/// Serve every adopted listener on a leg of its own. Needs an entered runtime.
+///
+/// Loopback is the REQUIRED leg (there is nothing to serve without it); the
+/// Tailscale leg is best-effort, exactly as in the CLI path. A listener whose
+/// own address cannot be read is served BEST-EFFORT: it cannot be identified as
+/// the loopback leg, and treating an unknown address as the one whose death
+/// ends the whole server is the wrong way to be wrong. Its placeholder address
+/// is a registry key and a log label only, never a bind target.
+fn spawn_adopted_legs(
+    tokio_listeners: Vec<tokio::net::TcpListener>,
+    shared: &LegShared,
+) -> tokio::task::JoinSet<()> {
+    let mut legs = tokio::task::JoinSet::new();
+    for tokio_listener in tokio_listeners {
+        let (addr, required) = match tokio_listener.local_addr() {
+            Ok(addr) => (addr, addr.ip().is_loopback()),
+            Err(err) => {
+                dux_core::logger::warn(&format!(
+                    "[server] serving a pre-bound listener whose address could not be \
+                     read ({err}); it is treated as best-effort, so its failure alone \
+                     will not stop the server. The web UI is still reachable on the \
+                     addresses dux reported."
+                ));
+                (SocketAddr::from(([127, 0, 0, 1], 0)), false)
+            }
+        };
+        spawn_leg(
+            &mut legs,
+            shared,
+            tokio_listener,
+            addr,
+            if required {
+                LegNeed::Required
+            } else {
+                LegNeed::BestEffort
+            },
+        );
+    }
+    legs
+}
+
+/// Take the branch of [`SignalPolicy`] a serve was started with, answering
+/// whether it installed signal handlers.
+fn install_signal_policy(
+    runtime: &tokio::runtime::Runtime,
+    signals: SignalPolicy,
+    console: &Console,
+    reload_handle: engine_actor::EngineHandle,
+    shutdown: &ServeShutdown,
+) -> bool {
+    match signals {
+        SignalPolicy::Adopt {
+            flag,
+            restore_terminal,
+            quit,
+        } => {
+            let force_exit = ForceExit::new(console.clone(), restore_terminal, quit);
+            runtime.spawn(async move {
+                shutdown_signal(force_exit).await;
+                flag.store(true, Ordering::SeqCst);
+            });
+            // The flip owns the engine, so SIGUSR1 runs the engine actor's
+            // reload here; the terminal UI's loop is not running to do it.
+            runtime.spawn(reload_signal::reload_on_signal(
+                reload_handle,
+                shutdown.subscribe(),
+            ));
+            true
+        }
+        // Nothing installed on purpose. See `SignalPolicy::Inherited`.
+        SignalPolicy::Inherited => false,
+    }
+}
+
 impl ServeCore {
     /// Adopt pre-bound std listeners and start serving.
     ///
@@ -2410,11 +2682,9 @@ impl ServeCore {
     /// `handle` is consumed: the router keeps its own clones, so holding one here
     /// would keep the request channel alive past the point where the serve is
     /// meant to be over.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         handle: engine_actor::EngineHandle,
-        listeners: Vec<std::net::TcpListener>,
-        control_socket: Option<std::os::unix::net::UnixListener>,
+        listeners: ServeListeners,
         config: &dux_core::config::Config,
         console: &Console,
         access_log: server::AccessLog,
@@ -2423,6 +2693,10 @@ impl ServeCore {
         // background one, which is the only one with a terminal UI beside it.
         hooks: BackgroundHooks,
     ) -> Result<Self> {
+        let ServeListeners {
+            web: listeners,
+            control: control_socket,
+        } = listeners;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -2448,50 +2722,14 @@ impl ServeCore {
             .filter_map(|l| l.local_addr().ok())
             .find(|a| !a.ip().is_loopback());
 
-        // The std listeners travel here already bound, so there is no rebind race;
-        // tokio needs them non-blocking. Adoption failures are rare (the bind
-        // already succeeded in the caller's pre-flight), but log the failing
-        // address before propagating so a serve that cannot start leaves a
-        // forensic record in dux.log, not just a status line.
-        let tokio_listeners = {
-            let _guard = runtime.enter();
-            let mut out = Vec::with_capacity(listeners.len());
-            for listener in listeners {
-                let addr = listener
-                    .local_addr()
-                    .map_or_else(|_| "<unknown address>".to_string(), |a| a.to_string());
-                if let Err(err) = listener.set_nonblocking(true) {
-                    dux_core::logger::error(&format!(
-                        "[server] could not adopt the pre-bound listener on {addr} \
-                         (set_nonblocking failed): {err}"
-                    ));
-                    return Err(err.into());
-                }
-                match tokio::net::TcpListener::from_std(listener) {
-                    Ok(l) => out.push(l),
-                    Err(err) => {
-                        dux_core::logger::error(&format!(
-                            "[server] could not adopt the pre-bound listener on {addr} \
-                             (tokio from_std failed): {err}"
-                        ));
-                        return Err(err.into());
-                    }
-                }
-            }
-            out
-        };
+        let tokio_listeners = adopt_listeners(&runtime, listeners)?;
 
         // The live-mode collaborators, created BEFORE the router so the Host
         // guard reads the mode from the same cell the serve loop writes. Neither
         // in-app mode is ever a forced-no run: `--no-tailscale` is a `dux server`
         // flag, so both can change the mode live.
-        let (mode_control, mode_requests) = TailscaleModeControl::new(
-            runtime.handle().clone(),
-            Arc::new(AtomicBool::new(tailscale.watches_interface())),
-            Arc::new(AtomicBool::new(tailscale.wants_tailscale())),
-        );
-        let mode_control = mode_control.with_password_set(password_set_of(&handle));
-        handle.set_tailscale_mode_control(mode_control.clone());
+        let (mode_control, mode_requests) =
+            live_mode_control(runtime.handle().clone(), tailscale, &handle);
 
         // The shared shutdown primitive: the SAME [`ServeShutdown`] the CLI serve
         // path uses. Its watch is the graceful-shutdown lane every serve task and
@@ -2520,32 +2758,7 @@ impl ServeCore {
         // On `auto`, watch the Tailscale interface for the rest of the serve.
         let mut tailscale_loop = {
             let _guard = runtime.enter();
-            let mut tailscale_loop = TailscaleLoop::new(
-                tailscale,
-                NoTailscaleFlag::Absent,
-                // No loopback listener address means no port to hang the leg on,
-                // so this deliberately starts no watcher rather than guessing one.
-                primary,
-                tailscale_leg,
-                &mode_control,
-                Arc::new(dux_core::tailscale::detect_ip),
-            );
-            // Not read here: this runs on the terminal UI's thread, which must
-            // not wait on a subprocess. The watcher looks it up before its first
-            // park, and on `yes` a one-shot look runs off this thread.
-            // Every leg shares one port; the configured one is the last resort
-            // for a serve whose listener addresses could not be read, so the
-            // Funnel check runs whatever happened to the primary.
-            let identity_port = primary
-                .or(tailscale_leg)
-                .map_or(config.server.port, |addr| addr.port());
-            tailscale_loop = tailscale_loop.with_identity(
-                Arc::new(move || dux_core::tailscale::detect_identity(identity_port)),
-                None,
-            );
-            tailscale_loop.start_watcher_if_wanted();
-            tailscale_loop.say_not_checking(console);
-            tailscale_loop
+            in_app_tailscale_loop(config, primary, tailscale_leg, &mode_control, console)
         };
         let leg_commands = tailscale_loop.take_leg_receiver();
 
@@ -2553,64 +2766,27 @@ impl ServeCore {
         // bounded join; the control socket's leg stands apart so it can be stopped first.
         let control;
         let supervisor = {
-            let shutdown = shutdown.clone();
-            let app = app.clone();
-            let console = console.clone();
-            // Cloned before `handle` is dropped below: the leg's news is owed to
-            // the terminal UI beside this serve as much as to the browsers.
-            let leg_status = LegStatus::new(handle.clone());
-            let mut legs = tokio::task::JoinSet::new();
+            let shared = LegShared {
+                app: app.clone(),
+                shutdown: shutdown.clone(),
+                console: console.clone(),
+                // Cloned before `handle` is dropped below: the leg's news is owed
+                // to the terminal UI beside this serve as much as to the browsers.
+                status: LegStatus::new(handle.clone()),
+            };
             let guard = runtime.enter();
-            for tokio_listener in tokio_listeners {
-                // Loopback is the REQUIRED leg (there is nothing to serve
-                // without it); the Tailscale leg is best-effort, exactly as in
-                // the CLI path. A listener whose own address cannot be read is
-                // served BEST-EFFORT: it cannot be identified as the loopback
-                // leg, and treating an unknown address as the one whose death
-                // ends the whole server is the wrong way to be wrong. Its
-                // placeholder address is a registry key and a log label only,
-                // never a bind target.
-                let (addr, required) = match tokio_listener.local_addr() {
-                    Ok(addr) => (addr, addr.ip().is_loopback()),
-                    Err(err) => {
-                        dux_core::logger::warn(&format!(
-                            "[server] serving a pre-bound listener whose address could not be \
-                             read ({err}); it is treated as best-effort, so its failure alone \
-                             will not stop the server. The web UI is still reachable on the \
-                             addresses dux reported."
-                        ));
-                        (SocketAddr::from(([127, 0, 0, 1], 0)), false)
-                    }
-                };
-                spawn_leg(
-                    &mut legs,
-                    app.clone(),
-                    tokio_listener,
-                    addr,
-                    if required {
-                        LegNeed::Required
-                    } else {
-                        LegNeed::BestEffort
-                    },
-                    &shutdown,
-                    console.clone(),
-                    leg_status.clone(),
-                );
-            }
+            let legs = spawn_adopted_legs(tokio_listeners, &shared);
             drop(guard);
             control = {
                 let _guard = runtime.enter();
                 control_socket
-                    .and_then(|listener| ControlLeg::spawn(app.clone(), listener, &shutdown))
+                    .and_then(|listener| ControlLeg::spawn(app.clone(), listener, &shared.shutdown))
             };
             runtime.spawn(run_serve_loop(
                 legs,
-                shutdown,
+                shared,
                 leg_commands,
                 mode_requests,
-                app,
-                console,
-                leg_status,
                 tailscale_loop,
             ))
         };
@@ -2621,28 +2797,8 @@ impl ServeCore {
         // tasks keep the request side alive.
         drop(handle);
 
-        let installed_signal_handlers = match signals {
-            SignalPolicy::Adopt {
-                flag,
-                restore_terminal,
-                quit,
-            } => {
-                let force_exit = ForceExit::new(console.clone(), restore_terminal, quit);
-                runtime.spawn(async move {
-                    shutdown_signal(force_exit).await;
-                    flag.store(true, Ordering::SeqCst);
-                });
-                // The flip owns the engine, so SIGUSR1 runs the engine actor's
-                // reload here; the terminal UI's loop is not running to do it.
-                runtime.spawn(reload_signal::reload_on_signal(
-                    reload_handle,
-                    shutdown.subscribe(),
-                ));
-                true
-            }
-            // Nothing installed on purpose. See `SignalPolicy::Inherited`.
-            SignalPolicy::Inherited => false,
-        };
+        let installed_signal_handlers =
+            install_signal_policy(&runtime, signals, console, reload_handle, &shutdown);
 
         Ok(Self {
             runtime,
@@ -2816,6 +2972,76 @@ impl ServeCore {
     }
 }
 
+/// The turns the flip's caller takes on the serving thread, see
+/// [`serve_with_engine`].
+pub struct FlipTurns<Tick, Status, Wait> {
+    /// Runs once per engine-loop iteration; its answer decides whether the
+    /// serve goes on.
+    pub on_tick: Tick,
+    /// Handed each human-readable teardown message once the quit's wind-down
+    /// starts.
+    pub on_shutdown_status: Status,
+    /// Runs on every pass of the quit's wait for the children, and answers true
+    /// to stop waiting.
+    pub on_shutdown_wait: Wait,
+}
+
+impl<Tick, Status, Wait> std::fmt::Debug for FlipTurns<Tick, Status, Wait> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlipTurns").finish_non_exhaustive()
+    }
+}
+
+/// The flip's console, opened with the lines `dux server` opens its log with,
+/// and the browser count its connection registry keeps.
+///
+/// The flip owns the terminal with its themed status screen, so this console
+/// writes NOTHING to stdout; it records every line into the shared ring the
+/// status screen's log viewer draws, the same lines `dux server` prints. Its
+/// connection registry keeps the screen's browser count in the same ring.
+fn flip_console(
+    engine: &Engine,
+    activity: dux_core::activity::ActivityRing,
+    startup: &StartupNotes,
+    listeners: &[std::net::TcpListener],
+) -> (Console, Arc<std::sync::atomic::AtomicUsize>) {
+    let browsers = activity.browsers_gauge();
+    let mut console = Console::capture(activity);
+    // The same lines go to `server.log`, so the flip leaves the log the other two
+    // ways of serving leave.
+    if let Some(log) = open_server_log(&engine.config, &engine.paths) {
+        console = console.with_server_log(log);
+    }
+    // The QR codes reach the log viewer as lines, exactly as `dux server`
+    // prints them.
+    if engine.config.server.qr_codes {
+        console.show_qr_codes();
+    }
+    for warning in &startup.warnings {
+        console.warn(warning);
+    }
+    // Both in-app serves are LOCAL MODE: the loopback leg is the required one
+    // and anything else is the best-effort Tailscale leg.
+    let legs: Vec<(SocketAddr, bool)> = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .map(|addr| (addr, addr.ip().is_loopback()))
+        .collect();
+    console.banner(&serve_banner(
+        dux_core::display_version(),
+        &legs,
+        &startup.bind_warnings,
+        engine.config.server.tailscale_mode(),
+        if startup.tailscale_detected {
+            TailscaleDetection::Found
+        } else {
+            TailscaleDetection::NotFound
+        },
+        &engine.config.server.auth,
+    ));
+    (console, browsers)
+}
+
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
 /// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
@@ -2851,56 +3077,27 @@ impl ServeCore {
 /// wait for the children: the status screen reads its keys and redraws there,
 /// and answers true when a second Ctrl-c key asks to stop waiting (the screen
 /// holds the terminal in raw mode, so Ctrl-c is a key, not a signal).
-#[allow(clippy::too_many_arguments)]
+///
+/// # Errors
+///
+/// When the serve cannot start (its runtime cannot be built or a pre-bound
+/// listener cannot be adopted), or when a listener failed while serving and the
+/// flip was not forced to quit.
 pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
     activity: dux_core::activity::ActivityRing,
     startup: &StartupNotes,
     hooks: FlipHooks,
-    mut on_tick: impl FnMut() -> ServerTick,
-    mut on_shutdown_status: impl FnMut(&str),
-    mut on_shutdown_wait: impl FnMut() -> bool,
+    turns: FlipTurns<impl FnMut() -> ServerTick, impl FnMut(&str), impl FnMut() -> bool>,
 ) -> Result<(Engine, ServerExit)> {
+    let FlipTurns {
+        mut on_tick,
+        mut on_shutdown_status,
+        mut on_shutdown_wait,
+    } = turns;
     warn_if_ui_not_built();
-    // The flip owns the terminal with its themed status screen, so this console
-    // writes NOTHING to stdout; it records every line into the shared ring the
-    // status screen's log viewer draws, the same lines `dux server` prints.
-    // Its connection registry keeps the screen's browser count in the same ring.
-    let browsers = activity.browsers_gauge();
-    let mut console = Console::capture(activity);
-    // The same lines go to `server.log`, so the flip leaves the log the other two
-    // ways of serving leave.
-    if let Some(log) = open_server_log(&engine.config, &engine.paths) {
-        console = console.with_server_log(log);
-    }
-    // The QR codes reach the log viewer as lines, exactly as `dux server`
-    // prints them.
-    if engine.config.server.qr_codes {
-        console.show_qr_codes();
-    }
-    for warning in &startup.warnings {
-        console.warn(warning);
-    }
-    // Both in-app serves are LOCAL MODE: the loopback leg is the required one
-    // and anything else is the best-effort Tailscale leg.
-    let legs: Vec<(SocketAddr, bool)> = listeners
-        .iter()
-        .filter_map(|l| l.local_addr().ok())
-        .map(|addr| (addr, addr.ip().is_loopback()))
-        .collect();
-    console.banner(&serve_banner(
-        dux_core::display_version(),
-        &legs,
-        &startup.bind_warnings,
-        engine.config.server.tailscale_mode(),
-        if startup.tailscale_detected {
-            TailscaleDetection::Found
-        } else {
-            TailscaleDetection::NotFound
-        },
-        &engine.config.server.auth,
-    ));
+    let (console, browsers) = flip_console(&engine, activity, startup, &listeners);
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
     engine_actor::spawn_global_workers(&mut engine);
 
@@ -2926,8 +3123,10 @@ pub fn serve_with_engine(
     let quit = Arc::new(QuitForce::default());
     let mut core = ServeCore::start(
         handle,
-        listeners,
-        control_socket::listener_of(&engine),
+        ServeListeners {
+            web: listeners,
+            control: control_socket::listener_of(&engine),
+        },
         &engine.config,
         &console,
         // `[server] access_log` governs the flip exactly as it does `dux server`:
@@ -3205,7 +3404,9 @@ pub fn finish_forced_quit(engine: Engine, handle: &ForceQuitHandle, exit: impl F
 pub fn print_force_message_once() {
     static PRINTED: AtomicBool = AtomicBool::new(false);
     if !PRINTED.swap(true, Ordering::SeqCst) {
-        eprintln!("{FORCE_EXIT_MESSAGE}");
+        // On the way out of the process: a stderr nobody can write to has no
+        // one left to tell.
+        let _ = writeln!(std::io::stderr().lock(), "{FORCE_EXIT_MESSAGE}");
     }
 }
 
@@ -3508,10 +3709,12 @@ mod tests {
         super::apply_leg_command(
             crate::serve_legs::LegCommand::Unbind(ts),
             &mut tasks,
-            &shutdown,
-            &axum::Router::new(),
-            &crate::console::Console::noop(),
-            &status_lane,
+            &crate::LegShared {
+                app: axum::Router::new(),
+                shutdown: shutdown.clone(),
+                console: crate::console::Console::noop(),
+                status: status_lane.clone(),
+            },
             &cell,
             &mut streak,
         )
@@ -3578,10 +3781,12 @@ mod tests {
             super::apply_leg_command(
                 command,
                 &mut tasks,
-                &shutdown,
-                &axum::Router::new(),
-                &crate::console::Console::noop(),
-                &status_lane,
+                &crate::LegShared {
+                    app: axum::Router::new(),
+                    shutdown: shutdown.clone(),
+                    console: crate::console::Console::noop(),
+                    status: status_lane.clone(),
+                },
                 &cell,
                 &mut streak,
             )
@@ -3654,10 +3859,12 @@ mod tests {
         super::apply_leg_command(
             crate::serve_legs::LegCommand::Bind(addr),
             &mut tasks,
-            &shutdown,
-            &axum::Router::new(),
-            &crate::console::Console::noop(),
-            &status_lane,
+            &crate::LegShared {
+                app: axum::Router::new(),
+                shutdown: shutdown.clone(),
+                console: crate::console::Console::noop(),
+                status: status_lane.clone(),
+            },
             &cell,
             &mut streak,
         )
@@ -3706,10 +3913,12 @@ mod tests {
         super::apply_leg_command(
             crate::serve_legs::LegCommand::Unbind(ts),
             &mut tasks,
-            &shutdown,
-            &axum::Router::new(),
-            &console,
-            &crate::serve_legs::LegStatus::default(),
+            &crate::LegShared {
+                app: axum::Router::new(),
+                shutdown: shutdown.clone(),
+                console: console.clone(),
+                status: crate::serve_legs::LegStatus::default(),
+            },
             &cell,
             &mut streak,
         )
@@ -3767,12 +3976,14 @@ mod tests {
         let bound_tailscale = tailscale_loop.bound_cell();
         let loop_task = tokio::spawn(super::run_serve_loop(
             legs,
-            shutdown.clone(),
+            crate::LegShared {
+                app: axum::Router::new(),
+                shutdown: shutdown.clone(),
+                console,
+                status: crate::serve_legs::LegStatus::default(),
+            },
             commands_rx,
             mode_rx,
-            axum::Router::new(),
-            console,
-            crate::serve_legs::LegStatus::default(),
             tailscale_loop,
         ));
 
@@ -4100,7 +4311,7 @@ mod tests {
         let console = crate::console::Console::test_ring_capture(ring.clone());
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let restore: super::RestoreTerminal = {
-            let events = events.clone();
+            let events = std::sync::Arc::clone(&events);
             std::sync::Arc::new(move || events.lock().unwrap().push("restore".to_string()))
         };
         let quit = settled_quit();
@@ -4218,7 +4429,7 @@ mod tests {
         let console = crate::console::Console::test_ring_capture(ring.clone());
         let quit = std::sync::Arc::new(super::QuitForce::default());
         {
-            let quit = quit.clone();
+            let quit = std::sync::Arc::clone(&quit);
             let console = console.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -4381,8 +4592,8 @@ mod tests {
         quit.start();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let owner = {
-            let quit = quit.clone();
-            let events = events.clone();
+            let quit = std::sync::Arc::clone(&quit);
+            let events = std::sync::Arc::clone(&events);
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 if quit.claim_exit() {
@@ -4412,7 +4623,7 @@ mod tests {
             crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         quit.start();
-        let force = super::ForceExit::new(console, None, quit.clone())
+        let force = super::ForceExit::new(console, None, std::sync::Arc::clone(&quit))
             .with_settle_bound(std::time::Duration::from_secs(5));
         let (exited_tx, exited_rx) = std::sync::mpsc::channel();
         runtime.spawn(async move {
@@ -4465,13 +4676,13 @@ mod tests {
         let (handle, join) = crate::engine_actor::spawn_engine_thread_with_console(
             engine,
             console.clone(),
-            quit.clone(),
+            std::sync::Arc::clone(&quit),
         );
         quit.request(&console);
         handle.shutdown().await;
         drop(handle);
         let outcome = tokio::task::spawn_blocking({
-            let quit = quit.clone();
+            let quit = std::sync::Arc::clone(&quit);
             move || {
                 super::finish_engine_thread(
                     join,
@@ -4877,6 +5088,14 @@ mod live_tailscale_mode_tests {
         (listener, addr)
     }
 
+    /// How a harness's loop looks at Tailscale: its name probe, how often, and
+    /// whether it believes it runs in a container.
+    struct Looks {
+        identify: Option<crate::IdentityProbe>,
+        period: Duration,
+        container: Container,
+    }
+
     struct Harness {
         shutdown: ServeShutdown,
         control: TailscaleModeControl,
@@ -4919,10 +5138,12 @@ mod live_tailscale_mode_tests {
                 primary,
                 initial_leg,
                 detect,
-                identify,
                 console,
-                FAST_LOOK,
-                Container::Outside,
+                Looks {
+                    identify,
+                    period: FAST_LOOK,
+                    container: Container::Outside,
+                },
             )
         }
 
@@ -4939,25 +5160,29 @@ mod live_tailscale_mode_tests {
                 None,
                 None,
                 Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
-                Some(identify),
                 console,
-                FAST_LOOK,
-                container,
+                Looks {
+                    identify: Some(identify),
+                    period: FAST_LOOK,
+                    container,
+                },
             )
         }
 
-        #[allow(clippy::too_many_arguments)]
         fn start_inner_every(
             mode: TailscaleMode,
             no_tailscale: NoTailscaleFlag,
             primary: Option<SocketAddr>,
             initial_leg: Option<SocketAddr>,
             detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
-            identify: Option<crate::IdentityProbe>,
             console: Console,
-            period: Duration,
-            container: Container,
+            looks: Looks,
         ) -> Self {
+            let Looks {
+                identify,
+                period,
+                container,
+            } = looks;
             let (control, mode_rx) = TailscaleModeControl::new(
                 tokio::runtime::Handle::current(),
                 Arc::new(AtomicBool::new(mode.watches_interface())),
@@ -4981,12 +5206,14 @@ mod live_tailscale_mode_tests {
             ts.start_watcher_if_wanted();
             let task = tokio::spawn(run_serve_loop(
                 tokio::task::JoinSet::new(),
-                shutdown.clone(),
+                crate::LegShared {
+                    app: axum::Router::new(),
+                    shutdown: shutdown.clone(),
+                    console,
+                    status: LegStatus::default(),
+                },
                 leg_rx,
                 mode_rx,
-                axum::Router::new(),
-                console,
-                LegStatus::default(),
                 ts,
             ));
             Self {
@@ -5031,10 +5258,12 @@ mod live_tailscale_mode_tests {
                 primary,
                 None,
                 Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
-                Some(identify),
                 Console::noop(),
-                period,
-                Container::Outside,
+                Looks {
+                    identify: Some(identify),
+                    period,
+                    container: Container::Outside,
+                },
             )
         }
 
@@ -6872,8 +7101,10 @@ mod auth_warning_mode_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let core = ServeCore::start(
             handle,
-            vec![listener],
-            None,
+            ServeListeners {
+                web: vec![listener],
+                control: None,
+            },
             &config,
             &Console::capture(ring.clone()),
             crate::server::AccessLog::Off,

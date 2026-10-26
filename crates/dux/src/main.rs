@@ -194,23 +194,27 @@ fn run_tui_with_flip() -> Result<()> {
                     activity,
                     &startup,
                     hooks,
-                    || server_tick(screen.borrow_mut().as_mut()),
-                    |message| {
-                        // Through the status screen so it renders on its own themed
-                        // line rather than as raw text wherever the cursor sits.
-                        match screen.borrow_mut().as_mut() {
-                            Some(screen) => screen.show_shutdown_message(message),
-                            None => client_commands::note(&mut std::io::stderr().lock(), message),
-                        }
-                    },
-                    || {
-                        // The screen holds the terminal in raw mode, so a second
-                        // Ctrl-c during the shutdown wait is a key; it reads its
-                        // keys and redraws on each turn of the wait.
-                        match screen.borrow_mut().as_mut() {
-                            Some(screen) => screen.shutdown_tick(),
-                            None => false,
-                        }
+                    dux_web::FlipTurns {
+                        on_tick: || server_tick(screen.borrow_mut().as_mut()),
+                        on_shutdown_status: |message: &str| {
+                            // Through the status screen so it renders on its own themed
+                            // line rather than as raw text wherever the cursor sits.
+                            match screen.borrow_mut().as_mut() {
+                                Some(screen) => screen.show_shutdown_message(message),
+                                None => {
+                                    client_commands::note(&mut std::io::stderr().lock(), message);
+                                }
+                            }
+                        },
+                        on_shutdown_wait: || {
+                            // The screen holds the terminal in raw mode, so a second
+                            // Ctrl-c during the shutdown wait is a key; it reads its
+                            // keys and redraws on each turn of the wait.
+                            match screen.borrow_mut().as_mut() {
+                                Some(screen) => screen.shutdown_tick(),
+                                None => false,
+                            }
+                        },
                     },
                 )?;
 

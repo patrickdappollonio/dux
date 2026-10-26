@@ -155,15 +155,17 @@ fn flip_and_come_back(
         dux_core::activity::ActivityRing::default(),
         &dux_core::serve_log::StartupNotes::default(),
         dux_web::FlipHooks::default(),
-        || {
-            if stop.load(Ordering::SeqCst) {
-                ServerTick::ReturnToTui
-            } else {
-                ServerTick::Continue
-            }
+        dux_web::FlipTurns {
+            on_tick: || {
+                if stop.load(Ordering::SeqCst) {
+                    ServerTick::ReturnToTui
+                } else {
+                    ServerTick::Continue
+                }
+            },
+            on_shutdown_status: |_message: &str| {},
+            on_shutdown_wait: || false,
         },
-        |_message| {},
-        || false,
     )
     .expect("serve_with_engine");
 
@@ -406,15 +408,17 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
             dux_core::activity::ActivityRing::default(),
             &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
-            || {
-                if quit_for_thread.load(Ordering::SeqCst) {
-                    ServerTick::QuitProcess
-                } else {
-                    ServerTick::Continue
-                }
+            dux_web::FlipTurns {
+                on_tick: || {
+                    if quit_for_thread.load(Ordering::SeqCst) {
+                        ServerTick::QuitProcess
+                    } else {
+                        ServerTick::Continue
+                    }
+                },
+                on_shutdown_status: |_message: &str| {},
+                on_shutdown_wait: || false,
             },
-            |_message| {},
-            || false,
         )
         .expect("serve_with_engine");
         // After QuitProcess teardown the child should have been SIGTERMed; the
@@ -485,9 +489,11 @@ async fn quit_process_counts_a_reaped_child_whose_pty_is_still_open_as_shut_down
             dux_core::activity::ActivityRing::default(),
             &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
-            || ServerTick::QuitProcess,
-            |_message| {},
-            || false,
+            dux_web::FlipTurns {
+                on_tick: || ServerTick::QuitProcess,
+                on_shutdown_status: |_message: &str| {},
+                on_shutdown_wait: || false,
+            },
         )
         .expect("serve_with_engine");
         let client = &returned_engine.companion_terminals[&terminal_id].client;
@@ -548,15 +554,17 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
             dux_core::activity::ActivityRing::default(),
             &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
-            || {
-                if stop_for_thread.load(Ordering::SeqCst) {
-                    ServerTick::ReturnToTui
-                } else {
-                    ServerTick::Continue
-                }
+            dux_web::FlipTurns {
+                on_tick: || {
+                    if stop_for_thread.load(Ordering::SeqCst) {
+                        ServerTick::ReturnToTui
+                    } else {
+                        ServerTick::Continue
+                    }
+                },
+                on_shutdown_status: |_message: &str| {},
+                on_shutdown_wait: || false,
             },
-            |_message| {},
-            || false,
         )
         .expect("serve_with_engine");
         // ReturnToTui keeps PTYs alive: the terminal must still be running.
@@ -768,15 +776,17 @@ async fn the_flip_logs_what_dux_server_prints() {
             ring_for_thread,
             &startup,
             dux_web::FlipHooks::default(),
-            || {
-                if quit_for_thread.load(Ordering::SeqCst) {
-                    ServerTick::QuitProcess
-                } else {
-                    ServerTick::Continue
-                }
+            dux_web::FlipTurns {
+                on_tick: || {
+                    if quit_for_thread.load(Ordering::SeqCst) {
+                        ServerTick::QuitProcess
+                    } else {
+                        ServerTick::Continue
+                    }
+                },
+                on_shutdown_status: |_message: &str| {},
+                on_shutdown_wait: || false,
             },
-            |_message| {},
-            || false,
         )
         .expect("serve_with_engine");
         done_tx.send(()).unwrap();
@@ -848,9 +858,11 @@ async fn a_second_ctrl_c_during_the_shutdown_wait_forces_the_exit() {
             ring_for_thread,
             &dux_core::serve_log::StartupNotes::default(),
             dux_web::FlipHooks::default(),
-            || ServerTick::QuitProcess,
-            |_message| {},
-            move || looks_for_hook.fetch_add(1, Ordering::SeqCst) >= 3,
+            dux_web::FlipTurns {
+                on_tick: || ServerTick::QuitProcess,
+                on_shutdown_status: |_message: &str| {},
+                on_shutdown_wait: move || looks_for_hook.fetch_add(1, Ordering::SeqCst) >= 3,
+            },
         )
         .expect("serve_with_engine");
         let client = &returned_engine.companion_terminals[&terminal_id].client;
