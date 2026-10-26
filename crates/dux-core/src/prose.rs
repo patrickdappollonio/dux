@@ -316,18 +316,14 @@ mod tests {
                     restartable: strings(&args["running"]["restartable"]),
                     left_running: strings(&args["running"]["left_running"]),
                 };
-                let resumes = args["conversation_resumes"].as_bool().expect("resumes");
+                let resume = if args["conversation_resumes"].as_bool().expect("resumes") {
+                    crate::working_copy::ConversationResume::Resumes
+                } else {
+                    crate::working_copy::ConversationResume::StartsFresh
+                };
                 let (branch, source) = (s("branch_name"), s("source_branch"));
                 crate::working_copy::recreate_confirm_prose(
-                    &worktree,
-                    &branch,
-                    &source,
-                    if resumes {
-                        crate::working_copy::ConversationResume::Resumes
-                    } else {
-                        crate::working_copy::ConversationResume::StartsFresh
-                    },
-                    &running,
+                    &worktree, &branch, &source, resume, &running,
                 )
             }
             "recreate_restart_checkbox" => {

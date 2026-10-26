@@ -12,6 +12,8 @@
 //! path uses and dispatches the agent create, whose busy and final take over
 //! from the clone's own spinner.
 
+use crate::add_project_plan::DefaultCheckout;
+use crate::project_browser::project_base_for_add;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -902,12 +904,8 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
         .ok()
         .flatten()
         .unwrap_or_default();
-    let leading_branch = crate::project_browser::project_base_for_add(
-        dest,
-        Some(&branch),
-        crate::add_project_plan::DefaultCheckout::StayOnCurrent,
-    )
-    .into_branch();
+    let leading_branch =
+        project_base_for_add(dest, Some(&branch), DefaultCheckout::StayOnCurrent).into_branch();
     // A pull request's create decides for itself what to do with a branch of
     // that name, so only a plain agent is refused one here.
     let name_taken = pull_request.is_none()

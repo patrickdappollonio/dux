@@ -80,6 +80,15 @@ pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<Diff
     diff_head_via_git_as(worktree, rel_path, None)
 }
 
+/// Whether the child is killed before it is waited for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reap {
+    /// Kill it first: its output is no longer wanted.
+    KillFirst,
+    /// Let it finish on its own.
+    LetFinish,
+}
+
 /// [`diff_head_via_git`] reading the file's lines in `requested` rather than by
 /// the editor's automatic rule (UTF-8 when the shown content is, otherwise
 /// windows-1252). A requested encoding the content is not valid in is refused
@@ -164,14 +173,6 @@ pub fn diff_head_via_git_as(
 
     // Everything past the spawn goes through this, so no early return can leave
     // a child behind.
-    /// Whether the child is killed before it is waited for.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Reap {
-        /// Kill it first: its output is no longer wanted.
-        KillFirst,
-        /// Let it finish on its own.
-        LetFinish,
-    }
     fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
         if how == Reap::KillFirst {
             let _ = child.kill();

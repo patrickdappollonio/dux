@@ -21,7 +21,7 @@ fn kill(pid: u32) {
 /// leader exit leaving a job in its group, observe the exit with `try_wait` (as
 /// the exit prune and the terminating reap do) and drop it in the same tick.
 /// Whether the drop waits for the leader-exit record to land first.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordWait {
     /// Wait for the record, then drop.
     WaitForIt,

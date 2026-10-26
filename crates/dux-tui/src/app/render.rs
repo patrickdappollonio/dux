@@ -340,9 +340,9 @@ pub(crate) fn agent_state_word(
     match dux_core::row_state::agent_row_state(
         status,
         dux_core::row_state::AgentRowFacts {
-            working: working,
-            typing: typing,
-            needs_attention: needs_attention,
+            working,
+            typing,
+            needs_attention,
         },
     ) {
         RowState::NeedsAttention => "Needs you",
@@ -13050,8 +13050,8 @@ fn terminal_row_lines(
     // agents keep "Working".
     let word =
         match dux_core::row_state::terminal_row_state(dux_core::row_state::TerminalRowFacts {
-            working: working,
-            typing: typing,
+            working,
+            typing,
         }) {
             dux_core::row_state::RowState::Typing => "Typing",
             dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,

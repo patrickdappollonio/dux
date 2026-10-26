@@ -3201,9 +3201,9 @@ mod tests {
     /// button to press again, which differs between a clone and an add.
     #[test]
     fn a_review_copy_refusal_says_how_to_agree_where_the_user_is() {
-        let flag = " To go ahead anyway, run the command again with --review-copy.";
         use crate::clone_project::CloneMode;
         use AgreementChannel::{CommandLineFlag, DialogBox};
+        let flag = " To go ahead anyway, run the command again with --review-copy.";
         assert_eq!(review_copy_how(CommandLineFlag), flag);
         assert_eq!(
             review_copy_how(DialogBox),

@@ -137,6 +137,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the sentence that says how to agree to a review copy",
     ),
     (
+        "dux_core::agent_job::AgreementChannel",
+        Vetted::Data,
+        "where the user agrees to a review copy, a plain enum with no code of its own",
+    ),
+    (
         "dux_core::agent_job::typed_copy_review_outlook",
         Vetted::Function(
             "crates/dux-core/src/agent_job.rs",
