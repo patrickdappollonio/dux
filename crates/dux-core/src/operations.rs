@@ -98,38 +98,55 @@ use crate::statusline::StatusTone;
 /// What kind of change a record follows. Spelled `noun.verb` on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum OperationKind {
+    /// Adding a project.
     #[serde(rename = "project.add")]
     ProjectAdd,
+    /// Removing a project.
     #[serde(rename = "project.remove")]
     ProjectRemove,
+    /// Creating an agent.
     #[serde(rename = "agent.create")]
     AgentCreate,
+    /// Deleting an agent.
     #[serde(rename = "agent.delete")]
     AgentDelete,
+    /// Stopping an agent.
     #[serde(rename = "agent.stop")]
     AgentStop,
+    /// Starting an agent.
     #[serde(rename = "agent.start")]
     AgentStart,
+    /// Opening a tab.
     #[serde(rename = "tab.create")]
     TabCreate,
+    /// Closing a tab.
     #[serde(rename = "tab.close")]
     TabClose,
+    /// Starting a tab.
     #[serde(rename = "tab.start")]
     TabStart,
+    /// Stopping a tab.
     #[serde(rename = "tab.stop")]
     TabStop,
+    /// Opening a terminal.
     #[serde(rename = "terminal.create")]
     TerminalCreate,
+    /// Closing a terminal.
     #[serde(rename = "terminal.close")]
     TerminalClose,
+    /// Saving a macro.
     #[serde(rename = "macro.set")]
     MacroSet,
+    /// Removing a macro.
     #[serde(rename = "macro.remove")]
     MacroRemove,
+    /// Saving a global environment variable.
     #[serde(rename = "env.set")]
     EnvSet,
+    /// Removing a global environment variable.
     #[serde(rename = "env.remove")]
     EnvRemove,
+    /// Reloading the config.
     #[serde(rename = "config.reload")]
     ConfigReload,
 }
@@ -189,11 +206,14 @@ pub enum HoldMode {
 /// One admission key and how it is held or wanted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hold {
+    /// The admission key.
     pub key: crate::engine::InFlightKey,
+    /// Whether the key is held alone or beside other shared holds.
     pub mode: HoldMode,
 }
 
 impl Hold {
+    /// A hold nothing else may share.
     pub fn exclusive(key: crate::engine::InFlightKey) -> Self {
         Self {
             key,
@@ -201,6 +221,7 @@ impl Hold {
         }
     }
 
+    /// A hold other shared holds may sit beside.
     pub fn shared(key: crate::engine::InFlightKey) -> Self {
         Self {
             key,
@@ -219,7 +240,9 @@ impl Hold {
 /// `GET /api/v1/operations/{id}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InTheWay {
+    /// The running operation's id.
     pub id: String,
+    /// What kind of change it is.
     pub kind: OperationKind,
 }
 
@@ -280,7 +303,9 @@ impl OperationState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartKind {
+    /// An agent's worktree.
     Worktree,
+    /// An agent's branch.
     Branch,
 }
 
@@ -319,9 +344,11 @@ impl PartOutcome {
 /// One piece of a change and what became of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OperationPart {
+    /// Which piece of the change this is.
     pub part: PartKind,
     /// The worktree's path or the branch's name.
     pub subject: String,
+    /// What became of it.
     pub outcome: PartOutcome,
     /// Why, when it was refused or failed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -332,12 +359,16 @@ pub struct OperationPart {
 /// removed, and what became of each piece.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OperationNotes {
+    /// The ids the change created.
     pub created: Vec<String>,
+    /// The ids the change removed.
     pub removed: Vec<String>,
+    /// What became of each piece of the change.
     pub parts: Vec<OperationPart>,
 }
 
 impl OperationNotes {
+    /// Whether there is nothing to report.
     pub fn is_empty(&self) -> bool {
         self.created.is_empty() && self.removed.is_empty() && self.parts.is_empty()
     }
@@ -378,7 +409,9 @@ impl OperationNotes {
 /// finished one is kept; fixed when the record opens, so a reload affects only later ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationPolicy {
+    /// How long a record may run before it reads as unknown.
     pub unknown_after: Duration,
+    /// How long a finished record is kept.
     pub retention: Duration,
 }
 
@@ -394,8 +427,11 @@ impl OperationPolicy {
 /// A record as a client reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OperationView {
+    /// The record's id.
     pub id: String,
+    /// What kind of change it follows.
     pub kind: OperationKind,
+    /// Where it stands.
     pub state: OperationState,
     /// The final's sentence; empty while running, and for a change that ended
     /// without one.
@@ -403,8 +439,11 @@ pub struct OperationView {
     /// The parts `message` was built from, as the status stream carries them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segments: Option<Vec<ProseSegment>>,
+    /// The ids the change created.
     pub created: Vec<String>,
+    /// The ids the change removed.
     pub removed: Vec<String>,
+    /// What became of each piece of the change.
     pub parts: Vec<OperationPart>,
 }
 
@@ -593,6 +632,7 @@ impl Operations {
         self.with(|registry| registry.records.len())
     }
 
+    /// Whether no records are held.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
