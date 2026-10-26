@@ -55,19 +55,23 @@ pub(crate) struct CloneRequest {
 /// reason, the flag's, covers whatever copy turns out to be needed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpfrontReviewCopy {
+    /// Whether the user agreed to a review copy.
     #[serde(default)]
     pub agreed: bool,
+    /// The word the warning's reason began with, or `None` for an agreement that covers any copy.
     #[serde(default)]
     pub reason: Option<String>,
     /// The branch the warning said the copy would be made on. An agreement that
     /// names none covers the reason under any name.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Whether the agreement came from a command-line flag rather than a dialog.
     #[serde(default)]
     pub by_flag: bool,
 }
 
 impl UpfrontReviewCopy {
+    /// The agreement as the agent create weighs it.
     pub fn consent(&self) -> crate::worker::ReviewCopyConsent {
         crate::worker::ReviewCopyConsent::from_upfront(
             crate::worker::ReviewCopyAnswer {
@@ -84,8 +88,10 @@ impl UpfrontReviewCopy {
 /// is worded by: a clone never says it added, and an add never says it cloned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CloneMode {
+    /// Clone the repository into the folder.
     #[default]
     Clone,
+    /// Add the checkout already in the folder as the project.
     AddExisting,
 }
 
@@ -129,12 +135,15 @@ impl CloneOutcome {
 /// A clone that is waiting for its worker, with whether a browser asked for
 /// it (whose follow-up the web layer then drives).
 pub struct PendingClone {
+    /// The clone's operation, which its outcome resolves.
     pub op: HandlerStatusOp<CloneOutcome>,
+    /// Whether a browser asked for the clone.
     pub from_web: bool,
     /// The repository key a pull request clone holds, released once the
     /// project is registered or the clone ends without one; `None` for an
     /// ordinary clone.
     pub repository_key: Option<String>,
+    /// Whether the folder is cloned into or added as it is.
     pub mode: CloneMode,
     /// The folder the operation clones into or adds, to word a refusal by what
     /// the holder of that folder is doing.
@@ -148,7 +157,9 @@ pub struct PendingClone {
 /// processes running, which quitting dux stops.
 #[derive(Default)]
 pub struct Clones {
+    /// The clones waiting for their worker, by operation id.
     pub pending: HashMap<String, PendingClone>,
+    /// The git processes running for those clones.
     pub processes: CloneProcesses,
     /// Extra variables for every clone's git, empty outside tests.
     pub(crate) git_env: Vec<(String, String)>,
@@ -260,9 +271,13 @@ pub(crate) fn inspect_pr_destination(
 /// The pull request a folder check is for, when the answer for a checkout
 /// should also say whether the agent will need a review copy there.
 pub struct FolderReviewCopyQuery<'a> {
+    /// The directory managed worktrees are created under.
     pub worktrees_root: &'a Path,
+    /// The pull request's number.
     pub number: u64,
+    /// The pull request's head branch.
     pub head_branch: &'a str,
+    /// The pull request's head commit, when known.
     pub head_commit: Option<&'a str>,
     /// The name the agent will be given: one spelled like a review copy of the
     /// branch asks for a copy, until a local branch of that name exists.
@@ -277,8 +292,11 @@ const REVIEW_COPY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// and a `review` query, whether the agent will need a review copy there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrDestinationCheck {
+    /// What the folder holds.
     pub state: PrDestination,
+    /// The folder, canonicalized as dux will use it.
     pub path: PathBuf,
+    /// Whether the agent will need a review copy there, when the check could say.
     pub review_copy: Option<ReviewCopyOutlook>,
 }
 
@@ -423,9 +441,13 @@ pub struct LeadingBranchGuess {
 /// The pull request a clone's worker looked up, and the agent name it settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClonedPullRequest {
+    /// The pull request.
     pub target: PullRequestCloneTarget,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's state as `gh` reported it.
     pub state: String,
+    /// The pull request's head branch.
     pub head_branch: String,
     /// The typed name, or the head branch when none was typed.
     pub agent_name: String,
@@ -439,10 +461,15 @@ pub struct ClonedPullRequest {
 pub struct ClonedFor {
     /// The address, with any user and token removed.
     pub address: String,
+    /// The folder the repository was cloned into or added from.
     pub path: PathBuf,
+    /// The new project's display name.
     pub project_name: String,
+    /// The new project's id.
     pub project_id: String,
+    /// The agent's name.
     pub agent_name: String,
+    /// Whether the folder was cloned into or added as it is.
     pub mode: CloneMode,
     /// The pull request the agent is for, when it is for one.
     pub pull_request: Option<PullRequestCloneTarget>,
@@ -543,12 +570,16 @@ impl ClonedFor {
 pub struct ClonedProject {
     /// The clone's op, which the follow-up resolves.
     pub status_op_id: Option<String>,
+    /// The folder the repository was cloned into or added from.
     pub path: PathBuf,
+    /// The agent's name.
     pub agent_name: String,
+    /// What the clone left on disk.
     pub cloned: ClonedRepository,
     /// The repository key the clone held, to release when the pending clone
     /// is gone.
     pub repository_key: Option<String>,
+    /// Whether the folder was cloned into or added as it is.
     pub mode: CloneMode,
 }
 
