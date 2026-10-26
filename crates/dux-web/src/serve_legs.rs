@@ -1402,6 +1402,15 @@ pub struct TailscaleModeControl {
 /// writes it and the surfaces that read the URLs it implies.
 pub(crate) type IdentityCell = Arc<std::sync::Mutex<Option<TailscaleIdentity>>>;
 
+impl std::fmt::Debug for TailscaleModeControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TailscaleModeControl")
+            .field("watched", &self.watched)
+            .field("host_literals", &self.host_literals)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TailscaleModeControl {
     /// Build the control and the receiving end the serve loop owns.
     pub(crate) fn new(

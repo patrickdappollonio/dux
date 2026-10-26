@@ -62,7 +62,10 @@ pub enum Arrival {
     },
     /// The control socket, whose `uid` the listener already checked is this
     /// process's own: trusted as this machine's owner, with no Host, Origin or password check.
-    Unix { uid: u32 },
+    Unix {
+        /// The connecting process's user id, the one this process runs as.
+        uid: u32,
+    },
 }
 
 impl Arrival {
@@ -82,6 +85,7 @@ impl Arrival {
         }
     }
 
+    /// Whether this connection came in over the control socket.
     pub fn is_control_socket(self) -> bool {
         matches!(self, Self::Unix { .. })
     }
@@ -101,6 +105,7 @@ pub fn over_control_socket<B>(request: &axum::http::Request<B>) -> bool {
 /// request an [`Arrival`]. Wraps whatever listener the serve already uses
 /// (every serve leg's is a TCP listener with Nagle switched off), whose own
 /// accept, error handling included, is unchanged.
+#[derive(Debug)]
 pub struct Recorded<L>(pub L);
 
 impl<L> axum::serve::Listener for Recorded<L>
@@ -303,6 +308,7 @@ fn parse_forwarded_address(part: &str) -> Option<IpAddr> {
     reason = "independent facts classification derives about one request, each read on its own"
 )]
 pub struct Classification {
+    /// Who the request is, as far as the password goes.
     pub class: ClientClass,
     /// Every address the request names: the peer, every `X-Forwarded-For`
     /// entry, `X-Real-IP` and every `Forwarded: for=`. The blocklist applies to

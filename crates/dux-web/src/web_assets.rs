@@ -28,7 +28,7 @@ use rust_embed::RustEmbed;
 /// of only through the router: every other gate here fetches a page and happens to
 /// fail when the embed is empty, where a direct assertion holds wherever `folder`
 /// points and reports the cause instead of a 404.
-#[derive(RustEmbed)]
+#[derive(Debug, RustEmbed)]
 #[folder = "$OUT_DIR/ui"]
 pub struct WebAssets;
 

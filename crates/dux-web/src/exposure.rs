@@ -86,6 +86,7 @@ impl IdentityFacts {
 /// Everything the serve knows about its exposure right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exposure {
+    /// What dux knows about a Tailscale Funnel or forward onto its port.
     pub funnel: FunnelState,
     /// The last successful look's facts, or `None` when no look is current (none
     /// has landed, the last one failed, or dux does not consult Tailscale).
