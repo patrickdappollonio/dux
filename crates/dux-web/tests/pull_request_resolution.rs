@@ -76,13 +76,13 @@ async fn boot_with_lookup(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
 
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         for (id, name, origin) in projects {
             let dir = root.join(id);
-            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::create_dir_all(&dir).expect("create the test directory");
             git_isolated(&dir, &["init", "-b", "main"]);
             git_isolated(&dir, &["remote", "add", "origin", origin]);
             store
@@ -96,11 +96,11 @@ async fn boot_with_lookup(
                     startup_command: None,
                     env: Default::default(),
                 })
-                .unwrap();
+                .expect("save the test project");
         }
     }
 
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.github_integration_enabled = true;
     // Point the probe at a stand-in `gh` that reports exactly `hosts`. Starting
@@ -132,15 +132,17 @@ async fn boot_with_lookup(
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }

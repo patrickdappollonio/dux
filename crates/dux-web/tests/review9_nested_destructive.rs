@@ -49,8 +49,8 @@ async fn fixture() -> Fixture {
     let root = tmp.path().to_path_buf();
     let repo = root.join("repo");
     let worktree = repo.join(".worktrees").join("agent");
-    std::fs::create_dir_all(&worktree).unwrap();
-    std::fs::write(worktree.join("a.txt"), "a\n").unwrap();
+    std::fs::create_dir_all(&worktree).expect("create the test directory");
+    std::fs::write(worktree.join("a.txt"), "a\n").expect("write the test file");
     let paths = DuxPaths {
         root: root.clone(),
         config_path: root.join("config.toml"),
@@ -59,9 +59,9 @@ async fn fixture() -> Fixture {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -73,12 +73,12 @@ async fn fixture() -> Fixture {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&session("s1", worktree.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.terminal.command = "cat".to_string();
     engine.config.terminal.args = vec![];
@@ -89,25 +89,30 @@ async fn fixture() -> Fixture {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr: SocketAddr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/api/v1/projects/p1/terminals"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let tid = body["terminal_id"].as_str().unwrap().to_string();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    let tid = body["terminal_id"]
+        .as_str()
+        .expect("the response names the terminal")
+        .to_string();
     let prefix = format!("http://{addr}/api/v1/projects/p1/terminals/{tid}/files");
 
     Fixture {

@@ -59,9 +59,9 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -73,12 +73,12 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", "p1", root.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -93,15 +93,17 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     engine.config.terminal.args = vec![];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -131,7 +133,7 @@ async fn wait_for_frame(
 async fn connect_events(addr: SocketAddr) -> ClientWs {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
-        .unwrap();
+        .expect("open the websocket");
     wait_for_frame(&mut ws, 5, |t| t.contains("\"event\":\"connected\""))
         .await
         .expect("a /ws/events connection must send a `connected` first frame");
@@ -154,9 +156,9 @@ async fn create_terminal_via_rest(addr: SocketAddr, session_id: &str) -> String 
         ))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status().as_u16(), 201, "terminal create should be 201");
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
     body["terminal_id"]
         .as_str()
         .expect("terminal_id in create response")

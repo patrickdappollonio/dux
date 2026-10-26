@@ -120,7 +120,7 @@ fn temp_paths() -> (dux_core::test_scratch::ScratchDir, DuxPaths) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     (tmp, paths)
 }
 
@@ -213,22 +213,27 @@ async fn unknown_path_falls_back_to_index() {
 /// Build a router backed by a throwaway engine for static-asset assertions.
 fn test_router() -> (dux_core::test_scratch::ScratchDir, axum::Router) {
     let (tmp, paths) = temp_paths();
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     (tmp, router(handle))
 }
 
 async fn get(app: axum::Router, uri: &str) -> axum::http::Response<Body> {
-    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap()
+    app.oneshot(
+        Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build the request"),
+    )
+    .await
+    .unwrap()
 }
 
 fn header(resp: &axum::http::Response<Body>, name: &str) -> Option<String> {
     resp.headers()
         .get(name)
-        .map(|v| v.to_str().unwrap().to_string())
+        .map(|v| v.to_str().expect("the header is ASCII").to_string())
 }
 
 #[tokio::test]

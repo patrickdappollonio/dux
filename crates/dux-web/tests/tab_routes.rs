@@ -73,8 +73,8 @@ async fn boot_full(
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
     let wt2 = root.join("wt2");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
+    std::fs::create_dir_all(&wt2).expect("create the test directory");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -84,9 +84,9 @@ async fn boot_full(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -98,15 +98,15 @@ async fn boot_full(
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&sample_session("s2", wt2.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -120,7 +120,7 @@ async fn boot_full(
     if let Some(password) = password {
         engine.config.server.auth.password_hash =
             dux_core::auth::hash_password(&dux_core::auth::Password::new(password.to_string()))
-                .unwrap();
+                .expect("hash the test password");
     }
     let (handle, _join) = spawn_engine_thread(engine);
     let params = RouterParams::plain_http().with_max_websocket_connections(
@@ -131,8 +131,10 @@ async fn boot_full(
         tab_per_agent,
     );
     let app = build_app(handle, Router::<AppState>::new(), tune(params));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     // Served the way every serve leg is, with both ends of each connection
     // recorded for the auth layer.
     tokio::spawn(async move {
@@ -141,7 +143,7 @@ async fn boot_full(
             app.into_make_service_with_connect_info::<dux_web::auth::Arrival>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -162,7 +164,7 @@ async fn boot_with_broken_provider_and_claude(
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
-    std::fs::create_dir_all(&wt1).unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -172,9 +174,9 @@ async fn boot_with_broken_provider_and_claude(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -186,12 +188,12 @@ async fn boot_with_broken_provider_and_claude(
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -220,15 +222,17 @@ async fn boot_with_broken_provider_and_claude(
         dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
     );
     let app = build_app(handle, Router::<AppState>::new(), params);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -238,10 +242,13 @@ async fn create_extra_tab(client: &reqwest::Client, addr: SocketAddr, session: &
         .post(format!("http://{addr}/api/v1/sessions/{session}/tabs"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201, "create tab should 201");
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["tab_id"].as_str().unwrap().to_string()
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    body["tab_id"]
+        .as_str()
+        .expect("the response names the tab")
+        .to_string()
 }
 
 #[tokio::test]
@@ -307,10 +314,10 @@ where
             .get(format!("http://{addr}/api/v1/sessions/{id}"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         if pred(&session) || tokio::time::Instant::now() >= deadline {
             return session;
         }
@@ -333,20 +340,25 @@ async fn followed_outcome(
         .and_then(|v| v.to_str().ok())
         .expect("a Location header")
         .to_string();
-    let accepted: serde_json::Value = resp.json().await.unwrap();
+    let accepted: serde_json::Value = resp.json().await.expect("the response body is JSON");
     assert_eq!(
         location,
-        format!("/api/v1/operations/{}", accepted["id"].as_str().unwrap())
+        format!(
+            "/api/v1/operations/{}",
+            accepted["id"]
+                .as_str()
+                .expect("the accepted operation has an id")
+        )
     );
     for _ in 0..15 {
         let record: serde_json::Value = client
             .get(format!("http://{addr}{location}?wait_seconds=2"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         if record["state"] != "running" {
             return record;
         }
@@ -362,10 +374,10 @@ async fn slot_tab_id(client: &reqwest::Client, addr: SocketAddr, id: &str) -> St
         .get(format!("http://{addr}/api/v1/sessions/{id}"))
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
         .json()
         .await
-        .unwrap();
+        .expect("the response body is JSON");
     session["slot_tab_id"]
         .as_str()
         .expect("the spine names the slot tab")
@@ -375,7 +387,7 @@ async fn slot_tab_id(client: &reqwest::Client, addr: SocketAddr, id: &str) -> St
 fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
     session["tabs"]
         .as_array()
-        .unwrap()
+        .expect("the agent lists its tabs")
         .iter()
         .any(|t| t["id"].as_str() == Some(tab_id) && t["has_live_process"] == true)
 }

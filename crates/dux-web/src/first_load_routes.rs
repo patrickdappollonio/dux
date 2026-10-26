@@ -73,11 +73,17 @@ impl FirstLoadState {
     /// The screen to show, for injection into the bootstrap document. A cheap
     /// clone under a short lock; the guard never crosses an `.await`.
     pub fn pending(&self) -> Option<PendingFirstLoadView> {
-        self.pending.lock().unwrap().clone()
+        self.pending
+            .lock()
+            .expect("the pending lock is not poisoned")
+            .clone()
     }
 
     fn set_pending(&self, screen: Option<PendingFirstLoadView>) {
-        *self.pending.lock().unwrap() = screen;
+        *self
+            .pending
+            .lock()
+            .expect("the pending lock is not poisoned") = screen;
     }
 }
 

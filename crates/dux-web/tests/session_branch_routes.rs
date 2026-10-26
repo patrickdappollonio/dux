@@ -32,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .expect("run git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -110,14 +110,14 @@ async fn boot() -> Fixture {
     let root = tmp.path().to_path_buf();
 
     let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&repo).expect("create the test directory");
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "t@example.com"]);
     git(&repo, &["config", "user.name", "Test"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
 
     let managed_root = root.join("worktrees").join("repo");
-    std::fs::create_dir_all(&managed_root).unwrap();
+    std::fs::create_dir_all(&managed_root).expect("create the test directory");
 
     // The drifted agent: born on `develop`, its worktree now on `develop-next`,
     // which carries one commit `develop` does not.
@@ -154,7 +154,7 @@ async fn boot() -> Fixture {
     );
 
     let folder = root.join("someones-folder");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&folder).expect("create the test directory");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -165,7 +165,7 @@ async fn boot() -> Fixture {
         socket_path: root.join("dux.sock"),
     };
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -177,7 +177,7 @@ async fn boot() -> Fixture {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&managed_session(
                 "drifted",
@@ -186,7 +186,7 @@ async fn boot() -> Fixture {
                 "develop",
                 dux_core::model::BranchProvenance::AttachedExisting,
             ))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&managed_session(
                 "duxs",
@@ -195,15 +195,15 @@ async fn boot() -> Fixture {
                 "dux/made-this",
                 dux_core::model::BranchProvenance::CreatedByDux,
             ))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&standalone_session(
                 "folder",
                 folder.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -211,15 +211,17 @@ async fn boot() -> Fixture {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
 
     Fixture {
@@ -234,7 +236,7 @@ async fn branch_unpushed(addr: SocketAddr, id: &str) -> (u16, serde_json::Value)
         "http://{addr}/api/v1/sessions/{id}/branch-unpushed"
     ))
     .await
-    .unwrap();
+    .expect("send the request");
     let status = resp.status().as_u16();
     let body = resp.json().await.unwrap_or(serde_json::Value::Null);
     (status, body)
@@ -248,7 +250,7 @@ async fn delete(addr: SocketAddr, id: &str, query: &str, connection: &str) -> u1
         .header("x-connection-id", connection)
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
         .status()
         .as_u16()
 }
@@ -263,7 +265,7 @@ async fn events_socket(
 ) {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
-        .unwrap();
+        .expect("open the websocket");
     let frame = next_frame(&mut ws, |v| v["event"] == "connected")
         .await
         .expect("a /ws/events connection must send a `connected` first frame");
@@ -339,7 +341,10 @@ where
     })
     .await
     .unwrap_or_else(|| panic!("the delete of {name} must report its outcome on the events socket"));
-    frame["message"].as_str().unwrap().to_string()
+    frame["message"]
+        .as_str()
+        .expect("the status frame carries a message")
+        .to_string()
 }
 
 fn branches(repo: &Path) -> Vec<String> {
@@ -347,7 +352,7 @@ fn branches(repo: &Path) -> Vec<String> {
         .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
         .current_dir(repo)
         .output()
-        .unwrap();
+        .expect("run git");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(std::string::ToString::to_string)
@@ -360,7 +365,7 @@ fn branches(repo: &Path) -> Vec<String> {
 async fn assert_session_gone(addr: SocketAddr, id: &str) {
     let status = reqwest::get(format!("http://{addr}/api/v1/sessions/{id}"))
         .await
-        .unwrap()
+        .expect("send the request")
         .status()
         .as_u16();
     assert_eq!(
@@ -519,7 +524,7 @@ async fn an_explicit_true_removes_every_branch_the_route_named() {
 async fn branch_pushed(addr: SocketAddr, id: &str) -> (u16, serde_json::Value) {
     let resp = reqwest::get(format!("http://{addr}/api/v1/sessions/{id}/branch-pushed"))
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     let body = resp.json().await.unwrap_or(serde_json::Value::Null);
     (status, body)
@@ -538,7 +543,7 @@ async fn rename(
         .json(&body)
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap_or_default())
 }
@@ -546,10 +551,10 @@ async fn rename(
 async fn session_title(addr: SocketAddr, id: &str) -> serde_json::Value {
     let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/sessions/{id}"))
         .await
-        .unwrap()
+        .expect("send the request")
         .json()
         .await
-        .unwrap();
+        .expect("the response body is JSON");
     body["title"].clone()
 }
 

@@ -44,11 +44,11 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::write(wt1.join("Cargo.toml"), "[package]\n").unwrap();
-    std::fs::write(wt1.join(".dotfile"), "hidden\n").unwrap();
-    std::fs::create_dir(wt1.join("sub")).unwrap();
-    std::fs::write(wt1.join("sub/child.rs"), "fn main() {}\n").unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
+    std::fs::write(wt1.join("Cargo.toml"), "[package]\n").expect("write the test file");
+    std::fs::write(wt1.join(".dotfile"), "hidden\n").expect("write the test file");
+    std::fs::create_dir(wt1.join("sub")).expect("create the test directory");
+    std::fs::write(wt1.join("sub/child.rs"), "fn main() {}\n").expect("write the test file");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -58,9 +58,9 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -72,12 +72,12 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -85,15 +85,17 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -106,7 +108,7 @@ async fn post_tree(addr: SocketAddr, session: &str, dir: &str) -> reqwest::Respo
         .json(&serde_json::json!({ "dir": dir }))
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
 }
 
 #[tokio::test]

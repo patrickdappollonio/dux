@@ -172,7 +172,7 @@ impl AppState {
     /// An unowned pty is not denied, matching `may_write`: the first write claims it.
     pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
         matches!(
-            self.pty_size_owners.owners.lock().unwrap().map.get(pty_id),
+            self.pty_size_owners.owners.lock().expect("the pty size owners lock is not poisoned").map.get(pty_id),
             Some(record) if record.conn_id != conn_id
         )
     }

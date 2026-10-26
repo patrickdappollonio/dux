@@ -65,10 +65,10 @@ fn init_repo_with_unstaged(dir: &std::path::Path) {
     run_git(dir, &["init", "-q"]);
     run_git(dir, &["config", "user.email", "t@example.com"]);
     run_git(dir, &["config", "user.name", "t"]);
-    std::fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+    std::fs::write(dir.join("f.txt"), "line1\nline2\n").expect("write the test file");
     run_git(dir, &["add", "f.txt"]);
     run_git(dir, &["commit", "-q", "-m", "init"]);
-    std::fs::write(dir.join("f.txt"), "line1\nCHANGED\n").unwrap();
+    std::fs::write(dir.join("f.txt"), "line1\nCHANGED\n").expect("write the test file");
 }
 
 /// Boot a server (auth OFF) with:
@@ -85,9 +85,9 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     let wt1 = root.join("wt1");
     let wt2 = root.join("wt2");
     let wt_nonrepo = root.join("wt_nonrepo");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
-    std::fs::create_dir_all(&wt_nonrepo).unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
+    std::fs::create_dir_all(&wt2).expect("create the test directory");
+    std::fs::create_dir_all(&wt_nonrepo).expect("create the test directory");
     init_repo_with_unstaged(&wt1);
     init_repo_with_unstaged(&wt2);
     // A standalone git-repo directory for a second project `p2`, so a
@@ -95,7 +95,7 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     // path-missing. It lives OUTSIDE the session worktrees so it does not perturb
     // their changed-files reads (notably `wt_nonrepo`, which must stay a non-repo).
     let proj2 = root.join("proj2");
-    std::fs::create_dir_all(&proj2).unwrap();
+    std::fs::create_dir_all(&proj2).expect("create the test directory");
     init_repo_with_unstaged(&proj2);
 
     let paths = DuxPaths {
@@ -106,9 +106,9 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -120,7 +120,7 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         // A second project whose path IS a git repo, for the project-scoped
         // command-scoping test.
         store
@@ -134,21 +134,21 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&sample_session("s2", wt2.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&sample_session(
                 "s_nonrepo",
                 wt_nonrepo.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
 
@@ -205,15 +205,17 @@ async fn boot() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         );
     let app = build_app(handle, probe, RouterParams::plain_http());
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -246,7 +248,7 @@ where
     let frame = wait_for_frame(ws, 5, |t| t.contains("\"event\":\"connected\""))
         .await
         .expect("a /ws/events connection must send a `connected` first frame");
-    let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&frame).expect("the body is JSON");
     v["id"]
         .as_str()
         .expect("connected frame carries a string id")
@@ -263,10 +265,10 @@ async fn wait_for_interest(client: &reqwest::Client, addr: SocketAddr, want: &[&
             .get(format!("http://{addr}/api/_interest"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         if got == want {
             return true;
         }

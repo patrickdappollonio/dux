@@ -32,7 +32,7 @@ const OTHER_PASSWORD: &str = "harbor cinnamon glacier tundra mosaic";
 
 fn hash_of(password: &str) -> String {
     static HASHES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-    let mut hashes = HASHES.lock().unwrap();
+    let mut hashes = HASHES.lock().expect("the hash cache lock is not poisoned");
     if let Some((_, hash)) = hashes.iter().find(|(p, _)| p == password) {
         return hash.clone();
     }
@@ -104,7 +104,12 @@ impl dux_core::engine::ConfigSurface for TerminalUiSurface {
 
 /// This machine's Tailscale address, as a successful look reports it.
 fn own_tailscale_ips() -> Vec<std::net::IpAddr> {
-    vec![TAILNET.local().unwrap().ip()]
+    vec![
+        TAILNET
+            .local()
+            .expect("the Tailscale arrival has a local address")
+            .ip(),
+    ]
 }
 
 /// What every router here starts with unless a test says otherwise: a
@@ -159,13 +164,13 @@ impl Dux {
             lock_path: root.join("dux.lock"),
             socket_path: root.join("dux.sock"),
         };
-        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
         std::fs::write(
             &paths.config_path,
             format!("# a comment that must survive\n\n[server.auth]\n{auth}\n"),
         )
-        .unwrap();
-        let mut engine = bootstrap_engine(&paths).unwrap();
+        .expect("write the test file");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
         dux_core::test_provider::defuse_config(&mut engine.config);
         if surface == EngineSurface::TerminalUi {
             engine.surface = Box::new(TerminalUiSurface);
@@ -178,7 +183,7 @@ impl Dux {
             &dux_core::config::ServerConfig::default(),
             &handle.paths(),
         )
-        .unwrap();
+        .expect("open the server log");
         let app = build_app(
             handle.clone(),
             Router::<AppState>::new(),
@@ -210,7 +215,7 @@ impl Dux {
     }
 
     fn config(&self) -> String {
-        std::fs::read_to_string(self.tmp.path().join("config.toml")).unwrap()
+        std::fs::read_to_string(self.tmp.path().join("config.toml")).expect("read the test file")
     }
 
     async fn send(&self, from: Arrival, request: Req) -> Answer {
@@ -244,7 +249,7 @@ impl Dux {
             }
             None => Body::empty(),
         };
-        let mut built = builder.body(body).unwrap();
+        let mut built = builder.body(body).expect("build the request");
         built
             .extensions_mut()
             .insert(axum::extract::ConnectInfo(from));
@@ -253,7 +258,7 @@ impl Dux {
         let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
-            .unwrap();
+            .expect("read the response body");
         Answer {
             status,
             headers,
@@ -286,7 +291,10 @@ impl Dux {
     async fn cli_token(&self, from: Arrival) -> String {
         let login = self.cli_login(from, PASSWORD).await;
         assert_eq!(login.status, StatusCode::OK, "{}", login.body);
-        login.json()["token"].as_str().unwrap().to_string()
+        login.json()["token"]
+            .as_str()
+            .expect("the login response carries a token")
+            .to_string()
     }
 
     /// Sign in and answer the `Cookie` header value the session rides on.
@@ -363,7 +371,11 @@ impl Answer {
     fn set_cookie(&self) -> String {
         self.headers
             .get("set-cookie")
-            .map(|v| v.to_str().unwrap().to_string())
+            .map(|v| {
+                v.to_str()
+                    .expect("the set-cookie header is ASCII")
+                    .to_string()
+            })
             .unwrap_or_default()
     }
 
@@ -372,7 +384,7 @@ impl Answer {
         self.set_cookie()
             .split(';')
             .next()
-            .unwrap()
+            .expect("split always yields a first part")
             .trim()
             .to_string()
     }
@@ -919,8 +931,10 @@ struct Serve {
 
 impl Serve {
     async fn start(dux: Dux) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("read the bound address");
         let app = dux.app.clone();
         tokio::spawn(async move {
             let _ = axum::serve(
@@ -942,18 +956,18 @@ impl Serve {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = format!("ws://{}{path}", self.addr)
             .into_client_request()
-            .unwrap();
+            .expect("build the websocket request");
         for (name, value) in headers {
             request.headers_mut().insert(
                 tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
-                    .unwrap(),
-                value.parse().unwrap(),
+                    .expect("a valid header name"),
+                value.parse().expect("a valid header value"),
             );
         }
         if let Some(cookie) = cookie {
             request
                 .headers_mut()
-                .insert("cookie", cookie.parse().unwrap());
+                .insert("cookie", cookie.parse().expect("a valid cookie header"));
         }
         tokio_tungstenite::connect_async(request)
             .await
@@ -983,14 +997,14 @@ impl Serve {
             .json(&json!({ "password": PASSWORD }))
             .send()
             .await
-            .unwrap();
+            .expect("send the request");
         assert_eq!(response.status(), 204);
         response.headers()["set-cookie"]
             .to_str()
-            .unwrap()
+            .expect("the set-cookie header is ASCII")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split always yields a first part")
             .to_string()
     }
 }
@@ -2263,7 +2277,9 @@ fn network_peer(last: u8) -> Arrival {
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, last)),
             50000,
         ),
-        local: NETWORK.local().unwrap(),
+        local: NETWORK
+            .local()
+            .expect("the network arrival has a local address"),
     }
 }
 
@@ -2866,8 +2882,10 @@ async fn a_right_password_racing_a_block_gets_no_session() {
 
 fn v6(peer: &str) -> Arrival {
     Arrival::Tcp {
-        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
-        local: "[2001:db8:ffff::10]:3890".parse().unwrap(),
+        peer: SocketAddr::new(peer.parse().expect("a valid IPv6 address"), 50000),
+        local: "[2001:db8:ffff::10]:3890"
+            .parse()
+            .expect("a valid socket address"),
     }
 }
 
@@ -3386,7 +3404,7 @@ async fn send_raw(dux: &Dux, from: Arrival, path: &str, headers: &[(&str, &[u8])
             axum::http::HeaderValue::from_bytes(value).expect("legal obs-text header value"),
         );
     }
-    let mut built = builder.body(Body::empty()).unwrap();
+    let mut built = builder.body(Body::empty()).expect("build the request");
     built
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(from));
@@ -3395,7 +3413,7 @@ async fn send_raw(dux: &Dux, from: Arrival, path: &str, headers: &[(&str, &[u8])
     let headers = response.headers().clone();
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await
-        .unwrap();
+        .expect("read the response body");
     Answer {
         status,
         headers,
@@ -3715,8 +3733,10 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
 /// same /64 dux itself is on.
 fn lan(peer: &str) -> Arrival {
     Arrival::Tcp {
-        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
-        local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
+        peer: SocketAddr::new(peer.parse().expect("a valid IPv6 address"), 50000),
+        local: "[2001:db8:1:1::10]:3890"
+            .parse()
+            .expect("a valid socket address"),
     }
 }
 

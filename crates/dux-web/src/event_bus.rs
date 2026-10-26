@@ -105,7 +105,10 @@ impl EventBus {
     /// Increment the interest refcount for `topic` (a connection just subscribed
     /// to a topic it was not already holding).
     pub fn add_interest(&self, topic: &str) {
-        let mut map = self.interest.lock().unwrap();
+        let mut map = self
+            .interest
+            .lock()
+            .expect("the interest lock is not poisoned");
         *map.entry(topic.to_string()).or_insert(0) += 1;
     }
 
@@ -113,7 +116,10 @@ impl EventBus {
     /// and underflow-logged: dropping interest in a topic that was never counted is
     /// a bookkeeping bug, so it is logged rather than panicking or wrapping.
     pub fn drop_interest(&self, topic: &str) {
-        let mut map = self.interest.lock().unwrap();
+        let mut map = self
+            .interest
+            .lock()
+            .expect("the interest lock is not poisoned");
         match map.get_mut(topic) {
             Some(count) => {
                 *count = count.saturating_sub(1);
@@ -133,7 +139,10 @@ impl EventBus {
     /// Drives the changed-files poller: idle sessions (no subscriber) are never
     /// polled.
     pub fn interested_sessions(&self) -> Vec<String> {
-        let map = self.interest.lock().unwrap();
+        let map = self
+            .interest
+            .lock()
+            .expect("the interest lock is not poisoned");
         map.keys()
             .filter_map(|topic| session_id_from_changes_topic(topic))
             .map(std::string::ToString::to_string)
@@ -143,7 +152,10 @@ impl EventBus {
     /// Whether any connection currently holds interest in `topic`. Used by the
     /// poller's grace-eviction to decide a session's cache can be dropped.
     pub fn has_interest(&self, topic: &str) -> bool {
-        self.interest.lock().unwrap().contains_key(topic)
+        self.interest
+            .lock()
+            .expect("the interest lock is not poisoned")
+            .contains_key(topic)
     }
 }
 

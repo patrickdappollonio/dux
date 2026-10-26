@@ -67,9 +67,9 @@ async fn serve(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -81,10 +81,10 @@ async fn serve(
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
-        store.create_session(&agent).unwrap();
+            .expect("save the test project");
+        store.create_session(&agent).expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.terminal.command = "cat".to_string();
     engine.config.terminal.args = vec![];
@@ -94,25 +94,30 @@ async fn serve(
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr: SocketAddr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{addr}/api/v1/projects/p1/terminals"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let tid = body["terminal_id"].as_str().unwrap().to_string();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    let tid = body["terminal_id"]
+        .as_str()
+        .expect("the response names the terminal")
+        .to_string();
     (
         client,
         format!("http://{addr}/api/v1/projects/p1/terminals/{tid}/files"),

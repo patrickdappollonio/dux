@@ -184,7 +184,10 @@ impl ConnectionRegistry {
         browser: Option<&dux_core::attachments::BrowserId>,
         after: Option<&str>,
     ) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         let key = match browser {
             Some(browser) => format!("browser:{}", browser.as_str()),
             None => after
@@ -203,14 +206,20 @@ impl ConnectionRegistry {
     }
 
     fn put(&self, id: String, entry: Entry) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         entries.insert(id, entry);
         self.recount(&entries);
     }
 
     /// Deregister a connection id (called on socket disconnect), freeing its slot.
     pub fn remove(&self, id: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         entries.remove(id);
         self.recount(&entries);
     }
@@ -246,7 +255,7 @@ impl ConnectionRegistry {
     pub fn class_of(&self, id: &str) -> Option<ConnClass> {
         self.entries
             .lock()
-            .unwrap()
+            .expect("the entries lock is not poisoned")
             .get(id)
             .map(|entry| entry.class)
     }
@@ -255,7 +264,10 @@ impl ConnectionRegistry {
     /// Asked by the status forwarder, which needs to know only whether the
     /// address a scoped status carries still has anybody at it.
     pub fn is_live(&self, id: &str) -> bool {
-        self.entries.lock().unwrap().contains_key(id)
+        self.entries
+            .lock()
+            .expect("the entries lock is not poisoned")
+            .contains_key(id)
     }
 }
 
@@ -774,7 +786,10 @@ impl IdempotencyCache {
     /// unbounded from one-shot keys.
     pub fn get(&self, key: &str) -> Option<String> {
         let now = Instant::now();
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         map.retain(|_, (_, at)| now.saturating_duration_since(*at) < IDEMPOTENCY_TTL);
         map.get(key).map(|(id, _)| id.clone())
     }
@@ -784,7 +799,7 @@ impl IdempotencyCache {
     pub fn record(&self, key: String, id: String) {
         self.entries
             .lock()
-            .unwrap()
+            .expect("the entries lock is not poisoned")
             .insert(key, (id, Instant::now()));
     }
 }

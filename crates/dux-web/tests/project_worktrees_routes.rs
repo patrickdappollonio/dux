@@ -26,7 +26,7 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .expect("run git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -80,7 +80,7 @@ async fn boot() -> Fixture {
     let root = tmp.path().to_path_buf();
 
     let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&repo).expect("create the test directory");
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "t@example.com"]);
     git(&repo, &["config", "user.name", "Test"]);
@@ -89,7 +89,7 @@ async fn boot() -> Fixture {
     // Managed worktrees live under `<worktrees_root>/<project name>/`, which is
     // exactly what `classify_project_worktrees` keys "managed" off.
     let managed = root.join("worktrees").join("repo");
-    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::create_dir_all(&managed).expect("create the test directory");
     let free = managed.join("free");
     let dirty = managed.join("dirty");
     let held = managed.join("held");
@@ -112,7 +112,7 @@ async fn boot() -> Fixture {
             ],
         );
     }
-    std::fs::write(dirty.join("scratch.txt"), "unsaved work").unwrap();
+    std::fs::write(dirty.join("scratch.txt"), "unsaved work").expect("write the test file");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -123,7 +123,7 @@ async fn boot() -> Fixture {
         socket_path: root.join("dux.sock"),
     };
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -135,12 +135,12 @@ async fn boot() -> Fixture {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", held.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -148,15 +148,17 @@ async fn boot() -> Fixture {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
 
     Fixture {
@@ -172,7 +174,7 @@ async fn boot() -> Fixture {
 async fn list(addr: SocketAddr, project: &str) -> (u16, serde_json::Value) {
     let resp = reqwest::get(format!("http://{addr}/api/v1/projects/{project}/worktrees"))
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     let body = resp.json().await.unwrap_or(serde_json::Value::Null);
     (status, body)
@@ -199,7 +201,7 @@ async fn delete_with(addr: SocketAddr, project: &str, path: &Path, extra: &str) 
         ))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap_or_default())
 }
@@ -210,7 +212,7 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
         .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
         .current_dir(repo)
         .output()
-        .unwrap();
+        .expect("run git");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .any(|line| line == branch)

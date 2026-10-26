@@ -63,9 +63,9 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -77,7 +77,7 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
@@ -85,9 +85,9 @@ fn build_engine() -> (Engine, dux_core::test_scratch::ScratchDir) {
                 "feat",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     // Not tests about Tailscale: on any other mode every request waits on the
     // first Funnel check, which would consult this machine's real CLI.

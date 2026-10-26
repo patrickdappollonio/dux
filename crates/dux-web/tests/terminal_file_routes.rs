@@ -59,17 +59,17 @@ async fn boot() -> Harness {
     let root = tmp.path().to_path_buf();
     let repo = root.join("repo");
     let other = root.join("other");
-    std::fs::create_dir_all(&repo).unwrap();
-    std::fs::create_dir_all(&other).unwrap();
-    std::fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
-    std::fs::write(repo.join(".bashrc"), "export X=1\n").unwrap();
-    std::fs::create_dir(repo.join("sub")).unwrap();
-    std::fs::write(repo.join("sub/child.rs"), "fn main() {}\n").unwrap();
-    std::fs::create_dir(repo.join(".cache")).unwrap();
-    std::fs::write(repo.join(".cache/blob"), "junk\n").unwrap();
+    std::fs::create_dir_all(&repo).expect("create the test directory");
+    std::fs::create_dir_all(&other).expect("create the test directory");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\n").expect("write the test file");
+    std::fs::write(repo.join(".bashrc"), "export X=1\n").expect("write the test file");
+    std::fs::create_dir(repo.join("sub")).expect("create the test directory");
+    std::fs::write(repo.join("sub/child.rs"), "fn main() {}\n").expect("write the test file");
+    std::fs::create_dir(repo.join(".cache")).expect("create the test directory");
+    std::fs::write(repo.join(".cache/blob"), "junk\n").expect("write the test file");
     let wt1 = root.join("wt1");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::write(wt1.join("agent.txt"), "agent\n").unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
+    std::fs::write(wt1.join("agent.txt"), "agent\n").expect("write the test file");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -79,9 +79,9 @@ async fn boot() -> Harness {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         for (id, path) in [("p1", &repo), ("p2", &other)] {
             store
                 .upsert_project(&ProjectConfig {
@@ -94,13 +94,13 @@ async fn boot() -> Harness {
                     startup_command: None,
                     env: Default::default(),
                 })
-                .unwrap();
+                .expect("save the test project");
         }
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.terminal.command = "cat".to_string();
     engine.config.terminal.args = vec![];
@@ -110,15 +110,17 @@ async fn boot() -> Harness {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     Harness {
         addr,
@@ -132,10 +134,13 @@ async fn create_project_terminal(addr: SocketAddr, project: &str) -> String {
         .post(format!("http://{addr}/api/v1/projects/{project}/terminals"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["terminal_id"].as_str().unwrap().to_string()
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    body["terminal_id"]
+        .as_str()
+        .expect("the response names the terminal")
+        .to_string()
 }
 
 async fn create_standalone_terminal(addr: SocketAddr) -> String {
@@ -143,10 +148,13 @@ async fn create_standalone_terminal(addr: SocketAddr) -> String {
         .post(format!("http://{addr}/api/v1/terminals"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["terminal_id"].as_str().unwrap().to_string()
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    body["terminal_id"]
+        .as_str()
+        .expect("the response names the terminal")
+        .to_string()
 }
 
 async fn post(addr: SocketAddr, path: &str, body: serde_json::Value) -> reqwest::Response {
@@ -155,7 +163,7 @@ async fn post(addr: SocketAddr, path: &str, body: serde_json::Value) -> reqwest:
         .json(&body)
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
 }
 
 #[tokio::test]

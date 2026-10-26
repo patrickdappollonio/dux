@@ -68,9 +68,9 @@ fn engine_with_an_agent_and_a_terminal_running()
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -82,12 +82,12 @@ fn engine_with_an_agent_and_a_terminal_running()
                 startup_command: None,
                 env: Default::default(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", root.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine
         .changed_files_poller_started
@@ -250,19 +250,20 @@ async fn browser(
     assert_eq!(hello["owner_device"].as_str(), Some(TUI_DEVICE_LABEL));
 
     // The terminal UI keeps typing into it, and the browser watches it arrive.
-    ask.send(Ask::TuiTypes(b"dux-tui-still-types\n")).unwrap();
+    ask.send(Ask::TuiTypes(b"dux-tui-still-types\n"))
+        .expect("the terminal UI thread is listening");
     let seen = accumulate_until(&mut pty, "dux-tui-still-types", Duration::from_secs(8)).await;
     assert!(seen.contains("dux-tui-still-types"), "{seen:?}");
 
     // A plain attach resize and the browser's typing take nothing.
     pty.send(Message::Text(r#"{"rows":30,"cols":100}"#.into()))
         .await
-        .unwrap();
+        .expect("send the resize frame");
     pty.send(Message::Binary(
         b"dux-plain-attach-marker\n".to_vec().into(),
     ))
     .await
-    .unwrap();
+    .expect("send the typed bytes");
     let stolen =
         accumulate_until(&mut pty, "dux-plain-attach-marker", Duration::from_secs(2)).await;
     assert!(
@@ -275,10 +276,10 @@ async fn browser(
         r#"{"rows":30,"cols":100,"takeover":true}"#.into(),
     ))
     .await
-    .unwrap();
+    .expect("send the take-over frame");
     pty.send(Message::Binary(b"dux-took-over-marker\n".to_vec().into()))
         .await
-        .unwrap();
+        .expect("send the typed bytes");
     let after = accumulate_until(&mut pty, "dux-took-over-marker", Duration::from_secs(8)).await;
     assert!(
         after.contains("dux-took-over-marker"),
