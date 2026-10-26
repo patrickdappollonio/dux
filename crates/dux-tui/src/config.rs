@@ -11,20 +11,31 @@ use toml_edit::{DocumentMut, Item};
 use crate::keybindings;
 
 pub(crate) use dux_core::config::*;
+
+/// Whether config.toml is being read for a start or for a reload of a running
+/// dux, which may neither create the file nor accept it gone or empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigRead {
+    /// A start, which writes the commented template when there is no file.
+    Start,
+    /// A reload, which keeps the running settings when the file is unusable.
+    Reload,
+}
+
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub(crate) fn ensure_config(paths: &DuxPaths) -> Result<Config> {
-    ensure_config_with(paths, false)
+    ensure_config_with(paths, ConfigRead::Start)
 }
 
 /// [`ensure_config`] for a reload: never creates the file, and refuses one
 /// that is gone or empty (judged on the text that is parsed, so a file
 /// truncated mid-read cannot load as the defaults, which have no password).
 pub(crate) fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
-    ensure_config_with(paths, true)
+    ensure_config_with(paths, ConfigRead::Reload)
 }
 
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
-fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
+fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     // Any core-side write that CREATES config.toml (bootstrap project-sync) must
     // emit the commented template, not a bare one.
     install_canonical_renderer();
@@ -38,7 +49,7 @@ fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
         }
         .into());
     }
-    if !reload && !paths.config_path.exists() {
+    if (purpose == ConfigRead::Start) && !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -56,13 +67,17 @@ fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
     let migrate =
         |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
             let raw = read.map_err(|error| {
-                load_error(if reload && error.kind() == std::io::ErrorKind::NotFound {
-                    dux_core::config::ConfigLoadProblem::Missing
-                } else {
-                    dux_core::config::ConfigLoadProblem::Unreadable(error.to_string())
-                })
+                load_error(
+                    if (purpose == ConfigRead::Reload)
+                        && error.kind() == std::io::ErrorKind::NotFound
+                    {
+                        dux_core::config::ConfigLoadProblem::Missing
+                    } else {
+                        dux_core::config::ConfigLoadProblem::Unreadable(error.to_string())
+                    },
+                )
             })?;
-            if reload && raw.trim().is_empty() {
+            if (purpose == ConfigRead::Reload) && raw.trim().is_empty() {
                 return Err(load_error(dux_core::config::ConfigLoadProblem::Empty).into());
             }
             dux_core::config::auth_section_of(&raw).map_err(load_error)?;

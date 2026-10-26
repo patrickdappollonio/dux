@@ -8916,7 +8916,7 @@ impl App {
                 self.forget_buttons_until_redrawn();
                 self.set_warning(
                     "Another device connected while this was open. Check who is connected now, \
-                     then (answer == ConfirmAnswer::Confirm) again to quit.",
+                     then confirm again to quit.",
                 );
                 return false;
             }
@@ -8959,7 +8959,7 @@ impl App {
             // before it acts, so the delete-vs-restore decision and the
             // destructive action agree with the worktree as it is THEN (not as
             // it was when the prompt opened): a file that was untracked at
-            // prompt-open but became tracked before (answer == ConfirmAnswer::Confirm) is restored, never
+            // prompt-open but became tracked before confirm is restored, never
             // deleted. A refusal there (now staged, nothing left to discard)
             // is the discard's final. The prompt was a file's, and a file is
             // what the discard may touch: a folder that has since taken the
@@ -8991,7 +8991,7 @@ impl App {
         self.prompt = PromptState::None;
         if answer == ConfirmAnswer::Cancel {
             self.set_info(
-                "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and (answer == ConfirmAnswer::Confirm)) to create the initial commit.",
+                "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and confirm) to create the initial commit.",
             );
             return false;
         }

@@ -2780,7 +2780,7 @@ impl App {
         // row even after the list scrolls.
         let term_heights: Vec<u16> = vec![3; term_count];
         // No widget highlight: the selection is hand-painted below. The widget
-        // selection is still set (when (focused == FocusState::Focused)) purely so the list scrolls to
+        // selection is still set (when focused) purely so the list scrolls to
         // keep the selected terminal visible, exactly as the agent list does.
         let mut term_state =
             ListState::default().with_selected(if self.left_section == LeftSection::Terminals {
@@ -4659,7 +4659,7 @@ impl App {
         outer_block.render(area, frame.buffer_mut());
 
         // Ratatui cannot detect damage to the physical terminal outside its
-        // previous-frame buffer, so resend the vulnerable (focused == FocusState::Focused) edge.
+        // previous-frame buffer, so resend the vulnerable focused edge.
         if (focused == FocusState::Focused)
             && self.session_surface == SessionSurface::Agent
             && area.width > 0

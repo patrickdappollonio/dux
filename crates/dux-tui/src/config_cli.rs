@@ -8,6 +8,7 @@
 
 use std::io::{Read, Write};
 
+use crate::config::ConfigRead;
 use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
 use dux_core::client::reload::ReloadAnswer;
@@ -325,7 +326,15 @@ pub(crate) fn run_set(
     // asking it, and only once that outcome is known.
     let wait = dux_core::client::wait::wait_timeout(None, &paths.config_path);
     let answer = dux_core::client::reload::ask_to_reload(&paths.lock_path, wait);
-    say_reload(&answer, !remaining.is_empty(), out)?;
+    say_reload(
+        &answer,
+        if remaining.is_empty() {
+            Remaining::Clean
+        } else {
+            Remaining::Problems
+        },
+        out,
+    )?;
     if password && let Some(sentence) = password_sentence(&answer) {
         writeln!(out, "{sentence}")?;
     }
@@ -334,8 +343,8 @@ pub(crate) fn run_set(
 
 /// Say how the running dux answered the reload: no answer in time exits with the
 /// unknown code (6), a refusal or a failed step fails the command on standard error.
-fn say_reload(answer: &ReloadAnswer, problems_remain: bool, out: &mut dyn Write) -> Result<()> {
-    let sentence = reload_sentence(answer, problems_remain);
+fn say_reload(answer: &ReloadAnswer, remaining: Remaining, out: &mut dyn Write) -> Result<()> {
+    let sentence = reload_sentence(answer, remaining);
     match answer {
         ReloadAnswer::Unknown(_) => {
             Err(dux_core::client::CliError::new(dux_core::client::Exit::Unknown, sentence).into())
@@ -356,15 +365,17 @@ fn shown(paths: &DuxPaths, path: &[String]) -> String {
 }
 
 /// The problems that stop `surface` (at start, and on a reload, which
-/// keeps the running settings): for `dux server`, `reload` leaves out a
+/// keeps the running settings): for `dux server`, a reload leaves out a
 /// problem its `--port`/`--bind` takes the place of, since a running one
 /// was started past it.
-fn stopping(problems: &[StartProblem], surface: Surface, reload: bool) -> Vec<&StartProblem> {
+fn stopping(problems: &[StartProblem], surface: Surface, read: ConfigRead) -> Vec<&StartProblem> {
     problems
         .iter()
         .filter(|problem| problem.stops(surface))
         .filter(|problem| {
-            !(reload && surface == Surface::DuxServer && problem.dux_server_override.is_some())
+            !((read == ConfigRead::Reload)
+                && surface == Surface::DuxServer
+                && problem.dux_server_override.is_some())
         })
         .collect()
 }
@@ -393,7 +404,7 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
         }
         Ok(())
     };
-    let terminal_ui = stopping(problems, Surface::TerminalUi, false);
+    let terminal_ui = stopping(problems, Surface::TerminalUi, ConfigRead::Start);
     if terminal_ui.is_empty() {
         writeln!(out, "The terminal UI starts with this file.")?;
     } else {
@@ -403,8 +414,8 @@ fn write_surface_verdicts(out: &mut dyn Write, problems: &[StartProblem]) -> Res
         )?;
         list(out, &terminal_ui)?;
     }
-    let reload = stopping(problems, Surface::DuxServer, true);
-    let start = stopping(problems, Surface::DuxServer, false);
+    let reload = stopping(problems, Surface::DuxServer, ConfigRead::Reload);
+    let start = stopping(problems, Surface::DuxServer, ConfigRead::Start);
     if !reload.is_empty() {
         writeln!(
             out,
@@ -617,10 +628,28 @@ fn user_inputs() -> Vec<String> {
     dux_core::auth::guess_words()
 }
 
-/// What happens next, from the reload answer. With `problems_remain` the verdicts
+/// Whether any problem the reload's verdicts listed is still in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Remaining {
+    /// Some are, and the verdicts above say which.
+    Problems,
+    /// None are.
+    Clean,
+}
+
+/// What `--stdin` would read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stdin {
+    /// The terminal, which would echo what is typed.
+    Terminal,
+    /// A pipe or a file.
+    Piped,
+}
+
+/// What happens next, from the reload answer. With problems remaining the verdicts
 /// of [`write_surface_verdicts`] come first, so this never says the change applies.
-fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
-    let then = if problems_remain {
+fn reload_sentence(answer: &ReloadAnswer, remaining: Remaining) -> String {
+    let then = if remaining == Remaining::Problems {
         " A kind that refuses this file will not start with it until the problems above are \
          fixed."
     } else {
@@ -639,12 +668,14 @@ fn reload_sentence(answer: &ReloadAnswer, problems_remain: bool) -> String {
              in dux.{then}",
             said.trim_end_matches('.')
         ),
-        ReloadAnswer::NotRunning if problems_remain => "dux is not running. A terminal UI or \
+        ReloadAnswer::NotRunning if (remaining == Remaining::Problems) => {
+            "dux is not running. A terminal UI or \
                                                         dux server started now reads this \
                                                         file as said above, and a kind that \
                                                         refuses it will not start until the \
                                                         problems above are fixed."
-            .to_string(),
+                .to_string()
+        }
         ReloadAnswer::NotRunning => {
             "dux is not running, so the change applies the next time it starts.".to_string()
         }
@@ -683,7 +714,11 @@ pub(crate) struct TerminalSecrets;
 impl SecretSource for TerminalSecrets {
     fn read_stdin(&mut self) -> Result<Password> {
         use std::io::IsTerminal;
-        refuse_terminal_stdin(std::io::stdin().is_terminal())?;
+        refuse_terminal_stdin(if std::io::stdin().is_terminal() {
+            Stdin::Terminal
+        } else {
+            Stdin::Piped
+        })?;
         read_secret(std::io::stdin().lock())
     }
 
@@ -752,8 +787,8 @@ pub fn read_env_value(from_stdin: bool, name: &str) -> Result<Password> {
 
 /// `--stdin` reads a pipe. On a terminal it would read what is typed with
 /// the terminal echoing it, so it is refused in favour of the hidden prompt.
-fn refuse_terminal_stdin(stdin_is_terminal: bool) -> Result<()> {
-    if stdin_is_terminal {
+fn refuse_terminal_stdin(stdin: Stdin) -> Result<()> {
+    if stdin == Stdin::Terminal {
         bail!(
             "--stdin reads from a pipe, and standard input here is the terminal, which would \
              show what you type. Run the same command without --stdin to be asked for it \
@@ -1308,7 +1343,7 @@ port = 3890
     fn the_reload_sentence_names_each_outcome() {
         let applied = reload_sentence(
             &ReloadAnswer::Applied("Configuration reloaded. New settings are active now.".into()),
-            false,
+            Remaining::Clean,
         );
         assert_eq!(
             applied,
@@ -1316,7 +1351,7 @@ port = 3890
         );
         let refused = reload_sentence(
             &ReloadAnswer::Refused("Config reload failed: bad value for ui.theme".into()),
-            false,
+            Remaining::Clean,
         );
         assert!(
             refused.contains("saved in config.toml but is not in force"),
@@ -1326,10 +1361,13 @@ port = 3890
             refused.contains("Config reload failed: bad value for ui.theme. Fix the file"),
             "the reason is said once, with one full stop: {refused}"
         );
-        assert!(reload_sentence(&ReloadAnswer::NotRunning, false).contains("next time it starts"));
+        assert!(
+            reload_sentence(&ReloadAnswer::NotRunning, Remaining::Clean)
+                .contains("next time it starts")
+        );
         let not_reached = reload_sentence(
             &ReloadAnswer::NotReached("dux (PID 7) is running but does not answer".into()),
-            false,
+            Remaining::Clean,
         );
         assert!(
             not_reached.contains("dux (PID 7) is running but does not answer"),
@@ -1341,7 +1379,7 @@ port = 3890
             ReloadAnswer::NotRunning,
             ReloadAnswer::NotReached("why".into()),
         ] {
-            let said = reload_sentence(&answer, true);
+            let said = reload_sentence(&answer, Remaining::Problems);
             assert!(!said.contains("next time it starts"), "{said}");
             assert!(
                 said.contains("until the problems above are fixed"),
@@ -1361,19 +1399,23 @@ port = 3890
             ReloadAnswer::NotReached("why".into()),
         ] {
             let mut out = Vec::new();
-            say_reload(&answer, false, &mut out).expect("not a failure");
+            say_reload(&answer, Remaining::Clean, &mut out).expect("not a failure");
             assert!(!out.is_empty(), "{answer:?} says something");
         }
         let mut out = Vec::new();
-        let error = say_reload(&ReloadAnswer::Refused("no".into()), false, &mut out)
-            .expect_err("refused fails");
+        let error = say_reload(
+            &ReloadAnswer::Refused("no".into()),
+            Remaining::Clean,
+            &mut out,
+        )
+        .expect_err("refused fails");
         assert!(
             error.to_string().contains("not in force"),
             "the failure carries the sentence: {error}"
         );
         let error = say_reload(
             &ReloadAnswer::Unknown("operation op-1 ran out; see dux operations show op-1".into()),
-            false,
+            Remaining::Clean,
             &mut out,
         )
         .expect_err("no answer in time ends the command");
@@ -1389,7 +1431,7 @@ port = 3890
         );
         let error = say_reload(
             &ReloadAnswer::PartlyApplied("one step failed: the database is locked".into()),
-            false,
+            Remaining::Clean,
             &mut out,
         )
         .expect_err("a half-applied reload fails");
@@ -1440,9 +1482,9 @@ port = 3890
 
     #[test]
     fn stdin_from_a_terminal_is_refused_with_the_prompt_as_the_way() {
-        let err = refuse_terminal_stdin(true).expect_err("a terminal would echo");
+        let err = refuse_terminal_stdin(Stdin::Terminal).expect_err("a terminal would echo");
         assert!(err.to_string().contains("without --stdin"), "{err}");
-        assert!(refuse_terminal_stdin(false).is_ok());
+        assert!(refuse_terminal_stdin(Stdin::Piped).is_ok());
     }
 
     #[test]
@@ -1734,7 +1776,7 @@ port = 3890
         ] {
             assert_eq!(password_sentence(&answer), None, "{answer:?}");
             assert!(
-                !reload_sentence(&answer, false).contains("signed out"),
+                !reload_sentence(&answer, Remaining::Clean).contains("signed out"),
                 "{answer:?}"
             );
         }

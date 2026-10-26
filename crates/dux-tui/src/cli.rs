@@ -642,13 +642,9 @@ fn run_regenerate(
             if let Some(note) = regenerate_password_note(&current) {
                 println!("\n{note}");
             }
-            println!(
-                "\nRun `dux config regenerate --(rewrite == ConfigRewrite::Apply)` to overwrite with these defaults."
-            );
+            println!("\nRun `dux config regenerate --yes` to overwrite with these defaults.");
         } else {
-            println!(
-                "no config file exists; regenerate --(rewrite == ConfigRewrite::Apply) will create one at:"
-            );
+            println!("no config file exists; regenerate --yes will create one at:");
             println!("  {}", paths.config_path.display());
         }
         return Ok(());
@@ -727,7 +723,7 @@ fn run_restore_docs(
              Your config.toml has NOT been modified.\n\
              Fix the syntax error at {} and run this again. If you would rather \
              start over from defaults and lose your current settings, that is \
-             `dux config regenerate --(rewrite == ConfigRewrite::Apply)`.",
+             `dux config regenerate --yes`.",
             paths.config_path.display()
         )
     })?;
@@ -740,9 +736,7 @@ fn run_restore_docs(
     if rewrite == ConfigRewrite::Preview {
         print!("{}", restore_docs_preview(&raw, &restored.text, held_back));
         print_restore_report(&restored);
-        println!(
-            "\nRun `dux config restore-docs --(rewrite == ConfigRewrite::Apply)` to apply this (a timestamped backup"
-        );
+        println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
         println!("of your current config is written first).");
         return Ok(());
     }
