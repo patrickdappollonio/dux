@@ -1170,14 +1170,20 @@ pub(super) const DELETE_WORKTREE_DETACHED: &str = "This worktree is not on a bra
      the working directory is removed.";
 
 #[cfg(test)]
-pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> String {
-    delete_worktree_branch_prose(branch, delete_branch).plain()
+pub(super) fn delete_worktree_branch_line(
+    branch: &str,
+    branch_removal: dux_core::worktree_manager::BranchRemoval,
+) -> String {
+    delete_worktree_branch_prose(branch, branch_removal).plain()
 }
 
 /// [`delete_worktree_branch_line`] with the branch marked as a name.
-pub(super) fn delete_worktree_branch_prose(branch: &str, delete_branch: bool) -> Prose {
+pub(super) fn delete_worktree_branch_prose(
+    branch: &str,
+    branch_removal: dux_core::worktree_manager::BranchRemoval,
+) -> Prose {
     let lead = Prose::new().text("The branch ").quoted(branch);
-    if delete_branch {
+    if branch_removal == dux_core::worktree_manager::BranchRemoval::Delete {
         lead.text(
             " will be deleted with it, forcibly. Any commits on it that are not merged anywhere \
              else go too.",
@@ -6984,7 +6990,14 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             ))),
             (Some(branch), delete_branch) => body_lines.extend(prose_lines(
-                &delete_worktree_branch_prose(branch, delete_branch),
+                &delete_worktree_branch_prose(
+                    branch,
+                    if delete_branch {
+                        dux_core::worktree_manager::BranchRemoval::Delete
+                    } else {
+                        dux_core::worktree_manager::BranchRemoval::Keep
+                    },
+                ),
                 " ",
                 Style::default().fg(if delete_branch {
                     self.theme.warning_fg
@@ -25926,8 +25939,8 @@ mod tests {
         fn confirm(
             app: &App,
             branch: Option<&str>,
-            dirty: bool,
-            delete_branch: bool,
+            state: crate::app::test_support::WorktreeState,
+            branch_removal: dux_core::worktree_manager::BranchRemoval,
         ) -> PromptState {
             let project = app.engine.projects[0].clone();
             PromptState::ConfirmDeleteWorktree(Box::new(super::ConfirmDeleteWorktreePrompt {
@@ -25943,14 +25956,19 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/worktrees/demo/free"),
                 label: branch.unwrap_or("detached 1a2b3c4").to_string(),
                 branch: branch.map(str::to_string),
-                dirty,
-                delete_branch,
+                dirty: state == crate::app::test_support::WorktreeState::Dirty,
+                delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
                 focus: super::DeleteWorktreeFocus::Cancel,
             }))
         }
 
         let mut app = test_app(default_bindings());
-        app.prompt = confirm(&app, Some("free"), false, true);
+        app.prompt = confirm(
+            &app,
+            Some("free"),
+            crate::app::test_support::WorktreeState::Clean,
+            dux_core::worktree_manager::BranchRemoval::Delete,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains(&on_screen(&super::delete_worktree_title_prose("free"))),
@@ -25975,7 +25993,12 @@ mod tests {
             "a clean worktree gets no dirty sentence:\n{screen}"
         );
 
-        app.prompt = confirm(&app, Some("free"), true, false);
+        app.prompt = confirm(
+            &app,
+            Some("free"),
+            crate::app::test_support::WorktreeState::Dirty,
+            dux_core::worktree_manager::BranchRemoval::Keep,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains("uncommitted changes"),
@@ -25990,7 +26013,12 @@ mod tests {
             "with the checkbox off the branch survives, and the copy says so:\n{screen}"
         );
 
-        app.prompt = confirm(&app, None, false, true);
+        app.prompt = confirm(
+            &app,
+            None,
+            crate::app::test_support::WorktreeState::Clean,
+            dux_core::worktree_manager::BranchRemoval::Delete,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains(&on_screen(&super::delete_worktree_title_prose(
@@ -26040,12 +26068,18 @@ mod tests {
              the working directory is removed."
         );
         assert_eq!(
-            super::delete_worktree_branch_line("free", true),
+            super::delete_worktree_branch_line(
+                "free",
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             "The branch \"free\" will be deleted with it, forcibly. Any commits on it that are \
              not merged anywhere else go too."
         );
         assert_eq!(
-            super::delete_worktree_branch_line("free", false),
+            super::delete_worktree_branch_line(
+                "free",
+                dux_core::worktree_manager::BranchRemoval::Keep
+            ),
             "The branch \"free\" is kept. Only the working directory is removed."
         );
     }
@@ -26053,16 +26087,16 @@ mod tests {
     /// A delete-agent prompt in a chosen state, for the rendering tests below.
     fn delete_agent_prompt(
         provenance: dux_core::model::BranchProvenance,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         delete_agent_prompt_on(
             provenance,
             "feature",
             "feature",
-            delete_worktree,
-            delete_branch,
+            worktree,
+            branch_removal,
             unpushed_commits,
         )
     }
@@ -26073,8 +26107,8 @@ mod tests {
         provenance: dux_core::model::BranchProvenance,
         branch_name: &str,
         initial_branch: &str,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
@@ -26088,8 +26122,8 @@ mod tests {
                 worktree_shared: false,
             },
             focus: super::DeleteAgentFocus::WorktreeCheckbox,
-            delete_worktree,
-            delete_branch,
+            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
+            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
             unpushed_commits,
         }
     }
@@ -26149,8 +26183,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -26174,8 +26208,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            false,
-            true,
+            dux_core::engine::WorktreeOnDelete::Keep,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -26193,8 +26227,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -26205,8 +26239,8 @@ mod tests {
 
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::Adopted,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -26217,8 +26251,8 @@ mod tests {
 
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -26406,8 +26440,8 @@ mod tests {
             dux_core::model::BranchProvenance::AttachedExisting,
             "develop-next",
             "develop",
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             Some(dux_core::git::UnpushedCommits {
                 count: 12,
                 has_remote_refs: false,
@@ -26609,8 +26643,8 @@ mod tests {
             dux_core::model::BranchProvenance::AttachedExisting,
             "develop-next",
             "develop",
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             pushed_nowhere(4),
         );
         let screen = rendered_screen(&mut app);

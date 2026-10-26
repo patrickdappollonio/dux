@@ -371,12 +371,17 @@ mod tests {
         );
     }
 
-    fn row(name: &str, branch: Option<&str>, agent: Option<&str>, dirty: bool) -> ManagedWorktree {
+    fn row(
+        name: &str,
+        branch: Option<&str>,
+        agent: Option<&str>,
+        state: crate::app::test_support::WorktreeState,
+    ) -> ManagedWorktree {
         ManagedWorktree {
             path: PathBuf::from(format!("/tmp/worktrees/demo/{name}")),
             label: branch.unwrap_or("detached abc1234").to_string(),
             branch: branch.map(str::to_string),
-            dirty,
+            dirty: state == crate::app::test_support::WorktreeState::Dirty,
             attached_session_id: agent.map(str::to_string),
             being_removed: false,
             busy: None,
@@ -411,8 +416,18 @@ mod tests {
     #[test]
     fn only_free_worktrees_are_selectable_and_held_ones_are_still_listed() {
         let entries = vec![
-            row("held", Some("held"), Some("session-1"), false),
-            row("free", Some("free"), None, false),
+            row(
+                "held",
+                Some("held"),
+                Some("session-1"),
+                crate::app::test_support::WorktreeState::Clean,
+            ),
+            row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            ),
         ];
         assert_eq!(removable_worktree_indices(&entries), vec![1]);
         let rows = manage_worktree_visual_rows(&entries, false, None);
@@ -426,7 +441,15 @@ mod tests {
     #[test]
     fn picking_a_free_worktree_opens_the_confirmation_with_the_branch_checkbox_on() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         let PromptState::ConfirmDeleteWorktree(prompt) = &app.prompt else {
             panic!("expected the confirmation, got {:?}", app.prompt);
@@ -446,7 +469,12 @@ mod tests {
     #[test]
     fn picking_an_attached_worktree_is_refused_rather_than_confirmed() {
         let mut app = test_app(default_bindings());
-        let entries = vec![row("held", Some("held"), Some("session-1"), false)];
+        let entries = vec![row(
+            "held",
+            Some("held"),
+            Some("session-1"),
+            crate::app::test_support::WorktreeState::Clean,
+        )];
         let mut prompt = manager(entries);
         prompt.selected = Some(0);
         app.prompt = PromptState::ManageWorktrees(prompt);
@@ -465,7 +493,15 @@ mod tests {
     #[test]
     fn a_detached_worktree_has_no_branch_checkbox() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("loose", None, None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "loose",
+                None,
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         let PromptState::ConfirmDeleteWorktree(prompt) = &app.prompt else {
             panic!("expected the confirmation");
@@ -480,7 +516,15 @@ mod tests {
     #[test]
     fn space_toggles_the_focused_checkbox_and_movement_only_moves_focus() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         // Focus moves Cancel -> Delete -> Checkbox with the horizontal key.
         app.handle_key(key(KeyCode::Right)).unwrap();
@@ -500,7 +544,15 @@ mod tests {
     #[test]
     fn the_focus_ring_skips_the_checkbox_when_there_is_no_branch() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("loose", None, None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "loose",
+                None,
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         app.handle_key(key(KeyCode::Right)).unwrap();
         app.handle_key(key(KeyCode::Right)).unwrap();
@@ -517,7 +569,15 @@ mod tests {
     #[test]
     fn escape_abandons_the_confirmation_and_returns_to_the_manager() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         app.handle_key(key(KeyCode::Esc)).unwrap();
         assert!(
@@ -530,7 +590,15 @@ mod tests {
     #[test]
     fn cancelling_says_nothing_was_touched() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         app.handle_key(key(KeyCode::Enter)).unwrap();
         assert!(matches!(app.prompt, PromptState::ManageWorktrees(_)));
@@ -546,7 +614,15 @@ mod tests {
     #[test]
     fn confirming_the_removal_closes_the_overlay_rather_than_relisting() {
         let mut app = test_app(default_bindings());
-        open_manager(&mut app, vec![row("free", Some("free"), None, false)]);
+        open_manager(
+            &mut app,
+            vec![row(
+                "free",
+                Some("free"),
+                None,
+                crate::app::test_support::WorktreeState::Clean,
+            )],
+        );
         app.confirm_delete_selected_worktree().unwrap();
         app.handle_key(key(KeyCode::Right)).unwrap();
         app.handle_key(key(KeyCode::Enter)).unwrap();
@@ -563,7 +639,9 @@ mod tests {
     ///
     /// Returns the app, the repo path and the worktree path, with the
     /// confirmation open on the one removable worktree.
-    fn app_with_a_real_worktree(delete_branch: bool) -> (App, PathBuf, PathBuf) {
+    fn app_with_a_real_worktree(
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
+    ) -> (App, PathBuf, PathBuf) {
         use crate::app::test_support::run_git;
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
@@ -612,7 +690,8 @@ mod tests {
 
         app.confirm_delete_selected_worktree().unwrap();
         if let PromptState::ConfirmDeleteWorktree(prompt) = &mut app.prompt {
-            prompt.delete_branch = delete_branch;
+            prompt.delete_branch =
+                branch_removal == dux_core::worktree_manager::BranchRemoval::Delete;
         } else {
             panic!("the confirmation must be open");
         }
@@ -648,7 +727,8 @@ mod tests {
 
     #[test]
     fn removing_a_worktree_with_the_checkbox_on_takes_the_branch_too() {
-        let (mut app, repo, worktree) = app_with_a_real_worktree(true);
+        let (mut app, repo, worktree) =
+            app_with_a_real_worktree(dux_core::worktree_manager::BranchRemoval::Delete);
         app.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm);
         let message = wait_for_status(&mut app, "Removed the worktree");
         assert!(!worktree.exists(), "the worktree directory must be gone");
@@ -661,7 +741,8 @@ mod tests {
 
     #[test]
     fn removing_a_worktree_with_the_checkbox_off_keeps_the_branch() {
-        let (mut app, repo, worktree) = app_with_a_real_worktree(false);
+        let (mut app, repo, worktree) =
+            app_with_a_real_worktree(dux_core::worktree_manager::BranchRemoval::Keep);
         app.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm);
         let message = wait_for_status(&mut app, "Removed the worktree");
         assert!(!worktree.exists(), "the worktree directory must be gone");

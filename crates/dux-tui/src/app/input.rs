@@ -28837,8 +28837,8 @@ cyan = "#00ffff"
     fn delete_agent_prompt_state(
         app: &App,
         provenance: dux_core::model::BranchProvenance,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
             attached: Vec::new(),
@@ -28851,8 +28851,8 @@ cyan = "#00ffff"
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
-            delete_worktree,
-            delete_branch,
+            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
+            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
             unpushed_commits: None,
         }
     }
@@ -28872,8 +28872,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            false,
-            false,
+            dux_core::engine::WorktreeOnDelete::Keep,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         // Cancel, Delete, worktree box, and back to Cancel: three stops.
         for expected in [
@@ -28889,8 +28889,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         for expected in [
             DeleteAgentFocus::Delete,
@@ -28916,8 +28916,8 @@ cyan = "#00ffff"
         app.prompt = delete_agent_prompt_state(
             &app,
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
         );
         app.prompt = match app.prompt {
             PromptState::ConfirmDeleteAgent {

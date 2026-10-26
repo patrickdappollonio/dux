@@ -25,6 +25,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 use tempfile::tempdir;
 
+/// Whether a worktree a test builds has uncommitted changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorktreeState {
+    /// It has uncommitted changes.
+    Dirty,
+    /// It has none.
+    Clean,
+}
+
 pub(crate) fn default_bindings() -> RuntimeBindings {
     RuntimeBindings::new(|action| {
         BINDING_DEFS

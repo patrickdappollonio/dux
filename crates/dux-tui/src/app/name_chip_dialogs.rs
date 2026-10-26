@@ -402,14 +402,17 @@ fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor(
     }
 }
 
-fn delete_agent_prompt(target: DeleteAgentTarget, delete_worktree: bool) -> PromptState {
+fn delete_agent_prompt(
+    target: DeleteAgentTarget,
+    worktree: dux_core::engine::WorktreeOnDelete,
+) -> PromptState {
     PromptState::ConfirmDeleteAgent {
         attached: Vec::new(),
         session_id: "s1".to_string(),
         agent_label: "launch-at-login".to_string(),
         target,
         focus: DeleteAgentFocus::Cancel,
-        delete_worktree,
+        delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
         delete_branch: true,
         unpushed_commits: Some(dux_core::git::UnpushedCommits {
             count: 2,
@@ -608,7 +611,7 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
                 branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
                 worktree_shared: false,
             },
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
         ),
     );
     assert_chipped(&app, &buf, "launch-at-login");
@@ -628,7 +631,7 @@ fn the_standalone_delete_dialog_chips_the_agent_and_its_folder() {
             DeleteAgentTarget::Folder {
                 folder_label: "~/notes-sa".to_string(),
             },
-            false,
+            dux_core::engine::WorktreeOnDelete::Keep,
         ),
     );
     assert_chipped(&app, &buf, "launch-at-login");
