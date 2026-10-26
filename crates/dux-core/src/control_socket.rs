@@ -347,7 +347,7 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
     (read == 0 && cred.pid > 0).then_some(cred.pid.cast_unsigned())
 }
 
-/// The process that called listen() on the socket `stream` is connected to;
+/// The process that called `listen()` on the socket `stream` is connected to;
 /// see the Linux version.
 #[cfg(target_os = "macos")]
 fn listener_pid(stream: &UnixStream) -> Option<u32> {

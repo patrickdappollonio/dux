@@ -382,7 +382,7 @@ fn platform_boot_id() -> Option<String> {
         libc::sysctlbyname(
             c"kern.bootsessionuuid".as_ptr(),
             buf.as_mut_ptr().cast(),
-            &mut len,
+            &raw mut len,
             std::ptr::null_mut(),
             0,
         )
@@ -411,8 +411,11 @@ pub(crate) fn boot_nanos_now() -> u64 {
     }
     #[cfg(target_os = "macos")]
     {
+        #[expect(
+            deprecated,
+            reason = "libc deprecated its Mach bindings in favour of the mach2 crate, which dux does not depend on"
+        )]
         // SAFETY: a plain read of the Mach clock, no arguments.
-        #[allow(deprecated)]
         let now = unsafe { libc::mach_absolute_time() };
         mach_to_nanos(now)
     }
@@ -485,20 +488,25 @@ fn parse_linux_stat(pid: u32, stat: &str) -> Option<ProcRow> {
 
 /// Mach absolute time in nanoseconds.
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "libc deprecated its Mach bindings in favour of the mach2 crate, which dux does not depend on"
+)]
 fn mach_to_nanos(abstime: u64) -> u64 {
     static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
     let (numer, denom) = *TIMEBASE.get_or_init(|| {
         let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
         // SAFETY: fills the struct it is handed.
-        let rc = unsafe { libc::mach_timebase_info(&mut info) };
+        let rc = unsafe { libc::mach_timebase_info(&raw mut info) };
         if rc == 0 && info.denom != 0 {
             (info.numer, info.denom)
         } else {
             (1, 1)
         }
     });
-    (u128::from(abstime) * u128::from(numer) / u128::from(denom)) as u64
+    // Saturates rather than wraps, as the Linux start time does: only some 584
+    // years of uptime would leave a value past u64 nanoseconds.
+    u64::try_from(u128::from(abstime) * u128::from(numer) / u128::from(denom)).unwrap_or(u64::MAX)
 }
 
 /// A process's start on the Mach absolute clock, in nanoseconds.
@@ -508,11 +516,13 @@ fn macos_start(pid: u32) -> Option<u64> {
     // SAFETY: zeroed is a valid value for this plain-data struct, and the
     // kernel writes at most its size for the V2 flavor.
     let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is the V2 struct the V2 flavor fills, and it lives
+    // for the whole call.
     let rc = unsafe {
         libc::proc_pid_rusage(
             pid,
             libc::RUSAGE_INFO_V2,
-            (&mut info as *mut libc::rusage_info_v2).cast::<libc::rusage_info_t>(),
+            (&raw mut info).cast::<libc::rusage_info_t>(),
         )
     };
     (rc == 0).then(|| mach_to_nanos(info.ri_proc_start_abstime))
@@ -718,8 +728,8 @@ pub fn read_process_table() -> Vec<ProcRow> {
             .filter(|(_, process)| process.thread_kind().is_none())
             .map(|(pid, process)| ProcRow {
                 pid: pid.as_u32(),
-                ppid: process.parent().map(|parent| parent.as_u32()),
-                sid: process.session_id().map(|sid| sid.as_u32()),
+                ppid: process.parent().map(sysinfo::Pid::as_u32),
+                sid: process.session_id().map(sysinfo::Pid::as_u32),
                 start_time: macos_start(pid.as_u32()).unwrap_or(UNKNOWN_START),
                 name: process.name().to_string_lossy().into_owned(),
                 exited: matches!(
@@ -849,7 +859,10 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
         // too; `libc` declares neither it nor its struct, so both follow `<sys/proc_info.h>`.
         const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
         #[repr(C)]
-        #[allow(dead_code)] // the kernel fills every field; only the uid is read
+        #[expect(
+            clippy::struct_field_names,
+            reason = "the fields mirror <sys/proc_info.h>, prefix included"
+        )]
         struct ProcBsdShortInfo {
             pbsi_pid: u32,
             pbsi_ppid: u32,
@@ -867,6 +880,8 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
         }
         const _: () = assert!(std::mem::size_of::<ProcBsdShortInfo>() == 64);
         let size = std::mem::size_of::<ProcBsdShortInfo>();
+        let size_arg = libc::c_int::try_from(size)
+            .expect("the 64-byte struct size asserted above fits in a c_int");
         // SAFETY: zeroed is a valid value for this plain-data struct.
         let mut info: ProcBsdShortInfo = unsafe { std::mem::zeroed() };
         let Ok(raw) = libc::c_int::try_from(pid) else {
@@ -879,8 +894,8 @@ fn process_uid(pid: u32) -> Result<Option<u32>, String> {
                 raw,
                 PROC_PIDT_SHORTBSDINFO,
                 0,
-                (&mut info as *mut ProcBsdShortInfo).cast::<libc::c_void>(),
-                size as libc::c_int,
+                (&raw mut info).cast::<libc::c_void>(),
+                size_arg,
             )
         };
         if usize::try_from(written).ok() == Some(size) {

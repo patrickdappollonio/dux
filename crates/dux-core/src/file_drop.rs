@@ -1381,7 +1381,7 @@ enum ProcessGroup {
     /// group has gone" is what sent a file to the shell's folder instead.
     #[cfg_attr(
         not(any(target_os = "linux", test)),
-        allow(
+        expect(
             dead_code,
             reason = "constructed only by the Linux scan; every platform matches on it"
         )
@@ -1454,9 +1454,12 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
 /// The two are read differently by the caller, because "the group has gone" and
 /// "dux could not look properly" are different facts and only the first may
 /// fall through to the shell.
-#[expect(
-    clippy::similar_names,
-    reason = "pid, ppid and pgid are the process table's own names for these ids"
+#[cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::similar_names,
+        reason = "pid and pgid are the process table's own names for these ids"
+    )
 )]
 fn process_group_members(pgid: u32) -> ProcessGroup {
     // Group 0 is not a group. Every kernel thread reports a process group of 0,
@@ -1746,7 +1749,7 @@ fn read_process_cwd(pid: u32) -> Option<PathBuf> {
             pid,
             libc::PROC_PIDVNODEPATHINFO,
             0,
-            (&mut info as *mut libc::proc_vnodepathinfo).cast::<libc::c_void>(),
+            (&raw mut info).cast::<libc::c_void>(),
             libc::c_int::try_from(size).ok()?,
         )
     };
