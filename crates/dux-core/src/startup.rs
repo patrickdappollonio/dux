@@ -14,9 +14,12 @@ use crate::model::{AgentSession, Project};
 
 pub(crate) const LOG_ROOT: &str = "startup-command-logs";
 
+/// One startup command to run in a new agent's worktree, with what it runs under.
 #[derive(Clone, Debug)]
 pub struct StartupCommandRun {
+    /// The project the command belongs to.
     pub project: Project,
+    /// The agent whose worktree it runs in.
     pub session: AgentSession,
     /// The agent's managed working copy, carried beside the session rather than
     /// read back out of it.
@@ -26,33 +29,51 @@ pub struct StartupCommandRun {
     /// payload here is what makes that structural: a standalone agent has no
     /// value of this type to offer, so no caller can build a run for one.
     pub managed: crate::model::ManagedWorkspace,
+    /// The command text, as the project configures it.
     pub command: String,
+    /// The shell the command is handed to.
     pub terminal: StartupCommandTerminalConfig,
+    /// The environment the command runs with.
     pub env: Vec<(String, String)>,
 }
 
+/// How one startup command run ended.
 #[derive(Clone, Debug)]
 pub struct StartupCommandResult {
+    /// The agent it ran for.
     pub session_id: String,
+    /// The project's display name.
     pub project_name: String,
+    /// The log file the run wrote.
     pub log_path: PathBuf,
+    /// `Ok` when the command succeeded, else the sentence saying how it failed.
     pub status: Result<(), String>,
 }
 
+/// One recorded startup command run.
 #[derive(Clone, Debug)]
 pub struct StartupCommandLogEntry {
+    /// The run's log file.
     pub path: PathBuf,
+    /// The log file's name, for a picker.
     pub display_name: String,
+    /// When the log was last written, when the filesystem could say.
     pub modified_at: Option<DateTime<Local>>,
 }
 
+/// Whose startup command logs a listing covers.
 #[derive(Clone, Debug)]
 pub enum StartupCommandLogScope {
+    /// One agent's runs.
     Agent {
+        /// The project the agent belongs to.
         project_id: String,
+        /// The agent.
         session_id: String,
     },
+    /// Every run under one project, across its agents.
     Project {
+        /// The project.
         project_id: String,
     },
 }
@@ -66,10 +87,13 @@ pub enum StartupCommandLogScope {
 /// the scope has never run its startup command.
 #[derive(Clone, Debug, Default)]
 pub struct StartupCommandLogListing {
+    /// Every run, newest first.
     pub entries: Vec<StartupCommandLogEntry>,
+    /// The newest run's log, or empty when there are none.
     pub content: String,
 }
 
+/// The directory one agent's startup command logs are kept in.
 pub fn agent_log_dir(paths: &DuxPaths, project_id: &str, session_id: &str) -> PathBuf {
     paths.root.join(LOG_ROOT).join(project_id).join(session_id)
 }
@@ -172,6 +196,11 @@ fn list_logs_in_dir(dir: &Path) -> Result<Vec<StartupCommandLogEntry>> {
     Ok(logs)
 }
 
+/// The whole text of a startup command log.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read as UTF-8 text, naming the path.
 pub fn read_log(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }

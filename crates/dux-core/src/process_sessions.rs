@@ -308,6 +308,7 @@ pub(crate) const UNKNOWN_START: u64 = 0;
 /// with `setsid`, so the session id is the leader's pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSession {
+    /// The session id, which is the leader's pid.
     pub sid: u32,
     /// When the leader started, in nanoseconds since the machine booted (see
     /// [`process_start`]): a clock no wall-clock step can move, so a session
@@ -505,7 +506,9 @@ fn macos_start(pid: u32) -> Option<u64> {
 /// reused, a pid with its start time cannot (in practice).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessIdentity {
+    /// The process id.
     pub pid: u32,
+    /// When it started, in nanoseconds since boot; 0 when the platform would not say.
     pub start_time: u64,
     /// The machine boot it was recorded in ([`current_boot`]). An identity
     /// from another boot is void, exactly like a session: every pid and
@@ -519,19 +522,23 @@ pub struct ProcessIdentity {
 /// One row of the process table, as much of it as these questions need.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcRow {
+    /// The process id.
     pub pid: u32,
+    /// The parent's pid, when known.
     pub ppid: Option<u32>,
     /// `None` when the process exited between the listing and the question.
     pub sid: Option<u32>,
     /// When it started, in nanoseconds since boot (see [`process_start`]); 0
     /// when the platform would not say (another user's process on macOS).
     pub start_time: u64,
+    /// The process's name.
     pub name: String,
     /// A zombie has exited: it holds no files and writes nothing.
     pub exited: bool,
 }
 
 impl ProcRow {
+    /// The process as told apart from a later one that reuses its pid.
     pub fn identity(&self) -> ProcessIdentity {
         ProcessIdentity {
             pid: self.pid,
@@ -759,8 +766,11 @@ fn non_empty_table(rows: Vec<ProcRow>) -> Result<Vec<ProcRow>, String> {
 /// [`occupants_of`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Occupant {
+    /// The process id.
     pub pid: u32,
+    /// The command it runs.
     pub command: String,
+    /// The directory it is working in.
     pub cwd: std::path::PathBuf,
 }
 
@@ -876,9 +886,13 @@ pub fn snapshot(sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
 /// What a purge has to work with. The real one reads the platform's process
 /// table and sends real signals; tests substitute a scripted one.
 pub trait ProcessOps {
+    /// The current process table.
     fn table(&mut self) -> Vec<ProcRow>;
+    /// Sends `signal` to `pid`; a process already gone is not an error.
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal);
+    /// The current time.
     fn now(&self) -> Instant;
+    /// Waits for `duration`.
     fn sleep(&mut self, duration: Duration);
 }
 
@@ -912,7 +926,10 @@ impl ProcessOps for SystemProcesses {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PurgeOutcome {
     /// Nothing is left. `stopped` counts the processes it had to ask.
-    Clean { stopped: usize },
+    Clean {
+        /// How many processes it had to ask to stop.
+        stopped: usize,
+    },
     /// These were still running after SIGKILL and the settle wait.
     Survivors(Vec<ProcRow>),
 }
@@ -1021,6 +1038,7 @@ pub struct SpawnGate {
 }
 
 impl SpawnGate {
+    /// A gate over `registry` that checks removals through `ops`.
     pub fn new(registry: AgentProcessRegistry, ops: crate::worktree_ops::WorktreeOps) -> Self {
         Self { registry, ops }
     }
@@ -1335,8 +1353,11 @@ type StartupStopNotice = Arc<dyn Fn(String) + Send + Sync>;
 /// agent's sessions are never ended, live or retired, in this run or the next).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegistryEntry {
+    /// The session.
     pub session: ProcessSession,
+    /// The folder it was started in.
     pub folder: std::path::PathBuf,
+    /// Whether it belongs to a standalone agent, whose sessions are never ended.
     pub standalone: bool,
 }
 
@@ -1345,9 +1366,13 @@ pub struct RegistryEntry {
 pub struct StoredSession {
     /// The agent (or `UNOWNED_PTYS`) it belongs to; `None` once retired.
     pub owner: Option<String>,
+    /// The session.
     pub session: ProcessSession,
+    /// The folder it was started in.
     pub folder: std::path::PathBuf,
+    /// Whether it belongs to a standalone agent, whose sessions are never ended.
     pub standalone: bool,
+    /// Its processes still running after an attempt to end them.
     pub survivors: Vec<ProcessIdentity>,
     /// What its processes are called in a sentence, so a refusal after a
     /// restart still names what is standing in a folder.
@@ -1360,7 +1385,9 @@ pub struct StoredSession {
 /// start, so the resumed removal asks exactly the questions the live run would.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegistrySnapshot {
+    /// The registered sessions the removal depends on.
     pub entries: Vec<RegistryEntry>,
+    /// Each session's processes still running after an attempt to end them.
     pub survivors: Vec<(ProcessSession, Vec<ProcessIdentity>)>,
 }
 
