@@ -475,8 +475,7 @@ pub(crate) async fn dispatch_guarded(
         state,
         command,
         headers,
-        Some(kind),
-        operation.asked(),
+        Some((kind, operation)),
         force,
         client,
     )
@@ -493,18 +492,21 @@ pub(crate) async fn dispatch_guarded_unrecorded(
     force: &ForceConnectedQuery,
     client: &crate::server::SocketClient,
 ) -> Result<Result<Guarded, String>, RouteRejection> {
-    dispatch_under_guard(state, command, headers, None, false, force, client).await
+    dispatch_under_guard(state, command, headers, None, force, client).await
 }
 
+/// `record` is the change's operation record kind and whether the client asked
+/// to follow it, or `None` for a change that keeps no record.
 async fn dispatch_under_guard(
     state: &crate::server::AppState,
     command: dux_core::wire::WireCommand,
     headers: &HeaderMap,
-    kind: Option<dux_core::operations::OperationKind>,
-    answered: bool,
+    record: Option<(dux_core::operations::OperationKind, &OperationQuery)>,
     force: &ForceConnectedQuery,
     client: &crate::server::SocketClient,
 ) -> Result<Result<Guarded, String>, RouteRejection> {
+    let kind = record.map(|(kind, _)| kind);
+    let answered = record.is_some_and(|(_, operation)| operation.asked());
     let scope = scope_from_headers(headers, &state.connections);
     let (force_connected, accepted_connected) = force.decision();
     let followed = crate::engine_actor::Followed {

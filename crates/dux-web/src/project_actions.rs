@@ -745,7 +745,17 @@ mod tests {
         );
     }
 
-    fn post_add(path: &str, create_initial_commit: bool) -> Request<Body> {
+    /// A plain add of `path`.
+    fn post_add(path: &str) -> Request<Body> {
+        post_add_body(path, "false")
+    }
+
+    /// An add of `path` that creates an empty initial commit first.
+    fn post_add_with_initial_commit(path: &str) -> Request<Body> {
+        post_add_body(path, "true")
+    }
+
+    fn post_add_body(path: &str, create_initial_commit: &str) -> Request<Body> {
         let body = format!(
             r#"{{"path":{},"create_initial_commit":{}}}"#,
             serde_json::to_string(path).unwrap(),
@@ -767,7 +777,10 @@ mod tests {
         assert!(!dux_core::git::repo_has_commits(repo.path()));
 
         let (_tmp, app) = router_no_auth();
-        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        let resp = app
+            .oneshot(post_add_with_initial_commit(&path))
+            .await
+            .unwrap();
         assert_eq!(
             resp.status(),
             axum::http::StatusCode::CREATED,
@@ -790,7 +803,7 @@ mod tests {
         let path = repo.path().to_string_lossy().to_string();
 
         let (_tmp, app) = router_no_auth();
-        let resp = app.oneshot(post_add(&path, false)).await.unwrap();
+        let resp = app.oneshot(post_add(&path)).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(
             !dux_core::git::repo_has_commits(repo.path()),
@@ -811,17 +824,22 @@ mod tests {
             .unwrap()
     }
 
-    fn add_body(
-        checkout_default: bool,
-        create_initial_commit: bool,
-        init_repo: bool,
-    ) -> super::AddProjectBody {
+    /// One of the add body's precedence-ladder flags.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum AddFlag {
+        CheckoutDefault,
+        CreateInitialCommit,
+        InitRepo,
+    }
+
+    /// An add body for `/repo` with exactly `flags` set.
+    fn add_body(flags: &[AddFlag]) -> super::AddProjectBody {
         super::AddProjectBody {
             path: "/repo".to_string(),
             name: String::new(),
-            checkout_default,
-            create_initial_commit,
-            init_repo,
+            checkout_default: flags.contains(&AddFlag::CheckoutDefault),
+            create_initial_commit: flags.contains(&AddFlag::CreateInitialCommit),
+            init_repo: flags.contains(&AddFlag::InitRepo),
             clone_url: None,
             agent_name: None,
             random_name: false,
@@ -951,7 +969,11 @@ mod tests {
             clone_url: Some(url.to_string()),
             agent_name: Some("first".to_string()),
             random_name: true,
-            ..add_body(true, true, true)
+            ..add_body(&[
+                AddFlag::CheckoutDefault,
+                AddFlag::CreateInitialCommit,
+                AddFlag::InitRepo,
+            ])
         };
         assert_eq!(
             super::add_project_command(clone("https://example.com/r.git")),
@@ -1038,19 +1060,26 @@ mod tests {
             WireCommand::AddProjectInitRepo { .. }
         ));
         assert!(matches!(
-            super::add_project_command(add_body(true, true, true)),
+            super::add_project_command(add_body(&[
+                AddFlag::CheckoutDefault,
+                AddFlag::CreateInitialCommit,
+                AddFlag::InitRepo
+            ])),
             WireCommand::AddProjectInitRepo { .. }
         ));
         assert!(matches!(
-            super::add_project_command(add_body(true, true, false)),
+            super::add_project_command(add_body(&[
+                AddFlag::CheckoutDefault,
+                AddFlag::CreateInitialCommit
+            ])),
             WireCommand::AddProjectCreateInitialCommit { .. }
         ));
         assert!(matches!(
-            super::add_project_command(add_body(true, false, false)),
+            super::add_project_command(add_body(&[AddFlag::CheckoutDefault])),
             WireCommand::AddProjectCheckoutDefault { .. }
         ));
         assert!(matches!(
-            super::add_project_command(add_body(false, false, false)),
+            super::add_project_command(add_body(&[])),
             WireCommand::AddProject { .. }
         ));
     }
@@ -1331,7 +1360,10 @@ mod tests {
         let path = repo.path().to_string_lossy().to_string();
 
         let (_tmp, app) = router_no_auth();
-        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        let resp = app
+            .oneshot(post_add_with_initial_commit(&path))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
         assert_eq!(
             commit_count(repo.path()),
@@ -1342,7 +1374,7 @@ mod tests {
 
     /// Add a committed repo as a project through the same router and return its id.
     async fn add_project_and_id(app: &axum::Router, path: &str) -> String {
-        let resp = app.clone().oneshot(post_add(path, false)).await.unwrap();
+        let resp = app.clone().oneshot(post_add(path)).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
@@ -1351,12 +1383,17 @@ mod tests {
         json["id"].as_str().expect("created id").to_string()
     }
 
-    fn delete_project_req(id: &str, delete_worktrees: bool) -> Request<Body> {
-        let uri = if delete_worktrees {
-            format!("/api/v1/projects/{id}?delete_worktrees=true")
-        } else {
-            format!("/api/v1/projects/{id}")
-        };
+    /// Remove project `id`, keeping its worktrees.
+    fn delete_project_req(id: &str) -> Request<Body> {
+        delete_project_at(format!("/api/v1/projects/{id}"))
+    }
+
+    /// Remove project `id` and its worktrees.
+    fn delete_project_and_worktrees_req(id: &str) -> Request<Body> {
+        delete_project_at(format!("/api/v1/projects/{id}?delete_worktrees=true"))
+    }
+
+    fn delete_project_at(uri: String) -> Request<Body> {
         Request::builder()
             .method("DELETE")
             .uri(uri)
@@ -1426,7 +1463,10 @@ mod tests {
     async fn project_delete_reports_a_launch_refusal_as_conflict() {
         let (_tmp, app) = router_with_launching_project_session();
 
-        let response = app.oneshot(delete_project_req("p1", true)).await.unwrap();
+        let response = app
+            .oneshot(delete_project_and_worktrees_req("p1"))
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1451,7 +1491,7 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(delete_project_req(&id, true))
+            .oneshot(delete_project_and_worktrees_req(&id))
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
@@ -1544,11 +1584,7 @@ mod tests {
         let (_tmp, app) = router_no_auth();
         let id = add_project_and_id(&app, &path).await;
 
-        let resp = app
-            .clone()
-            .oneshot(delete_project_req(&id, false))
-            .await
-            .unwrap();
+        let resp = app.clone().oneshot(delete_project_req(&id)).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
         assert!(repo.path().join(".git").exists());
 
@@ -1591,7 +1627,10 @@ mod tests {
         let path = repo.path().to_string_lossy().to_string();
 
         let (_tmp, app) = router_no_auth();
-        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        let resp = app
+            .oneshot(post_add_with_initial_commit(&path))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
         assert!(dux_core::git::repo_has_commits(repo.path()));
     }

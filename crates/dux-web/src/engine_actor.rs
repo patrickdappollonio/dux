@@ -2703,6 +2703,16 @@ pub(crate) struct EngineService {
     tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
 }
 
+/// How a config came to be in force, which decides whether a reload's
+/// operation records wait on the listener change it causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigArrival {
+    /// A reload, which a client may be following.
+    Reload,
+    /// A raw save's file taken on before a change, which no record follows.
+    DiskAdoption,
+}
+
 impl EngineService {
     pub(crate) fn new(engine: &Engine, ends: ActorLoopEnds, shutdown_echo: ShutdownEcho) -> Self {
         let ActorLoopEnds {
@@ -2965,7 +2975,7 @@ impl EngineService {
         let refused = find_config_reload_refused(&reaction).map(str::to_string);
         if let Some(config) = take_apply_reloaded_config(reaction) {
             let before = engine.config.clone();
-            let github_was_enabled = engine.github_integration_enabled;
+            let github_before = engine.github_integration();
             // A reload dux asked for after its own write is nobody's news.
             let quiet = engine.reload_origin.last_reload_was_own();
             let outcome = match engine.apply_reloaded_config(*config) {
@@ -2975,7 +2985,8 @@ impl EngineService {
                             &dux_core::config_reload_status::applied(),
                         ));
                     }
-                    let notes = self.config_in_force(engine, &before, github_was_enabled, true);
+                    let notes =
+                        self.config_in_force(engine, &before, github_before, ConfigArrival::Reload);
                     ConfigReloadOutcome::Applied {
                         notes: notes.into_iter().collect(),
                     }
@@ -2983,7 +2994,7 @@ impl EngineService {
                 Err(e) => {
                     // The engine kept the new config anyway, so it is in
                     // force; the failure is said last, so it holds the line.
-                    self.config_in_force(engine, &before, github_was_enabled, true);
+                    self.config_in_force(engine, &before, github_before, ConfigArrival::Reload);
                     let error = format!("{e:#}");
                     let _ = self.status.send(WireStatus::from_update(
                         &dux_core::config_reload_status::adopted_but_apply_failed(&error),
@@ -2996,12 +3007,13 @@ impl EngineService {
         if let Some((before, github_was_enabled, error)) = adopted {
             // The engine applied this config only to drain the commands it had
             // deferred, and left the `gh` probe a reload owes to this apply.
-            engine.probe_gh_after_reload(if github_was_enabled {
+            let github_before = if github_was_enabled {
                 dux_core::engine::GithubIntegration::Enabled
             } else {
                 dux_core::engine::GithubIntegration::Disabled
-            });
-            self.config_in_force(engine, &before, github_was_enabled, true);
+            };
+            engine.probe_gh_after_reload(github_before);
+            self.config_in_force(engine, &before, github_before, ConfigArrival::Reload);
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&error),
             ));
@@ -3042,11 +3054,11 @@ impl EngineService {
             ));
         }
         let before = engine.config.clone();
-        let github_was_enabled = engine.github_integration_enabled;
+        let github_before = engine.github_integration();
         let applied = engine.apply_reloaded_config(reloaded);
         // In force either way: the engine keeps the config even when its
         // apply fails, as on a reload.
-        self.config_in_force(engine, &before, github_was_enabled, false);
+        self.config_in_force(engine, &before, github_before, ConfigArrival::DiskAdoption);
         if let Err(error) = applied {
             let _ = self.status.send(WireStatus::from_update(
                 &dux_core::config_reload_status::adopted_but_apply_failed(&format!("{error:#}")),
@@ -3061,14 +3073,10 @@ impl EngineService {
         &mut self,
         engine: &mut Engine,
         before: &dux_core::config::Config,
-        github_was_enabled: bool,
-        for_reload: bool,
+        github_before: dux_core::engine::GithubIntegration,
+        arrival: ConfigArrival,
     ) -> Option<String> {
-        engine.retune_pr_sync_after_reload(if github_was_enabled {
-            dux_core::engine::GithubIntegration::Enabled
-        } else {
-            dux_core::engine::GithubIntegration::Disabled
-        });
+        engine.retune_pr_sync_after_reload(github_before);
         // Memory now matches disk: any pending raw "Save" has been adopted, so
         // disk is no longer ahead.
         self.config_disk_ahead = false;
@@ -3110,7 +3118,7 @@ impl EngineService {
             let status = self.status.tx.clone();
             // A reload is not over until the serve has answered, and a change it
             // could not follow is part of how the reload ended.
-            let operations = for_reload.then(|| engine.operations.clone());
+            let operations = (arrival == ConfigArrival::Reload).then(|| engine.operations.clone());
             if let Some(operations) = &operations {
                 operations.listener_change_started();
             }
@@ -6341,11 +6349,20 @@ mod tests {
         assert!(rx.blocking_recv().expect("a reply").is_err());
     }
 
-    fn pruned(
-        kind: PrunedPtyKind,
-        detached: bool,
-        tab_closed: bool,
-    ) -> dux_core::engine::PrunedPty {
+    /// How the pty in [`pruned`] went away.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Ending {
+        /// Its tab was closed, with two tabs left.
+        TabClosed,
+        /// It stopped and left its tab dormant.
+        Dormant,
+        /// Its agent was detached.
+        Detached,
+    }
+
+    fn pruned(kind: PrunedPtyKind, ending: Ending) -> dux_core::engine::PrunedPty {
+        let detached = ending == Ending::Detached;
+        let tab_closed = ending == Ending::TabClosed;
         dux_core::engine::PrunedPty {
             kind,
             id: "t1".to_string(),
@@ -6372,7 +6389,7 @@ mod tests {
     /// leaves something behind has to explain itself too.
     #[test]
     fn a_reaped_pty_is_announced_whenever_a_tab_row_or_a_pill_is_involved() {
-        let closed = prune_wire_status(&pruned(PrunedPtyKind::Agent, false, true))
+        let closed = prune_wire_status(&pruned(PrunedPtyKind::Agent, Ending::TabClosed))
             .expect("every clean tab exit is announced");
         assert_eq!(closed.tone, "info");
         assert_eq!(
@@ -6382,18 +6399,18 @@ mod tests {
         assert!(!closed.quiet_on.web);
 
         assert_eq!(
-            prune_wire_status(&pruned(PrunedPtyKind::Terminal, false, false)),
+            prune_wire_status(&pruned(PrunedPtyKind::Terminal, Ending::Dormant)),
             None,
             "the terminal's row left the sidebar in the same sweep"
         );
 
-        let dormant = prune_wire_status(&pruned(PrunedPtyKind::Agent, false, false))
+        let dormant = prune_wire_status(&pruned(PrunedPtyKind::Agent, Ending::Dormant))
             .expect("a dormant pill is indistinguishable from a never-launched one");
         assert_eq!(dormant.tone, "info");
         assert!(dormant.message.contains("Tab (Claude) exited."));
         assert!(!dormant.quiet_on.web, "there is nothing else to say it");
 
-        let detached = prune_wire_status(&pruned(PrunedPtyKind::Agent, true, false))
+        let detached = prune_wire_status(&pruned(PrunedPtyKind::Agent, Ending::Detached))
             .expect("losing the whole agent stays a warning");
         assert_eq!(detached.tone, "warning");
         assert!(detached.message.contains("exited."));
@@ -6404,7 +6421,7 @@ mod tests {
     /// the provider the pane fell back to.
     #[test]
     fn a_closed_tab_that_leaves_one_behind_names_what_the_pane_shows() {
-        let mut closed = pruned(PrunedPtyKind::Agent, false, true);
+        let mut closed = pruned(PrunedPtyKind::Agent, Ending::TabClosed);
         closed.closed_tab = Some(dux_core::engine::ClosedTabExit {
             provider: "claude".to_string(),
             agent_label: "feat/x".to_string(),
@@ -6427,7 +6444,7 @@ mod tests {
     /// only place the user sees them: the pane they were printed in is gone.
     #[test]
     fn a_refused_resume_warning_quotes_the_provider() {
-        let mut refused = pruned(PrunedPtyKind::Agent, true, false);
+        let mut refused = pruned(PrunedPtyKind::Agent, Ending::Detached);
         refused.label = "feat/x".to_string();
         refused.refused_resume_excerpt = Some(vec![
             "Resuming your conversation.".to_string(),

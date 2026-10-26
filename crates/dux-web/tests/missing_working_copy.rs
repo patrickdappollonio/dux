@@ -139,12 +139,22 @@ async fn boot_with_repo() -> (
     (addr, tmp, worktree, repo)
 }
 
+/// What the agent's directory is expected to hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkingCopy {
+    /// Nothing: the directory is gone.
+    Missing,
+    /// The working copy.
+    Present,
+}
+
 /// Poll until the server has noticed what is at the agent's directory.
 ///
 /// Asking for the agent's changes is what refreshes the classification, exactly
 /// as an open changes panel does; the answer runs off the engine thread, so the
 /// first ask reports the previous verdict by design.
-async fn wait_for_missing(addr: SocketAddr, missing: bool) -> serde_json::Value {
+async fn wait_for_missing(addr: SocketAddr, copy: WorkingCopy) -> serde_json::Value {
+    let missing = copy == WorkingCopy::Missing;
     let client = reqwest::Client::new();
     for _ in 0..100 {
         let _ = client
@@ -203,7 +213,7 @@ async fn a_deleted_working_copy_answers_with_its_own_verdict() {
     // The agent removes its own working copy from inside it.
     std::fs::remove_dir_all(&worktree).unwrap();
 
-    let workspace = wait_for_missing(addr, true).await;
+    let workspace = wait_for_missing(addr, WorkingCopy::Missing).await;
     let reason = workspace["quiet_reason"].as_str().unwrap_or_default();
     assert!(
         reason.contains(worktree.to_string_lossy().as_ref()),
@@ -323,7 +333,7 @@ async fn recreating_the_working_copy_puts_it_back_at_the_same_path() {
     let (addr, _tmp, worktree) = boot().await;
     let client = reqwest::Client::new();
     std::fs::remove_dir_all(&worktree).unwrap();
-    wait_for_missing(addr, true).await;
+    wait_for_missing(addr, WorkingCopy::Missing).await;
 
     let resp = client
         .post(format!(
@@ -345,7 +355,7 @@ async fn recreating_the_working_copy_puts_it_back_at_the_same_path() {
         "the working copy is back at {}",
         worktree.display()
     );
-    wait_for_missing(addr, false).await;
+    wait_for_missing(addr, WorkingCopy::Present).await;
 }
 
 /// An id with nothing to recreate is refused in a sentence rather than acted on:
@@ -399,7 +409,7 @@ async fn the_editor_refuses_a_directory_that_is_gone_in_the_same_sentence() {
     assert_eq!(resp.status(), 200);
 
     std::fs::remove_dir_all(&worktree).unwrap();
-    wait_for_missing(addr, true).await;
+    wait_for_missing(addr, WorkingCopy::Missing).await;
 
     let resp = client
         .post(format!("http://{addr}/api/v1/sessions/s1/files/list"))
@@ -444,7 +454,7 @@ async fn recreating_one_working_copy_leaves_an_unreachable_sibling_alone() {
 
     std::fs::remove_dir_all(&worktree).unwrap();
     std::fs::rename(&sibling, &stashed).expect("the sibling's mount goes away");
-    wait_for_missing(addr, true).await;
+    wait_for_missing(addr, WorkingCopy::Missing).await;
 
     let resp = client
         .post(format!(
@@ -454,7 +464,7 @@ async fn recreating_one_working_copy_leaves_an_unreachable_sibling_alone() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    wait_for_missing(addr, false).await;
+    wait_for_missing(addr, WorkingCopy::Present).await;
 
     std::fs::rename(&stashed, &sibling).expect("the sibling's mount comes back");
     let listed = dux_core::test_git::fixture_git()

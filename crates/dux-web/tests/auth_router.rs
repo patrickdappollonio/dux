@@ -120,25 +120,34 @@ fn tailnet_exposure() -> dux_web::exposure::ExposureCell {
     exposure
 }
 
+/// Which surface the test engine reloads its config as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EngineSurface {
+    /// `dux server`'s.
+    Server,
+    /// The terminal UI's, as under the flip and the background server.
+    TerminalUi,
+}
+
 impl Dux {
     fn start(auth: &str) -> Self {
         Self::start_tuned(auth, |params| params)
     }
 
     fn start_tuned(auth: &str, tune: impl FnOnce(RouterParams) -> RouterParams) -> Self {
-        Self::start_on(auth, tune, false)
+        Self::start_on(auth, tune, EngineSurface::Server)
     }
 
     /// A router whose engine reloads the way the terminal UI's does, as under
     /// the flip and the background server.
     fn start_as_terminal_ui(auth: &str) -> Self {
-        Self::start_on(auth, |params| params, true)
+        Self::start_on(auth, |params| params, EngineSurface::TerminalUi)
     }
 
     fn start_on(
         auth: &str,
         tune: impl FnOnce(RouterParams) -> RouterParams,
-        terminal_ui: bool,
+        surface: EngineSurface,
     ) -> Self {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
@@ -158,7 +167,7 @@ impl Dux {
         .unwrap();
         let mut engine = bootstrap_engine(&paths).unwrap();
         dux_core::test_provider::defuse_config(&mut engine.config);
-        if terminal_ui {
+        if surface == EngineSurface::TerminalUi {
             engine.surface = Box::new(TerminalUiSurface);
         }
         let (handle, _join) = spawn_engine_thread(engine);

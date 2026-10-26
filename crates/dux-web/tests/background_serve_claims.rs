@@ -158,8 +158,9 @@ async fn attach(url: &str) -> (ClientWs, serde_json::Value) {
 /// Start a serve over `engine` on a fresh loopback port.
 fn serve(
     engine: &mut Engine,
-    claim_before_serving: bool,
+    claims: dux_core::background_serve::ServeClaims,
 ) -> (BackgroundServer, std::net::SocketAddr) {
+    let claim_before_serving = claims == dux_core::background_serve::ServeClaims::UndrivenPtys;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback bind");
     let addr = listener.local_addr().expect("bound address");
     // Not a test about Tailscale: on any other mode every request waits on the
@@ -295,7 +296,10 @@ async fn browser(
 #[test]
 fn a_browser_finds_everything_running_driven_by_the_tui_until_it_takes_over() {
     let (mut engine, terminal, _tmp) = engine_with_an_agent_and_a_terminal_running();
-    let (mut server, addr) = serve(&mut engine, true);
+    let (mut server, addr) = serve(
+        &mut engine,
+        dux_core::background_serve::ServeClaims::UndrivenPtys,
+    );
     let seat = server
         .ownership()
         .expect("a web serve gives the terminal UI a seat");
@@ -333,7 +337,10 @@ fn a_browser_finds_everything_running_driven_by_the_tui_until_it_takes_over() {
 #[test]
 fn a_serve_started_without_the_claim_leaves_everything_free() {
     let (mut engine, terminal, _tmp) = engine_with_an_agent_and_a_terminal_running();
-    let (mut server, addr) = serve(&mut engine, false);
+    let (mut server, addr) = serve(
+        &mut engine,
+        dux_core::background_serve::ServeClaims::Nothing,
+    );
     let seat = server
         .ownership()
         .expect("a web serve gives the terminal UI a seat");

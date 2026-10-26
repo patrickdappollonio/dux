@@ -338,17 +338,22 @@ impl SocketClient {
         self.address
     }
 
-    fn facts(
-        &self,
-        device: Option<String>,
-        events: bool,
-    ) -> dux_core::attachments::ConnectionFacts {
+    /// What an events socket from this client registers as.
+    fn events_facts(&self, device: Option<String>) -> dux_core::attachments::ConnectionFacts {
+        dux_core::attachments::ConnectionFacts {
+            events: true,
+            ..self.pty_facts(device)
+        }
+    }
+
+    /// What a terminal socket from this client registers as.
+    fn pty_facts(&self, device: Option<String>) -> dux_core::attachments::ConnectionFacts {
         dux_core::attachments::ConnectionFacts {
             surface: dux_core::attachments::Surface::Browser,
             device,
             address: self.address,
             verified: self.verified,
-            events,
+            events: false,
             browser: self.browser.clone(),
         }
     }
@@ -1324,12 +1329,21 @@ fn provider_gone_close() -> Message {
 /// forwarder ended because the PTY was torn down (the provider crashed/exited, or
 /// a tab/agent was closed), which is a provider-gone close so the client does not
 /// relaunch it.
-fn forwarder_end_close(shutting_down: bool) -> Message {
-    if shutting_down {
-        Message::Close(None)
-    } else {
-        provider_gone_close()
+fn forwarder_end_close(why: ForwarderEnd) -> Message {
+    match why {
+        ForwarderEnd::ServerShutdown => Message::Close(None),
+        ForwarderEnd::PtyGone => provider_gone_close(),
     }
+}
+
+/// Why a PTY forwarder ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForwarderEnd {
+    /// The server is shutting down.
+    ServerShutdown,
+    /// The PTY was torn down: the provider crashed or exited, or a tab or agent
+    /// was closed.
+    PtyGone,
 }
 
 fn spawn_pty_forwarder(
@@ -2466,13 +2480,18 @@ impl AttachedPtySocket<'_> {
     /// Close with the code that tells the client whether to reconnect: the server
     /// shutting down is a different answer from the provider going away.
     async fn close_after_forwarder_end(&self) -> PtyLoopAction {
-        let shutting_down = self
+        let why = if self
             .engine
             .shutdown_flag()
-            .load(std::sync::atomic::Ordering::SeqCst);
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            ForwarderEnd::ServerShutdown
+        } else {
+            ForwarderEnd::PtyGone
+        };
         // The terminal is gone (or dux is): there is nothing left to protect.
         self.attachment.end_deliberately();
-        send_close(self.sink, forwarder_end_close(shutting_down)).await;
+        send_close(self.sink, forwarder_end_close(why)).await;
         PtyLoopAction::Break
     }
 
@@ -2547,8 +2566,7 @@ impl AttachedPtySocket<'_> {
                 pty_id,
                 self.conn_id,
                 self.user_agent,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
             ));
             self.event_bus.emit(pty_owner_event(
                 pty_id,
@@ -2572,27 +2590,23 @@ impl AttachedPtySocket<'_> {
     fn handle_resize_frame(&self, frame: &PtyResizeFrame) {
         let pty_id = self.target.pty_id();
         let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
-        let outcome = self.owners.claim_for_resize(
-            pty_id,
-            self.conn_id,
-            if frame.takeover {
-                dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }
-            } else {
-                dux_core::pty_owners::ResizeIntent::Plain
-            },
-            self.user_agent,
-            |seq| {
-                self.engine
-                    .resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
-            },
-        );
+        let intent = if frame.takeover {
+            dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }
+        } else {
+            dux_core::pty_owners::ResizeIntent::Plain
+        };
+        let outcome =
+            self.owners
+                .claim_for_resize(pty_id, self.conn_id, intent, self.user_agent, |seq| {
+                    self.engine
+                        .resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
+                });
         if let Some(epoch) = outcome.epoch {
             dux_core::logger::info(&crate::pty_log::describe_claim_granted(
                 pty_id,
                 self.conn_id,
                 self.user_agent,
-                frame.takeover,
-                expected_owner,
+                intent,
             ));
             self.event_bus.emit(pty_owner_event(
                 pty_id,
@@ -2621,7 +2635,11 @@ impl AttachedPtySocket<'_> {
     }
 
     async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
-        self.attachment.note_viewed(frame.viewed);
+        if frame.viewed {
+            self.attachment.note_viewed();
+        } else {
+            self.attachment.note_unviewed();
+        }
         if frame.viewed {
             self.engine.note_viewed(self.target.pty_id().to_string());
         }
@@ -3121,7 +3139,7 @@ async fn ws_events_upgrade(
     let changes = Arc::clone(&state.changes);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
-    let facts = client.facts(captured_user_agent(&headers), true);
+    let facts = client.events_facts(captured_user_agent(&headers));
     let after = client.after;
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -4183,11 +4201,7 @@ impl AttachmentGuard {
         let own_connection = if linked.is_some() {
             None
         } else {
-            attachments.register(
-                registry_id,
-                client.facts(device, false),
-                Some(heard.clone()),
-            );
+            attachments.register(registry_id, client.pty_facts(device), Some(heard.clone()));
             Some(registry_id.to_string())
         };
         let connection = linked.unwrap_or_else(|| registry_id.to_string());
@@ -4209,13 +4223,13 @@ impl AttachmentGuard {
         }
     }
 
-    fn note_viewed(&self, viewed: bool) {
-        if viewed {
-            self.attachments
-                .note_viewed(self.token, std::time::Instant::now());
-        } else {
-            self.attachments.note_unviewed(self.token);
-        }
+    fn note_viewed(&self) {
+        self.attachments
+            .note_viewed(self.token, std::time::Instant::now());
+    }
+
+    fn note_unviewed(&self) {
+        self.attachments.note_unviewed(self.token);
     }
 
     fn end_deliberately(&self) {
@@ -4431,11 +4445,11 @@ mod tests {
     fn forwarder_end_close_is_provider_gone_unless_shutting_down() {
         // A provider crash/exit (not shutting down) must tell the client to stop;
         // a shutdown must be a plain close so the client reconnects on restart.
-        match forwarder_end_close(false) {
+        match forwarder_end_close(ForwarderEnd::PtyGone) {
             Message::Close(Some(frame)) => assert_eq!(frame.code, PROVIDER_GONE_CLOSE_CODE),
             other => panic!("expected provider-gone close, got {other:?}"),
         }
-        match forwarder_end_close(true) {
+        match forwarder_end_close(ForwarderEnd::ServerShutdown) {
             Message::Close(None) => {}
             other => panic!("expected a plain close on shutdown, got {other:?}"),
         }
