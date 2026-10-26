@@ -176,7 +176,7 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
             random_name,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: dux_core::clone_project::UpfrontReviewCopy::default(),
         }
     } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
@@ -1021,7 +1021,7 @@ mod tests {
                 random_name: true,
                 pull_request: None,
                 add_existing: false,
-                review_copy: Default::default(),
+                review_copy: dux_core::clone_project::UpfrontReviewCopy::default(),
             }
         );
         // A pull request, or the add of a checkout for one, outranks a clone
@@ -1050,7 +1050,7 @@ mod tests {
                     random_name: true,
                     pull_request,
                     add_existing,
-                    review_copy: Default::default(),
+                    review_copy: dux_core::clone_project::UpfrontReviewCopy::default(),
                 }
             );
         }

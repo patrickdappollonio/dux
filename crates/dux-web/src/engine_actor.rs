@@ -47,7 +47,7 @@ pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<V
 /// session lifecycle and status, the `working` hysteresis flag and the per-session
 /// terminal list, which all live in the same projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpineChange {
+pub(crate) enum SpineChange {
     Projects,
     Sessions,
 }
@@ -55,24 +55,24 @@ pub enum SpineChange {
 /// What the worktree manager's listing needs from the engine for one project:
 /// the classification inputs, and every folder something dux started is still
 /// running in (so such a row is shown busy rather than removable).
-pub struct ProjectWorktreeInputs {
-    pub project: dux_core::model::Project,
-    pub paths: dux_core::config::DuxPaths,
-    pub sessions: Vec<dux_core::model::AgentSession>,
-    pub busy: Vec<dux_core::worktree_manager::BusyFolder>,
+pub(crate) struct ProjectWorktreeInputs {
+    pub(crate) project: dux_core::model::Project,
+    pub(crate) paths: dux_core::config::DuxPaths,
+    pub(crate) sessions: Vec<dux_core::model::AgentSession>,
+    pub(crate) busy: Vec<dux_core::worktree_manager::BusyFolder>,
 }
 
 /// A request to follow a tab or terminal change as an operation, its id minted
 /// before dispatch. The engine opens the record before making the change, so
 /// nothing the change raises lands first, and fills `record` before replying.
-pub struct OperationTicket {
-    pub id: String,
-    pub kind: OperationKind,
-    pub record: Arc<std::sync::OnceLock<OperationView>>,
+pub(crate) struct OperationTicket {
+    pub(crate) id: String,
+    pub(crate) kind: OperationKind,
+    pub(crate) record: Arc<std::sync::OnceLock<OperationView>>,
 }
 
 impl OperationTicket {
-    pub fn new(kind: OperationKind) -> Self {
+    pub(crate) fn new(kind: OperationKind) -> Self {
         Self {
             id: dux_core::operations::mint_operation_id(),
             kind,
@@ -92,30 +92,30 @@ impl OperationTicket {
 /// follow it (which decides only the answer's shape). With no kind it is the
 /// attachment policy alone, for a guarded change that keeps no record.
 #[derive(Clone, Debug)]
-pub struct Followed {
-    pub kind: Option<OperationKind>,
-    pub answered: bool,
+pub(crate) struct Followed {
+    pub(crate) kind: Option<OperationKind>,
+    pub(crate) answered: bool,
     /// Go ahead even though somebody else is attached to what the change
     /// would end (`force_connected` on the route). Only that refusal is
     /// skipped; the reservation and every other check still run.
-    pub force_connected: bool,
+    pub(crate) force_connected: bool,
     /// With `force_connected`: go ahead only over these blockers
     /// ([`dux_core::attachments::Blocker::key`]), the ones the asking dialog
     /// showed. `None` goes ahead over everybody.
-    pub accepted_connected: Option<std::collections::BTreeSet<String>>,
+    pub(crate) accepted_connected: Option<std::collections::BTreeSet<String>>,
     /// The browser tab asking, exempt from its own attachments: its events
     /// connection, when the request named one from its own address (see
     /// `rest_common::exempt_requester`). `None` exempts nobody.
-    pub requester: Option<String>,
+    pub(crate) requester: Option<String>,
 }
 
 /// Why the engine refused a dispatched change: its sentence, and, when the
 /// refusal was that somebody else is attached to what the change would end,
 /// who (see [`dux_core::attachments`]).
 #[derive(Debug)]
-pub struct WireError {
-    pub message: String,
-    pub attached: Option<Vec<dux_core::attachments::Blocker>>,
+pub(crate) struct WireError {
+    pub(crate) message: String,
+    pub(crate) attached: Option<Vec<dux_core::attachments::Blocker>>,
 }
 
 impl From<String> for WireError {
@@ -133,21 +133,21 @@ pub const MISSING_OPERATION_RECORD: &str =
     "the change was made, but its operation record did not come back with the reply";
 
 /// Everything the pull-request reference resolver reads from the engine.
-pub struct PullRequestResolutionInputs {
-    pub projects: Vec<dux_core::model::Project>,
-    pub policy: dux_core::gh::GithubHostPolicy,
+pub(crate) struct PullRequestResolutionInputs {
+    pub(crate) projects: Vec<dux_core::model::Project>,
+    pub(crate) policy: dux_core::gh::GithubHostPolicy,
     /// Each signed-in host's git protocol, for the clone address.
-    pub protocols: std::collections::BTreeMap<String, dux_core::gh::GitProtocol>,
+    pub(crate) protocols: std::collections::BTreeMap<String, dux_core::gh::GitProtocol>,
     /// The program the pull request lookup runs: `gh`, or a test's stand-in.
-    pub gh_program: std::ffi::OsString,
-    pub gh_available: bool,
+    pub(crate) gh_program: std::ffi::OsString,
+    pub(crate) gh_available: bool,
     /// Where managed worktrees live, which decides what name a review copy
     /// can take.
-    pub worktrees_root: std::path::PathBuf,
+    pub(crate) worktrees_root: std::path::PathBuf,
 }
 
 /// One unit of work for the engine thread.
-pub enum EngineRequest {
+pub(crate) enum EngineRequest {
     ApplyWire(
         WireCommand,
         oneshot::Sender<Result<WireCommandOutcome, WireError>>,
@@ -515,7 +515,7 @@ const SPINE_BACKSTOP_TICK_INTERVAL: u32 = 40;
 /// iteration: `Continue` runs another tick, `Exit` returns the engine to the caller.
 /// The flip's status screen drives this; the dedicated-thread path always answers
 /// `Continue` and exits only on the `Shutdown` request.
-pub enum LoopControl {
+pub(crate) enum LoopControl {
     Continue,
     Exit,
 }
@@ -748,7 +748,7 @@ impl LiveServerLimits {
         self.allowed_hosts.clone()
     }
 
-    pub fn set_allowed_hosts(&self, hosts: &[String]) {
+    pub(crate) fn set_allowed_hosts(&self, hosts: &[String]) {
         self.allowed_hosts.replace(hosts);
     }
 
@@ -757,6 +757,7 @@ impl LiveServerLimits {
         self.search_index_max_files.load(Ordering::Relaxed)
     }
 
+    /// Replace the cap on the editor's file-search flat walk; `0` disables it.
     pub fn set_search_index_max_files(&self, value: usize) {
         self.search_index_max_files.store(value, Ordering::Relaxed);
     }
@@ -768,7 +769,7 @@ impl LiveServerLimits {
         self.access_log.load(Ordering::Relaxed)
     }
 
-    pub fn set_access_log(&self, value: crate::server::AccessLog) {
+    pub(crate) fn set_access_log(&self, value: crate::server::AccessLog) {
         self.access_log
             .store(value == crate::server::AccessLog::On, Ordering::Relaxed);
     }
@@ -783,7 +784,7 @@ impl LiveServerLimits {
         self.pty_send_timeout_seconds.load(Ordering::Relaxed)
     }
 
-    pub fn set_pty_send_timeout_seconds(&self, value: usize) {
+    pub(crate) fn set_pty_send_timeout_seconds(&self, value: usize) {
         self.pty_send_timeout_seconds
             .store(value, Ordering::Relaxed);
     }
@@ -798,7 +799,7 @@ impl LiveServerLimits {
         self.heartbeat_deadline_seconds.load(Ordering::Relaxed)
     }
 
-    pub fn set_heartbeat_deadline_seconds(&self, value: usize) {
+    pub(crate) fn set_heartbeat_deadline_seconds(&self, value: usize) {
         self.heartbeat_deadline_seconds
             .store(value, Ordering::Relaxed);
     }
@@ -809,7 +810,7 @@ impl LiveServerLimits {
         Duration::from_secs(self.presence_grace_seconds.load(Ordering::Relaxed))
     }
 
-    pub fn set_presence_grace_seconds(&self, value: u64) {
+    pub(crate) fn set_presence_grace_seconds(&self, value: u64) {
         self.presence_grace_seconds.store(value, Ordering::Relaxed);
     }
 
@@ -990,6 +991,9 @@ struct PendingSubscribe {
     deadline: Instant,
 }
 
+/// The caller-facing end of the engine actor: every route reaches the `!Send`
+/// engine through this cheap, cloneable handle, by request over a channel or
+/// through the registries it shares by handle.
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
@@ -1072,15 +1076,15 @@ pub struct EngineHandle {
     /// waits (decided, after review: they belong to the dux process, not to
     /// one serve).
     admission: Arc<crate::auth::admission::Admission>,
+    /// The same slot as [`ActorLoopEnds::tailscale_mode_control`], so the serve
+    /// path can hand the actor its live Tailscale-mode handle after the actor is
+    /// already running (which it always is on `dux server`).
+    tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
     /// Test-only tally of the worktrees [`Self::refresh_changed_files`] was asked
     /// to recompute, newest last. That call is fire-and-forget into the actor
     /// channel, so a route test has no other way to prove the request was made,
     /// and "asked the engine to refresh" is exactly half of what a refresh-now
     /// route must get right.
-    /// The same slot as [`ActorLoopEnds::tailscale_mode_control`], so the serve
-    /// path can hand the actor its live Tailscale-mode handle after the actor is
-    /// already running (which it always is on `dux server`).
-    tailscale_mode_control: Arc<std::sync::OnceLock<crate::serve_legs::TailscaleModeControl>>,
     #[cfg(test)]
     refresh_requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -1092,6 +1096,14 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<EngineHandle>();
 };
+
+impl std::fmt::Debug for EngineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineHandle")
+            .field("instance_id", &self.instance_id)
+            .finish_non_exhaustive()
+    }
+}
 
 impl EngineHandle {
     /// Hand the actor this serve's live Tailscale-mode handle. Called once per
@@ -1113,6 +1125,7 @@ impl EngineHandle {
         Arc::clone(&self.shutdown_flag)
     }
 
+    /// Subscribe to every status the engine broadcasts to browsers, from now on.
     pub fn subscribe_status(&self) -> broadcast::Receiver<WireStatus> {
         self.status_tx.subscribe()
     }
@@ -1201,15 +1214,15 @@ impl EngineHandle {
         }
     }
 
-    /// The warning and the error raised while no browser was connected, taken
-    /// out of the controller in the same call. Asked once per joining
-    /// `/ws/events` connection; see [`EngineRequest::TakeLateStatusFinals`].
     /// The counter the events socket keeps up to date; see the field.
     pub(crate) fn events_watchers(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.events_watchers)
     }
 
-    pub async fn take_late_status_finals(&self) -> Vec<KeyedWireStatus> {
+    /// The warning and the error raised while no browser was connected, taken
+    /// out of the controller in the same call. Asked once per joining
+    /// `/ws/events` connection; see [`EngineRequest::TakeLateStatusFinals`].
+    pub(crate) async fn take_late_status_finals(&self) -> Vec<KeyedWireStatus> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -1237,12 +1250,15 @@ impl EngineHandle {
         rx.await.unwrap_or(0)
     }
 
-    pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
+    pub(crate) async fn apply_wire(
+        &self,
+        command: WireCommand,
+    ) -> Result<WireCommandOutcome, String> {
         self.apply_wire_scoped(command, StatusScope::All).await
     }
 
     /// Reload `config.toml` after dux wrote it itself, without announcing it.
-    pub async fn reload_after_own_config_write(&self) -> Result<WireCommandOutcome, String> {
+    pub(crate) async fn reload_after_own_config_write(&self) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::ReloadAfterOwnConfigWrite(tx))
@@ -1256,7 +1272,7 @@ impl EngineHandle {
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
     /// operation of `kind`: answers the outcome and the id of the record a
     /// client polls with [`Self::operations`].
-    pub async fn apply_wire_operation(
+    pub(crate) async fn apply_wire_operation(
         &self,
         command: WireCommand,
         origin: StatusScope,
@@ -1292,7 +1308,7 @@ impl EngineHandle {
 
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), with the same answer,
     /// for a change a route records as an operation the client did not follow.
-    pub async fn apply_wire_recorded(
+    pub(crate) async fn apply_wire_recorded(
         &self,
         command: WireCommand,
         origin: StatusScope,
@@ -1322,7 +1338,7 @@ impl EngineHandle {
     /// A change that would end terminals somebody may be attached to, recorded
     /// as an operation of `kind` (followed when `answered`). Refused with who is
     /// attached unless `force_connected`; the record's view rides `outcome.operation`.
-    pub async fn apply_wire_guarded(
+    pub(crate) async fn apply_wire_guarded(
         &self,
         command: WireCommand,
         origin: StatusScope,
@@ -1356,7 +1372,7 @@ impl EngineHandle {
     /// originating connection's [`StatusScope`], so every status it mints (the
     /// synchronous outcome, deferred busies and finals, worker busies) reaches
     /// only that connection.
-    pub async fn apply_wire_scoped(
+    pub(crate) async fn apply_wire_scoped(
         &self,
         command: WireCommand,
         origin: StatusScope,
@@ -1409,7 +1425,10 @@ impl EngineHandle {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub async fn subscribe_pty(&self, session_id: String) -> Result<PtySubscription, String> {
+    pub(crate) async fn subscribe_pty(
+        &self,
+        session_id: String,
+    ) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::SubscribePty(session_id, tx))
@@ -1418,7 +1437,7 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
-    pub fn write_pty(&self, session_id: String, bytes: Vec<u8>) {
+    pub(crate) fn write_pty(&self, session_id: String, bytes: Vec<u8>) {
         // `try_send`: keystrokes are fire-and-forget from a sync caller. A full
         // channel means the producer is flooding far past the engine's drain
         // rate; shedding the write then is the intended overload behaviour (the
@@ -1451,14 +1470,17 @@ impl EngineHandle {
         rx.await.ok().flatten()
     }
 
-    pub fn note_viewed(&self, pty_id: String) {
+    pub(crate) fn note_viewed(&self, pty_id: String) {
         // `try_send`: a viewed ping is a periodic best-effort hint. Dropping one
         // under overload is harmless: the next ping (every ~2s while the tab is
         // foregrounded) re-stamps the engagement window.
         let _ = self.req_tx.try_send(EngineRequest::NoteViewed(pty_id));
     }
 
-    pub async fn subscribe_terminal(&self, terminal_id: String) -> Result<PtySubscription, String> {
+    pub(crate) async fn subscribe_terminal(
+        &self,
+        terminal_id: String,
+    ) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::SubscribeTerminal(terminal_id, tx))
@@ -1467,7 +1489,7 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
-    pub async fn create_terminal(
+    pub(crate) async fn create_terminal(
         &self,
         session_id: String,
         ticket: Option<OperationTicket>,
@@ -1483,7 +1505,7 @@ impl EngineHandle {
     /// Create a project terminal (a plain shell at the project's repo root with
     /// no agent attached), replying `(terminal_id, label)`. Mirrors
     /// `create_terminal`.
-    pub async fn create_project_terminal(
+    pub(crate) async fn create_project_terminal(
         &self,
         project_id: String,
         ticket: Option<OperationTicket>,
@@ -1499,7 +1521,7 @@ impl EngineHandle {
     /// Create a standalone terminal (a plain shell in the user's home directory
     /// owned by nothing), replying `(terminal_id, label)`. Takes no owner id,
     /// which is the whole point of the kind.
-    pub async fn create_standalone_terminal(
+    pub(crate) async fn create_standalone_terminal(
         &self,
         ticket: Option<OperationTicket>,
     ) -> Result<(String, String), String> {
@@ -1513,7 +1535,7 @@ impl EngineHandle {
 
     /// Create an extra tab for `session_id` (provider `None` → project default),
     /// replying `(tab_id, provider)`. Direct-return, mirroring `create_terminal`.
-    pub async fn create_agent_tab(
+    pub(crate) async fn create_agent_tab(
         &self,
         session_id: String,
         provider: Option<String>,
@@ -1532,7 +1554,7 @@ impl EngineHandle {
     /// Start dormant tab `tab_id` explicitly (the "Start session" press). See
     /// [`EngineRequest::StartAgentTab`] for why this exists alongside the
     /// subscribe-launch path.
-    pub async fn start_agent_tab(
+    pub(crate) async fn start_agent_tab(
         &self,
         tab_id: String,
         ticket: Option<OperationTicket>,
@@ -1743,7 +1765,7 @@ impl EngineHandle {
             .await;
     }
 
-    pub async fn session_git_access(
+    pub(crate) async fn session_git_access(
         &self,
         session_id: String,
     ) -> Option<dux_core::engine::SessionGitAccess> {
@@ -1804,7 +1826,7 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
-    pub async fn session_worktree(&self, session_id: String) -> Option<String> {
+    pub(crate) async fn session_worktree(&self, session_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -1921,7 +1943,7 @@ impl EngineHandle {
     /// `202` body; the outcome rides the status toast stream. A synchronous
     /// refusal (gh unavailable, empty reference, unknown session) is `Err` with
     /// the engine's message.
-    pub async fn attach_pull_request(
+    pub(crate) async fn attach_pull_request(
         &self,
         session_id: String,
         raw: String,
@@ -1963,7 +1985,7 @@ impl EngineHandle {
     /// on its event bus. The document those events describe is pushed separately
     /// (see [`EngineHandle::workspace_docs`]); a client that cannot read the push
     /// refetches `/api/v1/workspace` on the event instead.
-    pub fn subscribe_spine_changes(&self) -> broadcast::Receiver<SpineChange> {
+    pub(crate) fn subscribe_spine_changes(&self) -> broadcast::Receiver<SpineChange> {
         self.spine_change_tx.subscribe()
     }
 
@@ -1982,6 +2004,7 @@ impl EngineHandle {
         &self.worktree_ops
     }
 
+    /// The `[server]` limits a reload changes while dux serves. Shared, not copied.
     pub fn live_limits(&self) -> Arc<LiveServerLimits> {
         Arc::clone(&self.live_limits)
     }
@@ -2109,7 +2132,7 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    pub async fn project_worktree_inputs(
+    pub(crate) async fn project_worktree_inputs(
         &self,
         project_id: String,
     ) -> Option<ProjectWorktreeInputs> {
@@ -2129,7 +2152,9 @@ impl EngineHandle {
     /// pull request lookup runs and the gh-availability flag the pull-request
     /// reference resolver needs. See
     /// [`EngineRequest::PullRequestResolutionInputs`].
-    pub async fn pull_request_resolution_inputs(&self) -> Option<PullRequestResolutionInputs> {
+    pub(crate) async fn pull_request_resolution_inputs(
+        &self,
+    ) -> Option<PullRequestResolutionInputs> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2186,7 +2211,7 @@ impl EngineHandle {
     /// render of the running config if the file is missing). `Err` on a read
     /// failure or a dead engine thread, so the editor never opens on blank
     /// content the user could save over their real config.
-    pub async fn read_raw_config(&self) -> Result<RawConfig, String> {
+    pub(crate) async fn read_raw_config(&self) -> Result<RawConfig, String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2205,7 +2230,7 @@ impl EngineHandle {
     /// handed out. [`RawWriteError::Changed`] when the file moved since that
     /// read; [`RawWriteError::Refused`] for no token, invalid TOML, a refused
     /// change, an IO failure, or a dead engine thread.
-    pub async fn write_raw_config(
+    pub(crate) async fn write_raw_config(
         &self,
         content: String,
         token: Option<String>,
@@ -2231,7 +2256,7 @@ impl EngineHandle {
     /// Read the inputs `dux_core::first_load::plan` needs. `None` when the engine
     /// thread is gone, in which case the caller shows no screen at all rather
     /// than guessing (and, critically, stamps nothing).
-    pub async fn first_load_inputs(&self) -> Option<FirstLoadInputs> {
+    pub(crate) async fn first_load_inputs(&self) -> Option<FirstLoadInputs> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2246,7 +2271,7 @@ impl EngineHandle {
 
     /// Record `version` as seen. This is the write that makes a dismissal shared
     /// between the web UI and the TUI: one SQLite row, read by both.
-    pub async fn mark_version_seen(&self, version: String) -> Result<(), String> {
+    pub(crate) async fn mark_version_seen(&self, version: String) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -2264,26 +2289,17 @@ impl EngineHandle {
 /// Everything the first-load gate needs, read off the engine thread in one
 /// round-trip. See [`EngineRequest::FirstLoadInputs`].
 #[derive(Clone, Debug)]
-pub struct FirstLoadInputs {
+pub(crate) struct FirstLoadInputs {
     /// The version recorded in SQLite; `None` on a first ever launch.
-    pub last_seen: Option<String>,
+    pub(crate) last_seen: Option<String>,
     /// This build's display version (`"development"` for a non-release build).
-    pub running: String,
-    pub disable_welcome: bool,
-    pub disable_release_notes: bool,
+    pub(crate) running: String,
+    pub(crate) disable_welcome: bool,
+    pub(crate) disable_release_notes: bool,
     /// The dux state directory, where the release-notes cache file lives.
-    pub state_root: std::path::PathBuf,
+    pub(crate) state_root: std::path::PathBuf,
 }
 
-/// Spawn the engine thread. Returns a handle and the thread's join handle.
-///
-/// This is the dedicated-thread server path (`dux server`): the engine lives on
-/// its own std thread for its whole life. The channel setup, worker spawns, and
-/// loop body are shared with the in-process flip ([`crate::serve_with_engine`])
-/// via [`build_actor_channels`], [`spawn_global_workers`], and
-/// [`run_engine_loop`]. This path simply runs the loop on a spawned thread and
-/// drops the returned engine. The control closure always returns `Continue`, so
-/// the loop's only exit is the inline `Shutdown` request, exactly as before.
 /// Relaunch agents with auto-reopen intent, once, at server startup. The
 /// headless counterpart of the TUI's `auto_reopen_eligible_sessions`: the
 /// ELIGIBILITY rule is core-owned (`Engine::auto_reopen_candidates`, the same
@@ -2341,6 +2357,15 @@ pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
     launched
 }
 
+/// Spawn the engine thread. Returns a handle and the thread's join handle.
+///
+/// This is the dedicated-thread server path (`dux server`): the engine lives on
+/// its own std thread for its whole life. The channel setup, worker spawns, and
+/// loop body are shared with the in-process flip ([`crate::serve_with_engine`])
+/// via [`build_actor_channels`], [`spawn_global_workers`], and
+/// [`run_engine_loop`]. This path simply runs the loop on a spawned thread and
+/// drops the returned engine. The control closure always returns `Continue`, so
+/// the loop's only exit is the inline `Shutdown` request, exactly as before.
 pub fn spawn_engine_thread(engine: Engine) -> (EngineHandle, JoinHandle<()>) {
     spawn_engine_thread_with_console(
         engine,
@@ -4005,15 +4030,15 @@ const FIRST_WORKSPACE_REV: u64 = 1;
 /// rather than splicing it per consumer is what makes a fetched body and a
 /// pushed frame orderable against each other: they are the same bytes, carrying
 /// the same number, however the client came by them.
-pub struct WorkspaceDoc {
+pub(crate) struct WorkspaceDoc {
     /// Monotonic within one run of the server, starting at 1. It says nothing
     /// across restarts, which is exactly why the client resets what it has
     /// applied whenever its events socket reopens.
-    pub rev: u64,
+    pub(crate) rev: u64,
     /// The serialized document, `rev` field included. `Arc<str>` because every
     /// connected client is handed the same bytes on every change; re-serializing
     /// per connection is the cost this whole change exists to remove.
-    pub json: Arc<str>,
+    pub(crate) json: Arc<str>,
 }
 
 /// Serialize one workspace document with `rev` as a top-level field alongside
@@ -4431,11 +4456,11 @@ fn first_load_inputs(engine: &Engine) -> FirstLoadInputs {
 /// The raw `config.toml` as the editor opens it, with the proof of what was
 /// read that its save must carry back.
 #[derive(Debug, Clone)]
-pub struct RawConfig {
-    pub content: String,
+pub(crate) struct RawConfig {
+    pub(crate) content: String,
     /// [`dux_core::config_write::read_token`] of the file as read (or of "no
     /// file"). The save is refused unless the file still matches it.
-    pub token: String,
+    pub(crate) token: String,
 }
 
 /// Why a raw config save did not land.
@@ -6081,8 +6106,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
@@ -6182,7 +6207,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: dux_core::model::ProjectBranchStatus::Leading,
             path_missing: false,
@@ -6220,8 +6245,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
@@ -6334,8 +6359,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
         let (tx, rx) = oneshot::channel();
         handle_subscribe(
@@ -6491,8 +6516,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
 
         let _ =
@@ -6530,7 +6555,7 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
             operations.clone(),
         );
         let policy = dux_core::operations::OperationPolicy {
@@ -6591,8 +6616,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
 
         let mut warning = WireStatus::new("warning", "git is failing");
@@ -6622,8 +6647,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
 
         let _ = status.send(WireStatus::keyed("launch:a", "busy", "Launching...").sticky());
@@ -6860,8 +6885,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -6880,8 +6905,8 @@ mod tests {
             snapshot_tx: snap_tx,
             watchers: Arc::new(AtomicUsize::new(0)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         }
@@ -6924,7 +6949,7 @@ mod tests {
             snap_tx,
             Arc::new(AtomicUsize::new(1)),
             live,
-            Default::default(),
+            dux_core::operations::Operations::default(),
         );
         let busy = dux_core::status_text!["Pulling ", q("main"), "\u{2026}"];
         let _ = e.send(WireStatus::keyed("pull", "busy", busy.clone()));
@@ -7070,8 +7095,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -7132,8 +7157,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -7229,8 +7254,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -7317,8 +7342,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals().with_live_keys(live.clone()),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -7362,8 +7387,8 @@ mod tests {
             // hold-for-the-next-arrival rule, which needs an empty room.
             watchers: Arc::new(AtomicUsize::new(1)),
             controller: KeyedStatusController::emitting_finals(),
-            operations: Default::default(),
-            attachments: Default::default(),
+            operations: dux_core::operations::Operations::default(),
+            attachments: dux_core::attachments::Attachments::default(),
             for_terminal: None,
             generations: std::collections::HashMap::new(),
         };
@@ -8942,8 +8967,8 @@ mod tests {
             clear_tx,
             snapshot_tx,
             Arc::new(AtomicUsize::new(1)),
-            Default::default(),
-            Default::default(),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
         );
         let (config_reload_tx, _config_rx) = broadcast::channel(8);
         let mut disk_ahead = false;
