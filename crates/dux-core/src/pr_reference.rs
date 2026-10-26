@@ -102,8 +102,11 @@ impl TypedReference {
 /// A pull request in a repository dux may clone, as requests carry it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullRequestCloneTarget {
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
 }
 
@@ -111,13 +114,18 @@ pub struct PullRequestCloneTarget {
 /// clone from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequestCloneOffer {
+    /// The address dux would clone from.
     pub address: String,
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
 }
 
 impl PullRequestCloneOffer {
+    /// The pull request this offer is for.
     pub fn target(&self) -> PullRequestCloneTarget {
         PullRequestCloneTarget {
             host: self.host.clone(),
@@ -176,12 +184,19 @@ pub fn pull_request_clone_offer(
 /// and the submit are built from. Serializes as the resolve answer's `clone`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PullRequestCloneFacts {
+    /// The address dux would clone from.
     pub address: String,
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's state as `gh` reported it.
     pub state: String,
+    /// The pull request's head branch.
     pub head_branch: String,
     /// The pull request's head commit, when `gh` reported it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -192,6 +207,7 @@ pub struct PullRequestCloneFacts {
 }
 
 impl PullRequestCloneFacts {
+    /// The pull request these facts are about.
     pub fn target(&self) -> PullRequestCloneTarget {
         PullRequestCloneTarget {
             host: self.host.clone(),
@@ -894,7 +910,9 @@ impl Uninspectable {
 /// One project dux could not inspect, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UninspectedProject {
+    /// The project's display name.
     pub name: String,
+    /// Why it could not be inspected.
     pub reason: Uninspectable,
 }
 
@@ -905,7 +923,9 @@ pub struct UninspectedProject {
 /// inspected licenses a surface to say there is no checkout.
 #[derive(Clone, Debug, Default)]
 pub struct ReferenceResolution {
+    /// The projects that are checkouts of the repository.
     pub matches: Vec<crate::model::Project>,
+    /// The projects dux could not ask about.
     pub uninspected: Vec<UninspectedProject>,
 }
 

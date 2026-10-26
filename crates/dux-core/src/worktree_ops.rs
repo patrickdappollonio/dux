@@ -36,17 +36,29 @@ use crate::engine::{InFlightKey, RemovedBranches};
 /// removal shows, so the user is told what dux is waiting for.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub enum WorktreeOpKind {
+    /// A pull.
     Pull,
+    /// A commit.
     Commit,
+    /// A push.
     Push,
+    /// A branch rename.
     BranchRename,
+    /// The working copy being recreated.
     RecreateWorkingCopy,
+    /// An agent being created in it.
     CreateAgent,
+    /// Its startup command.
     StartupCommand,
+    /// A save from the editor.
     EditorWrite,
+    /// A file upload.
     Upload,
+    /// A change to its files from the changes pane.
     GitChange,
+    /// A project being added there.
     AddProject,
+    /// A repository being cloned there.
     CloneRepository,
 }
 
@@ -99,6 +111,7 @@ pub enum HoldOwner {
 /// delete or move of it is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HoldRefused {
+    /// The folder the refused operation wanted.
     pub path: PathBuf,
     /// `None` for a worktree removal; for a destructive file operation, what
     /// it is ("an editor delete or move").
@@ -515,6 +528,7 @@ fn under_with_case(inner: &Path, outer: &Path, case: CaseRule) -> bool {
 }
 
 impl WorktreeOps {
+    /// An empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -892,6 +906,7 @@ pub enum RemovalClaim {
 }
 
 impl RemovalClaim {
+    /// The path being removed.
     pub fn path(&self) -> &Path {
         match self {
             Self::Lead(lease) => &lease.key,
@@ -922,6 +937,7 @@ pub struct RemovalLease {
 }
 
 impl RemovalLease {
+    /// The path this lease may remove.
     pub fn path(&self) -> &Path {
         &self.key
     }
@@ -1037,6 +1053,7 @@ pub struct RemovalJoin {
 }
 
 impl RemovalJoin {
+    /// The path the joined removal is removing.
     pub fn path(&self) -> &Path {
         &self.key
     }

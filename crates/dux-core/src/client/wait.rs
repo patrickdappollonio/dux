@@ -25,17 +25,24 @@ pub(crate) const READ_WAIT: Duration = Duration::from_secs(25);
 /// How long to pause before reading again after a read got no reply.
 const RETRY_PAUSE: Duration = Duration::from_millis(250);
 
+/// Where an operation record stands, as the API spells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordState {
+    /// The work is still running.
     Running,
+    /// Everything the change set out to do was done.
     Succeeded,
+    /// Nothing the change set out to do was done.
     Failed,
+    /// Some of it was done and some was not; the parts say which.
     Partial,
+    /// Still running past the point where its outcome reads as unknown.
     Unknown,
 }
 
 impl RecordState {
+    /// Whether the record has an outcome; `Unknown` has none yet.
     pub fn is_final(self) -> bool {
         !matches!(self, RecordState::Running | RecordState::Unknown)
     }
@@ -54,9 +61,13 @@ impl RecordState {
 /// One piece of a change and what became of it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct RecordPart {
+    /// Which piece of the change: `worktree` or `branch`.
     pub part: String,
+    /// The worktree's path or the branch's name.
     pub subject: String,
+    /// What became of it.
     pub outcome: String,
+    /// Why, when it was refused or failed.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -64,15 +75,22 @@ pub struct RecordPart {
 /// An operation record as the API answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct OperationRecord {
+    /// The record's id.
     pub id: String,
+    /// What kind of change it follows, spelled `noun.verb`.
     pub kind: String,
+    /// Where it stands.
     pub state: RecordState,
+    /// The final's sentence; empty while running.
     #[serde(default)]
     pub message: String,
+    /// The ids the change created.
     #[serde(default)]
     pub created: Vec<String>,
+    /// The ids the change removed.
     #[serde(default)]
     pub removed: Vec<String>,
+    /// What became of each piece of the change.
     #[serde(default)]
     pub parts: Vec<RecordPart>,
 }
@@ -80,7 +98,9 @@ pub struct OperationRecord {
 /// A change the dux refused, with the operation it named as in the way, when
 /// the refusal named one.
 pub struct Refused {
+    /// The refusal.
     pub error: CliError,
+    /// The id of the operation it named as in the way, when it named one.
     pub operation: Option<String>,
 }
 
