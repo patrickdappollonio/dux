@@ -4980,29 +4980,8 @@ impl Engine {
     ) -> BranchRenamePlan {
         let rename_branch = branch == BranchRename::AlsoTheBranch;
         let name = new_name.trim().to_string();
-        let branch_named = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .is_none_or(super::model::AgentSession::supports_branch_git);
-        if name.is_empty() {
-            // An empty name resets the label to the branch (or, for a
-            // standalone agent, the folder) name. A branch cannot be renamed
-            // to nothing, so asking for both at once is refused rather than
-            // quietly doing only the reset.
-            if rename_branch && branch_named {
-                return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
-            }
-        } else if !crate::git::is_valid_agent_name(&name) {
-            // A STANDALONE agent has no branch, but its name follows the same
-            // rules as every other agent's, as it did when it was created.
-            return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
-        }
-        // Block overlapping renames: a second concurrent `git branch -m` on the
-        // same worktree would race the first (and could corrupt the in-flight
-        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
-        if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
-            return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
+        if let Some(rejection) = self.branch_rename_rejection(session_id, &name, branch) {
+            return BranchRenamePlan::Rejected(rejection);
         }
         // A worktree being removed (or deleted or moved) takes no rename:
         // nothing new may start in a folder that is about to go. A branch
@@ -5129,6 +5108,43 @@ impl Engine {
             new_branch: name,
             previous_title,
         })
+    }
+
+    /// Why a rename may not start before anything is touched: the name is
+    /// empty while the branch is to be renamed too, the name is not a valid
+    /// agent name, or a rename of this agent is already running. `name` is
+    /// already trimmed.
+    fn branch_rename_rejection(
+        &self,
+        session_id: &str,
+        name: &str,
+        branch: BranchRename,
+    ) -> Option<BranchRenameRejection> {
+        let branch_named = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .is_none_or(crate::model::AgentSession::supports_branch_git);
+        if name.is_empty() {
+            // An empty name resets the label to the branch (or, for a
+            // standalone agent, the folder) name. A branch cannot be renamed
+            // to nothing, so asking for both at once is refused rather than
+            // quietly doing only the reset.
+            if branch == BranchRename::AlsoTheBranch && branch_named {
+                return Some(BranchRenameRejection::EmptyName);
+            }
+        } else if !crate::git::is_valid_agent_name(name) {
+            // A STANDALONE agent has no branch, but its name follows the same
+            // rules as every other agent's, as it did when it was created.
+            return Some(BranchRenameRejection::MalformedName);
+        }
+        // Block overlapping renames: a second concurrent `git branch -m` on the
+        // same worktree would race the first (and could corrupt the in-flight
+        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
+        if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
+            return Some(BranchRenameRejection::AlreadyInFlight);
+        }
+        None
     }
 
     /// Set (or, with `None`, clear) a session's custom title and persist it.

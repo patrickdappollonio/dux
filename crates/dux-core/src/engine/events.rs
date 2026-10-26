@@ -847,38 +847,8 @@ pub(crate) fn perform_deferred_removal(
                 },
             )
         };
-        // The gate every delete applies: unasked, only branches dux
-        // created are dux's to delete, and the delete dialog's answer
-        // overrides that in either direction.
-        let delete_branches = managed
-            .branch_provenance
-            .resolve_branch_deletion(delete_branch);
         remove_after_last_look(look, || {
-            // A rename that landed while this removal waited moved the
-            // branch, so it is deleted by the name it has NOW.
-            let branch_name = leading.renamed(&managed.branch_name);
-            let initial_branch = leading.renamed(&managed.initial_branch);
-            if delete_branches {
-                crate::git::remove_worktree(
-                    std::path::Path::new(project_path),
-                    std::path::Path::new(&managed.worktree_path),
-                    &branch_name,
-                    // The BIRTH branch too; see `git::remove_worktree`.
-                    Some(initial_branch.as_str()),
-                )
-                .map(RemovedBranches::Deleted)
-            } else {
-                crate::git::remove_worktree_keep_branch(
-                    std::path::Path::new(project_path),
-                    std::path::Path::new(&managed.worktree_path),
-                )
-                .map(|()| {
-                    RemovedBranches::Kept(branch_kept_reason(
-                        managed.branch_provenance,
-                        delete_branch,
-                    ))
-                })
-            }
+            remove_by_current_names(project_path, managed, leading, delete_branch)
         })
     }))
     .unwrap_or_else(|payload| {
@@ -892,6 +862,44 @@ pub(crate) fn perform_deferred_removal(
         lease.finish(result.clone());
     }
     result
+}
+
+/// Let git remove the worktree, and the branches dux may delete. A rename
+/// that landed while the removal waited moved the branch, so each branch is
+/// deleted by the name it has NOW. `delete_branch` is the dialog's
+/// answer, which says why a kept branch was kept.
+fn remove_by_current_names(
+    project_path: &str,
+    managed: &crate::model::ManagedWorkspace,
+    leading: &crate::worktree_ops::RemovalLease,
+    delete_branch: Option<bool>,
+) -> anyhow::Result<RemovedBranches> {
+    // The gate every delete applies: unasked, only branches dux
+    // created are dux's to delete, and the delete dialog's answer
+    // overrides that in either direction.
+    let delete_branches = managed
+        .branch_provenance
+        .resolve_branch_deletion(delete_branch);
+    let branch_name = leading.renamed(&managed.branch_name);
+    let initial_branch = leading.renamed(&managed.initial_branch);
+    if delete_branches {
+        crate::git::remove_worktree(
+            std::path::Path::new(project_path),
+            std::path::Path::new(&managed.worktree_path),
+            &branch_name,
+            // The BIRTH branch too; see `git::remove_worktree`.
+            Some(initial_branch.as_str()),
+        )
+        .map(RemovedBranches::Deleted)
+    } else {
+        crate::git::remove_worktree_keep_branch(
+            std::path::Path::new(project_path),
+            std::path::Path::new(&managed.worktree_path),
+        )
+        .map(|()| {
+            RemovedBranches::Kept(branch_kept_reason(managed.branch_provenance, delete_branch))
+        })
+    }
 }
 
 /// The final when processes a standalone agent started are still running in
@@ -2096,7 +2104,22 @@ impl Engine {
             };
         }
 
-        let view = match &action {
+        let view = self.apply_persisted_project_action(&action);
+
+        ProjectPersistenceOutcome {
+            action,
+            view,
+            status_op_id,
+        }
+    }
+
+    /// Mirror a saved project change in memory and answer the view that reports
+    /// it.
+    fn apply_persisted_project_action(
+        &mut self,
+        action: &ProjectPersistenceAction,
+    ) -> ProjectPersistenceView {
+        match action {
             ProjectPersistenceAction::Add {
                 project,
                 status_message,
@@ -2187,12 +2210,6 @@ impl Engine {
                     env_count,
                 }
             }
-        };
-
-        ProjectPersistenceOutcome {
-            action,
-            view,
-            status_op_id,
         }
     }
 
