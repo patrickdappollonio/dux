@@ -51,6 +51,17 @@ pub(crate) fn container_logs(name: &str) -> LogBuffer {
     buffer
 }
 
+/// Print a progress line on stderr, through the test harness's capture, so it
+/// is filed under the journey that printed it.
+#[expect(
+    clippy::print_stderr,
+    reason = "only eprintln! reaches the test harness's output capture, which files a progress \
+              line under the journey that printed it instead of interleaving it with the others"
+)]
+pub(crate) fn say(text: &str) {
+    eprintln!("{text}");
+}
+
 /// Print every recorded container's output, through the test harness's capture so a failing
 /// journey shows it under its own name.
 #[expect(

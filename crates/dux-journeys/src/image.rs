@@ -21,7 +21,6 @@
 //! `cargo build --profile journeys --bin dux` (or point `DUX_JOURNEY_BIN` at one).
 
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -331,7 +330,7 @@ fn build_lock() -> Option<std::fs::File> {
         Ok(file) => match file.lock() {
             Ok(()) => Some(file),
             Err(err) => {
-                say(&format!(
+                crate::util::say(&format!(
                     "dux-journeys: cannot lock {} ({err}); building without the lock",
                     path.display()
                 ));
@@ -339,7 +338,7 @@ fn build_lock() -> Option<std::fs::File> {
             }
         },
         Err(err) => {
-            say(&format!(
+            crate::util::say(&format!(
                 "dux-journeys: cannot open the image build lock {} ({err}); is the directory \
                  owned by another user? Building without the lock",
                 path.display()
@@ -347,13 +346,6 @@ fn build_lock() -> Option<std::fs::File> {
             None
         }
     }
-}
-
-/// Write `text` as a line on stderr at once. The setup runs on a blocking thread, outside the test
-/// harness's output capture, so this is where its progress has always gone; a stderr that cannot
-/// take a line has nowhere to report it.
-pub(crate) fn say(text: &str) {
-    let _ = writeln!(std::io::stderr().lock(), "{text}");
 }
 
 /// Build the journey image unless it exists.
@@ -366,7 +358,7 @@ fn ensure_built(tag: &str) {
     if image_present(&full) {
         return;
     }
-    say(&format!(
+    crate::util::say(&format!(
         "dux-journeys: building image {full} from tools/preview-env (once per change)"
     ));
     let base = format!("BASE_IMAGE={}", pinned("JOURNEY_BASE_IMAGE"));

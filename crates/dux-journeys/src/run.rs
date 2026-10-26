@@ -174,7 +174,7 @@ fn install_signal_cleanup(run: String) {
     let mut signals = match signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]) {
         Ok(signals) => signals,
         Err(err) => {
-            crate::image::say(&format!(
+            crate::util::say(&format!(
                 "dux-journeys: cannot watch for Ctrl-C ({err}); the next run cleans up instead"
             ));
             return;
@@ -182,7 +182,7 @@ fn install_signal_cleanup(run: String) {
     };
     std::thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
-            crate::image::say(
+            crate::util::say(
                 "dux-journeys: interrupted; removing this run's containers and networks",
             );
             remove_run(&run);
