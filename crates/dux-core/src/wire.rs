@@ -55,12 +55,18 @@ use crate::worker::{
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
 pub enum WireCommand {
+    /// Stage one file's changes in an agent's worktree.
     StageFile {
+        /// The agent whose worktree holds the file.
         session_id: String,
+        /// The file's path, relative to the worktree.
         path: String,
     },
+    /// Unstage one file in an agent's worktree, keeping its working-tree changes.
     UnstageFile {
+        /// The agent whose worktree holds the file.
         session_id: String,
+        /// The file's path, relative to the worktree.
         path: String,
     },
     /// Discard a single file's working-tree changes. The wire layer derives the
@@ -69,17 +75,26 @@ pub enum WireCommand {
     /// rejects the command when the file is currently staged, mirroring the
     /// TUI, which only allows discarding unstaged files.
     DiscardFile {
+        /// The agent whose worktree holds the file.
         session_id: String,
+        /// The file's path, relative to the worktree.
         path: String,
     },
+    /// Commit the staged changes in an agent's worktree.
     CommitChanges {
+        /// The agent whose worktree is committed.
         session_id: String,
+        /// The commit message, as typed.
         message: String,
     },
+    /// Push an agent's branch to its remote.
     Push {
+        /// The agent whose branch is pushed.
         session_id: String,
     },
+    /// Pull the remote's changes into an agent's worktree.
     Pull {
+        /// The agent whose worktree is pulled.
         session_id: String,
     },
     /// Pull (refresh) a PROJECT's source checkout from remote, mirroring the
@@ -89,10 +104,14 @@ pub enum WireCommand {
     /// `PullTarget::Project`. The busy/already-running copy and the leading
     /// branch source match the TUI byte-for-byte.
     PullProject {
+        /// The project whose source checkout is pulled.
         project_id: String,
     },
+    /// Turn startup auto-reopen on or off for one agent.
     ToggleAgentAutoReopen {
+        /// The agent the setting belongs to.
         session_id: String,
+        /// Whether dux brings the agent back at startup.
         enabled: bool,
     },
     /// Re-run the agent's project startup command in that agent's worktree,
@@ -102,13 +121,19 @@ pub enum WireCommand {
     /// final status pair flows back through `spawn_status_op`). Rejected when the
     /// session/project is unknown or the project has no startup command.
     RerunStartupCommand {
+        /// The agent whose startup command runs again.
         session_id: String,
     },
+    /// Close a companion, project or standalone terminal and end its shell.
     DeleteTerminal {
+        /// The terminal to close.
         terminal_id: String,
     },
+    /// Delete an agent session, optionally removing its worktree and branch.
     DeleteSession {
+        /// The agent to delete.
         session_id: String,
+        /// Whether the agent's worktree is removed from disk too.
         delete_worktree: bool,
         /// The delete dialog's "also delete the branch" answer. ABSENT means
         /// nobody was asked, which keeps the provenance default and is what a
@@ -117,27 +142,42 @@ pub enum WireCommand {
         #[serde(default)]
         delete_branch: Option<bool>,
     },
+    /// Replace the global `[env]` table with these variables.
     PersistGlobalEnv {
+        /// Every global environment variable, by name.
         env: BTreeMap<String, String>,
         /// The [`global_env_version`] this save was based on: a changed table
         /// refuses it with [`StaleSet::GlobalEnv`]; absent, the save replaces it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
     },
+    /// Set or clear a project's default provider.
     UpdateProjectProvider {
+        /// The project the setting belongs to.
         project_id: String,
+        /// The provider's name, or `None` to fall back to the global default.
         provider: Option<String>,
     },
+    /// Set or clear a project's auto-reopen preference.
     UpdateProjectAutoReopen {
+        /// The project the setting belongs to.
         project_id: String,
+        /// Whether the project's agents come back at startup, or `None` to follow the global
+        /// setting.
         auto_reopen_agents: Option<bool>,
     },
+    /// Set or clear a project's startup command.
     UpdateProjectStartupCommand {
+        /// The project the setting belongs to.
         project_id: String,
+        /// The command run in each new worktree, or `None` to run nothing.
         startup_command: Option<String>,
     },
+    /// Replace a project's environment overlay.
     UpdateProjectEnv {
+        /// The project the setting belongs to.
         project_id: String,
+        /// Every project environment variable, by name.
         env: BTreeMap<String, String>,
     },
     /// Re-read `config.toml` from disk and apply it to the running engine.
@@ -155,6 +195,7 @@ pub enum WireCommand {
     /// choice sticks across restarts; the next `ViewModel` broadcast carries the
     /// new value, and the client reconciles its optimistic override against it.
     SetChangesPaneVisible {
+        /// Whether the Changes pane is shown.
         visible: bool,
     },
     /// Persist this dux instance's identity to `config.toml`: the browser tab
@@ -168,7 +209,9 @@ pub enum WireCommand {
     /// failure, and a non-empty body mutates config-static state, so the web
     /// fires `config.changed`.
     SetInstanceIdentity {
+        /// The browser tab title, or `None` to leave it unchanged.
         title: Option<String>,
+        /// The favicon color name, or `None` to leave it unchanged.
         favicon: Option<String>,
     },
     /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
@@ -189,6 +232,7 @@ pub enum WireCommand {
     /// so every client's sort control agrees. Unknown values are rejected. Low-stakes
     /// preference, lazy write.
     SetAgentSort {
+        /// The sort mode's name.
         sort: String,
     },
     /// Flip `ui.github_integration` and persist it, mirroring the TUI's
@@ -209,12 +253,19 @@ pub enum WireCommand {
     /// a synchronous row + map mutation and mints no busy of its own; the
     /// resolve→attach flow's single keyed op carries the busy and the final.
     AttachPullRequest {
+        /// The agent the pull request is attached to.
         session_id: String,
+        /// The GitHub host the pull request lives on.
         host: String,
+        /// The repository, as `owner/name`.
         owner_repo: String,
+        /// The pull request's number.
         number: u64,
+        /// The pull request's title.
         title: String,
+        /// The pull request's state as `gh` reported it.
         state: String,
+        /// The pull request's web address.
         url: String,
     },
     /// Detach a session's pull request: this agent has no PR, as of now. The
@@ -224,6 +275,7 @@ pub enum WireCommand {
     /// association too, not only to a pin. Reversed by an
     /// `AttachPullRequest` or a `ResumePullRequestAutodetection`.
     ClearPullRequestOverride {
+        /// The agent whose pull request is detached.
         session_id: String,
     },
     /// Undo a detach: switch pull-request autodetection back on for the
@@ -232,6 +284,7 @@ pub enum WireCommand {
     /// (the suppression is dux's own state); without a usable `gh` the check
     /// is a no-op and the session is picked up once the integration re-arms.
     ResumePullRequestAutodetection {
+        /// The agent whose autodetection is switched back on.
         session_id: String,
     },
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
@@ -258,6 +311,7 @@ pub enum WireCommand {
     /// refused rather than degraded, because this arrives from a picker and a
     /// value outside the tri-state is a bug, not a typo in a file.
     SetTailscaleMode {
+        /// The mode's name: `auto`, `yes` or `no`.
         mode: String,
     },
     /// Set explicit values for the Preferences dialog's `[ui]`/`[capabilities]`
@@ -276,6 +330,7 @@ pub enum WireCommand {
     /// Companion terminals are killed through `DeleteTerminal`. Unknown session
     /// is an `Err`; killing an agent that is not running is an idempotent no-op.
     KillSessionPty {
+        /// The agent whose processes are killed.
         session_id: String,
     },
     /// Detach an agent WHOLE: ask every one of its tabs' provider processes to
@@ -297,7 +352,9 @@ pub enum WireCommand {
     /// they asked for. Everything else (the row menu, the palette, a single
     /// row's Stop) leaves it false and gets the polite path.
     DetachAgent {
+        /// The agent to detach.
         session_id: String,
+        /// Whether the processes end at once instead of being asked to shut down.
         #[serde(default)]
         force: bool,
     },
@@ -317,14 +374,18 @@ pub enum WireCommand {
     /// pick its conversation back up are stopped politely and started again.
     /// Absent is false, so a client that predates it keeps the old behaviour.
     RecreateWorkingCopy {
+        /// The agent whose working copy is recreated.
         session_id: String,
+        /// Whether the tabs that cannot follow the new folder are restarted after the checkout.
         #[serde(default)]
         restart_tabs: bool,
     },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
     AddProject {
+        /// The repository's path on the server.
         path: String,
+        /// The project's display name; empty derives it from the path.
         name: String,
     },
     /// Check the repo's default branch out FIRST, then register it as a project,
@@ -339,7 +400,9 @@ pub enum WireCommand {
     /// `NonDefaultBranchCheckoutCompleted` for `drive_add_project_followup` on
     /// the web, or the TUI's own drain, to finish the add.
     AddProjectCheckoutDefault {
+        /// The repository's path on the server.
         path: String,
+        /// The project's display name; empty derives it from the path.
         name: String,
     },
     /// Create an empty initial commit for a fresh (unborn) repo, THEN register
@@ -351,7 +414,9 @@ pub enum WireCommand {
     /// whose `AddProjectAfterInitialCommit` reaction is driven to the actual add
     /// by `drive_add_project_followup` (web) or the TUI's `workers.rs` drain.
     AddProjectCreateInitialCommit {
+        /// The repository's path on the server.
         path: String,
+        /// The project's display name; empty derives it from the path.
         name: String,
     },
     /// Initialize a brand-new git repository in a plain folder, seed a starter
@@ -362,7 +427,9 @@ pub enum WireCommand {
     /// `InFlightKey::InitialCommit`, spawns `run_init_repo_job`, and returns a
     /// busy status resolved by `drive_add_project_followup`.
     AddProjectInitRepo {
+        /// The folder's path on the server.
         path: String,
+        /// The project's display name; empty derives it from the path.
         name: String,
     },
     /// Clone `url` into `path` as a new project, then start an agent named
@@ -371,10 +438,14 @@ pub enum WireCommand {
     /// need no git refuse it at once, and the rest runs on a worker under the
     /// returned busy (see [`crate::clone_project`]).
     CloneProject {
+        /// The address to clone from.
         url: String,
+        /// The server path the clone is written to.
         path: String,
+        /// The new agent's name; absent or blank picks one.
         #[serde(default)]
         agent_name: Option<String>,
+        /// Whether the agent gets a random name.
         #[serde(default)]
         random_name: bool,
         /// Create the agent from this pull request instead of a plain one:
@@ -392,18 +463,22 @@ pub enum WireCommand {
     },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
+        /// The project to remove.
         project_id: String,
     },
     /// Delete a project by id AND remove its agents' worktrees from disk (the
     /// destructive counterpart to `RemoveProject`). Guarded and sequenced by
     /// `Command::DeleteProject`.
     DeleteProject {
+        /// The project to delete.
         project_id: String,
     },
     /// Create a new agent in a project. `name` may be empty to auto-generate a
     /// branch name; a non-empty name becomes the custom branch/agent name.
     CreateAgent {
+        /// The project the agent is created in.
         project_id: String,
+        /// The agent and branch name; empty generates one.
         name: String,
         /// Per-agent override for copying the project checkout's uncommitted
         /// changes into the new worktree. `None` falls back to the config
@@ -449,7 +524,9 @@ pub enum WireCommand {
     /// name becomes the custom branch/agent name. Mirrors the TUI's
     /// `fork_selected_session`, which builds a `CreateAgentRequest::ForkSession`.
     ForkSession {
+        /// The agent to fork.
         session_id: String,
+        /// The new agent and branch name; empty generates one.
         name: String,
     },
     /// Rename an agent, the same act as the terminal UI's rename dialog. `title`
@@ -459,8 +536,11 @@ pub enum WireCommand {
     /// `rename_branch` the git branch is renamed to `title` as well, on a
     /// background worker; it is refused with an empty title. Absent means false.
     RenameSession {
+        /// The agent to rename.
         session_id: String,
+        /// The new display name; empty clears it.
         title: String,
+        /// Whether the git branch is renamed to the title as well.
         #[serde(default)]
         rename_branch: bool,
     },
@@ -470,7 +550,9 @@ pub enum WireCommand {
     /// fresh session with no resume args and first tears down any running
     /// provider (the TUI's `force_reconnect_agent`).
     ReconnectSession {
+        /// The agent whose provider is relaunched.
         session_id: String,
+        /// Whether a fresh conversation starts, tearing down any running provider first.
         force: bool,
     },
     /// Persist a custom display order for a project's agent sessions.
@@ -478,7 +560,9 @@ pub enum WireCommand {
     /// validates this strictly and errors otherwise). Drives the web UI's
     /// drag-and-drop reordering.
     ReorderSessions {
+        /// The project whose agents are reordered.
         project_id: String,
+        /// Every one of the project's agents, in the new order.
         session_ids: Vec<String>,
     },
     /// Persist a GLOBAL custom order for every agent (the flat model). `session_ids`
@@ -486,11 +570,13 @@ pub enum WireCommand {
     /// engine validates strictly). This is the web flat list's drag: agents reorder
     /// as one independent list, so a drop can land anywhere regardless of project.
     ReorderAgents {
+        /// Every agent, in the new order.
         session_ids: Vec<String>,
     },
     /// Persist a custom display order for the workspace's projects.
     /// `project_ids` must list exactly the known projects.
     ReorderProjects {
+        /// Every project, in the new order.
         project_ids: Vec<String>,
     },
     /// Persist a GLOBAL runtime order for every companion terminal (session- and
@@ -499,6 +585,7 @@ pub enum WireCommand {
     /// desired order (the engine validates strictly). Runtime-only: terminals
     /// have no SQLite row, so this order resets to creation order on restart.
     ReorderTerminals {
+        /// Every terminal, in the new order.
         terminal_ids: Vec<String>,
     },
     /// Swap which CLI a session uses, mirroring the TUI palette's
@@ -510,7 +597,9 @@ pub enum WireCommand {
     /// the session's PTY, pins the previously-running one so labels stay truthful
     /// until the user reconnects. Selecting the current provider is a no-op.
     ChangeAgentProvider {
+        /// The agent whose provider changes.
         session_id: String,
+        /// The provider's name.
         provider: String,
     },
     /// Close an extra tab (a non-Main provider tab): tear down its PTY and delete
@@ -518,13 +607,17 @@ pub enum WireCommand {
     /// ephemeral). The session-slot tab is never closed through here: a Main "close" is a
     /// detach via `KillSessionPty`. `tab_id` must belong to `session_id`.
     CloseAgentTab {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab to close.
         tab_id: String,
     },
     /// Stop one tab's provider process and keep the tab dormant; the agent
     /// detaches only with its last running tab. A tab not running is a no-op.
     StopAgentTab {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab to stop.
         tab_id: String,
     },
     /// Retarget one tab's provider (effective on its next launch), mirroring
@@ -532,8 +625,11 @@ pub enum WireCommand {
     /// this delegates to the session-level change; for a
     /// extra tab it updates only that tab. `provider` is validated server-side.
     ChangeAgentTabProvider {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab whose provider changes.
         tab_id: String,
+        /// The provider's name.
         provider: String,
     },
     /// Remember the tab the user last focused on this agent, so switching away
@@ -543,7 +639,9 @@ pub enum WireCommand {
     /// frequency and user-paced: dispatched with no status/toast (`status: None`)
     /// and the TUI/web writers treat it as fire-and-forget.
     SetLastFocusedTab {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab to remember, or `None` to clear the memory.
         tab_id: Option<String>,
     },
     /// Switch a project's SOURCE checkout back to its default branch, mirroring
@@ -558,6 +656,7 @@ pub enum WireCommand {
     /// confirms in the frontend dialog before sending this, because a menu click
     /// is a lighter gesture and the checkout moves HEAD.
     CheckoutProjectDefaultBranch {
+        /// The project whose source checkout switches.
         project_id: String,
     },
     /// Switch a project's SOURCE checkout to `branch` and make it the base new
@@ -573,7 +672,9 @@ pub enum WireCommand {
     /// listed, a valid branch name, and not checked out in another worktree is
     /// checked in the worker, never here.
     ChangeProjectBaseBranch {
+        /// The project whose source checkout switches.
         project_id: String,
+        /// The branch to switch to and branch new worktrees from.
         branch: String,
     },
     /// Adopt an orphaned managed worktree (created by dux, no live session) as a
@@ -588,8 +689,11 @@ pub enum WireCommand {
     /// bounded plumbing reads with no working-tree writes, so it runs inline
     /// rather than through a worker.
     CreateAgentFromWorktree {
+        /// The project the worktree belongs to.
         project_id: String,
+        /// The worktree's canonical path, as the listing returned it.
         worktree_path: String,
+        /// The new agent's display name.
         name: String,
     },
     /// Create a new agent checked out on a GitHub PR's head branch, mirroring
@@ -606,8 +710,11 @@ pub enum WireCommand {
     /// would open a name prompt instead. A lookup failure surfaces on the async
     /// status stream.
     CreateAgentFromPr {
+        /// The project the agent is created in.
         project_id: String,
+        /// The pull request reference as the user typed it.
         pr: String,
+        /// The agent and branch name; empty uses the pull request's head branch.
         name: String,
         /// The user agreed to a review copy of the pull request, in case the
         /// branch cannot be used as it is. Without it such a create is refused
@@ -639,7 +746,9 @@ pub enum WireCommand {
     /// is translated by the shared `dux_core::macros::macro_payload_bytes` before
     /// the write, so parity with the TUI is by construction.
     RunMacro {
+        /// The agent session or terminal the macro is sent to.
         target_id: String,
+        /// The macro's name.
         name: String,
     },
     /// Wholesale-replace the `[macros]` config, mirroring the TUI macro editor's
@@ -650,6 +759,7 @@ pub enum WireCommand {
     /// client: empty names, duplicate names, empty text and unknown surface
     /// strings are all rejected.
     UpdateMacros {
+        /// Every macro, in order.
         entries: Vec<WireMacroEntry>,
         /// The [`macros_version`] this save was based on: a changed list refuses
         /// it with [`StaleSet::Macros`]; absent, the save replaces it.
@@ -659,22 +769,29 @@ pub enum WireCommand {
     /// Add the macro `name`, or replace it in place, keeping every other
     /// macro and the list's order. Validated as a whole-list save is.
     SetMacro {
+        /// The macro's name.
         name: String,
+        /// The text the macro types.
         text: String,
+        /// Where the macro may run: `agent`, `terminal` or `both`.
         surface: String,
     },
     /// Remove the macro `name`; an unknown name is an error.
     RemoveMacro {
+        /// The macro's name.
         name: String,
     },
     /// Set one global environment variable, keeping the rest of `[env]`; the
     /// value never appears in any status.
     SetGlobalEnvVar {
+        /// The variable's name.
         name: String,
+        /// The variable's value.
         value: String,
     },
     /// Remove one global environment variable; an unknown name is an error.
     RemoveGlobalEnvVar {
+        /// The variable's name.
         name: String,
     },
     /// Point the changed-files watch at a session's worktree, mirroring the TUI's
@@ -687,6 +804,7 @@ pub enum WireCommand {
     /// `#[serde(default)]` so the absent form is accepted as well as an explicit
     /// `null`, matching the frontend's clear path.
     WatchChangedFiles {
+        /// The agent whose worktree is watched, or `None` to clear the watch.
         #[serde(default)]
         session_id: Option<String>,
     },
@@ -716,6 +834,7 @@ fn clamp_nonzero<T: PartialOrd + Copy>(value: T, max: T) -> T {
 /// state, so the web fires `config.changed`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SettingsPatch {
+    /// `ui.copy_on_select`: whether selecting text in the web terminal copies it.
     pub copy_on_select: Option<bool>,
     /// `ui.compose_bar`: WHEN the web's touch terminal puts up the compose bar
     /// (the buffered phone typing surface). One of `"auto"`, `"always"` or
@@ -745,8 +864,12 @@ pub struct SettingsPatch {
     /// field write with no side effects (the reopen pass reads it at the NEXT
     /// startup), so it rides the generic settings path.
     pub auto_reopen_agents: Option<bool>,
+    /// `ui.show_changes_pane`: whether the Changes pane is shown.
     pub show_changes_pane: Option<bool>,
+    /// `ui.web_notifications`: whether an agent's notification sequences become browser
+    /// notifications.
     pub web_notifications: Option<bool>,
+    /// `ui.always_show_tab_strip`: whether the agent tab strip shows with a single tab.
     pub always_show_tab_strip: Option<bool>,
     /// `ui.tab_reaches_agent`: whether the TUI's typeable center pane hands Tab
     /// and Shift-Tab to the agent. A plain field write the TUI reads live, so it
@@ -756,11 +879,18 @@ pub struct SettingsPatch {
     /// A plain field write the TUI reads on every frame, so it rides the
     /// generic settings path even though the web draws its own icons.
     pub nerd_font_icons: Option<bool>,
+    /// `ui.status_clear_seconds`: the base window a status stays up for; 0 disables auto-clear.
     pub status_clear_seconds: Option<u16>,
+    /// `ui.attention_grace_seconds`: how long attention indicators stay after dux regains your
+    /// attention; 0 clears them at once.
     pub attention_grace_seconds: Option<u64>,
+    /// `ui.attention_indicator`: whether an agent asking for attention is marked on either surface.
     pub attention_indicator: Option<bool>,
+    /// `ui.attention_on_bell`: whether a plain terminal bell counts as an attention request.
     pub attention_on_bell: Option<bool>,
+    /// `ui.pr_banner_position`: `top` or `bottom`.
     pub pr_banner_position: Option<String>,
+    /// `ui.hyperlinks`: whether OSC 8 hyperlinks in a terminal are clickable.
     pub hyperlinks: Option<bool>,
     /// `defaults.enable_randomized_pet_name_by_default`. It rides the generic
     /// settings path (rather than its dedicated toggle endpoint) because
@@ -951,8 +1081,11 @@ pub fn is_stale_set(message: &str) -> bool {
 /// `MacroSurface` serde casing and the `ViewModel`'s `MacroView::surface`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct WireMacroEntry {
+    /// The macro's name.
     pub name: String,
+    /// The text the macro types.
     pub text: String,
+    /// Where the macro may run.
     pub surface: String,
 }
 
@@ -965,6 +1098,7 @@ pub struct WireMacroEntry {
 pub struct WireStatus {
     /// "info" | "busy" | "warning" | "error"
     pub tone: String,
+    /// The sentence shown to the user.
     pub message: String,
     /// The parts `message` was built from, in the browser's `Prose` shape
     /// (words as strings, names as `{ name, quoted }`), so a toast draws each
@@ -1199,6 +1333,7 @@ impl WireDispatch {
 /// state arrives separately via `view_model()`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WireCommandOutcome {
+    /// The status the command raised at once, if any.
     pub status: Option<WireStatus>,
     /// Whether a tab-close command (`KillSessionPty` for the session-slot tab,
     /// `CloseAgentTab` for an extra tab) DETACHED the agent. Computed in core
@@ -1279,7 +1414,9 @@ impl WireCommandOutcome {
 /// dismiss. The `statuses` are broadcast as usual.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WebFollowupStatuses {
+    /// The statuses to broadcast.
     pub statuses: Vec<WireStatus>,
+    /// The keys of the busy statuses to dismiss.
     pub clear_keys: Vec<String>,
 }
 
