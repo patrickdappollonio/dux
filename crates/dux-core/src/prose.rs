@@ -299,6 +299,17 @@ mod tests {
         Value::Array(out)
     }
 
+    /// The `rename_branch_note` case, whose pushed flag names its own state.
+    fn rename_branch_note(args: &Value) -> Prose {
+        let pushed = if args["pushed"].as_bool().expect("pushed") {
+            crate::engine::BranchPushed::Pushed
+        } else {
+            crate::engine::BranchPushed::NotPushed
+        };
+        let branch = args["branch"].as_str().expect("branch");
+        crate::engine::rename_branch_note_prose(branch, args["open_pr"].as_u64(), pushed)
+    }
+
     /// Build one fixture case's sentence the way the terminal UI does.
     fn build(sentence: &str, args: &Value) -> Prose {
         let s = |key: &str| args[key].as_str().expect(key).to_string();
@@ -355,15 +366,7 @@ mod tests {
                 args["project_name"].as_str(),
                 args["agent_count"].as_u64().expect("agent_count") as usize,
             ),
-            "rename_branch_note" => crate::engine::rename_branch_note_prose(
-                &s("branch"),
-                args["open_pr"].as_u64(),
-                if args["pushed"].as_bool().expect("pushed") {
-                    crate::engine::BranchPushed::Pushed
-                } else {
-                    crate::engine::BranchPushed::NotPushed
-                },
-            ),
+            "rename_branch_note" => rename_branch_note(args),
             "pr_clone_offer" => crate::pr_reference::pr_clone_offer_prose(
                 &s("repository"),
                 s("number").parse().expect("number"),

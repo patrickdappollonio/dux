@@ -66,7 +66,7 @@ pub enum SecretKind {
 
 /// Write-only settings that have no field of their own in `Config`, each by
 /// its path's segments.
-pub const VIRTUAL_KEYS: &[(&[&str], WritePolicy)] = &[(
+pub(crate) const VIRTUAL_KEYS: &[(&[&str], WritePolicy)] = &[(
     &["server", "auth", "password"],
     WritePolicy::Secret(SecretKind::PasswordHash {
         stores_at: &["server", "auth", "password_hash"],
@@ -119,7 +119,7 @@ impl Key {
     }
 
     /// True for a table (`server.auth`) rather than one setting.
-    pub fn is_table(&self) -> bool {
+    pub(crate) fn is_table(&self) -> bool {
         self.shape == Shape::Table
     }
 
@@ -420,7 +420,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Read `raw` (as typed on the command line) as a value for `key`, checked
 /// against the setting's type, range and allowed values. Text settings take
 /// `raw` verbatim, with no quotes needed; lists take a TOML array.
-pub fn parse_value(key: &Key, raw: &str) -> Result<Value, String> {
+pub(crate) fn parse_value(key: &Key, raw: &str) -> Result<Value, String> {
     if let WritePolicy::Secret(_) = key.policy {
         return Err(format!(
             "{} is never given on the command line; dux asks for it instead",
@@ -1913,7 +1913,7 @@ pub fn shown_file_text(
 }
 
 /// What `set` prints in place of a value that is, or holds, a table.
-pub const A_TABLE_NOT_SHOWN: &str = "(a table, not shown)";
+pub(crate) const A_TABLE_NOT_SHOWN: &str = "(a table, not shown)";
 
 /// How [`printed_value`] writes a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

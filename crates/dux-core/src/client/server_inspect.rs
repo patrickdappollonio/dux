@@ -119,7 +119,10 @@ struct LogRead {
 
 /// The last `lines` lines of a running dux's server log, and the sentence it
 /// adds when the answer was cut short.
-pub fn log_tail(client: &Client, lines: usize) -> Result<(Vec<String>, Option<String>), CliError> {
+pub(crate) fn log_tail(
+    client: &Client,
+    lines: usize,
+) -> Result<(Vec<String>, Option<String>), CliError> {
     let read: LogRead = client.get_json(&format!("{LOG_ROUTE}?lines={lines}"))?;
     Ok((read.lines, read.note))
 }
@@ -135,7 +138,7 @@ const LINE_LIMIT: usize = 1024 * 1024;
 /// # Errors
 ///
 /// [`Exit::NotRunning`] when the stream ends on its own: dux is stopping, or this sign-in ended.
-pub fn log_follow(
+pub(crate) fn log_follow(
     client: &Client,
     lines: usize,
     on_line: &mut dyn FnMut(&str) -> ControlFlow<()>,

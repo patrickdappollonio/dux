@@ -19,7 +19,7 @@ pub const ONLY_TAB_CLOSE_REFUSAL: &str = "This is the agent's only tab, so closi
 /// upper-cased. Pills stay lower-case because they are chrome, and the
 /// disambiguating suffix rides along, so "Codex 2" in a confirmation is the pill
 /// the user is looking at. Mirrors the web's `tabProseLabel`.
-pub fn prose_tab_label(strip_label: &str) -> String {
+pub(crate) fn prose_tab_label(strip_label: &str) -> String {
     let mut chars = strip_label.chars();
     match chars.next() {
         Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),

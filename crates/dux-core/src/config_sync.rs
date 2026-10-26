@@ -131,17 +131,17 @@ pub fn validate_project_records(source: &str, projects: &[ProjectConfig]) -> Res
 
 /// Two project records dux cannot tell apart, by their positions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DuplicateProject {
+pub(crate) struct DuplicateProject {
     pub first: usize,
     pub second: usize,
     /// Whether they share an id (else they share a path).
-    pub same_id: bool,
+    pub(crate) same_id: bool,
 }
 
 impl DuplicateProject {
     /// The sentence, with the two projects as `first` and `second` say
     /// them (by position or by line), never by path, name or id.
-    pub fn sentence(&self, first: &str, second: &str) -> String {
+    pub(crate) fn sentence(&self, first: &str, second: &str) -> String {
         if self.same_id {
             format!(
                 "{first} and {second} have the same id. Remove one, or give it another id, then \
@@ -156,7 +156,7 @@ impl DuplicateProject {
 }
 
 /// The first two project records in `projects` that share an id or a path.
-pub fn duplicate_project(projects: &[ProjectConfig]) -> Option<DuplicateProject> {
+pub(crate) fn duplicate_project(projects: &[ProjectConfig]) -> Option<DuplicateProject> {
     for (first, project) in projects.iter().enumerate() {
         for (offset, other) in projects.iter().skip(first + 1).enumerate() {
             let second = first + 1 + offset;

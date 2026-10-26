@@ -58,7 +58,7 @@ pub struct ProjectDeletionOutcome {
     pub failures: Vec<(String, String)>,
     /// What could not be saved, and why, when something could not: the
     /// session database or config.toml.
-    pub persist_failure: Option<(String, String)>,
+    pub(crate) persist_failure: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +152,7 @@ pub fn removal_waiting_message(label: &str, waiting_for: &str) -> StatusText {
 
 /// The failure a removal reports when the operations in its worktree did not
 /// finish within the wait.
-pub fn removal_wait_expired_message(path: &Path, waited: Duration, still: &str) -> String {
+pub(crate) fn removal_wait_expired_message(path: &Path, waited: Duration, still: &str) -> String {
     format!(
         "dux waited {} seconds for {still} in {} to finish and it had not, so the worktree \
          was kept. Remove it from the worktree manager once that is done, or raise \
@@ -211,7 +211,7 @@ impl Engine {
 
     /// How long a removal waits for operations in its worktree (and a project
     /// deletion for an agent being created in it) before it gives up out loud.
-    pub fn removal_wait(&self) -> Duration {
+    pub(crate) fn removal_wait(&self) -> Duration {
         Duration::from_secs(u64::from(self.config.removal_wait_seconds))
     }
 
@@ -219,7 +219,7 @@ impl Engine {
     /// by [`Engine::clear_in_flight`] for that key, so every completion path
     /// that already clears the key releases the path too.
     #[must_use = "a refused hold must be answered, never dropped"]
-    pub fn hold_path_for_in_flight(
+    pub(crate) fn hold_path_for_in_flight(
         &self,
         key: &InFlightKey,
         path: impl AsRef<Path>,
@@ -277,7 +277,7 @@ impl Engine {
     }
 
     /// Whether this project is being deleted.
-    pub fn project_is_being_deleted(&self, project_id: &str) -> bool {
+    pub(crate) fn project_is_being_deleted(&self, project_id: &str) -> bool {
         self.removal_coordination
             .project_deletions
             .contains_key(project_id)
@@ -718,8 +718,8 @@ impl Engine {
         requested: &Path,
         branch: crate::worktree_manager::BranchRemoval,
     ) -> Option<crate::worktree_manager::RemovalAdmission> {
-        let delete_branch = branch == crate::worktree_manager::BranchRemoval::Delete;
         use crate::worktree_manager::{AdmittedRemoval, RemovalAdmission, RemovalOutcome};
+        let delete_branch = branch == crate::worktree_manager::BranchRemoval::Delete;
         let project = self
             .projects
             .iter()

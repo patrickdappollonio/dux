@@ -133,7 +133,7 @@ fn fetch_with_one_retry(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BaseBranchSwitched {
     /// The folder was on the branch before anything ran, so nothing switched.
-    pub folder_was_on_it: bool,
+    pub(crate) folder_was_on_it: bool,
 }
 
 /// Why the folder was not switched. Nothing was saved in any of these.
@@ -193,7 +193,7 @@ pub enum BranchHolder {
 /// An agent's directory and the label its row shows, handed to the switch so a
 /// branch held there can name the agent rather than a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentDirectory {
+pub(crate) struct AgentDirectory {
     pub directory: String,
     pub label: String,
     /// A standalone agent's folder rather than a managed worktree.
@@ -203,7 +203,7 @@ pub struct AgentDirectory {
 /// What the switch needs to say who holds a branch: every agent's directory
 /// and the project's managed worktree area (`<worktrees root>/<project>`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HolderContext {
+pub(crate) struct HolderContext {
     pub agents: Vec<AgentDirectory>,
     pub managed_root: PathBuf,
 }
@@ -217,7 +217,7 @@ impl HolderContext {
     /// exist and spelled on from there. A full canonicalization fails for a
     /// folder that is gone, and would then read a missing managed worktree, or
     /// one reached through a symlinked worktrees root, as somebody else's.
-    pub fn classify(&self, holder: &Path) -> BranchHolder {
+    pub(crate) fn classify(&self, holder: &Path) -> BranchHolder {
         let agents: Vec<&AgentDirectory> = self
             .agents
             .iter()
@@ -282,7 +282,7 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 /// must still be listed (which also refuses a name git rejects as a branch
 /// name) and must not be held by another worktree. No fetch runs here: the
 /// branch was chosen from a listing that already fetched.
-pub fn switch_to_base_branch(
+pub(crate) fn switch_to_base_branch(
     repo: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,

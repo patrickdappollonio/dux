@@ -105,7 +105,7 @@ pub enum InFlightKey {
 impl InFlightKey {
     /// The folder this operation writes a repository into, for the keys that
     /// do: at most one of them may hold a folder at a time.
-    pub fn folder_written(&self) -> Option<&std::path::Path> {
+    pub(crate) fn folder_written(&self) -> Option<&std::path::Path> {
         match self {
             Self::Clone(path) => Some(path),
             Self::InitialCommit(path) => Some(std::path::Path::new(path)),
@@ -129,7 +129,7 @@ pub enum ProjectFolderAction {
 impl ProjectFolderAction {
     /// What dux is doing, as the refusal sentence names it:
     /// "dux is already {this} for project ...".
-    pub fn running_phrase(self) -> &'static str {
+    pub(crate) fn running_phrase(self) -> &'static str {
         match self {
             Self::CheckoutDefaultBranch => "checking out the default branch",
             Self::ChangeBaseBranch => "changing the base branch",
@@ -149,10 +149,10 @@ pub struct RenameExpectation {
     /// The branch the worktree was on before the rename dispatched. A
     /// `BranchSyncReady` still reporting it means the rename has not landed
     /// yet, which is expected, so skip quietly.
-    pub old_branch: String,
+    pub(crate) old_branch: String,
     /// The branch `git branch -m` is moving to. A `BranchSyncReady` reporting
     /// it is the rename completing, which is expected, so skip quietly.
-    pub new_branch: String,
+    pub(crate) new_branch: String,
 }
 
 impl RenameExpectation {
@@ -191,12 +191,12 @@ pub struct BranchRenameDispatch {
     /// The worktree the `git branch -m` runs in.
     pub worktree_path: String,
     /// The branch name before the rename (the `git branch -m` source).
-    pub old_branch: String,
+    pub(crate) old_branch: String,
     /// The branch name to move to (the `git branch -m` target).
-    pub new_branch: String,
+    pub(crate) new_branch: String,
     /// The title the session carried before the optimistic write, so the
     /// surface (or the completion/unwind handlers) can restore it on failure.
-    pub previous_title: Option<String>,
+    pub(crate) previous_title: Option<String>,
 }
 
 /// The decision and side effects computed by `Engine::prepare_branch_rename`.

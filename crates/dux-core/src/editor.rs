@@ -164,7 +164,7 @@ pub fn editor_label(name: &str) -> Option<&'static str> {
 /// one of its commands, whether or not it is installed; `None` for an empty or
 /// unrecognized value. What [`crate::config_effective::effective_editor_default`]
 /// reads `[editor] default` with.
-pub fn configured_editor_key(name: &str) -> Option<&'static str> {
+pub(crate) fn configured_editor_key(name: &str) -> Option<&'static str> {
     let normalized = normalize_editor_name(name);
     if normalized.is_empty() {
         return None;
@@ -176,7 +176,7 @@ pub fn configured_editor_key(name: &str) -> Option<&'static str> {
 }
 
 /// Every supported editor's config key, in the order dux prefers them.
-pub fn editor_config_keys() -> Vec<&'static str> {
+pub(crate) fn editor_config_keys() -> Vec<&'static str> {
     EDITOR_SPECS.iter().map(|spec| spec.config_key).collect()
 }
 

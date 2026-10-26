@@ -23,7 +23,7 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 /// Bytes of randomness in a session token: 256 bits.
-pub const TOKEN_BYTES: usize = 32;
+pub(crate) const TOKEN_BYTES: usize = 32;
 
 /// The SHA-256 digest a session is stored and looked up by.
 pub type TokenDigest = [u8; 32];

@@ -55,7 +55,7 @@ const MAX_CARRY: usize = 4096;
 
 /// A signal extracted from an agent's raw output stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttentionEvent {
+pub(crate) enum AttentionEvent {
     /// A bare terminal bell (`0x07`) outside any escape sequence: the classic
     /// ding, config-gated by `attention_on_bell`. This is the ONLY bell path
     /// (the emulator's own `Event::Bell` is deliberately not handled, see
@@ -76,7 +76,7 @@ pub enum AttentionEvent {
 /// independently (clipboard writes are forwarded more conservatively than
 /// notifications).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CapturedKind {
+pub(crate) enum CapturedKind {
     /// An `OSC 9` / `OSC 777` desktop notification.
     Notify,
     /// An `OSC 99` kitty-notification-protocol sequence (any part, including `d=0`
@@ -93,7 +93,7 @@ pub enum CapturedKind {
 /// events drive dux's own in-app attention chrome, captures are the raw bytes
 /// replayed to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapturedSeq {
+pub(crate) struct CapturedSeq {
     pub kind: CapturedKind,
     pub bytes: Vec<u8>,
 }
@@ -134,7 +134,7 @@ enum TermScan {
 /// chunk of raw output in order. It carries an unterminated trailing sequence
 /// across calls so a code split between two reads is still recognized.
 #[derive(Default)]
-pub struct AttentionScanner {
+pub(crate) struct AttentionScanner {
     /// The tail of the previous chunk that ended in the middle of an escape
     /// sequence, prepended to the next chunk. Bounded by [`MAX_CARRY`].
     carry: Vec<u8>,
@@ -149,20 +149,21 @@ pub struct AttentionScanner {
 }
 
 impl AttentionScanner {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Scan the next chunk of raw output and return every complete signal found.
     /// Any trailing partial sequence is carried to the next call.
-    pub fn scan(&mut self, data: &[u8]) -> Vec<AttentionEvent> {
+    #[cfg(test)]
+    pub(crate) fn scan(&mut self, data: &[u8]) -> Vec<AttentionEvent> {
         self.scan_full(data, None)
     }
 
     /// Like [`AttentionScanner::scan`], but additionally appends every whitelisted
     /// passthrough sequence (in canonical form) to `capture` when it is `Some`.
     /// The `capture = None` path is byte-for-byte identical to `scan`.
-    pub fn scan_full(
+    pub(crate) fn scan_full(
         &mut self,
         data: &[u8],
         capture: Option<&mut Vec<CapturedSeq>>,
@@ -196,7 +197,7 @@ impl AttentionScanner {
     /// Total number of runaway partial sequences dropped so far. The reader loop
     /// compares this across calls to log a debug line when a drop happens; the
     /// scanner itself stays pure and never logs.
-    pub fn overflow_drops(&self) -> u64 {
+    pub(crate) fn overflow_drops(&self) -> u64 {
         self.overflow_drops
     }
 }
@@ -541,7 +542,7 @@ fn canonical_osc(payload: &[u8]) -> Vec<u8> {
 /// [`tmux_unwrap`]. `ESC P tmux ;` + the payload with every `ESC` doubled + `ESC \`.
 /// dux uses this to re-wrap the sequences it captured (and unwrapped) so they pass
 /// through the tmux dux itself runs under.
-pub fn tmux_wrap(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn tmux_wrap(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() + 9);
     out.extend_from_slice(b"\x1bPtmux;");
     for &b in bytes {

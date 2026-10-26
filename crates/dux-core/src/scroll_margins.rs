@@ -57,7 +57,7 @@ use alacritty_terminal::vte::ansi::{
 /// travels with the pair because whether a region is "the whole screen" is only
 /// answerable against a height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScrollRegion {
+pub(crate) struct ScrollRegion {
     pub start: i32,
     pub end: i32,
     pub screen_lines: i32,
@@ -65,7 +65,7 @@ pub struct ScrollRegion {
 
 impl ScrollRegion {
     /// The whole screen, which is what a terminal has until a program narrows it.
-    pub fn full(rows: u16) -> Self {
+    pub(crate) fn full(rows: u16) -> Self {
         Self::full_lines(i32::from(rows))
     }
 
@@ -79,7 +79,7 @@ impl ScrollRegion {
     }
 
     /// Whether the region still covers every row.
-    pub fn is_full_screen(&self) -> bool {
+    pub(crate) fn is_full_screen(&self) -> bool {
         self.start == 0 && self.end == self.screen_lines
     }
 
@@ -95,7 +95,7 @@ impl ScrollRegion {
     /// for an empty region, and a client handed the inverted pair that would
     /// describe it rejects the sequence and keeps the whole screen, so this emits
     /// the whole screen directly rather than relying on that rejection.
-    pub fn decstbm_sequence(&self) -> String {
+    pub(crate) fn decstbm_sequence(&self) -> String {
         if self.is_full_screen() || self.start >= self.end {
             "\x1b[r".to_string()
         } else {
@@ -165,7 +165,7 @@ impl Handler for RegionObserver {
 
 /// Runs a parser over the child's output and keeps the scrolling region it
 /// implies.
-pub struct ScrollRegionTracker {
+pub(crate) struct ScrollRegionTracker {
     parser: Processor<StdSyncHandler>,
     observer: RegionObserver,
     /// Both dimensions, because the engine decides whether a resize touches its
@@ -177,7 +177,7 @@ pub struct ScrollRegionTracker {
 
 impl ScrollRegionTracker {
     /// A tracker for a terminal of this size that has not been written to.
-    pub fn new(rows: u16, cols: u16) -> Self {
+    pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
             parser: Processor::new(),
             observer: RegionObserver {
@@ -189,7 +189,7 @@ impl ScrollRegionTracker {
     }
 
     /// Feed the same bytes the terminal is being fed.
-    pub fn advance(&mut self, bytes: &[u8]) {
+    pub(crate) fn advance(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.observer, bytes);
     }
 
@@ -205,7 +205,7 @@ impl ScrollRegionTracker {
     /// whole screen while the child still had its margins. A width-only change IS
     /// a real resize and does widen the region, so comparing heights alone would
     /// not do.
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    pub(crate) fn resize(&mut self, rows: u16, cols: u16) {
         if self.rows == rows && self.cols == cols {
             return;
         }
@@ -215,7 +215,7 @@ impl ScrollRegionTracker {
     }
 
     /// The region the child currently has.
-    pub fn region(&self) -> ScrollRegion {
+    pub(crate) fn region(&self) -> ScrollRegion {
         self.observer.region
     }
 }

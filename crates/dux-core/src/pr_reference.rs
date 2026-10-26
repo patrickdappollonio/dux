@@ -2234,7 +2234,7 @@ mod resolution_tests {
             offer,
             clone_unavailable,
             ..
-        } = resolution_event("acme/widget#3", &vec![widget], &missing)
+        } = resolution_event("acme/widget#3", &[widget], &missing)
         else {
             panic!("wrong event");
         };

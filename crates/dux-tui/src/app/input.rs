@@ -8228,7 +8228,7 @@ impl App {
                         if prompt
                             .entries
                             .get(*index)
-                            .is_some_and(|entry| entry.is_selectable()) =>
+                            .is_some_and(dux_core::worker::ProjectWorktreeEntry::is_selectable) =>
                     {
                         Some(*index)
                     }

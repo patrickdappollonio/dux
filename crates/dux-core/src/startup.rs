@@ -9,7 +9,7 @@ use chrono::{DateTime, Local, Utc};
 use crate::config::{DuxPaths, StartupCommandTerminalConfig};
 use crate::model::{AgentSession, Project};
 
-pub const LOG_ROOT: &str = "startup-command-logs";
+pub(crate) const LOG_ROOT: &str = "startup-command-logs";
 
 #[derive(Clone, Debug)]
 pub struct StartupCommandRun {
@@ -71,7 +71,11 @@ pub fn agent_log_dir(paths: &DuxPaths, project_id: &str, session_id: &str) -> Pa
     paths.root.join(LOG_ROOT).join(project_id).join(session_id)
 }
 
-pub fn delete_agent_logs(paths: &DuxPaths, project_id: &str, session_id: &str) -> Result<()> {
+pub(crate) fn delete_agent_logs(
+    paths: &DuxPaths,
+    project_id: &str,
+    session_id: &str,
+) -> Result<()> {
     let dir = agent_log_dir(paths, project_id, session_id);
     if !dir.exists() {
         return Ok(());
@@ -82,7 +86,11 @@ pub fn delete_agent_logs(paths: &DuxPaths, project_id: &str, session_id: &str) -
 /// Fire-and-forget background deletion of an agent's startup-command logs.
 /// Errors are logged but not surfaced to the caller, since session deletion
 /// has already succeeded by the time this runs.
-pub fn spawn_delete_startup_command_logs(paths: DuxPaths, project_id: String, session_id: String) {
+pub(crate) fn spawn_delete_startup_command_logs(
+    paths: DuxPaths,
+    project_id: String,
+    session_id: String,
+) {
     std::thread::spawn(move || {
         if let Err(err) = delete_agent_logs(&paths, &project_id, &session_id) {
             crate::logger::error(&format!(
@@ -92,7 +100,7 @@ pub fn spawn_delete_startup_command_logs(paths: DuxPaths, project_id: String, se
     });
 }
 
-pub fn list_agent_logs(
+pub(crate) fn list_agent_logs(
     paths: &DuxPaths,
     project_id: &str,
     session_id: &str,
@@ -100,7 +108,7 @@ pub fn list_agent_logs(
     list_logs_in_dir(&agent_log_dir(paths, project_id, session_id))
 }
 
-pub fn list_project_logs(
+pub(crate) fn list_project_logs(
     paths: &DuxPaths,
     project_id: &str,
 ) -> Result<Vec<StartupCommandLogEntry>> {
@@ -200,7 +208,7 @@ pub fn load_logs_for_scope(
     Ok(StartupCommandLogListing { entries, content })
 }
 
-pub fn open_path(path: &Path) -> Result<()> {
+pub(crate) fn open_path(path: &Path) -> Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -227,7 +235,7 @@ pub fn open_path(path: &Path) -> Result<()> {
 /// When the agent is deleted while the command runs, no log is written: the
 /// agent's log folder went with it and is never recreated for a run nobody can
 /// look at any more.
-pub fn run_startup_command(
+pub(crate) fn run_startup_command(
     paths: &DuxPaths,
     run: StartupCommandRun,
     registry: &crate::process_sessions::AgentProcessRegistry,
@@ -793,7 +801,7 @@ thread_local! {
 
 /// The refusal for a second startup-command run of one agent while the first
 /// is still going. Both surfaces say it in these words.
-pub fn startup_already_running_message(agent_label: &str) -> String {
+pub(crate) fn startup_already_running_message(agent_label: &str) -> String {
     format!(
         "The startup command for agent \"{agent_label}\" is still running. Wait for it to \
          finish, then run it again; its log will show how the current run went."

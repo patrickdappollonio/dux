@@ -187,7 +187,7 @@ pub struct GhProbeState {
     /// probe that is still running cannot be joined by a second one every tick,
     /// and it is wall-clock elapsed time per the animation/refresh tenet.
     /// `None` until the first probe, which the surfaces spawn at startup.
-    pub last_probe_at: Option<Instant>,
+    pub(crate) last_probe_at: Option<Instant>,
     /// Set when the probe now in flight was asked for BY THE USER, so its
     /// outcome is reported even when nothing changed. A scheduled re-check that
     /// answers the same as last time says nothing; a re-check somebody pressed
@@ -266,7 +266,7 @@ impl ChangedFilesRefreshQueue {
     /// The next worktree to read. `None` means nothing is queued, and clears
     /// the running flag so the reader can exit and the next requester spawns a
     /// fresh one.
-    pub fn next_request(&mut self) -> Option<PathBuf> {
+    pub(crate) fn next_request(&mut self) -> Option<PathBuf> {
         let next = self.pending.take();
         if next.is_none() {
             self.running = false;
@@ -285,12 +285,12 @@ impl ChangedFilesRefreshQueue {
 /// The longest the changed-files poller will wait between sweeps, whatever the
 /// previous sweep cost. One pathological read must not park the panel for
 /// minutes.
-pub const CHANGED_FILES_POLL_MAX_DELAY: Duration = Duration::from_secs(60);
+pub(crate) const CHANGED_FILES_POLL_MAX_DELAY: Duration = Duration::from_secs(60);
 
 /// How long the changed-files poller waits before its next sweep: the plain
 /// interval on any repository that answers faster than that, and otherwise the
 /// length of the sweep just finished, capped.
-pub fn changed_files_poll_delay(interval: Duration, last_sweep: Duration) -> Duration {
+pub(crate) fn changed_files_poll_delay(interval: Duration, last_sweep: Duration) -> Duration {
     interval.max(last_sweep.min(CHANGED_FILES_POLL_MAX_DELAY))
 }
 
@@ -307,7 +307,7 @@ fn lock_changed_files_queue(
 }
 
 /// See [`Engine::serve_memory`].
-pub type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
+pub(crate) type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
 
 pub struct Engine {
     pub config: Config,
@@ -1050,7 +1050,7 @@ pub struct PendingRecreate {
     /// attachment guard reserved, so a tab that comes up during the checkout,
     /// which nothing reserved and somebody may have attached to since, is
     /// never stopped. `None` when no restart was asked for.
-    pub restart_targets: Option<Vec<(TabId, crate::model::ProviderKind)>>,
+    pub(crate) restart_targets: Option<Vec<(TabId, crate::model::ProviderKind)>>,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see
@@ -1135,7 +1135,11 @@ impl ProjectBaseAdoption {
 
     /// The sticky error a failed save ends the checkout with, in place of the
     /// confirmation; `None` when the save did not fail. Both surfaces print this.
-    pub fn save_failure_message(&self, project_name: &str, branch: &str) -> Option<StatusText> {
+    pub(crate) fn save_failure_message(
+        &self,
+        project_name: &str,
+        branch: &str,
+    ) -> Option<StatusText> {
         self.save_failure_message_advising(
             project_name,
             branch,
@@ -1145,7 +1149,7 @@ impl ProjectBaseAdoption {
 
     /// [`Self::save_failure_message`] for a "Change base branch", whose advice
     /// is to run that action again.
-    pub fn change_base_save_failure_message(
+    pub(crate) fn change_base_save_failure_message(
         &self,
         project_name: &str,
         branch: &str,
@@ -1232,7 +1236,7 @@ fn push_quoted_list(text: &mut StatusText, names: &[String]) {
 /// needs fixing outside the toast before the action can run again. The other
 /// refusals are plain errors, because picking again from a fresh list is the
 /// whole fix.
-pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Final {
+pub(crate) fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Final {
     use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
     match outcome {
         ChangeBaseOutcome::Changed {
@@ -1384,7 +1388,7 @@ pub fn change_base_final(project_name: &str, outcome: &ChangeBaseOutcome) -> Fin
 /// The confirmation for a finished "Change base branch". Both surfaces print
 /// exactly this: the checkout sentence, the base's move said out loud when it
 /// moved, and a sentence of its own when nothing needed to change at all.
-pub fn change_base_branch_message(
+pub(crate) fn change_base_branch_message(
     project_name: &str,
     branch: &str,
     folder: FolderOnBranch,
@@ -1404,7 +1408,7 @@ pub fn change_base_branch_message(
 
 /// Whether a project's folder was on the branch a change made its base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FolderOnBranch {
+pub(crate) enum FolderOnBranch {
     /// The folder was already on it, so nothing was checked out.
     Already,
     /// The change checked it out.
@@ -1422,7 +1426,7 @@ pub fn change_base_branch_path_missing_message(project_name: &str) -> StatusText
 }
 
 /// The busy while a "Change base branch" runs.
-pub fn change_base_branch_busy_message(project_name: &str, branch: &str) -> StatusText {
+pub(crate) fn change_base_branch_busy_message(project_name: &str, branch: &str) -> StatusText {
     status_text![
         "Changing the base branch of project ",
         q(project_name),
@@ -1452,7 +1456,7 @@ pub fn checkout_default_branch_message(
 
 /// The confirmation when the folder was already on the default branch, so no
 /// checkout ran. Both surfaces print exactly this.
-pub fn already_on_default_branch_message(
+pub(crate) fn already_on_default_branch_message(
     project_name: &str,
     current_branch: &str,
     base: &ProjectBaseAdoption,
@@ -1540,7 +1544,10 @@ pub fn change_base_branch_confirm_prose(
 /// The refusal when an operation that switches the project folder's branch is
 /// already running there (see [`ProjectFolderAction`]), naming the running one:
 /// an ordinary warning, because waiting is all it asks. Both surfaces print it.
-pub fn project_folder_busy_message(project_name: &str, running: ProjectFolderAction) -> StatusText {
+pub(crate) fn project_folder_busy_message(
+    project_name: &str,
+    running: ProjectFolderAction,
+) -> StatusText {
     status_text![
         format!("dux is already {} for project ", running.running_phrase()),
         q(project_name),
@@ -1638,7 +1645,7 @@ pub enum PrAttachOutcome {
 /// The one mapping from a manual PR-attach outcome to the status the surfaces
 /// show. Shared by the dispatch site and the tests so a fourth outcome cannot
 /// be given a different ending in one of them.
-pub fn pr_attach_final(outcome: &PrAttachOutcome) -> Final {
+pub(crate) fn pr_attach_final(outcome: &PrAttachOutcome) -> Final {
     match outcome {
         PrAttachOutcome::Attached { message } => Final::info(message.clone()),
         PrAttachOutcome::Failed { message } => Final::error(message.clone()),
@@ -1665,7 +1672,7 @@ pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 /// genuine agent output continuing past it re-lights the indicator on the next
 /// tick. Shared by the TUI spinner and the web `ViewModel` through
 /// [`Engine::is_agent_streaming`].
-pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
+pub(crate) const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
 
 /// How long after a WHEEL notch is forwarded to a PTY the output-activity
 /// heuristic stays suppressed for it. A child with mouse reporting on repaints
@@ -1682,7 +1689,7 @@ pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250)
 /// Same length as [`AGENT_INPUT_SUPPRESSION_WINDOW`] and for the same reason: it
 /// must comfortably outlast the trailing repaint of the last notch, while a
 /// scroll that has stopped hands the heuristic back promptly.
-pub const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
+pub(crate) const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
 
 /// The same suppression after a BUTTON press or release (a click, a phone tap,
 /// the start or end of a selection drag), and deliberately much shorter than
@@ -1696,7 +1703,7 @@ pub const POINTER_REPAINT_WINDOW: Duration = Duration::from_millis(1250);
 /// promptly rather than after more than a second of a blank row. Half a second
 /// covers the repaint a click provokes with room to spare while keeping that
 /// wait short. Wall-clock, per the design tenet.
-pub const POINTER_CLICK_REPAINT_WINDOW: Duration = Duration::from_millis(500);
+pub(crate) const POINTER_CLICK_REPAINT_WINDOW: Duration = Duration::from_millis(500);
 
 /// How long a forwarded pointer report suppresses the output-activity
 /// heuristic, or `None` if it suppresses nothing at all.
@@ -1743,14 +1750,14 @@ impl PointerStamp {
 /// report channel has gone quiet and the heuristic should take over. This also
 /// bounds how long a crashed agent's last "working" report can linger before the
 /// spinner settles. Wall-clock, per the design tenet.
-pub const PROGRESS_AUTHORITY_WINDOW: Duration = Duration::from_secs(10);
+pub(crate) const PROGRESS_AUTHORITY_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long after the user last looked at a tab (TUI focus, web PTY subscribe)
 /// an attention signal on that tab stays suppressed/cleared. Must comfortably
 /// exceed a surface's tick cadence so continuously viewing a tab keeps its
 /// attention flag from ever rising. Typing suppression is separate
 /// ([`AGENT_INPUT_SUPPRESSION_WINDOW`]). Wall-clock, per the design tenet.
-pub const ATTENTION_ENGAGED_WINDOW: Duration = Duration::from_secs(3);
+pub(crate) const ATTENTION_ENGAGED_WINDOW: Duration = Duration::from_secs(3);
 
 /// Whether the user is currently "engaged" with a tab and so should not be
 /// nagged about it: they either looked at it within [`ATTENTION_ENGAGED_WINDOW`]
@@ -1851,13 +1858,13 @@ enum GhReprobe {
 /// no-ops, so every surface can invoke the refresh once per (sub-second) tick
 /// and still get the same ~2s cadence. Wall-clock, not tick counts, per the
 /// "periodic refreshes use wall-clock time" design tenet.
-pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long an entry in [`Engine::created_session_by_op`] stays addressable by a
 /// REST create handler before it is pruned. Comfortably longer than the longest
 /// create-await window (the from-PR path waits up to 60s) so a slow create still
 /// resolves, but short enough that the map self-trims on a long-running server.
-pub const CREATED_SESSION_TTL: Duration = Duration::from_secs(120);
+pub(crate) const CREATED_SESSION_TTL: Duration = Duration::from_secs(120);
 
 /// The distinctive phrase every "an attach is already resolving for this
 /// agent" refusal carries. The engine is the authority on the refusal; the
@@ -1973,7 +1980,7 @@ impl SessionGitAccess {
 /// a repository nobody named. `feature` names the action in the user's terms
 /// ("push", "attach a pull request", "fork"), and `remedy` says what to do
 /// instead, because "no" with no way forward is where a user gets stuck.
-pub fn standalone_agent_refusal(agent_name: &str, feature: &str, remedy: &str) -> String {
+pub(crate) fn standalone_agent_refusal(agent_name: &str, feature: &str, remedy: &str) -> String {
     format!(
         "Agent \"{agent_name}\" is a standalone agent: it runs in a folder you chose and has \
          no branch of its own, so there is nothing to {feature}. {remedy}"
@@ -1995,7 +2002,7 @@ pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// agent in the TUI, opening its PTY on the web) so a freshly-focused agent shows
 /// current data even if no other trigger checked it recently, without letting
 /// focus-thrash hammer `gh`.
-pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
+pub(crate) const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
 
 /// Correlation key for the "GitHub API quota low / recovered" status so the
 /// warning and its eventual recovery/clear replace the same entry.
@@ -2014,7 +2021,7 @@ const PR_RATE_LIMIT_BACKOFF_SECS: u64 = 300;
 /// One per-host pull-request pause notice: how long the host is left alone, and
 /// the status both surfaces raise for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrPauseNotice {
+pub(crate) struct PrPauseNotice {
     pub pause: Duration,
     pub tone: crate::statusline::StatusTone,
     pub message: StatusText,
@@ -2029,7 +2036,7 @@ pub struct PrPauseNotice {
 /// Every tone self-dismisses on both surfaces, so a warning here never sits on
 /// screen once the pause is over. Messages carry no markup: a toast and the
 /// status line both show them verbatim.
-pub fn pr_pause_notice(
+pub(crate) fn pr_pause_notice(
     sig: &crate::gh::HostSignal,
     now: chrono::DateTime<Utc>,
 ) -> Option<PrPauseNotice> {
@@ -2100,7 +2107,7 @@ const PR_SYNC_SLICE_SECS: u64 = 3;
 /// Default sleep granularity of the branch-sync wait, for the same reason as
 /// [`PR_SYNC_SLICE_SECS`]: a retuned or disabled interval must be observed in a
 /// few seconds, not after a full one.
-pub const BRANCH_SYNC_SLICE_MS: u64 = 3_000;
+pub(crate) const BRANCH_SYNC_SLICE_MS: u64 = 3_000;
 
 /// The branch-sync wait's tunable granularity and its progress counter.
 ///
@@ -2110,8 +2117,8 @@ pub const BRANCH_SYNC_SLICE_MS: u64 = 3_000;
 /// claim: a running loop adopts a new interval mid-wait.
 #[derive(Debug)]
 pub struct BranchSyncWait {
-    pub slice_ms: AtomicU64,
-    pub waits_started: AtomicU64,
+    pub(crate) slice_ms: AtomicU64,
+    pub(crate) waits_started: AtomicU64,
 }
 
 impl Default for BranchSyncWait {
@@ -2229,7 +2236,7 @@ impl Engine {
     /// Prunes on insert: entries past [`CREATED_SESSION_TTL`] or whose session no
     /// longer exists are dropped, so the map stays bounded on a long-running
     /// server.
-    pub fn record_created_session(&mut self, op_id: String, session_id: String) {
+    pub(crate) fn record_created_session(&mut self, op_id: String, session_id: String) {
         let now = Instant::now();
         // Bind disjoint field borrows so the retain closure can read `sessions`
         // while the map is borrowed mutably.
@@ -2536,7 +2543,7 @@ impl Engine {
     /// The terminal identity dux should apply when launching an agent, resolved
     /// from the configured mode, the owning surface, and the inherited-env probe.
     /// Companion terminals reuse it too so a plain shell sees the same identity.
-    pub fn resolved_identity(&self) -> crate::term_identity::TerminalIdentity {
+    pub(crate) fn resolved_identity(&self) -> crate::term_identity::TerminalIdentity {
         let mode = crate::config_effective::effective_terminal_identity(
             &self.config.capabilities.terminal_identity,
         );
@@ -2784,7 +2791,7 @@ impl Engine {
         self.in_flight.contains(key)
     }
 
-    pub fn spawn_project_persistence(
+    pub(crate) fn spawn_project_persistence(
         &mut self,
         action: ProjectPersistenceAction,
         status_op_id: Option<String>,
@@ -3349,7 +3356,7 @@ impl Engine {
     /// value is warned about and corrected once, where the config was taken in
     /// (see [`crate::config::correct_github_probe_interval`]), which leaves
     /// nothing for this to say however often it is asked.
-    pub fn github_probe_interval(&self) -> Duration {
+    pub(crate) fn github_probe_interval(&self) -> Duration {
         Duration::from_secs(
             crate::config::normalized_github_probe_interval(
                 self.config.ui.github_probe_interval_secs,
@@ -3758,7 +3765,7 @@ impl Engine {
     /// per companion terminal. This is the definition of "something is running"
     /// for the whole app, and it lives here so both surfaces answer it the same
     /// way instead of each re-deriving the expression.
-    pub fn running_process_count(&self) -> usize {
+    pub(crate) fn running_process_count(&self) -> usize {
         self.providers.len() + self.companion_terminals.len()
     }
 
@@ -3942,7 +3949,7 @@ impl Engine {
                     dir.display(),
                     entries.len()
                 ));
-                let _ = tx.send(WorkerEvent::BrowserEntriesReady { dir: dir, entries });
+                let _ = tx.send(WorkerEvent::BrowserEntriesReady { dir, entries });
             },
         );
     }
@@ -4092,7 +4099,7 @@ impl Engine {
     /// that, every off-to-on transition created another permanent poller, because
     /// the old one reads its kill switch only once per [`PR_SYNC_SLICE_SECS`] and
     /// a fast off-then-on lands inside that window.
-    pub fn spawn_pr_sync_worker(&self) {
+    pub(crate) fn spawn_pr_sync_worker(&self) {
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let control = Arc::clone(&self.pr_sync);
         let interval_secs = Arc::clone(&self.pr_poll_interval_secs);
@@ -4352,7 +4359,7 @@ impl Engine {
         self.pr_sync.disarm();
     }
 
-    pub fn spawn_initial_pr_refresh(&mut self) {
+    pub(crate) fn spawn_initial_pr_refresh(&mut self) {
         self.pr_sync.note_refresh();
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -4922,7 +4929,7 @@ impl Engine {
     /// The engine does not mark the rename in-flight here: that marker belongs
     /// to the worker spawn, so the title-only and no-op paths, which never
     /// dispatch, leave no dangling marker.
-    pub fn prepare_branch_rename(
+    pub(crate) fn prepare_branch_rename(
         &mut self,
         session_id: &str,
         new_name: &str,
@@ -5109,7 +5116,11 @@ impl Engine {
     /// is never reverted (permanently deferring drift detection). Removes the
     /// expected-branch stash, clears the in-flight marker, and restores
     /// `previous_title`. Idempotent.
-    pub fn revert_optimistic_rename(&mut self, session_id: &str, previous_title: Option<String>) {
+    pub(crate) fn revert_optimistic_rename(
+        &mut self,
+        session_id: &str,
+        previous_title: Option<String>,
+    ) {
         self.rename_expected.remove(session_id);
         self.clear_in_flight(&InFlightKey::BranchRename(session_id.to_string()));
         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
@@ -5133,7 +5144,7 @@ impl Engine {
     /// from Inactive could otherwise sit for hours showing a pull-request badge
     /// that was last refreshed before it was put away, and reconnecting to it is
     /// exactly the moment its user starts reading that badge again.
-    pub fn update_pr_sync_sessions(&mut self) {
+    pub(crate) fn update_pr_sync_sessions(&mut self) {
         let returned = self.rebuild_pr_sync_plan();
         // Owed from a previous rebuild, whose check was refused. Retried once
         // each and then let go whatever happens, so this can never become a
@@ -5242,7 +5253,7 @@ impl Engine {
     /// command and the `PullRequestResolved` attach handler, so both surfaces
     /// apply the exact same mutation. Returns the user-facing confirmation.
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_pr_attach(
+    pub(crate) fn apply_pr_attach(
         &mut self,
         session_id: &str,
         host: &str,
@@ -5763,7 +5774,7 @@ impl Engine {
     /// looked the project up and fell through `unwrap_or_default` would silently
     /// hand a project-less agent an empty environment, which is a very different
     /// thing from the global one.
-    pub fn session_env(&self, session: &AgentSession) -> Vec<(String, String)> {
+    pub(crate) fn session_env(&self, session: &AgentSession) -> Vec<(String, String)> {
         let project_env = match &session.workspace {
             crate::model::AgentWorkspace::Managed(managed) => self
                 .projects
@@ -5779,7 +5790,7 @@ impl Engine {
     /// Where an agent lives, as a phrase a status line can drop into a
     /// sentence: `project "web"` for a managed agent, `folder "~/notes"` for a
     /// standalone one. Folder paths are shortened against the server's home.
-    pub fn session_location_phrase(&self, session: &AgentSession) -> StatusText {
+    pub(crate) fn session_location_phrase(&self, session: &AgentSession) -> StatusText {
         match &session.workspace {
             crate::model::AgentWorkspace::Managed(_) => {
                 crate::status_text!["project ", q(self.project_name_for_session(session))]
@@ -6024,7 +6035,11 @@ impl Engine {
     /// resume and must have started here before. Resume history is per-provider
     /// (each CLI keeps its own conversation in the directory), so eligibility is
     /// judged against `provider`, not `session.provider`.
-    pub fn should_resume_provider(&self, session: &AgentSession, provider: &ProviderKind) -> bool {
+    pub(crate) fn should_resume_provider(
+        &self,
+        session: &AgentSession,
+        provider: &ProviderKind,
+    ) -> bool {
         let cfg = crate::config::provider_config(&self.config, provider);
         cfg.supports_session_resume() && session.has_started_provider(provider)
     }
@@ -6235,7 +6250,7 @@ impl Engine {
     /// wording stays surface-side. An unknown session is an error; the caller
     /// owns the no-op "already uses this provider" case, since only the surface
     /// knows the session's display label for that copy.
-    pub fn change_agent_provider(
+    pub(crate) fn change_agent_provider(
         &mut self,
         session_id: &str,
         provider: &ProviderKind,
@@ -6412,7 +6427,7 @@ impl Engine {
     /// actually removed. A store failure is logged, not fatal: the in-memory
     /// removal already happened and the stale row is re-reconciled on the next
     /// restart at worst.
-    pub fn remove_agent_tab_row(&mut self, tab_id: &str) -> bool {
+    pub(crate) fn remove_agent_tab_row(&mut self, tab_id: &str) -> bool {
         if self.agent_tabs.remove(TabIdRef::new(tab_id)).is_none() {
             return false;
         }
@@ -6437,7 +6452,7 @@ impl Engine {
     /// Every sentence that names a tab reads it here. A confirmation, a status
     /// line and a pill that derive the name three different ways can disagree
     /// about which tab they mean, and the user has only the name to go on.
-    pub fn tab_strip_labels(&self, session_id: &SessionIdRef) -> Vec<(TabId, String)> {
+    pub(crate) fn tab_strip_labels(&self, session_id: &SessionIdRef) -> Vec<(TabId, String)> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id.as_str()) else {
             return Vec::new();
         };
@@ -13619,7 +13634,7 @@ mod resource_monitor_targets_tests {
     #[test]
     fn collect_resource_stats_marks_kinds_and_ids() {
         let mut collector = crate::resource_stats::ResourceCollector::new();
-        let (rows, _) = collector.sample(&vec![ResourceTarget {
+        let (rows, _) = collector.sample(&[ResourceTarget {
             id: "term-1".to_string(),
             kind: ResourceKind::Terminal,
             label: "Terminal (npm): dev server".to_string(),

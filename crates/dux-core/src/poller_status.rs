@@ -50,27 +50,27 @@ pub fn restarted(label: &str, feature: &str) -> StatusUpdate {
 // demand tries again the next time something asks for it.
 
 /// The remedy for a worker spawned once, at startup, that nothing retries.
-pub const REMEDY_RESTART_DUX: &str = "It stays off until you restart dux.";
+pub(crate) const REMEDY_RESTART_DUX: &str = "It stays off until you restart dux.";
 
 /// The remedy for the one-shot probe behind a standalone agent's git status,
 /// which every later question about the folder starts again.
-pub const REMEDY_NEXT_LOOK_AT_AGENT: &str =
+pub(crate) const REMEDY_NEXT_LOOK_AT_AGENT: &str =
     "The next look at this agent asks again, so nothing has to be restarted.";
 
 /// The remedy for the on-demand sweep behind the changed-files list, which the
 /// next refresh starts again.
-pub const REMEDY_NEXT_CHANGED_FILES_REFRESH: &str =
+pub(crate) const REMEDY_NEXT_CHANGED_FILES_REFRESH: &str =
     "The next refresh of that list asks again, so nothing has to be restarted.";
 
 /// The remedy for the pull-request poller, which is started by a config reload
 /// and by dux re-checking whether the GitHub CLI works.
-pub const REMEDY_PR_SYNC: &str = "dux starts it again when you reload your config; otherwise it stays off until you restart \
+pub(crate) const REMEDY_PR_SYNC: &str = "dux starts it again when you reload your config; otherwise it stays off until you restart \
      dux.";
 
 /// A worker could not be started at all, so the feature behind it is off. What
 /// the user can do about that is `remedy`, which the call site chooses from the
 /// constants above because only it knows whether anything retries.
-pub fn spawn_failed(label: &str, feature: &str, error: &str, remedy: &str) -> StatusUpdate {
+pub(crate) fn spawn_failed(label: &str, feature: &str, error: &str, remedy: &str) -> StatusUpdate {
     StatusUpdate::keyed(
         key(label),
         StatusTone::Warning,
@@ -83,7 +83,11 @@ pub fn spawn_failed(label: &str, feature: &str, error: &str, remedy: &str) -> St
 /// The badge on screen is right, so this is about what survives a restart
 /// rather than about what the user is looking at, and the sentence says so
 /// instead of implying the status itself is wrong.
-pub fn pr_status_not_saved(session_id: &str, agent_label: &str, error: &str) -> StatusUpdate {
+pub(crate) fn pr_status_not_saved(
+    session_id: &str,
+    agent_label: &str,
+    error: &str,
+) -> StatusUpdate {
     StatusUpdate::keyed(
         key(&format!("pr-status-write:{session_id}")),
         StatusTone::Warning,
@@ -105,7 +109,7 @@ pub fn pr_status_not_saved(session_id: &str, agent_label: &str, error: &str) -> 
 /// fails transiently all the time (an index lock held by the agent's own commit,
 /// a directory mid-rename), so a sentence per blip is noise and a streak is the
 /// signal that something is actually wrong.
-pub const WARN_AFTER_FAILURES: u32 = crate::changes_status::ERROR_WARN_THRESHOLD;
+pub(crate) const WARN_AFTER_FAILURES: u32 = crate::changes_status::ERROR_WARN_THRESHOLD;
 
 /// Consecutive panic-free iterations after which a loop worker reports its next
 /// panic out loud again.
@@ -115,7 +119,7 @@ pub const WARN_AFTER_FAILURES: u32 = crate::changes_status::ERROR_WARN_THRESHOLD
 /// already replaced that sentence and the log keeps every one of them, while a
 /// worker that ran cleanly for a streak and then broke for a different reason is
 /// news nobody has heard.
-pub const REARM_AFTER_SUCCESSES: u32 = WARN_AFTER_FAILURES;
+pub(crate) const REARM_AFTER_SUCCESSES: u32 = WARN_AFTER_FAILURES;
 
 /// Per-subject consecutive-failure counting for a poller that repeats the same
 /// question every cycle.
@@ -124,7 +128,7 @@ pub const REARM_AFTER_SUCCESSES: u32 = WARN_AFTER_FAILURES;
 /// actually shown, so a blip stays silent and a standing failure is reported
 /// once.
 #[derive(Debug, Default)]
-pub struct FailureStreaks {
+pub(crate) struct FailureStreaks {
     streaks: HashMap<String, u32>,
     warned: HashSet<String>,
 }
@@ -132,7 +136,7 @@ pub struct FailureStreaks {
 impl FailureStreaks {
     /// Record one failure. `true` exactly once, on the cycle that crosses
     /// [`WARN_AFTER_FAILURES`].
-    pub fn record_failure(&mut self, subject: &str) -> bool {
+    pub(crate) fn record_failure(&mut self, subject: &str) -> bool {
         let streak = self.streaks.entry(subject.to_string()).or_insert(0);
         *streak += 1;
         if *streak != WARN_AFTER_FAILURES {
@@ -144,7 +148,7 @@ impl FailureStreaks {
 
     /// Record one success. `true` only when a warning was actually shown, so a
     /// blip that never warned leaves no orphaned "it is back" behind it.
-    pub fn record_success(&mut self, subject: &str) -> bool {
+    pub(crate) fn record_success(&mut self, subject: &str) -> bool {
         self.streaks.remove(subject);
         self.warned.remove(subject)
     }
@@ -152,7 +156,7 @@ impl FailureStreaks {
 
 /// Branch sync has failed to read git's current branch in one worktree for a
 /// whole streak, so the branch dux shows for that agent may have drifted.
-pub fn branch_sync_stuck(worktree: &str, error: &str) -> StatusUpdate {
+pub(crate) fn branch_sync_stuck(worktree: &str, error: &str) -> StatusUpdate {
     StatusUpdate::keyed(
         key(&format!("branch-sync:{worktree}")),
         StatusTone::Warning,
@@ -165,7 +169,7 @@ pub fn branch_sync_stuck(worktree: &str, error: &str) -> StatusUpdate {
 }
 
 /// And the same read succeeded again, on the same key.
-pub fn branch_sync_recovered(worktree: &str) -> StatusUpdate {
+pub(crate) fn branch_sync_recovered(worktree: &str) -> StatusUpdate {
     StatusUpdate::keyed(
         key(&format!("branch-sync:{worktree}")),
         StatusTone::Info,

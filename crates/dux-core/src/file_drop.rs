@@ -64,12 +64,12 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 /// How many suffixed candidates are tried after the dropped name itself before
 /// the request is refused. Each candidate carries a counter, so this is only
 /// reached when 64 distinct names are all taken within the same second.
-pub const MAX_COLLISION_ATTEMPTS: u32 = 64;
+pub(crate) const MAX_COLLISION_ATTEMPTS: u32 = 64;
 
 /// Byte limit assumed for a single path component when the filesystem will not
 /// answer `pathconf(_PC_NAME_MAX)`. 255 is the value on ext4, APFS, XFS, btrfs
 /// and every other filesystem dux is realistically dropped onto.
-pub const FALLBACK_NAME_MAX_BYTES: usize = 255;
+pub(crate) const FALLBACK_NAME_MAX_BYTES: usize = 255;
 
 /// Why a dropped filename is unusable.
 ///
@@ -195,7 +195,7 @@ impl std::fmt::Display for TreeDirError {
 ///
 /// The empty string is the worktree ROOT and is allowed: it is what the browser
 /// sends for a drop on empty tree space.
-pub fn validate_tree_drop_dir(relative: &str) -> Result<(), TreeDirError> {
+pub(crate) fn validate_tree_drop_dir(relative: &str) -> Result<(), TreeDirError> {
     if relative.is_empty() {
         return Ok(());
     }
@@ -329,7 +329,7 @@ impl From<std::io::Error> for DropDirError {
 /// Pure, so the cases that cannot be constructed on a filesystem (a relative
 /// answer from a lookup that should only ever produce absolute ones) are still
 /// pinned by a test.
-pub fn check_reportable_dir_path(path: &Path) -> Result<&str, UnreportablePath> {
+pub(crate) fn check_reportable_dir_path(path: &Path) -> Result<&str, UnreportablePath> {
     if !path.is_absolute() {
         return Err(UnreportablePath::NotAbsolute);
     }
@@ -398,7 +398,7 @@ pub struct SavedDrop {
 /// per-component limit is `name_max` bytes.
 ///
 /// Validation, never repair. See [`DropNameError`] for each refusal.
-pub fn validate_drop_name(name: &str, name_max: usize) -> Result<(), DropNameError> {
+pub(crate) fn validate_drop_name(name: &str, name_max: usize) -> Result<(), DropNameError> {
     if name.is_empty() {
         return Err(DropNameError::Empty);
     }
@@ -462,7 +462,7 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// the extension is shortened too, and if there is still no room for a single
 /// character of stem this returns `None` and the request fails deterministically
 /// rather than looping or producing something unusable.
-pub fn collision_candidate(
+pub(crate) fn collision_candidate(
     name: &str,
     stamp: &str,
     counter: u32,
@@ -539,7 +539,7 @@ pub fn slugify_drop_name(name: &str, name_max: usize) -> String {
 /// Whether a newly made upload directory is seeded with its self-ignoring
 /// `.gitignore`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UploadGitignore {
+pub(crate) enum UploadGitignore {
     /// Write the `.gitignore` when dux creates it (none is there yet).
     Write,
     /// Write none.
@@ -603,7 +603,7 @@ impl DropDir {
     /// `EEXIST` and the walk simply opens what is there, and the `.gitignore` is
     /// created with `O_CREAT | O_EXCL`, so exactly one writer creates it and an
     /// existing one is left untouched whatever it holds, symlink included.
-    pub fn open_uploads(
+    pub(crate) fn open_uploads(
         worktree: &Path,
         relative: &str,
         gitignore: UploadGitignore,
@@ -684,7 +684,7 @@ impl DropDir {
     /// from the pinned worktree handle with `O_NOFOLLOW`, so a symlink at any
     /// component fails the request instead of being followed out of the tree, and
     /// nothing is resolved back to text and reopened.
-    pub fn open_tree_dir(worktree: &Path, relative: &str) -> Result<Self, DropDirError> {
+    pub(crate) fn open_tree_dir(worktree: &Path, relative: &str) -> Result<Self, DropDirError> {
         validate_tree_drop_dir(relative).map_err(DropDirError::TreeDirRefused)?;
 
         let mut fd = rustix::fs::open(
@@ -761,7 +761,7 @@ impl DropDir {
     /// The filesystem's byte limit for a single name in this directory, asked of
     /// the filesystem rather than assumed. Falls back to
     /// [`FALLBACK_NAME_MAX_BYTES`] when it will not answer.
-    pub fn name_max(&self) -> usize {
+    pub(crate) fn name_max(&self) -> usize {
         // SAFETY: `fpathconf` only reads properties of the fd, which we own for
         // the duration of the call.
         let raw = unsafe { libc::fpathconf(self.fd.as_raw_fd(), libc::_PC_NAME_MAX) };
@@ -827,7 +827,7 @@ impl DropDir {
 /// agent worktree would edit the user's main repository and affect every other
 /// worktree, which is precisely the pollution the upload directory exists to
 /// remove.
-pub const UPLOADS_GITIGNORE: &str = "*\n";
+pub(crate) const UPLOADS_GITIGNORE: &str = "*\n";
 
 /// Create the self-ignoring `.gitignore` in the pinned upload directory, unless
 /// something is already there.
@@ -988,7 +988,7 @@ pub fn save_drop(
 /// A read or write failure part-way through REMOVES the partial file: an
 /// abandoned upload must leave nothing behind, or the folder fills with
 /// zero-length rubble that the user did not put there and was never told about.
-pub fn save_drop_from<R: Read>(
+pub(crate) fn save_drop_from<R: Read>(
     dir: &DropDir,
     requested_name: &str,
     naming: DropNaming,
@@ -1176,7 +1176,7 @@ impl FileDropDestination {
 /// `/w/agent2` starts with `/w/agent` and is a different directory entirely,
 /// and answering yes there refreshes an agent whose worktree never changed.
 /// `Path::starts_with` compares whole components, so it says no.
-pub fn resolved_path_is_within(root: &Path, path: &Path) -> bool {
+pub(crate) fn resolved_path_is_within(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
@@ -1223,9 +1223,9 @@ pub fn saved_file_is_within(root: &Path, saved: &Path) -> bool {
 pub struct WorkingDirectory {
     /// The foreground process group leader, when one is running that is not the
     /// shell itself.
-    pub foreground_pid: Option<u32>,
+    pub(crate) foreground_pid: Option<u32>,
     /// The shell's own pid.
-    pub shell_pid: Option<u32>,
+    pub(crate) shell_pid: Option<u32>,
     /// Where the terminal was opened. A shell's directory changes the moment
     /// someone types `cd`, so this is the last fallback and never the answer
     /// while a live process can be asked.
@@ -1625,7 +1625,7 @@ fn shares_our_mount_namespace(pid: u32) -> Result<bool, DropDirError> {
 /// by this mechanism**, and is stated rather than glossed: on macOS the
 /// directory named could in principle be replaced before the open. Linux has
 /// no such gap.
-pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
+pub(crate) fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     #[cfg(target_os = "linux")]
     {
         // Before anything is saved. The handle would be opened correctly through
@@ -1654,7 +1654,7 @@ pub fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
 /// whose folder could not be read is in `unknown`, and a caller deciding
 /// whether a folder is free must treat it as possibly standing there.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CwdReport {
+pub(crate) struct CwdReport {
     pub found: std::collections::HashMap<u32, PathBuf>,
     pub unknown: Vec<u32>,
     /// Why the unknown ones are unknown, in words, when there is one reason
@@ -1667,7 +1667,7 @@ pub struct CwdReport {
 /// `PROC_PIDVNODEPATHINFO` on macOS (no external tool, so nothing escapes or
 /// re-encodes a name). Fails closed: a process that is still there and could
 /// not be asked is reported as unknown, never left out. Blocking.
-pub fn process_cwds(pids: &[u32]) -> CwdReport {
+pub(crate) fn process_cwds(pids: &[u32]) -> CwdReport {
     process_cwds_with(pids, read_process_cwd)
 }
 

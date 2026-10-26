@@ -43,7 +43,7 @@ use super::Engine;
 /// tick without the grace being consulted, and far more than a scheduler needs,
 /// since the deferral is re-evaluated every tick. It is also the ceiling on how
 /// long a PTY held open by a grandchild lingers, which is why it is not larger.
-pub const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
+pub(super) const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 /// Whether an agent PTY whose child is on its way out is ready to be pruned,
 /// given whether its exit status is known (the child has been reaped), how long
@@ -58,7 +58,7 @@ pub const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
 ///
 /// `since_eof` is `Some` exactly when the reader is at end of input, so it
 /// carries both that fact and the clock that bounds it.
-pub fn agent_pty_ready_to_prune(
+pub(super) fn agent_pty_ready_to_prune(
     exit_success: Option<bool>,
     since_eof: Option<Duration>,
     since_reap: Option<Duration>,
@@ -119,7 +119,7 @@ pub enum RunUse {
 /// verdict to give.
 ///
 /// Pure, so the policy is testable without waiting out a real window.
-pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, run_use: RunUse) -> bool {
+pub(crate) fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, run_use: RunUse) -> bool {
     run_use == RunUse::Untouched && run_duration.is_some_and(|ran_for| ran_for < RAPID_EXIT_WINDOW)
 }
 
@@ -150,7 +150,7 @@ pub fn rapid_exit_ends_run_badly(run_duration: Option<Duration>, run_use: RunUse
 /// refusal with words in it, one line included, arrives here to be quoted. Said
 /// out loud here, and in the docs, because a rule nobody wrote down is a mystery
 /// the first time it bites.
-pub fn refused_resume_excerpt(
+pub(super) fn refused_resume_excerpt(
     start: crate::model::ConversationStart,
     run_duration: Option<Duration>,
     run_use: RunUse,
@@ -640,13 +640,13 @@ pub fn clean_exit_closes_tab_row(exit: TabExit) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TabExit {
     /// The tab is its agent's last remaining one.
-    pub is_only_tab: bool,
+    pub(crate) is_only_tab: bool,
     /// The exit status's success, `None` when it is unknown.
     pub exit_success: Option<bool>,
     /// The run ended badly (see [`rapid_exit_ends_run_badly`]).
-    pub ended_badly: bool,
+    pub(crate) ended_badly: bool,
     /// The provider refused to resume and said why.
-    pub refused_resume: bool,
+    pub(crate) refused_resume: bool,
 }
 
 /// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
@@ -657,7 +657,7 @@ pub struct TabExit {
 /// `reap_terminating_ptys` removes ids as they reap (clean exit OR force-kill)
 /// and dispatches `removal` exactly once, when `pending_ids` empties.
 pub struct GroupWorktreeRemoval {
-    pub pending_ids: std::collections::HashSet<String>,
+    pub(crate) pending_ids: std::collections::HashSet<String>,
     pub removal: DeferredWorktreeRemoval,
 }
 
@@ -702,7 +702,7 @@ pub struct PendingDetach {
     /// the agent even if the row has since been renamed or removed.
     pub label: String,
     /// The tab ids still to be reaped.
-    pub pending_ids: std::collections::HashSet<String>,
+    pub(crate) pending_ids: std::collections::HashSet<String>,
     /// True once ANY of the agent's tabs had to be force-killed. One forced tab
     /// makes the whole agent's outcome forced: the detach promised a polite
     /// shutdown and did not get one, and saying otherwise would be a lie about
@@ -744,7 +744,7 @@ pub struct PendingTabRestart {
     /// running.
     pub tabs: Vec<(TabId, crate::model::ProviderKind)>,
     /// The tab ids still to be reaped.
-    pub pending_ids: std::collections::HashSet<String>,
+    pub(crate) pending_ids: std::collections::HashSet<String>,
     /// True once any of the old processes had to be force-killed.
     pub forced: bool,
     /// The grace the old processes were given, for the forced sentence.
@@ -754,7 +754,7 @@ pub struct PendingTabRestart {
     /// not start again.
     pub stopped: std::collections::HashSet<TabId>,
     /// Set when the agent was deleted meanwhile: nothing starts again.
-    pub agent_deleted: bool,
+    pub(crate) agent_deleted: bool,
     /// What happened to each tab so far; complete once every launch answered.
     pub report: crate::working_copy::TabRestartReport,
     /// Set once the launches have been dispatched.
@@ -774,7 +774,7 @@ pub struct RestartLaunch {
     pub resume: bool,
     /// Whether it is the fresh launch the resume fallback started after the
     /// resume did not take.
-    pub fell_back: bool,
+    pub(crate) fell_back: bool,
 }
 
 /// How a resumed restart turned out, once the resume fallback can no longer
@@ -952,12 +952,12 @@ pub fn detach_confirm_prose(
 /// formatters this routine logs with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShutdownReport {
-    pub agents_total: usize,
-    pub terminals_total: usize,
+    pub(crate) agents_total: usize,
+    pub(crate) terminals_total: usize,
     /// Agents that exited within the grace period (the rest were `SIGKILLed`).
-    pub agents_exited: usize,
+    pub(crate) agents_exited: usize,
     /// Terminals that exited within the grace period (the rest were `SIGKILLed`).
-    pub terminals_exited: usize,
+    pub(crate) terminals_exited: usize,
     pub elapsed: std::time::Duration,
     /// True when at least one child had to be force-killed (SIGKILL) because it
     /// had not exited by the time the grace window was up. Equivalently,
@@ -1556,7 +1556,7 @@ impl Engine {
     ///
     /// Takes a tab id, never a session id: `providers` is tab-keyed and
     /// `close_tab` passes an extra tab's id through here.
-    pub fn begin_close_provider(
+    pub(crate) fn begin_close_provider(
         &mut self,
         tab_id: &TabIdRef,
         label: String,
@@ -1636,7 +1636,7 @@ impl Engine {
     /// Read straight from the two maps a process lives in, so a dormant tab (a
     /// row with no process) is never in it, and neither is a launch that has not
     /// produced its pty yet.
-    pub fn running_pty_ids(&self) -> Vec<String> {
+    pub(crate) fn running_pty_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self
             .providers
             .keys()
@@ -1753,7 +1753,7 @@ impl Engine {
     /// outcome is withdrawn, so the returned `clear_key` is the spinner the
     /// caller must retire. Without that the panic button would leave a spinner
     /// promising a wait that is already over.
-    pub fn force_detach_session(&mut self, session_id: &str) -> ForceDetachOutcome {
+    pub(crate) fn force_detach_session(&mut self, session_id: &str) -> ForceDetachOutcome {
         let Some(label) = self
             .sessions
             .iter()
@@ -1828,7 +1828,7 @@ impl Engine {
     /// and nothing closes it automatically. The rule lives on
     /// `TerminalOwner::closed_by_session_delete`, whose exhaustive match
     /// enforces it.
-    pub fn begin_close_session_terminals(&mut self, session_id: &str) {
+    pub(crate) fn begin_close_session_terminals(&mut self, session_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
             .iter()
@@ -1848,7 +1848,7 @@ impl Engine {
     /// project, and nothing closes it automatically. The rule lives on
     /// `TerminalOwner::closed_by_project_removal`, whose exhaustive match
     /// enforces it.
-    pub fn begin_close_project_terminals(&mut self, project_id: &str) {
+    pub(crate) fn begin_close_project_terminals(&mut self, project_id: &str) {
         let ids: Vec<String> = self
             .companion_terminals
             .iter()
@@ -2048,7 +2048,7 @@ impl Engine {
     /// it is a repository by construction) and a few git subprocesses for a
     /// standalone folder, which is why this runs for the whole workspace rather
     /// than waiting for a panel to open on one agent.
-    pub fn probe_agent_directories(&mut self) {
+    pub(crate) fn probe_agent_directories(&mut self) {
         let ids: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
         for id in ids {
             self.spawn_folder_repo_probe(&id);
@@ -2368,7 +2368,10 @@ impl Engine {
 
     /// The agent's live tabs, in strip order, sorted by what each does with a
     /// recreated working copy.
-    pub fn recreate_running_tabs(&self, session_id: &str) -> crate::working_copy::RunningTabs {
+    pub(crate) fn recreate_running_tabs(
+        &self,
+        session_id: &str,
+    ) -> crate::working_copy::RunningTabs {
         let mut running = crate::working_copy::RunningTabs::default();
         let Some(session) = self.session_by_id(session_id) else {
             return running;
@@ -2393,7 +2396,7 @@ impl Engine {
     /// The tabs a recreate restarts when asked to, in strip order: those with a
     /// process running whose CLI cannot follow the folder and can pick its
     /// conversation back up. A launch still on its way has no process to stop.
-    pub fn recreate_restart_targets(
+    pub(crate) fn recreate_restart_targets(
         &self,
         session_id: &str,
     ) -> Vec<(TabId, crate::model::ProviderKind)> {

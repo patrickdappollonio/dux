@@ -105,7 +105,7 @@ pub struct MacroEntry {
 
 /// One macro as a change asks for it, checked the way every surface checks it;
 /// returns the name as it is saved, with its entry.
-pub fn checked_macro(
+pub(crate) fn checked_macro(
     name: &str,
     text: String,
     surface: &str,
@@ -203,7 +203,7 @@ pub const DEFAULT_LOG_KEEP: u32 = 5;
 
 /// Hard ceiling on `logging.keep`, since every rotation shifts the whole set of
 /// copies and the user is unlikely to want a thousand of them.
-pub const MAX_LOG_KEEP: u32 = 1000;
+pub(crate) const MAX_LOG_KEEP: u32 = 1000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -252,7 +252,7 @@ impl Default for CliConfig {
 }
 
 /// Default for `[git] clone_stall_seconds`.
-pub const DEFAULT_CLONE_STALL_SECONDS: u64 = 300;
+pub(crate) const DEFAULT_CLONE_STALL_SECONDS: u64 = 300;
 
 /// `[git]`: how dux runs git for you.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -295,7 +295,7 @@ pub const DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT: u32 = 8;
 
 /// Default per-agent tab cap (see [`UiConfig::agent_tabs_max`]), counting the
 /// session-slot tab, so the default 20 allows the session-slot tab plus 19 extra tabs.
-pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
+pub(crate) const DEFAULT_AGENT_TABS_MAX: u16 = 20;
 /// Hard ceiling the per-agent tab cap is clamped to, so a fat-fingered config
 /// value can't ask the app to keep unbounded live PTYs per agent.
 pub const MAX_AGENT_TABS_MAX: u16 = 100;
@@ -310,11 +310,11 @@ pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
 /// Default number of lines the `start-web-server` flip's log viewer keeps for
 /// scrolling back. The same lines `dux server` prints to its terminal, whose own
 /// scrollback is the host terminal's; this is the flip's equivalent.
-pub const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
+pub(crate) const DEFAULT_LOG_VIEWER_LINES: usize = 2000;
 
 /// Where the control socket lives unless `[server] control_socket` says
 /// otherwise, relative to the config folder.
-pub const DEFAULT_CONTROL_SOCKET: &str = "dux.sock";
+pub(crate) const DEFAULT_CONTROL_SOCKET: &str = "dux.sock";
 
 /// The most lines the flip's log viewer keeps, whatever `log_viewer_lines` says.
 /// The viewer keeps every line wrapped and ready to draw, so the bound is what
@@ -326,13 +326,13 @@ pub const LOG_VIEWER_LINES_MAX: usize = 20_000;
 /// Reconnect. Consumed by the BROWSER, which is the only side that can see
 /// whether the screen ever painted. Counted in visible time, so a backgrounded
 /// tab does not burn the budget while it is not being watched.
-pub const DEFAULT_REPLAY_WAIT_SECONDS: u32 = 8;
+pub(crate) const DEFAULT_REPLAY_WAIT_SECONDS: u32 = 8;
 
 /// Default ceiling, in seconds, on the gap between the browser's automatic
 /// reconnect attempts. The backoff grows towards this and then stays there, so
 /// a phone that has been out of signal for an hour still retries about every
 /// ten seconds rather than once an hour.
-pub const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS: u32 = 10;
+pub(crate) const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS: u32 = 10;
 
 /// Default number of consecutive reconnect attempts the browser makes before it
 /// stops trying and says so. Consumed by the BROWSER; the server never reads it.
@@ -341,27 +341,27 @@ pub const DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS: u32 = 10;
 /// coming back, the network returning) restarts a spent one, so the give-up
 /// state is reserved for a page that has been sitting in front of an unreachable
 /// server.
-pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 8;
+pub(crate) const DEFAULT_RECONNECT_ATTEMPTS: u32 = 8;
 
 /// Default deadline, in seconds, on one reconnect attempt: an attempt that has
 /// not opened by then is abandoned and counted as failed. An unreachable host on
 /// a remote network does not refuse a connection, it hangs, so without this the
 /// budget above would take most of an hour to spend.
-pub const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS: u32 = 10;
+pub(crate) const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS: u32 = 10;
 
 /// Default deadline, in seconds, on one changed-files request from the web UI's
 /// Changes pane, body included. A half-open connection never settles, and a
 /// request that never settles would leave the pane loading forever; past this it
 /// is given up with an error the pane shows. Generous, because the answer for a
 /// worktree with tens of thousands of changed files is megabytes.
-pub const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 30;
+pub(crate) const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 30;
 
 /// Default interval, in seconds, at which a visible page asks its terminal
 /// connection to prove it is really alive. The WebSocket-level ping the server
 /// sends is send-only with no deadline, so it cannot detect the half-open
 /// socket a Wi-Fi to cellular handoff leaves behind; this is the
 /// application-level beat that can.
-pub const DEFAULT_HEARTBEAT_SECONDS: u32 = 15;
+pub(crate) const DEFAULT_HEARTBEAT_SECONDS: u32 = 15;
 
 /// Default visible-time wait, in seconds, for the answer to that beat before
 /// the browser gives up on the socket and forces a plain reconnect. Generous
@@ -383,15 +383,15 @@ pub const DEFAULT_PTY_SEND_TIMEOUT_SECONDS: u32 = 60;
 
 /// Default for `[server] operation_unknown_after_seconds`: the status line's
 /// [`crate::statusline::BUSY_LIVE_CEILING`], past which a spinner is not believed either.
-pub const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
+pub(crate) const DEFAULT_OPERATION_UNKNOWN_AFTER_SECONDS: u64 = 1800;
 
 /// Default for `[server] operation_retention_seconds`: how long a finished
 /// change's record can still be read by its id.
-pub const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
+pub(crate) const DEFAULT_OPERATION_RETENTION_SECONDS: u64 = 1800;
 
 /// Default for `[server] presence_grace_seconds`: how long a browser tab keeps
 /// protecting a terminal it was looking at after that connection was lost.
-pub const DEFAULT_PRESENCE_GRACE_SECONDS: u64 = 300;
+pub(crate) const DEFAULT_PRESENCE_GRACE_SECONDS: u64 = 300;
 
 /// Default cap on concurrent `/files/tree` directory listings (see
 /// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
@@ -435,53 +435,53 @@ pub const DEFAULT_FILE_DROP_MAX_CONCURRENCY: u32 = 2;
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
 /// [`ServerConfig::shutdown_timeout_seconds`] (web/`dux server`).
-pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
+pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
 
 /// Hard ceiling on a configured shutdown timeout. The field is seconds, but a
 /// `u16` reaches ~18 hours, so a fat-fingered millisecond value (e.g. `30000`)
 /// would otherwise block quit (and, on the web server, the single engine
 /// thread that services every client) for that whole time. Clamping keeps a
 /// misconfiguration from wedging shutdown while still allowing any sane grace.
-pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
+pub(crate) const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
 
 /// Default seconds a worktree removal waits for operations still running in
 /// that worktree (a pull, a push, a commit, a branch rename, an editor save)
 /// before it gives up and keeps the worktree. Also how long deleting a project
 /// waits for an agent still being created in it.
-pub const DEFAULT_REMOVAL_WAIT_SECONDS: u16 = 120;
+pub(crate) const DEFAULT_REMOVAL_WAIT_SECONDS: u16 = 120;
 
 /// Default seconds between blind GitHub PR-status safety polls. Deliberately
 /// slow: some PR checks run on events (focusing, creating or an agent exiting),
 /// and this poll is what notices a push or a change made on GitHub itself.
-pub const DEFAULT_PR_POLL_INTERVAL_SECONDS: u16 = 180;
+pub(crate) const DEFAULT_PR_POLL_INTERVAL_SECONDS: u16 = 180;
 
 /// Hard ceiling on the PR poll interval (6 hours). Already far slower than any
 /// useful safety net, so cap there to keep a fat-fingered value from silently
 /// neutering the backstop while still allowing any sane interval.
-pub const MAX_PR_POLL_INTERVAL_SECONDS: u16 = 21_600;
+pub(crate) const MAX_PR_POLL_INTERVAL_SECONDS: u16 = 21_600;
 
 /// Floor on a *nonzero* PR poll interval. `0` disables the blind poll entirely;
 /// any positive value below this is clamped up so a mistyped tiny value (e.g.
 /// `1`) can't hammer the GitHub API every second.
-pub const MIN_PR_POLL_INTERVAL_SECONDS: u16 = 30;
+pub(crate) const MIN_PR_POLL_INTERVAL_SECONDS: u16 = 30;
 
 /// Default seconds between blind GitHub PR-status polls for INACTIVE agents
 /// (twelve hours). An agent the sidebar has put under Inactive is one nobody is
 /// working in, so its pull request moves rarely and nothing on screen is waiting
 /// on the answer; it is still worth an occasional look, because a merge or a
 /// close is exactly what happens to a branch after its agent is put away.
-pub const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
+pub(crate) const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
 
 /// Hard ceiling on the inactive PR poll interval (seven days). Far beyond any
 /// useful backstop already, so a fat-fingered value is clamped rather than
 /// silently turning the slow clock off; `0` is how you turn it off on purpose.
-pub const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
+pub(crate) const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
 
 /// Default seconds between re-checks of `gh` while dux cannot use it. Five
 /// minutes is short enough that a rate limit or a brief outage clears itself
 /// long before anyone thinks to restart dux, and long enough that a machine
 /// with no `gh` login at all spends almost nothing on asking.
-pub const DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 300;
+pub(crate) const DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 300;
 
 /// Hard ceiling on the `gh` re-check interval (6 hours), matching the PR poll's
 /// ceiling: past that the re-check has stopped being a recovery path.
@@ -504,7 +504,7 @@ pub const MIN_GITHUB_PROBE_INTERVAL_SECONDS: u16 = 30;
 /// corrected exactly once, where a config is taken in
 /// ([`correct_github_probe_interval`]), which leaves this a no-op clamp on every
 /// later read.
-pub fn normalized_github_probe_interval(seconds: u16) -> u16 {
+pub(crate) fn normalized_github_probe_interval(seconds: u16) -> u16 {
     if seconds == 0 {
         return 0;
     }
@@ -560,11 +560,11 @@ pub const MAX_STATUS_CLEAR_SECONDS: u16 = 3_600;
 pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
 
 /// Floor on `ui.terminal_font_size`. Below this the glyphs are unreadable.
-pub const MIN_TERMINAL_FONT_SIZE: u16 = 8;
+pub(crate) const MIN_TERMINAL_FONT_SIZE: u16 = 8;
 
 /// Ceiling on `ui.terminal_font_size`. Above this a terminal pane can no
 /// longer usefully fit any real width.
-pub const MAX_TERMINAL_FONT_SIZE: u16 = 32;
+pub(crate) const MAX_TERMINAL_FONT_SIZE: u16 = 32;
 
 /// Normalize a configured `terminal_font_size`: a value outside
 /// [`MIN_TERMINAL_FONT_SIZE`, `MAX_TERMINAL_FONT_SIZE`] degrades to
@@ -589,7 +589,7 @@ pub fn normalized_terminal_font_size(size: u16) -> u16 {
 /// clamps to this). Five minutes is far longer than any useful "just came
 /// back" grace window; `0` ("clear immediately") is a separate, always-allowed
 /// value handled by the caller before clamping.
-pub const MAX_ATTENTION_GRACE_SECONDS: u64 = 300;
+pub(crate) const MAX_ATTENTION_GRACE_SECONDS: u64 = 300;
 
 /// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
 /// every shutdown path uses, through
@@ -645,7 +645,7 @@ impl TailscaleMode {
     /// The warning text for one unrecognized value, or `None` when the value is
     /// a mode dux knows. Returned rather than logged so the message itself is
     /// testable, the [`ComposeBarMode::unknown_value_warning`] precedent.
-    pub fn unknown_value_warning(s: &str) -> Option<String> {
+    pub(crate) fn unknown_value_warning(s: &str) -> Option<String> {
         if Self::parse(s).is_some() {
             return None;
         }
@@ -905,7 +905,7 @@ where
 
 /// The one-line warning to log when `[server] tailscale` names a mode dux does
 /// not know, or `None` when it is fine. Emitted once per load, never per read.
-pub fn tailscale_load_warning(config: &Config) -> Option<String> {
+pub(crate) fn tailscale_load_warning(config: &Config) -> Option<String> {
     TailscaleMode::unknown_value_warning(&config.server.tailscale)
 }
 
@@ -1261,7 +1261,7 @@ pub fn server_log_viewer_settings_changed(prev: &ServerConfig, next: &ServerConf
 
 /// True when a config reload changed a `[server]` setting read once, as a
 /// listener binds and its router is built; settings a running serve reads live are left out.
-pub fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+pub(crate) fn server_bind_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     !server_bind_setting_names(prev, next).is_empty()
 }
 
@@ -1328,7 +1328,7 @@ pub fn server_bind_setting_names(prev: &ServerConfig, next: &ServerConfig) -> Ve
 /// `qr_codes` is in this set too: the codes are drawn by the `dux server`
 /// console and by the flip's status screen, both of which read it as the serve
 /// starts, and neither one is a listener.
-pub fn server_console_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
+pub(crate) fn server_console_settings_changed(prev: &ServerConfig, next: &ServerConfig) -> bool {
     prev.color != next.color || prev.qr_codes != next.qr_codes
 }
 
@@ -1467,7 +1467,7 @@ impl WebDragDropPaste {
     /// process-wide logger, and "warns once per load" is exactly the property
     /// worth pinning.
     /// `at` is the setting as printed, through the one formatter.
-    pub fn unknown_value_warning(at: &str, s: &str) -> Option<String> {
+    pub(crate) fn unknown_value_warning(at: &str, s: &str) -> Option<String> {
         if Self::parse(s).is_some() {
             return None;
         }
@@ -1555,7 +1555,7 @@ impl ComposeBarMode {
     ///
     /// Returned rather than logged so the message itself is testable, the same
     /// reason [`WebDragDropPaste::unknown_value_warning`] gives.
-    pub fn unknown_value_warning(s: &str) -> Option<String> {
+    pub(crate) fn unknown_value_warning(s: &str) -> Option<String> {
         if Self::parse(s).is_some() {
             return None;
         }
@@ -1637,7 +1637,7 @@ where
 /// Split out from the parse so `load_config` can warn exactly once per load
 /// rather than once per render, the `upload_directory_load_warning` /
 /// `upload_pasted_text_chars_load_warning` precedent.
-pub fn compose_bar_load_warning(config: &Config) -> Option<String> {
+pub(crate) fn compose_bar_load_warning(config: &Config) -> Option<String> {
     ComposeBarMode::unknown_value_warning(&config.ui.compose_bar)
 }
 
@@ -1659,7 +1659,7 @@ pub fn new_project_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-pub fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -1933,7 +1933,7 @@ impl Default for CapabilitiesConfig {
 
 /// Default `ui.upload_directory`: inside the worktree (so a CLI that restricts
 /// reads to its workspace can still open the file), and self-ignoring.
-pub const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
+pub(crate) const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 
 /// The most a configured `ui.upload_directory` may measure, in bytes.
 ///
@@ -1943,7 +1943,7 @@ pub const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 /// relative tail that already fills `PATH_MAX` cannot fit under any worktree
 /// whatsoever. How much of the remaining room a particular worktree leaves is
 /// not knowable at load, and is left to the syscall.
-pub const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
+pub(crate) const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 
 /// Why a configured `ui.upload_directory` cannot be used, or `None` when it is
 /// usable. Pure, and phrased as a sentence fragment the warning completes.
@@ -2026,7 +2026,7 @@ pub(crate) fn upload_directory_rejection(configured: &str) -> Option<&'static st
 /// runs well past it and becomes a file the agent can read on demand. It stays a
 /// preference: a user running an unmeasured CLI that handles long pastes worse
 /// lowers it, and one who wants everything typed out sets `0`.
-pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 4_000;
+pub(crate) const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 4_000;
 
 /// Floor on a *nonzero* `ui.upload_pasted_text_chars`.
 ///
@@ -2034,7 +2034,7 @@ pub const DEFAULT_UPLOAD_PASTED_TEXT_CHARS: usize = 4_000;
 /// tiny value would turn ordinary instructions into files and make the agent
 /// feel broken in a way that names nothing. `0` remains the way to switch the
 /// behaviour off, and the warning says so.
-pub const MIN_UPLOAD_PASTED_TEXT_CHARS: usize = 200;
+pub(crate) const MIN_UPLOAD_PASTED_TEXT_CHARS: usize = 200;
 
 /// Ceiling on `ui.upload_pasted_text_chars`.
 ///
@@ -2043,7 +2043,7 @@ pub const MIN_UPLOAD_PASTED_TEXT_CHARS: usize = 200;
 /// byte figure or an extra zero,
 /// and clamping it with a warning is what the warn-once-and-degrade convention
 /// is for. Switching the behaviour off has its own value, and it is `0`.
-pub const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
+pub(crate) const MAX_UPLOAD_PASTED_TEXT_CHARS: usize = 100_000;
 
 /// Normalize a configured `ui.upload_pasted_text_chars`: `0` is the valid
 /// "switch it off" value and is preserved; anything else is clamped into
@@ -2066,7 +2066,7 @@ pub fn normalized_upload_pasted_text_chars(configured: usize) -> usize {
 /// It names the way to switch the behaviour off as well as the clamp, because
 /// somebody typing a very small number is usually reaching for "never do this"
 /// and would otherwise keep lowering it and keep being clamped.
-pub fn upload_pasted_text_chars_load_warning(configured: usize) -> Option<String> {
+pub(crate) fn upload_pasted_text_chars_load_warning(configured: usize) -> Option<String> {
     let normalized = normalized_upload_pasted_text_chars(configured);
     if normalized == configured {
         return None;
@@ -2081,7 +2081,7 @@ pub fn upload_pasted_text_chars_load_warning(configured: usize) -> Option<String
 /// The warning [`load_config`] emits for an unusable `ui.upload_directory`, or
 /// `None` for a usable one. Split out from the logging so the message can be
 /// asserted directly, mirroring [`terminal_font_size_load_warning`].
-pub fn upload_directory_load_warning(configured: &str) -> Option<String> {
+pub(crate) fn upload_directory_load_warning(configured: &str) -> Option<String> {
     let reason = upload_directory_rejection(configured)?;
     Some(format!(
         "ui.upload_directory = {configured:?} cannot be used because {reason}. Falling back \
@@ -2095,7 +2095,7 @@ pub fn upload_directory_load_warning(configured: &str) -> Option<String> {
 /// surfaces normalize through this so the TUI host forward and the web browser
 /// write agree on the mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClipboardPassthroughMode {
+pub(crate) enum ClipboardPassthroughMode {
     /// Forward a clipboard SET only from the tab the user is currently viewing.
     Focused,
     /// Forward a clipboard SET from any tab, foreground or background.
@@ -2108,7 +2108,7 @@ impl ClipboardPassthroughMode {
     /// Parse a config string into a mode, returning `None` for an unrecognized
     /// value so the caller can decide whether to warn. Never warns itself, so the
     /// per-tick forward path can call it freely.
-    pub fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "focused" => Some(Self::Focused),
             "always" => Some(Self::Always),
@@ -2117,25 +2117,9 @@ impl ClipboardPassthroughMode {
         }
     }
 
-    /// Parse a config string, falling back to [`ClipboardPassthroughMode::Focused`]
-    /// with a logged warning on an unrecognized value. Call this at config
-    /// load/reload (once), NOT per tick, so a typo is surfaced without spamming the
-    /// log; the forward path uses the non-warning [`ClipboardPassthroughMode::parse`].
-    pub fn from_config_str(s: &str) -> Self {
-        if let Some(mode) = Self::parse(s) {
-            mode
-        } else {
-            crate::logger::warn(&format!(
-                "unknown capabilities.clipboard_passthrough value {s:?}; falling back to \
-                 \"focused\" (valid: focused, always, off)"
-            ));
-            Self::Focused
-        }
-    }
-
     /// The canonical lowercase name, used to project the normalized mode into the
     /// web bootstrap document so both surfaces agree.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Focused => "focused",
             Self::Always => "always",
@@ -2216,7 +2200,7 @@ impl ProviderCommandConfig {
     /// Falls back to the whole string when there is no file name to take (an empty
     /// command, or one that is nothing but separators), so the answer is never
     /// silently empty.
-    pub fn command_file_name(&self) -> String {
+    pub(crate) fn command_file_name(&self) -> String {
         std::path::Path::new(&self.command).file_name().map_or_else(
             || self.command.clone(),
             |n| n.to_string_lossy().into_owned(),
@@ -2391,14 +2375,14 @@ impl ProvidersConfig {
     }
 }
 
-pub fn default_terminal_command() -> String {
+pub(crate) fn default_terminal_command() -> String {
     env::var("SHELL")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
-pub fn default_terminal_args() -> Vec<String> {
+pub(crate) fn default_terminal_args() -> Vec<String> {
     // Launch as a login shell so the user's profile, aliases, and prompt
     // are loaded. The -l flag is supported by bash, zsh, fish, dash, and
     // all POSIX shells.
@@ -2556,11 +2540,11 @@ impl DuxPaths {
 
 /// `[server] control_socket` as a path: relative to the config folder, or
 /// as written when absolute.
-pub fn resolve_control_socket(root: &Path, setting: &str) -> PathBuf {
+pub(crate) fn resolve_control_socket(root: &Path, setting: &str) -> PathBuf {
     root.join(setting)
 }
 
-pub fn resolve_root(
+pub(crate) fn resolve_root(
     dux_home: Option<std::ffi::OsString>,
     home: Option<PathBuf>,
     xdg_config_home: Option<std::ffi::OsString>,
@@ -2579,7 +2563,7 @@ pub fn resolve_root(
     Ok(discover_root(&home, xdg_config_home))
 }
 
-pub fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
+pub(crate) fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         let _ = xdg_config_home;
@@ -2603,7 +2587,7 @@ pub fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -
 
 /// Expand environment variables (`$VAR`, `${VAR}`) in a config string.
 /// Returns `None` when variable syntax is invalid.
-pub fn expand_env_vars(raw: &str) -> Option<String> {
+pub(crate) fn expand_env_vars(raw: &str) -> Option<String> {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
@@ -2649,7 +2633,7 @@ pub fn expand_env_vars(raw: &str) -> Option<String> {
     Some(result)
 }
 
-pub fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
+pub(crate) fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
     let mut resolved = Vec::with_capacity(env.len());
     for (name, value) in env {
         validate_project_env_name(name)?;
@@ -2708,7 +2692,7 @@ pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
 
 /// Whether `name` is a name dux accepts for an environment variable, in
 /// `[env]` and in a project's `env`: `[A-Za-z_][A-Za-z0-9_]*`.
-pub fn is_valid_env_name(name: &str) -> bool {
+pub(crate) fn is_valid_env_name(name: &str) -> bool {
     is_valid_var_name(name)
 }
 
@@ -2723,7 +2707,7 @@ fn validate_project_env_name(name: &str) -> Result<()> {
 /// Expand environment variables (`$VAR`, `${VAR}`) and tilde (`~`) in a path
 /// string.  Returns `None` when the result is unsafe (relative path, directory
 /// traversal via `..`, or invalid variable names).
-pub fn expand_path(raw: &str) -> Option<String> {
+pub(crate) fn expand_path(raw: &str) -> Option<String> {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
@@ -2914,7 +2898,7 @@ impl SourceText {
     }
 
     /// For a text dux wrote, the config that write put in the file.
-    pub fn written_base(&self) -> Option<&Config> {
+    pub(crate) fn written_base(&self) -> Option<&Config> {
         self.written_base.as_deref()
     }
 }
@@ -3433,7 +3417,7 @@ fn is_exact_auth_setting(name: &str) -> bool {
 /// holds nothing `[server.auth]` has; the documentation restore cleans it up.
 /// A table merely named like "auth" (`[path]`, `[oauth]`) and holding no
 /// auth setting is the user's own, as it always was.
-pub fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
+pub(crate) fn misplaced_auth_problem_list(raw: &str) -> Vec<crate::config_auth::Problem> {
     misplaced_auth_problems_tagged(raw)
         .into_iter()
         .map(|(problem, _)| problem)
@@ -3451,19 +3435,20 @@ pub fn plaintext_password_problems(raw: &str) -> Vec<crate::config_auth::Problem
 
 /// What a printer shows in place of a plaintext password written in the
 /// file, `--show` included: it is never echoed.
-pub const PLAINTEXT_PASSWORD_NOT_SHOWN: &str = "(a plaintext password; not shown, and not read)";
+pub(crate) const PLAINTEXT_PASSWORD_NOT_SHOWN: &str =
+    "(a plaintext password; not shown, and not read)";
 
 /// One step of a key path in a config file: a key as the file writes it (a
 /// quoted key holding dots is one key), or an entry of an array.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PathStep {
+pub(crate) enum PathStep {
     Key(String),
     Index(usize),
 }
 
 impl PathStep {
     /// This step as the formatter takes it.
-    pub fn as_part(&self) -> PathPart<'_> {
+    pub(crate) fn as_part(&self) -> PathPart<'_> {
         match self {
             PathStep::Key(key) => PathPart::Key(key),
             PathStep::Index(index) => PathPart::Index(*index),
@@ -3474,7 +3459,7 @@ impl PathStep {
 /// A plaintext password written in a config file, exactly where the start
 /// check found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlaintextPassword {
+pub(crate) struct PlaintextPassword {
     /// The key's whole path as the start check's walk saw it.
     pub steps: Vec<PathStep>,
     /// The lines the key and its whole value sit on in the file's text,
@@ -3487,7 +3472,7 @@ pub struct PlaintextPassword {
 /// [`plaintext_password_problems`] gives), each with where it is. Every
 /// printer hides what this names and decides nothing of its own. Empty when
 /// `raw` is not TOML: a printer then prints none of the file's text.
-pub fn plaintext_passwords(raw: &str) -> Vec<PlaintextPassword> {
+pub(crate) fn plaintext_passwords(raw: &str) -> Vec<PlaintextPassword> {
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
@@ -3524,7 +3509,7 @@ fn plaintext_password_steps(file: &toml::Value) -> Vec<Vec<PathStep>> {
 /// holds nothing else: what [`plaintext_passwords`] says of the same value
 /// in the user's file, for a printer that holds a value rather than the
 /// text it came from. Each is a whole path from the file's top.
-pub fn plaintext_passwords_at(path: &[String], value: &toml::Value) -> Vec<Vec<PathStep>> {
+pub(crate) fn plaintext_passwords_at(path: &[String], value: &toml::Value) -> Vec<Vec<PathStep>> {
     let mut file = value.clone();
     for key in path.iter().rev() {
         let mut table = toml::Table::new();
@@ -3962,13 +3947,13 @@ impl StartProblem {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StartCheck {
     pub problems: Vec<StartProblem>,
-    pub unjudgeable_rules: Vec<String>,
+    pub(crate) unjudgeable_rules: Vec<String>,
 }
 
 /// A check only the terminal UI's crate can make (its `[keys]`, after the
 /// key migrations its start applies), installed by it, so the one list holds
 /// it too. It gets the whole file's text and returns what it refuses.
-pub type TerminalUiCheck = fn(&str) -> Vec<String>;
+pub(crate) type TerminalUiCheck = fn(&str) -> Vec<String>;
 
 static TERMINAL_UI_CHECK: std::sync::OnceLock<TerminalUiCheck> = std::sync::OnceLock::new();
 
@@ -3982,7 +3967,7 @@ pub fn install_terminal_ui_check(check: TerminalUiCheck) {
 /// The migrations only the terminal UI's start applies (its `[keys]`
 /// ones: retired actions pruned, legacy ones folded), installed by it, so
 /// the one list judges the file's types as that start reads them.
-pub type TerminalUiMigration = fn(&mut toml_edit::DocumentMut);
+pub(crate) type TerminalUiMigration = fn(&mut toml_edit::DocumentMut);
 
 static TERMINAL_UI_MIGRATION: std::sync::OnceLock<TerminalUiMigration> = std::sync::OnceLock::new();
 
@@ -4006,7 +3991,7 @@ pub fn terminal_ui_key_corrections(raw: &str) -> Vec<(Vec<String>, String)> {
 
 /// [`terminal_ui_key_corrections`], each binding that gained a retired one's
 /// with the path it came from.
-pub fn terminal_ui_key_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
+pub(crate) fn terminal_ui_key_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
     let Ok(file) = toml::from_str::<toml::Table>(raw) else {
         return Vec::new();
     };
@@ -4094,7 +4079,7 @@ fn contains_binding(bound: &toml::Value, value: &toml::Value) -> bool {
 /// the terminal UI, which alone knows its actions and their defaults, so
 /// `dux config get` reports what it uses by running that resolution, never a
 /// copy of it. `None` for a `[keys]` it cannot read.
-pub type TerminalUiKeyResolution = fn(&str) -> Option<toml::Table>;
+pub(crate) type TerminalUiKeyResolution = fn(&str) -> Option<toml::Table>;
 
 static TERMINAL_UI_KEYS: std::sync::OnceLock<TerminalUiKeyResolution> = std::sync::OnceLock::new();
 
@@ -4108,7 +4093,7 @@ pub fn install_terminal_ui_key_resolution(resolution: TerminalUiKeyResolution) {
 /// the list its binding parser reads (retired and folded names included,
 /// which its load still knows). Installed by the terminal UI, which alone
 /// knows its actions.
-pub type TerminalUiKeyActions = fn(&str) -> bool;
+pub(crate) type TerminalUiKeyActions = fn(&str) -> bool;
 
 static TERMINAL_UI_KEY_ACTIONS: std::sync::OnceLock<TerminalUiKeyActions> =
     std::sync::OnceLock::new();
@@ -4260,7 +4245,7 @@ pub fn start_refusal(raw: &str, surface: Surface) -> Option<String> {
 /// list had its text. Problems about other settings never block a set. A
 /// problem about no setting at all is answerable whenever it is new, known
 /// by its id, so no problem is ever invisible to a set.
-pub fn problems_added_by_set<'a>(
+pub(crate) fn problems_added_by_set<'a>(
     before: &StartCheck,
     after: &'a StartCheck,
     key: &[String],
@@ -4625,7 +4610,7 @@ pub fn shown_path(raw: &str, segments: &[String]) -> String {
 /// One step of a path that may run through an array of tables: a key, or
 /// the index of an entry (`projects[0]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PathPart<'a> {
+pub(crate) enum PathPart<'a> {
     Key(&'a str),
     Index(usize),
 }
@@ -4635,7 +4620,7 @@ pub enum PathPart<'a> {
 /// [`first_hidden_part`]): `[[projects]]` against a project's fields, and
 /// any other array's elements have no keys in the schema, so each is placed
 /// by its line.
-pub fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
+pub(crate) fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
     let printed = |parts: &[PathPart<'_>]| {
         let mut out = String::new();
         for part in parts {
@@ -4712,13 +4697,13 @@ pub fn name_is_hidden(_raw: &str, segments: &[String]) -> bool {
 
 /// Whether any part of `parts` (a path that may run through arrays) is one
 /// the formatter never prints, so nothing at or below it is printed either.
-pub fn first_hidden_part_of(parts: &[PathPart<'_>]) -> bool {
+pub(crate) fn first_hidden_part_of(parts: &[PathPart<'_>]) -> bool {
     first_hidden_part(parts).is_some()
 }
 
 /// [`name_is_hidden`] for a path that may run through arrays: whether its
 /// last part, a key, is one the formatter never prints.
-pub fn part_is_hidden(parts: &[PathPart<'_>]) -> bool {
+pub(crate) fn part_is_hidden(parts: &[PathPart<'_>]) -> bool {
     first_hidden_part(parts).is_some_and(|(index, _)| index + 1 == parts.len())
 }
 
@@ -4961,7 +4946,7 @@ fn config_start_problems(config: &Config, raw: Option<&str>) -> Vec<StartProblem
 
 /// The checks the terminal UI's start makes on the config it read (see
 /// [`check_start`] for the whole list), as sentences.
-pub fn start_check_problems(config: &Config) -> Vec<String> {
+pub(crate) fn start_check_problems(config: &Config) -> Vec<String> {
     config_start_problems(config, config.source_text.as_str())
         .into_iter()
         .filter(|problem| problem.stops(crate::config::Surface::TerminalUi))
@@ -5000,7 +4985,7 @@ pub fn start_check(config: &Config) -> Result<()> {
 /// The problems with `config`'s log files at `paths`: `[logging] path` or `[server]
 /// log_path` naming a file dux keeps for itself, which the log would be written into.
 /// Both surfaces refuse to start, and to reload, with any of them.
-pub fn log_path_problems(config: &Config, paths: &DuxPaths) -> Vec<StartProblem> {
+pub(crate) fn log_path_problems(config: &Config, paths: &DuxPaths) -> Vec<StartProblem> {
     use crate::config_auth::Problem;
     // A file as the system finds it: through every link when it exists, else
     // through its folder's, so `..`, a linked folder and a link at the path itself
@@ -5094,7 +5079,7 @@ pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, Conf
 /// section loads. A `server` or `server.auth` that is not a table, or a
 /// value of the wrong type, is one problem; otherwise every rule the
 /// section breaks is listed.
-pub fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
+pub(crate) fn auth_problems_of(raw: &str) -> Vec<crate::config_auth::Problem> {
     let file: toml::Table = match toml::from_str(raw) {
         Ok(file) => file,
         Err(error) => {
@@ -5141,7 +5126,7 @@ fn auth_section_problems(file: &toml::Table, raw: &str) -> Vec<crate::config_aut
 
 /// Read one `server.auth` value through the same deserializer every other
 /// reader uses.
-pub fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
+pub(crate) fn parse_auth_value(auth: toml::Value) -> Result<ServerAuthConfig, String> {
     #[derive(Deserialize)]
     struct Holder {
         auth: ServerAuthConfig,
@@ -5433,7 +5418,7 @@ pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, Confi
 /// The file's values as written: migrated and recovered, with provider
 /// defaults, but without the in-memory corrections [`load_config`] makes to
 /// out-of-range values.
-pub fn load_config_file_as_written(
+pub(crate) fn load_config_file_as_written(
     config_path: &Path,
 ) -> std::result::Result<Config, ConfigLoadError> {
     if let Some(raw) = read_config_text(config_path)? {
@@ -5502,7 +5487,9 @@ pub fn correct_loaded(config: Config) -> Config {
 /// A config's text read as written: migrated in memory, recovered, with
 /// provider defaults, without the load corrections, and carrying the text
 /// itself as its [`Config::source_text`].
-pub fn config_from_text_as_written(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
+pub(crate) fn config_from_text_as_written(
+    raw: &str,
+) -> std::result::Result<Config, ConfigLoadProblem> {
     config_from_text(raw, Report::Log)
 }
 
@@ -5565,7 +5552,7 @@ fn key_path(names: &[&str]) -> Vec<String> {
 /// another setting of the file (a deprecated key, a retired binding), that
 /// setting's path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LoadCorrection {
+pub(crate) struct LoadCorrection {
     pub path: Vec<String>,
     pub reason: String,
     pub from: Option<Vec<String>>,
@@ -5596,7 +5583,7 @@ pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
 
 /// [`load_corrections_of`], each with the setting a carried-over value came
 /// from.
-pub fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
+pub(crate) fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
     let mut found: Vec<LoadCorrection> = raw
         .parse::<toml_edit::DocumentMut>()
         .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
@@ -5816,7 +5803,9 @@ pub(crate) fn raw_has_removed_max_websocket_connections(raw: &str) -> bool {
 
 /// Check whether a provider command is available on PATH.
 /// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
-pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::Result<(), String> {
+pub(crate) fn check_provider_available(
+    config: &ProviderCommandConfig,
+) -> std::result::Result<(), String> {
     if provider_command_available(&config.command) {
         return Ok(());
     }
@@ -6003,7 +5992,7 @@ impl ServerFlag {
     }
 
     /// Whether `cli` carries it.
-    pub fn is_set(self, cli: &ServerCliOverrides) -> bool {
+    pub(crate) fn is_set(self, cli: &ServerCliOverrides) -> bool {
         match self {
             Self::Bind => cli.bind.is_some(),
             Self::Port => cli.port.is_some(),
@@ -6033,7 +6022,7 @@ impl ServerFileSetting {
     }
 
     /// Whether `cli` takes the file's value out of the picture.
-    pub fn overridden_by(self, cli: &ServerCliOverrides) -> bool {
+    pub(crate) fn overridden_by(self, cli: &ServerCliOverrides) -> bool {
         self.flags().iter().any(|flag| flag.is_set(cli))
     }
 
@@ -6066,7 +6055,7 @@ pub struct ServerCliOverrides {
 /// `validate_server_host`, so a whitespaced host parses the same way at both.
 /// Hostnames are not resolved; the value must be an IP literal such as
 /// `127.0.0.1` or `0.0.0.0`.
-pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
+pub(crate) fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
     use std::str::FromStr;
     let trimmed = host.trim();
     std::net::IpAddr::from_str(trimmed).map_err(|_| {

@@ -22,12 +22,12 @@ use std::time::{Duration, Instant};
 
 /// The longest socket path the platform accepts, in bytes. `sun_path` holds
 /// 104 bytes on macOS and 108 on Linux, and the terminating NUL takes one.
-pub const MAX_PATH_BYTES: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
+pub(crate) const MAX_PATH_BYTES: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
 
 /// Why dux runs without its control socket. Each reads as one line, because
 /// it is written into the lock file as `control-socket-unavailable=<reason>`.
 #[derive(Debug)]
-pub enum Unavailable {
+pub(crate) enum Unavailable {
     /// The resolved path is longer than [`MAX_PATH_BYTES`].
     PathTooLong { path: PathBuf, bytes: usize },
     /// The path has a line break in it, which the lock file cannot carry.
@@ -365,7 +365,7 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
 
 /// The sentence a start without the socket shows on its status line and
 /// writes to `dux.log`: what is missing, why, and the setting that fixes it.
-pub fn unavailable_warning(reason: &Unavailable) -> String {
+pub(crate) fn unavailable_warning(reason: &Unavailable) -> String {
     format!(
         "dux is running without its control socket, so command-line clients cannot reach \
          it: {reason}. Set [server] control_socket in config.toml to a path dux can use, \

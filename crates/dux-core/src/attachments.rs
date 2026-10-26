@@ -654,7 +654,7 @@ impl Attachments {
 
     /// [`Self::reserve`] for a change agreed to over `accepted`: refused, with
     /// everybody in the way, only when somebody outside `accepted` is in the way.
-    pub fn reserve_accepting(
+    pub(crate) fn reserve_accepting(
         &self,
         scope: Scope,
         requester: Option<&str>,
@@ -684,7 +684,7 @@ impl Attachments {
     }
 
     /// Keep reservation `id` until a final lands under `key`, or `until`.
-    pub fn hand_to_key(&self, id: u64, key: &str, until: Instant) {
+    pub(crate) fn hand_to_key(&self, id: u64, key: &str, until: Instant) {
         self.with(|state| {
             if let Some(reservation) = state.reservations.get_mut(&id) {
                 reservation.life = Life::Key {

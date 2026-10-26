@@ -29,7 +29,7 @@ pub fn running_in_container() -> bool {
 /// Whether `KUBERNETES_SERVICE_HOST`, which Kubernetes sets in every pod, is
 /// set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KubernetesEnv {
+pub(crate) enum KubernetesEnv {
     /// It is set.
     Set,
     /// It is not.
@@ -53,7 +53,7 @@ pub enum KubernetesEnv {
 ///
 /// A host whose own root is an overlay (a live image) reads as a container;
 /// that only adds a warning.
-pub fn container_signals_in(root: &Path, kubernetes: KubernetesEnv) -> bool {
+pub(crate) fn container_signals_in(root: &Path, kubernetes: KubernetesEnv) -> bool {
     let read = |path: &str| std::fs::read_to_string(root.join(path)).ok();
     kubernetes == KubernetesEnv::Set
         || root.join(".dockerenv").exists()

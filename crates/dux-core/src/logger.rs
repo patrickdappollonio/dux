@@ -98,7 +98,7 @@ pub fn error(message: &str) {
 /// Adopt a new `logging.level`. Takes effect on the next line written; the log
 /// FILE is opened once for the process, so `logging.path` is startup-only and a
 /// reload cannot move it.
-pub fn set_level(level: &str) {
+pub(crate) fn set_level(level: &str) {
     LEVEL.store(
         crate::config_effective::effective_log_level(level) as u8,
         Ordering::Relaxed,
@@ -108,7 +108,7 @@ pub fn set_level(level: &str) {
 /// Adopt new rotation settings. They are read afresh on every line written, so
 /// a reload takes effect at the next write; the log FILE stays the one opened at
 /// startup, exactly as `logging.path` does.
-pub fn set_rotation(config: &LoggingConfig) {
+pub(crate) fn set_rotation(config: &LoggingConfig) {
     ROTATION.store(RotationSettings::from_config(config));
 }
 

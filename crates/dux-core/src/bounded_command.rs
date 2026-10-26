@@ -19,13 +19,13 @@ use std::time::{Duration, Instant};
 /// read everything still has to be scheduled to hand its buffer over, and on a
 /// loaded machine a short fixed window loses that race and silently returns
 /// empty output. See [`run_command_with_timeout`] for the ceiling.
-pub const DEFAULT_READER_DRAIN: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_READER_DRAIN: Duration = Duration::from_secs(2);
 
 /// Outcome of a bounded invocation. `Failed` carries the failure text (a spawn or
 /// wait error) so callers can log the real cause instead of conflating it with a
 /// timeout.
 #[derive(Debug)]
-pub enum CommandOutcome {
+pub(crate) enum CommandOutcome {
     /// The child exited on its own; the output is whatever was drained.
     Completed(Output),
     /// The wall-clock cap elapsed first. The child has been killed and reaped.
@@ -52,7 +52,7 @@ pub enum CommandOutcome {
 /// scheduling race rather than a wedge.
 ///
 /// `label` names the program in failure text and is only used for messages.
-pub fn run_command_with_timeout(
+pub(crate) fn run_command_with_timeout(
     mut cmd: Command,
     timeout: Duration,
     reader_drain: Duration,

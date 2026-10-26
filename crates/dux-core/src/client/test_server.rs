@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 /// A request as the stand-in received it.
 #[derive(Clone, Debug)]
-pub struct Seen {
+pub(crate) struct Seen {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
@@ -15,7 +15,7 @@ pub struct Seen {
 }
 
 impl Seen {
-    pub fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -23,7 +23,7 @@ impl Seen {
     }
 }
 
-pub enum Reply {
+pub(super) enum Reply {
     /// These exact bytes, then close.
     Raw(String),
     /// Close without answering.
@@ -35,7 +35,7 @@ pub enum Reply {
 }
 
 impl Reply {
-    pub fn json(status: u16, body: &str) -> Self {
+    pub(super) fn json(status: u16, body: &str) -> Self {
         Reply::Raw(format!(
             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
@@ -45,16 +45,16 @@ impl Reply {
 
 type Handler = Arc<dyn Fn(&Seen) -> Reply + Send + Sync>;
 
-pub struct FakeDux {
+pub(crate) struct FakeDux {
     seen: Arc<Mutex<Vec<Seen>>>,
 }
 
 impl FakeDux {
-    pub fn seen(&self) -> Vec<Seen> {
+    pub(super) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
-    pub fn unix(
+    pub(super) fn unix(
         path: &std::path::Path,
         handler: impl Fn(&Seen) -> Reply + Send + Sync + 'static,
     ) -> Self {
@@ -71,7 +71,7 @@ impl FakeDux {
         Self { seen }
     }
 
-    pub fn tcp(
+    pub(super) fn tcp(
         handler: impl Fn(&Seen) -> Reply + Send + Sync + 'static,
     ) -> (Self, std::net::SocketAddr) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a test port");
@@ -146,7 +146,7 @@ fn serve<S: Read + Write>(stream: S, record: &Mutex<Vec<Seen>>, handler: &Handle
 }
 
 /// A temp folder only this user can enter, as dux's config folder is.
-pub fn private_dir() -> tempfile::TempDir {
+pub(crate) fn private_dir() -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

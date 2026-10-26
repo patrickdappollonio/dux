@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use crate::git::FileTracking;
+
 use crate::engine::events::{
     BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, EventReaction,
     FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
@@ -324,12 +326,17 @@ impl Engine {
         let classify = {
             let worktree_path = worktree_path.clone();
             let path = path.clone();
-            move || -> Result<bool, String> {
-                match untracked {
-                    Some(untracked) => Ok(untracked),
+            move || -> Result<FileTracking, String> {
+                let untracked = match untracked {
+                    Some(untracked) => untracked,
                     None => crate::git::discard_classify(&worktree_path, &path)
-                        .map_err(|err| format!("{err:#}")),
-                }
+                        .map_err(|err| format!("{err:#}"))?,
+                };
+                Ok(if untracked {
+                    FileTracking::Untracked
+                } else {
+                    FileTracking::Tracked
+                })
             }
         };
         // A folder, a nested repository or an untracked link is removed
@@ -357,15 +364,11 @@ impl Engine {
             });
             return Ok(self.spawn_changes_op(op, move || {
                 let _hold = hold;
-                let is_untracked = classify()?;
+                let tracking = classify()?;
                 crate::git::discard_confirmed(
                     &worktree_path,
                     &path,
-                    if is_untracked {
-                        crate::git::FileTracking::Untracked
-                    } else {
-                        crate::git::FileTracking::Tracked
-                    },
+                    tracking,
                     Some(confirmed),
                     || {
                         Err(crate::destructive::Refused(format!(
@@ -375,15 +378,7 @@ impl Engine {
                     },
                 )
                 .map_err(|err| format!("{err:#}"))?;
-                Ok(discard_message(
-                    &path,
-                    if is_untracked {
-                        FileTracking::Untracked
-                    } else {
-                        FileTracking::Tracked
-                    },
-                    confirmed,
-                )(0))
+                Ok(discard_message(&path, tracking, confirmed)(0))
             }));
         }
         let claim = self
@@ -406,37 +401,24 @@ impl Engine {
             .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
         Ok(self.spawn_changes_op(op, move || {
             let _hold = hold;
-            let is_untracked = classify()?;
+            let tracking = classify()?;
             // The discard refuses anything that is no longer what was
             // confirmed, so a success is the kind the user confirmed; the
             // number of files is what actually went.
             let went = crate::git::discard_confirmed(
                 &worktree_path,
                 &path,
-                if is_untracked {
-                    crate::git::FileTracking::Untracked
-                } else {
-                    crate::git::FileTracking::Tracked
-                },
+                tracking,
                 Some(confirmed),
                 || check.clear(&[&claim], "delete"),
             )
             .map_err(|err| format!("{err:#}"))?;
-            Ok(discard_message(
-                &path,
-                if is_untracked {
-                    FileTracking::Untracked
-                } else {
-                    FileTracking::Tracked
-                },
-                confirmed,
-            )(went))
+            Ok(discard_message(&path, tracking, confirmed)(went))
         }))
     }
 }
 
 /// What a discard of `path` says once it is done, given how many files went.
-use crate::git::FileTracking;
 
 fn discard_message(
     path: &str,

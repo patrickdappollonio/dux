@@ -81,7 +81,11 @@ impl QuietSurfaces {
     /// Whether the web shows this status. The wire omits the `quiet` field
     /// entirely when it does, so the shape a browser reads is what it was
     /// before the flag grew a second half.
-    pub fn shows_on_web(&self) -> bool {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if hands the predicate a reference to the field"
+    )]
+    pub(crate) fn shows_on_web(&self) -> bool {
         !self.web
     }
 }
@@ -100,7 +104,7 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Generous on purpose. It is a backstop for a bug, not a timeout: a value a
 /// slow clone or a long fetch could plausibly cross would reintroduce the false
 /// "timed out" this mechanism exists to remove.
-pub const BUSY_LIVE_CEILING: Duration = Duration::from_mins(30);
+pub(crate) const BUSY_LIVE_CEILING: Duration = Duration::from_mins(30);
 
 /// The keys of status operations the engine is still running.
 ///
@@ -204,7 +208,7 @@ pub const FINAL_REPLAY_WINDOW: Duration = Duration::from_secs(30);
 /// `crates/dux-web/web/src/lib/notify.ts` so the status line and the browser
 /// toast agree; `the_web_mirrors_the_warning_clear_factor` reads that file and
 /// fails if they drift.
-pub const WARNING_CLEAR_FACTOR: u32 = 3;
+pub(crate) const WARNING_CLEAR_FACTOR: u32 = 3;
 
 /// How many statuses may wait behind the one on the TUI's status line.
 ///
@@ -214,7 +218,7 @@ pub const WARNING_CLEAR_FACTOR: u32 = 3;
 ///
 /// When the queue is full the oldest waiting `Info` is dropped, not the newest
 /// arrival, because the newer message is the more current fact.
-pub const MAX_QUEUED_STATUSES: usize = 5;
+pub(crate) const MAX_QUEUED_STATUSES: usize = 5;
 
 /// The storage key of the `n`th anonymous entry under [`StatusRetention::Retain`].
 ///
@@ -276,7 +280,7 @@ const SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
 /// Return the arc spinner frame appropriate for the given wall-clock
 /// `since` instant (advances every 100 ms). Used by the TUI's `render_footer`
 /// when displaying a `Busy` status from the keyed controller.
-pub fn spinner_frame_for(since: Instant) -> &'static str {
+pub(crate) fn spinner_frame_for(since: Instant) -> &'static str {
     let index = ((since.elapsed().as_millis() / 100) as usize) % SPINNER_FRAMES.len();
     SPINNER_FRAMES[index]
 }
@@ -336,7 +340,7 @@ enum Waiters {
 
 /// One open status, keyed or anonymous.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyedStatus {
+pub(crate) struct KeyedStatus {
     /// `None` = the anonymous slot (unkeyed transients); `Some` = a keyed op.
     pub key: Option<String>,
     pub tone: StatusTone,

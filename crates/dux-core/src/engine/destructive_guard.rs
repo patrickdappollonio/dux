@@ -35,7 +35,7 @@ impl Drop for EngineThreadMark {
 
 /// Panic, in test builds, when `what` (a blocking read a destructive
 /// clearance does) runs on the engine thread during a destructive command.
-pub fn assert_off_engine_thread(what: &str) {
+pub(crate) fn assert_off_engine_thread(what: &str) {
     #[cfg(test)]
     assert!(
         !ON_ENGINE_THREAD.with(std::cell::Cell::get),

@@ -276,7 +276,7 @@ pub struct BootstrapView {
     /// value (global default or project override). Named `global_` here so it
     /// cannot be confused with that per-project field when read alongside it.
     /// Older servers omit it, so the web falls back to "claude".
-    pub global_default_provider: String,
+    pub(crate) global_default_provider: String,
     /// The first-run welcome screen's content, from `dux_core::welcome_screen`.
     /// Projected unconditionally, because the app menu can open the screen on
     /// demand and the content is config-static. Distinct from `welcome_tips`,
@@ -419,7 +419,7 @@ impl PendingFirstLoadView {
     /// The wire name for [`crate::first_load::FirstLoad::Welcome`].
     pub const WELCOME: &'static str = "welcome";
     /// The wire name for [`crate::first_load::FirstLoad::WhatsNew`].
-    pub const WHATS_NEW: &'static str = "whats_new";
+    pub(crate) const WHATS_NEW: &'static str = "whats_new";
 
     pub fn welcome() -> Self {
         Self {
@@ -564,7 +564,7 @@ impl AgentWorkspaceView {
     /// Project the model workspace, folding in the live repository verdict a
     /// folder needs (the model does not carry it: it is engine state, refreshed
     /// by a probe).
-    pub fn from_workspace(
+    pub(crate) fn from_workspace(
         workspace: &crate::model::AgentWorkspace,
         repo_status: crate::git::FolderRepoStatus,
         conversation: ConversationResume,
@@ -646,7 +646,7 @@ pub struct SessionView {
     /// (unlike `overridden`) precisely because it is the state in which there
     /// is NO pull request to hang it off: it is what lets a surface offer the
     /// way back.
-    pub pr_autodetect_suppressed: bool,
+    pub(crate) pr_autodetect_suppressed: bool,
     /// The id of this agent's **session-slot tab**: its first tab. Closing that
     /// tab hands the slot on, so the pointer moves; what cannot be closed is an
     /// agent's only tab. Published so the browser never has to infer slot-ness
@@ -738,7 +738,7 @@ impl crate::model::TerminalOwner {
     /// directory rather than a live probe: this string feeds the spine's change
     /// fingerprint, so a value that moved on every `cd` would churn the sidebar
     /// and make the row's search key unstable.
-    pub fn to_view(&self, cwd: &std::path::Path) -> TerminalOwnerView {
+    pub(crate) fn to_view(&self, cwd: &std::path::Path) -> TerminalOwnerView {
         match self.as_ref() {
             crate::model::TerminalOwnerRef::Session(id) => TerminalOwnerView::Session {
                 session_id: id.to_string(),
@@ -819,7 +819,7 @@ pub struct TerminalView {
 /// into a stable kind plus the payload that kind carries, so a browser can word
 /// the sentence without knowing Rust's variants.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct TabRunVerdictView {
+pub(crate) struct TabRunVerdictView {
     /// One of `launch_failed`, `exited`, `exited_unknown`, `rapid_clean_exit`
     /// (see [`crate::tab_verdict::TabRunEnding::wire_kind`]). A client that does
     /// not recognise a kind must fall back to its generic sentence rather than
@@ -905,7 +905,7 @@ pub struct AgentTabView {
     /// says, and the engine's clock is a monotonic `Instant` with no wall-clock
     /// spelling. It goes stale by one spine refresh interval, which a coarse age
     /// absorbs.
-    pub last_run_verdict: Option<TabRunVerdictView>,
+    pub(crate) last_run_verdict: Option<TabRunVerdictView>,
     /// What this tab's live process launched with, for a file dropped onto its
     /// pane; `None` when no process is live.
     ///
@@ -1349,7 +1349,7 @@ impl Engine {
     /// The set of project ids that own at least one live project terminal. Feeds
     /// the sidebar split so a project with a live terminal never sinks below the
     /// "no agents" separator.
-    pub fn project_ids_with_terminals(&self) -> std::collections::HashSet<String> {
+    pub(crate) fn project_ids_with_terminals(&self) -> std::collections::HashSet<String> {
         self.companion_terminals
             .values()
             .filter_map(|t| match t.owner.as_ref() {

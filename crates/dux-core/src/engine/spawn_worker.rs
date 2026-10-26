@@ -20,20 +20,20 @@ pub struct CommandWorkerSpec {
     /// `Some` when the command guards re-entry through `in_flight`. The
     /// primitive marks the key before spawning; the worker's own
     /// completion-event handler must clear it.
-    pub in_flight_key: Option<InFlightKey>,
+    pub(crate) in_flight_key: Option<InFlightKey>,
     /// Status to enqueue on the worker channel before the worker thread starts.
     /// It travels through the same FIFO channel as the worker's completion
     /// event, so an out-of-order arrival cannot overwrite it.
-    pub busy_status: Option<StatusUpdate>,
+    pub(crate) busy_status: Option<StatusUpdate>,
     /// Reaction returned to the caller when `in_flight_key` is already in
     /// flight. `None` falls back to a generic warning naming the label.
-    pub already_running_status: Option<StatusUpdate>,
+    pub(crate) already_running_status: Option<StatusUpdate>,
     /// Builds the completion event posted when the worker thread panics. It must
     /// be one `process_worker_event` routes through this command's normal
     /// failure path, which is what clears the in-flight key. `None` logs the
     /// panic and synthesises nothing, so use it only where there is no
     /// in-flight key to clear.
-    pub panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
+    pub(crate) panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
 /// Whether a status op's completion has the surfaces read the changed-files
@@ -70,7 +70,11 @@ impl Engine {
     /// - `EventReaction::Status(error)` when `thread::Builder::spawn`
     ///   returns `Err` (rare; PID / RLIMIT exhaustion). The in-flight key is
     ///   cleared in this case so a retry can proceed.
-    pub fn spawn_command_worker<F>(&mut self, spec: CommandWorkerSpec, job: F) -> EventReaction
+    pub(crate) fn spawn_command_worker<F>(
+        &mut self,
+        spec: CommandWorkerSpec,
+        job: F,
+    ) -> EventReaction
     where
         F: FnOnce(Sender<WorkerEvent>) + Send + 'static,
     {
@@ -175,7 +179,7 @@ impl Engine {
     /// The sweep covers only the registries keyed by the status key; a key
     /// cannot address the ones keyed by session id, and missing them costs a
     /// leaked op struct rather than anything the user sees.
-    pub fn abandon_status_op(&mut self, key: &str) {
+    pub(crate) fn abandon_status_op(&mut self, key: &str) {
         self.retire_status_key(key);
         self.pending_create_ops.remove(key);
         self.pending_web_checkout_ops.remove(key);
@@ -207,7 +211,7 @@ impl Engine {
     /// [`Self::spawn_status_op`] for work that changes a worktree's files:
     /// its completion also has the surfaces read the changed-files listing
     /// again, so the change shows the moment it is done.
-    pub fn spawn_changes_op<T, E, F>(
+    pub(crate) fn spawn_changes_op<T, E, F>(
         &mut self,
         op: crate::engine::StatusOp<T, E>,
         work: F,
@@ -322,12 +326,12 @@ pub struct BackgroundWorkerSpec {
     pub label: String,
     /// Most background workers have no in-flight tracking. The option exists
     /// for the few that legitimately need single-instance semantics.
-    pub in_flight_key: Option<InFlightKey>,
+    pub(crate) in_flight_key: Option<InFlightKey>,
     /// Posted on `worker_tx` if the worker thread panics, so
     /// `process_worker_event` can clear the in-flight key through its existing
     /// failure handler. `None` logs the panic and synthesises nothing, for
     /// workers whose completion event has no failure variant, or none at all.
-    pub panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
+    pub(crate) panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
 }
 
 impl Engine {
@@ -339,7 +343,7 @@ impl Engine {
     /// [`BackgroundSpawn`] outcome lets a caller unwind optimistic state on a
     /// synchronous spawn failure, which is logged and clears the in-flight key
     /// so a retry can proceed.
-    pub fn spawn_background_worker<F>(
+    pub(crate) fn spawn_background_worker<F>(
         &mut self,
         spec: BackgroundWorkerSpec,
         job: F,
@@ -478,7 +482,7 @@ impl Engine {
     /// since a watcher that cannot start is logged and nothing more, but a
     /// caller holding a single-instance slot for the loop must release it, or
     /// the loop can never be started again.
-    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F) -> bool
+    pub(crate) fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F) -> bool
     where
         F: FnMut(&Sender<WorkerEvent>) -> LoopControl + Send + 'static,
     {

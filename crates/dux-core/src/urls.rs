@@ -12,10 +12,10 @@ pub const DOCS: &str = "https://getdux.app/docs";
 
 /// `owner/repo`, the one place the coordinates are spelled out. Everything
 /// below is built from it so a rename is a one-line change.
-pub const REPO_SLUG: &str = "patrickdappollonio/dux";
+pub(crate) const REPO_SLUG: &str = "patrickdappollonio/dux";
 
 /// The source repository.
-pub const REPO: &str = "https://github.com/patrickdappollonio/dux";
+pub(crate) const REPO: &str = "https://github.com/patrickdappollonio/dux";
 
 /// The releases index. Also the fallback destination when there is no release
 /// matching the running version (a dev build, or a tag GitHub has not published

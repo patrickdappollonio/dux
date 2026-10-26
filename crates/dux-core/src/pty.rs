@@ -95,7 +95,7 @@ pub enum Hyperlinks {
 
 /// Whether a plain bell counts as asking for attention (`attention_on_bell`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BellPolicy {
+pub(crate) enum BellPolicy {
     /// A bell counts.
     Counts,
     /// A bell is drained and ignored.
@@ -212,7 +212,7 @@ impl TerminalSnapshot {
 /// cell lands somewhere else, and setting a region homes the cursor, so the
 /// cursor can only be placed once the region is already in place. Hence the whole
 /// screen up front, cells, region, cursor.
-pub fn synthesize_repaint(
+pub(crate) fn synthesize_repaint(
     snapshot: &TerminalSnapshot,
     screen: ScreenBuffer,
     scroll_region: ScrollRegion,
@@ -939,7 +939,8 @@ pub struct PtyClient {
 }
 
 /// Where a client reads the members recorded for its child's session.
-pub type RecordedMembers = Box<dyn Fn() -> Vec<crate::process_sessions::ProcessIdentity> + Send>;
+pub(crate) type RecordedMembers =
+    Box<dyn Fn() -> Vec<crate::process_sessions::ProcessIdentity> + Send>;
 
 /// Maximum number of captured passthrough sequences retained before the oldest is
 /// dropped. Small: the host is expected to drain every tick, so this only bounds a
@@ -1159,7 +1160,7 @@ impl PtyClient {
     /// life of the client. Companion terminals pass `false`: they are plain shells,
     /// not agents, so scanning their every byte for OSC / bell signals only burns
     /// cycles and could raise spurious attention.
-    pub fn spawn_with_env_opts(
+    pub(crate) fn spawn_with_env_opts(
         command: &str,
         args: &[String],
         cwd: &Path,
@@ -1373,7 +1374,7 @@ impl PtyClient {
 
     /// Set where the members recorded for the child's session are read from
     /// (see the field).
-    pub fn set_recorded_members(&self, source: RecordedMembers) {
+    pub(crate) fn set_recorded_members(&self, source: RecordedMembers) {
         if let Ok(mut slot) = self.recorded_members.lock() {
             *slot = Some(source);
         }
@@ -1401,7 +1402,10 @@ impl PtyClient {
     }
 
     /// Set what runs once this client's child is gone (see the field).
-    pub fn set_leader_exit_hook(&self, hook: impl Into<crate::process_sessions::LeaderExitHook>) {
+    pub(crate) fn set_leader_exit_hook(
+        &self,
+        hook: impl Into<crate::process_sessions::LeaderExitHook>,
+    ) {
         let hook = hook.into();
         if let Ok(mut slot) = self.recording.lock() {
             *slot = hook.recording();
@@ -1415,7 +1419,7 @@ impl PtyClient {
     /// running in its session is recorded without waiting for this client to
     /// drop. A quit calls it after every child has stopped, because the
     /// clients themselves may never drop before the process exits.
-    pub fn fire_leader_exit_hook(&self) {
+    pub(crate) fn fire_leader_exit_hook(&self) {
         if let Some(hook) = self
             .leader_exit_hook
             .lock()
@@ -1743,14 +1747,14 @@ impl PtyClient {
     /// nothing at all. A poisoned lock answers `false`, which is the safe way
     /// round: it starts a fresh session rather than sitting on words nobody can
     /// read.
-    pub fn has_readable_output(&self) -> bool {
+    pub(crate) fn has_readable_output(&self) -> bool {
         self.terminal.lock().is_ok_and(|t| t.has_readable_output())
     }
 
     /// Returns `true` if the terminal has only minimal output (no scrollback
     /// and at most `threshold` visible lines). Used to detect failed resume
     /// attempts that print a short error and exit.
-    pub fn has_minimal_output(&self, threshold: usize) -> bool {
+    pub(crate) fn has_minimal_output(&self, threshold: usize) -> bool {
         self.terminal
             .lock()
             .map_or(true, |t| t.has_minimal_output(threshold))
@@ -1779,7 +1783,7 @@ impl PtyClient {
     ///
     /// Suppresses the signal briefly after a resize to avoid counting the
     /// child process's redraw burst as streaming activity.
-    pub fn take_received_data(&self) -> bool {
+    pub(crate) fn take_received_data(&self) -> bool {
         if !self.received_data.swap(false, Ordering::AcqRel) {
             return false;
         }
@@ -1798,7 +1802,7 @@ impl PtyClient {
     /// flags are drained every call (so a suppressed signal never lingers);
     /// `bells` gates whether a plain bell counts (the `attention_on_bell`
     /// preference). Notifications always count when the feature is enabled.
-    pub fn take_attention(&self, bells: BellPolicy) -> bool {
+    pub(crate) fn take_attention(&self, bells: BellPolicy) -> bool {
         let notify = self.attention_notify.swap(false, Ordering::AcqRel);
         let bell = self.attention_bell.swap(false, Ordering::AcqRel);
         notify || (bells == BellPolicy::Counts && bell)
@@ -1807,7 +1811,7 @@ impl PtyClient {
     /// Drain and return every captured passthrough sequence, oldest first. Mirrors
     /// [`PtyClient::take_attention`]: the caller (the engine) decides which kinds to
     /// forward. Companion terminals never capture, so this is always empty for them.
-    pub fn take_passthrough(&self) -> Vec<crate::attention::CapturedSeq> {
+    pub(crate) fn take_passthrough(&self) -> Vec<crate::attention::CapturedSeq> {
         self.passthrough
             .lock()
             .map(|mut ring| ring.drain(..).collect())
@@ -1828,7 +1832,7 @@ impl PtyClient {
     /// The most recent `OSC 9;4` progress report, if the agent emitted one. This
     /// is a non-consuming read: the value persists until a newer report replaces
     /// it. Staleness is the engine's concern.
-    pub fn progress_report(&self) -> Option<ProgressReport> {
+    pub(crate) fn progress_report(&self) -> Option<ProgressReport> {
         self.progress.lock().ok().and_then(|slot| *slot)
     }
 
@@ -1900,7 +1904,7 @@ impl PtyClient {
     /// [`PtyClient::is_exited`] flipping: the child can die while the PTY read
     /// side is still open, so callers that need the child's output fully
     /// ingested must wait for `is_exited`, and use this only to bound that wait.
-    pub fn reaped_at(&self) -> Option<Instant> {
+    pub(crate) fn reaped_at(&self) -> Option<Instant> {
         self.reaped.as_ref().map(|(_, at)| *at)
     }
 
@@ -1912,7 +1916,7 @@ impl PtyClient {
     /// cannot bound that wait on the reap, because the wait exists precisely for
     /// the case where no reap has happened: a child that closes its descriptors
     /// and keeps running reaches EOF and is never reapable at all.
-    pub fn exited_at(&self) -> Option<Instant> {
+    pub(crate) fn exited_at(&self) -> Option<Instant> {
         self.exited_at.get().copied()
     }
 
@@ -1934,7 +1938,7 @@ impl PtyClient {
     /// that has `EOFed` without ever being reaped still has a duration, which is
     /// what lets a caller judge a launch that died instantly even when no exit
     /// status was ever available for it.
-    pub fn run_duration(&self) -> Option<std::time::Duration> {
+    pub(crate) fn run_duration(&self) -> Option<std::time::Duration> {
         [self.exited_at(), self.reaped_at()]
             .into_iter()
             .flatten()
@@ -1943,7 +1947,7 @@ impl PtyClient {
     }
 
     /// Returns the PID of the shell process spawned in this PTY.
-    pub fn child_process_id(&self) -> Option<u32> {
+    pub(crate) fn child_process_id(&self) -> Option<u32> {
         self.child.process_id()
     }
 
@@ -1984,7 +1988,7 @@ impl PtyClient {
     /// shutdown action, and a SIGKILL that did not land leaves a child running
     /// while `shutdown_ptys` reports it force-closed, so it must leave a trace
     /// (mirrors the `Drop` breadcrumb, louder because the context is explicit).
-    pub fn force_terminate(&self) {
+    pub(crate) fn force_terminate(&self) {
         if let Err(err) = self.signal_process_groups(rustix::process::Signal::KILL)
             && err != rustix::io::Errno::SRCH
         {
@@ -2019,7 +2023,7 @@ impl PtyClient {
     /// anything is asked to exit, because a process that called `setsid` is
     /// tied to the agent only by its parent, and that link is cut the moment
     /// the parent exits.
-    pub fn signal_targets(&self) -> SignalTargets {
+    pub(crate) fn signal_targets(&self) -> SignalTargets {
         // A reaped child's group id is signalled only while a recorded member
         // still holds it; an empty group's id may name somebody else by now.
         let child = self
@@ -2030,7 +2034,7 @@ impl PtyClient {
     }
 
     /// The session this PTY's child leads, recorded at spawn.
-    pub fn process_session(&self) -> Option<crate::process_sessions::ProcessSession> {
+    pub(crate) fn process_session(&self) -> Option<crate::process_sessions::ProcessSession> {
         self.process_session
     }
 
@@ -2052,7 +2056,7 @@ impl PtyClient {
     /// The foreground group is only offered when it is NOT the shell's own
     /// group, because at an idle prompt `tcgetpgrp` returns the shell and asking
     /// twice about the same process buys nothing.
-    pub fn working_directory(&self) -> crate::file_drop::WorkingDirectory {
+    pub(crate) fn working_directory(&self) -> crate::file_drop::WorkingDirectory {
         let shell_pid = self.child_process_id();
         crate::file_drop::WorkingDirectory {
             foreground_pid: self.foreground_pgid().filter(|fg| Some(*fg) != shell_pid),
@@ -2077,7 +2081,7 @@ impl PtyClient {
     /// libc call) to get the foreground process group and compares it to the
     /// shell PID. If they differ, a child command is running and its name is
     /// resolved via platform-specific APIs.
-    pub fn foreground_process_name(&self) -> Option<String> {
+    pub(crate) fn foreground_process_name(&self) -> Option<String> {
         let raw_fd = self.master.as_raw_fd()?;
         let fg_pid = foreground_pgid_of_fd(raw_fd)?;
 
@@ -2370,7 +2374,7 @@ impl Drop for PtyClient {
 /// session and group) and, when a job-controlled app owns the terminal, that
 /// app's foreground group. See [`PtyClient::signal_targets`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SignalTargets {
+pub(crate) struct SignalTargets {
     child: Option<u32>,
     foreground: Option<u32>,
 }
@@ -2378,7 +2382,7 @@ pub struct SignalTargets {
 impl SignalTargets {
     /// Send `sig` to every target group. Returns the first error; `ESRCH` (the
     /// group already went) is benign.
-    pub fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
+    pub(crate) fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
         let signal_group = |pgid: u32| {
             rustix::process::Pid::from_raw(pgid as i32).map_or(Ok(()), |group| {
                 rustix::process::kill_process_group(group, sig)
@@ -2391,7 +2395,7 @@ impl SignalTargets {
 
     /// [`PtyClient::terminate`]'s polite pair, SIGTERM then SIGHUP, sent to
     /// targets read earlier.
-    pub fn terminate(&self) {
+    pub(crate) fn terminate(&self) {
         let _ = self.send(rustix::process::Signal::TERM);
         let _ = self.send(rustix::process::Signal::HUP);
     }
@@ -2545,7 +2549,7 @@ fn join_reader_bounded(reader: ReaderToJoin) {
 /// engine actor or the terminal UI's loop. Past this bound the thread is
 /// detached and logged; it ends by itself when the last holder goes. Not a
 /// user setting: it bounds a wait that is normally microseconds.
-pub const READER_JOIN_BOUND: Duration = Duration::from_millis(250);
+pub(crate) const READER_JOIN_BOUND: Duration = Duration::from_millis(250);
 
 /// Resolve a process name from its PID.
 ///
@@ -3385,12 +3389,12 @@ fn named_color_to_tui(color: NamedColor) -> CellColor {
 /// Borrows so the common `spawn_with_env` path passes a temporary empty identity
 /// with no allocation.
 #[derive(Clone, Copy)]
-pub struct PtySpawnOptions<'a> {
+pub(crate) struct PtySpawnOptions<'a> {
     /// The caller's `[env]` overrides, applied last so a user value always wins.
     pub env: &'a [(String, String)],
     /// Whether the reader loop runs the attention/passthrough scanner (agents:
     /// true; companion shells: false).
-    pub track_agent_signals: bool,
+    pub(crate) track_agent_signals: bool,
     /// The terminal-identity env mutation to apply before the caller env.
     pub identity: &'a crate::term_identity::TerminalIdentity,
 }

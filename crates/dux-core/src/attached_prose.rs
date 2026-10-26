@@ -19,8 +19,8 @@ pub struct AttachedEntry {
     pub address: Option<String>,
     pub verified: bool,
     pub driving: bool,
-    pub target_kind: TargetKind,
-    pub target_label: String,
+    pub(crate) target_kind: TargetKind,
+    pub(crate) target_label: String,
     /// The agent the tab or terminal belongs to, when it belongs to one.
     pub agent_label: Option<String>,
 }

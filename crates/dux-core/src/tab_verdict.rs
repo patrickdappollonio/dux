@@ -20,12 +20,12 @@ use std::time::Instant;
 /// purpose: this is the tail a person reads at a glance on a card, not a log.
 /// A provider that dies with a stack trace is not diagnosed here; it is
 /// diagnosed in `dux.log`.
-pub const VERDICT_EXCERPT_MAX_LINES: usize = 8;
+pub(crate) const VERDICT_EXCERPT_MAX_LINES: usize = 8;
 
 /// How many CHARACTERS (never bytes) of each excerpt line are kept. Wide enough
 /// for an ordinary error sentence, bounded so one pathological line cannot ride
 /// the wire to every connected browser.
-pub const VERDICT_EXCERPT_MAX_CHARS: usize = 200;
+pub(crate) const VERDICT_EXCERPT_MAX_CHARS: usize = 200;
 
 /// The exhaustive set of ways a tab's run can have ended badly.
 ///
@@ -51,7 +51,7 @@ pub enum TabRunEnding {
 impl TabRunEnding {
     /// The stable wire spelling. Kept next to the variants so the two cannot
     /// drift, and matched exhaustively so a new variant must choose one.
-    pub fn wire_kind(&self) -> &'static str {
+    pub(crate) fn wire_kind(&self) -> &'static str {
         match self {
             TabRunEnding::LaunchFailed { .. } => "launch_failed",
             TabRunEnding::ExitedWithStatus { .. } => "exited",
@@ -89,7 +89,7 @@ impl TabRunEnding {
 #[derive(Clone, Debug)]
 pub struct TabRunVerdict {
     pub ending: TabRunEnding,
-    pub ended_at: Instant,
+    pub(crate) ended_at: Instant,
     /// The last visible non-blank lines the run had on screen, captured ONCE at
     /// the moment the run ended (the client is gone immediately afterwards) and
     /// never topped up later.
@@ -116,7 +116,7 @@ impl TabRunVerdict {
 /// The tail rather than the head: a CLI that fails says so on its way out, and
 /// the head of a screenful is a banner. Char-based throughout, because provider
 /// output is arbitrary UTF-8 and byte slicing panics inside a character.
-pub fn verdict_excerpt(text: &str) -> Vec<String> {
+pub(crate) fn verdict_excerpt(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim_end)
@@ -132,7 +132,7 @@ pub fn verdict_excerpt(text: &str) -> Vec<String> {
 /// How many of the run's LAST excerpt lines a refused resume quotes. Two, not
 /// the whole excerpt: this sentence lands on a status line and in a toast, and
 /// a CLI's refusal says the thing and then says what to do about it.
-pub const RESUME_REFUSAL_QUOTED_LINES: usize = 2;
+pub(crate) const RESUME_REFUSAL_QUOTED_LINES: usize = 2;
 
 /// The warning both surfaces raise when a RESUME run was refused: the provider
 /// came up, said why it would not resume, and quit at once.
@@ -201,7 +201,7 @@ pub fn refused_resume_warning(
 /// Coarse on purpose. The card answers "was this just now, or this morning";
 /// a card that claimed "1 minute 43 seconds ago" would be precise about a
 /// number nobody acts on.
-pub fn humanize_age_ago(seconds: u64) -> String {
+pub(crate) fn humanize_age_ago(seconds: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;

@@ -16,7 +16,7 @@ use crate::worker::{AgentLaunchKind, AgentLaunchRequest};
 /// purely from its observable state, so both detection windows (`--continue`
 /// exits empty, and a resume hangs past its timeout) live in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResumeFallbackDecision {
+pub(crate) enum ResumeFallbackDecision {
     /// The resumed provider EXITED leaving NO READABLE TEXT on screen: it said
     /// nothing, so there was nothing to resume and nothing to report. Relaunch
     /// fresh (window a).
@@ -146,7 +146,7 @@ impl Engine {
     /// live provider or an in-flight launch. `--continue` is directory-scoped
     /// and always grabs the most recent conversation, so at most one tab may
     /// resume and every tab launched beside a live one starts fresh.
-    pub fn build_tab_launch_request(
+    pub(crate) fn build_tab_launch_request(
         &self,
         tab_id: TabId,
         tab_provider: Option<ProviderKind>,
@@ -265,7 +265,7 @@ impl Engine {
     /// state transition happens inside this one `&mut self` call, so no other
     /// `drain_events` tick observes a half-applied state. See
     /// `ResumeFallbackOutcome` for how the caller must treat each result.
-    pub fn retry_resume_fallback(
+    pub(crate) fn retry_resume_fallback(
         &mut self,
         tab_id: &str,
         pty_size: (u16, u16),

@@ -28,7 +28,7 @@ impl Engine {
     /// the worker. Answers the clone's keyed busy, or the sentence of the check
     /// that refused it, in which case nothing was started. `asked_by` says
     /// whether a browser asked, whose follow-up the web layer drives.
-    pub fn begin_clone_project(
+    pub(crate) fn begin_clone_project(
         &mut self,
         request: &CloneRequest,
         asked_by: CloneAskedBy,
@@ -257,7 +257,7 @@ impl Engine {
     /// request to set a repository up there can say what it waits for: the
     /// mode of the pending operation for that folder, or a clone when the key
     /// is held and no operation names it.
-    pub fn clone_running_into(&self, path: &std::path::Path) -> Option<CloneMode> {
+    pub(crate) fn clone_running_into(&self, path: &std::path::Path) -> Option<CloneMode> {
         self.is_in_flight(&InFlightKey::Clone(path.to_path_buf()))
             .then(|| {
                 self.clones
@@ -270,7 +270,7 @@ impl Engine {
 
     /// The refusal for a request to set a repository up at `path` while a clone
     /// or an add holds it, worded by what the holder is doing.
-    pub fn clone_running_refusal(&self, path: &std::path::Path) -> Option<String> {
+    pub(crate) fn clone_running_refusal(&self, path: &std::path::Path) -> Option<String> {
         Some(match self.clone_running_into(path)? {
             CloneMode::Clone => format!(
                 "dux is cloning a repository into \"{}\". Please wait for it to finish.",

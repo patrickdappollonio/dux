@@ -14,11 +14,11 @@
 /// what phone cameras read comfortably off a screen, and it saves four columns
 /// a code, which is the difference between two codes side by side and stacked
 /// on an 80-column terminal.
-pub const QUIET_ZONE: usize = 2;
+pub(crate) const QUIET_ZONE: usize = 2;
 
 /// Columns between two codes drawn side by side, wide enough that a camera
 /// framing one does not catch the edge of the other.
-pub const COLUMN_GAP: usize = 4;
+pub(crate) const COLUMN_GAP: usize = 4;
 
 /// Which modules are drawn as filled blocks.
 ///
@@ -76,7 +76,7 @@ pub fn row_width(row: &[Segment]) -> usize {
 /// A code is an odd number of modules wide, so the last row's lower half falls
 /// outside it; it is drawn as quiet zone, which only makes the bottom margin
 /// half a module taller.
-pub fn code_rows(text: &str, polarity: Polarity) -> Option<Vec<String>> {
+pub(crate) fn code_rows(text: &str, polarity: Polarity) -> Option<Vec<String>> {
     let code =
         qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::L).ok()?;
     let width = code.width();
@@ -109,7 +109,7 @@ pub fn code_rows(text: &str, polarity: Polarity) -> Option<Vec<String>> {
 
 /// How several codes are placed in the space available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Arrangement {
+pub(crate) enum Arrangement {
     SideBySide,
     Stacked,
 }
@@ -117,7 +117,7 @@ pub enum Arrangement {
 /// Side by side when every column (a code or its label, whichever is wider)
 /// fits in `available` columns with [`COLUMN_GAP`] between them, stacked
 /// otherwise.
-pub fn arrangement(column_widths: &[usize], available: usize) -> Arrangement {
+pub(crate) fn arrangement(column_widths: &[usize], available: usize) -> Arrangement {
     let gaps = COLUMN_GAP * column_widths.len().saturating_sub(1);
     let needed: usize = column_widths.iter().sum::<usize>() + gaps;
     if needed <= available {

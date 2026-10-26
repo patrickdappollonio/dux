@@ -24,7 +24,7 @@ pub struct IgnoreCandidate {
 
 /// Dependency and build-artifact directories only; nothing contentious (no
 /// `.idea/`, no Go `vendor/`). Extend via pull request.
-pub const STARTER_IGNORES: &[IgnoreCandidate] = &[
+pub(crate) const STARTER_IGNORES: &[IgnoreCandidate] = &[
     IgnoreCandidate {
         dir: "node_modules",
         comment: "# Installed npm/yarn/pnpm packages; recreated from the lockfile.",
@@ -100,7 +100,7 @@ pub fn matched_candidates(dir: &Path) -> Vec<&'static IgnoreCandidate> {
 /// Must run after `git init` and before the initial commit: `check-ignore`
 /// needs a repository, and an untracked `.gitignore` already filters
 /// `git status` (both measured). The seed is deliberately not committed.
-pub fn seed_gitignore(repo: &Path) -> Result<bool> {
+pub(crate) fn seed_gitignore(repo: &Path) -> Result<bool> {
     let matched = matched_candidates(repo);
     if matched.is_empty() {
         return Ok(false);

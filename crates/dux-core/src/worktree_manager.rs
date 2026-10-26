@@ -84,7 +84,7 @@ impl ManagedWorktree {
 /// lives. Dirtiness is not knowable from a classification, so it comes back
 /// `false` here and is filled in by [`list_manageable_worktrees`], which is
 /// allowed to shell to git.
-pub fn manageable_worktrees(entries: Vec<ProjectWorktreeEntry>) -> Vec<ManagedWorktree> {
+pub(crate) fn manageable_worktrees(entries: Vec<ProjectWorktreeEntry>) -> Vec<ManagedWorktree> {
     entries
         .into_iter()
         .filter(|entry| entry.is_managed_by_dux && !entry.is_project_checkout)
@@ -133,7 +133,11 @@ pub struct BusyFolder {
 /// by an agent", and removing it is refused for that reason), so `busy` is
 /// kept for any other occupant, alongside the holding agent when there is
 /// one. Pure.
-pub fn in_use_by(entry_path: &Path, holder: Option<&str>, busy: &[BusyFolder]) -> Option<String> {
+pub(crate) fn in_use_by(
+    entry_path: &Path,
+    holder: Option<&str>,
+    busy: &[BusyFolder],
+) -> Option<String> {
     busy.iter()
         .filter(|occupant| holder.is_none() || occupant.agent_id.as_deref() != holder)
         .find(|occupant| crate::worktree_ops::folder_contains(entry_path, &occupant.folder))

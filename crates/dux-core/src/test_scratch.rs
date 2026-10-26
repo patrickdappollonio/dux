@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// How long a drop keeps trying before it gives up and reports the leak.
-pub const REMOVAL_WINDOW: Duration = Duration::from_secs(2);
+pub(crate) const REMOVAL_WINDOW: Duration = Duration::from_secs(2);
 /// The pause between attempts, long enough for a writer to finish a file.
 const RETRY_PAUSE: Duration = Duration::from_millis(25);
 

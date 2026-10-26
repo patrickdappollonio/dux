@@ -61,7 +61,7 @@ pub struct ConfigFileLock {
 
 impl ConfigFileLock {
     /// How long a writer waits for another one before giving up out loud.
-    pub const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+    pub(crate) const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 
     /// The lock file guarding writes to `config_path`.
     pub fn lock_path(config_path: &Path) -> PathBuf {
@@ -76,7 +76,7 @@ impl ConfigFileLock {
 
     /// Take the lock, waiting up to `wait`. A lock still held after that is
     /// an error naming the lock file, never an endless wait.
-    pub fn acquire_within(config_path: &Path, wait: Duration) -> Result<Self> {
+    pub(crate) fn acquire_within(config_path: &Path, wait: Duration) -> Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
         let lock_path = Self::lock_path(config_path);
         // flock needs only a readable descriptor, so the file is opened
@@ -145,7 +145,11 @@ const CONFIG_WRITE_LOCK_NAME: &str = ".config-write.lock";
 /// self-deletes on drop if the rename never happens, so a failed/panicking write
 /// leaves no orphan and never a partial real file. Holds the
 /// [`ConfigFileLock`] for the write.
-pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+pub(crate) fn write_config_atomic(
+    path: &Path,
+    contents: &str,
+    durability: Durability,
+) -> Result<()> {
     let _lock = ConfigFileLock::acquire(path)?;
     // Judged against the file as it is on disk, under the lock.
     let on_disk = std::fs::read_to_string(path).ok();
@@ -401,7 +405,7 @@ impl<'a> SaveBase<'a> {
 /// never written from memory at all (see [`mutate_config_file`]). Reading and
 /// writing happen under one [`ConfigFileLock`], and the result's
 /// `[server.auth]` is checked first. Returns the text written.
-pub fn patch_config_file_three_way(
+pub(crate) fn patch_config_file_three_way(
     config_path: &Path,
     base: Option<SaveBase<'_>>,
     ours: &Config,
@@ -494,7 +498,7 @@ pub fn source_after_sync(
 /// key is later deleted by hand, the new keys count as deleted with it, and
 /// a save never fills them in. Only a key the file has never expressed in
 /// any form is filled with its default.
-pub fn seen_of_read(text: &str, projects: &[ProjectConfig]) -> String {
+pub(crate) fn seen_of_read(text: &str, projects: &[ProjectConfig]) -> String {
     let Ok(mut migrated) = text.parse::<DocumentMut>() else {
         return text.to_string();
     };
@@ -504,7 +508,7 @@ pub fn seen_of_read(text: &str, projects: &[ProjectConfig]) -> String {
     union_seen(Some(text), &migrated.to_string(), projects)
 }
 
-pub fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig]) -> String {
+pub(crate) fn union_seen(seen: Option<&str>, written: &str, projects: &[ProjectConfig]) -> String {
     let Some(seen) = seen else {
         return written.to_string();
     };
@@ -1473,7 +1477,7 @@ pub enum MissingConfig<'a> {
 }
 
 /// [`mutate_config_file`] with a choice of what a missing file means.
-pub fn mutate_config_file_with<T>(
+pub(crate) fn mutate_config_file_with<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
@@ -1489,7 +1493,7 @@ pub fn mutate_config_file_with<T>(
 /// the start checks), so a change that adds one is refused with the start's
 /// own words, and nothing is written. Returns the problems left, each with
 /// the surfaces it stops.
-pub fn mutate_config_file_repairing<T>(
+pub(crate) fn mutate_config_file_repairing<T>(
     config_path: &Path,
     missing: MissingConfig<'_>,
     key: &[String],
@@ -2305,7 +2309,7 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
 /// Get or create a table named `section` at the document root.
 ///
 /// Public because the TUI's deprecation migrations reuse it.
-pub fn ensure_table<'a>(doc: &'a mut DocumentMut, section: &str) -> &'a mut Table {
+pub(crate) fn ensure_table<'a>(doc: &'a mut DocumentMut, section: &str) -> &'a mut Table {
     table_in(doc.as_table_mut(), section)
 }
 
@@ -2393,7 +2397,11 @@ fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {
 /// Remove `key` from the table named `section`, returning the removed item.
 ///
 /// Public because the TUI's deprecation migrations reuse it.
-pub fn remove_table_key_item(doc: &mut DocumentMut, section: &str, key: &str) -> Option<Item> {
+pub(crate) fn remove_table_key_item(
+    doc: &mut DocumentMut,
+    section: &str,
+    key: &str,
+) -> Option<Item> {
     doc.get_mut(section)
         .and_then(Item::as_table_mut)
         .and_then(|table| table.remove(key))

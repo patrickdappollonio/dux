@@ -25,7 +25,7 @@ pub const DIFF_HEAD_MAX_LINES: usize = 4_000;
 /// How far the line count is allowed to run before it stops counting. A diff
 /// this long is already unreadable, and walking a multi-gigabyte patch to reach
 /// an exact figure buys nothing; past it the total is reported as a floor.
-pub const DIFF_HEAD_MAX_COUNTED_LINES: usize = 2_000_000;
+pub(crate) const DIFF_HEAD_MAX_COUNTED_LINES: usize = 2_000_000;
 
 /// How many bytes of patch the head may carry, whatever the line count says.
 ///
@@ -33,7 +33,7 @@ pub const DIFF_HEAD_MAX_COUNTED_LINES: usize = 2_000_000;
 /// thousand lines can be a hundred megabytes. Kept lines stop at the last one
 /// that fits, so the text still ends on a line boundary and `shown_lines` still
 /// counts exactly what is in it.
-pub const DIFF_HEAD_MAX_BYTES: usize = 2 << 20;
+pub(crate) const DIFF_HEAD_MAX_BYTES: usize = 2 << 20;
 
 /// How many bytes of each side are sampled to decide text versus binary.
 const BINARY_SAMPLE_BYTES: usize = 8 * 1024;
@@ -56,7 +56,7 @@ pub struct DiffHead {
     pub truncated: bool,
     /// True when counting stopped at [`DIFF_HEAD_MAX_COUNTED_LINES`], so
     /// `total_lines` is a floor rather than the figure.
-    pub total_is_at_least: bool,
+    pub(crate) total_is_at_least: bool,
     /// True when either side is binary (a NUL, a binary signature, or git's
     /// own binary verdict). `text` is then empty and the caller should say so
     /// rather than render a patch.

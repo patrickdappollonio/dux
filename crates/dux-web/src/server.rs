@@ -2541,9 +2541,7 @@ impl AttachedPtySocket<'_> {
             pty_id,
             self.conn_id,
             if frame.takeover {
-                dux_core::pty_owners::ResizeIntent::TakeOver {
-                    expected_owner: expected_owner,
-                }
+                dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }
             } else {
                 dux_core::pty_owners::ResizeIntent::Plain
             },

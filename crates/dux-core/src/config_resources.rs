@@ -53,7 +53,7 @@ pub fn read(config_path: &Path) -> Result<ConfigFile, String> {
 
 /// `name`, an entry of the user-named table `table`, as a listing prints it, and
 /// whether it is hidden; `raw` is the file it came from, empty for a running dux.
-pub fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
+pub(crate) fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
     let segments = [table.to_string(), name.to_string()];
     if crate::config::name_is_hidden(raw, &segments) {
         (crate::config::shown_path(raw, &segments), true)
@@ -64,18 +64,18 @@ pub fn shown_name(raw: &str, table: &str, name: &str) -> (String, bool) {
 
 /// A global environment variable's name as a sentence names it: a name that is
 /// no variable name is replaced by its line's placeholder.
-pub fn env_label(raw: &str, name: &str) -> String {
+pub(crate) fn env_label(raw: &str, name: &str) -> String {
     shown_name(raw, "env", name).0
 }
 
 /// A macro's name as a sentence names it: the name itself when it follows the
 /// `[macros]` rule, else the placeholder for an entry whose name is not shown.
-pub fn macro_label(name: &str) -> String {
+pub(crate) fn macro_label(name: &str) -> String {
     shown_name("", "macros", name).0
 }
 
 /// The refusal for removing a macro the list does not hold.
-pub fn unknown_macro(name: &str) -> String {
+pub(crate) fn unknown_macro(name: &str) -> String {
     match shown_name("", "macros", name) {
         (name, false) => format!("unknown macro \"{name}\""),
         (label, true) => format!("unknown macro: {label}"),
@@ -83,7 +83,7 @@ pub fn unknown_macro(name: &str) -> String {
 }
 
 /// The refusal for removing a variable the global environment does not hold.
-pub fn unknown_env_var(name: &str) -> String {
+pub(crate) fn unknown_env_var(name: &str) -> String {
     match shown_name("", "env", name) {
         (name, false) => format!("unknown global environment variable \"{name}\""),
         (label, true) => format!("unknown global environment variable: {label}"),
@@ -145,7 +145,7 @@ pub fn macros(
 }
 
 /// The macros of a loaded file, in file order.
-pub fn macros_of(file: &ConfigFile) -> Vec<MacroItem> {
+pub(crate) fn macros_of(file: &ConfigFile) -> Vec<MacroItem> {
     macros(
         &file.raw,
         file.config.macros.entries.iter().map(|(name, entry)| {
@@ -315,7 +315,7 @@ fn missing_file(paths: &DuxPaths) -> crate::config_write::MissingConfig<'static>
 }
 
 /// Add the macro `name`, or replace it where it stands, in the file.
-pub fn set_macro_in_file(
+pub(crate) fn set_macro_in_file(
     paths: &DuxPaths,
     name: &str,
     text: String,
@@ -330,7 +330,7 @@ pub fn set_macro_in_file(
 }
 
 /// Remove the macro `name` from the file.
-pub fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
+pub(crate) fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
         let table = crate::config_write::ensure_table(doc, "macros");
         if table.remove(name).is_none() {
@@ -341,7 +341,7 @@ pub fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> 
 }
 
 /// Set the global environment variable `name` in the file.
-pub fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyhow::Result<()> {
+pub(crate) fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyhow::Result<()> {
     crate::config::check_global_env_var(name, value)?;
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
         // Where `dux config set` writes, so a replaced value keeps the
@@ -355,7 +355,7 @@ pub fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyhow::Res
 }
 
 /// Remove the global environment variable `name` from the file.
-pub fn remove_env_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
+pub(crate) fn remove_env_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
     crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
         let table = crate::config_write::ensure_table(doc, "env");
         if table.remove(name).is_none() {

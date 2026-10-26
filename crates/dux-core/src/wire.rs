@@ -18,10 +18,10 @@ pub mod status_keys {
     pub const CONFIG_RELOAD: &str = "config-reload";
     /// Worktree-list failure key. Parameterised by project id at call sites:
     /// `format!("{WORKTREE_LIST_PREFIX}:{project_id}")`.
-    pub const WORKTREE_LIST_PREFIX: &str = "worktree-list";
+    pub(crate) const WORKTREE_LIST_PREFIX: &str = "worktree-list";
     /// Push key prefix. Parameterised by worktree path at call sites:
     /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
-    pub const PUSH_PREFIX: &str = "push";
+    pub(crate) const PUSH_PREFIX: &str = "push";
 
     /// Push operation key, parameterised by worktree path.
     pub fn push(worktree_path: &str) -> String {
@@ -818,7 +818,7 @@ impl SettingsPatch {
     /// `Self::default()`. Keep it a whole-struct compare rather than a per-field
     /// list: a field added to this struct then CANNOT make the check stale and
     /// silently read a patch carrying only that field as empty.
-    pub fn any_present(&self) -> bool {
+    pub(crate) fn any_present(&self) -> bool {
         // `quiet` is a presentation flag, not a settings field: neutralize it
         // in the compare so a patch carrying only `quiet` still reads as
         // empty (nothing to write, no `config.changed`).
@@ -833,7 +833,7 @@ impl SettingsPatch {
     /// settings field. This is the gate that scopes `quiet`: the whole-struct
     /// compare (every field its own default except that one and the flag)
     /// cannot go stale when a field is added, mirroring `any_present`.
-    pub fn is_accessory_bar_only(&self) -> bool {
+    pub(crate) fn is_accessory_bar_only(&self) -> bool {
         self.mobile_accessory_bar.is_some()
             && *self
                 == Self {
@@ -917,7 +917,7 @@ fn content_version(value: &impl Serialize) -> String {
 /// A whole-set save refused because the set changed after the client read it.
 /// Nothing was written; the client reads the set again and redoes its edit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StaleSet {
+pub(crate) enum StaleSet {
     Macros,
     GlobalEnv,
 }
@@ -1036,11 +1036,11 @@ mod quiet_web_wire {
         clippy::trivially_copy_pass_by_ref,
         reason = "serde's serialize_with hands the function a reference to the field"
     )]
-    pub fn serialize<S: Serializer>(value: &QuietSurfaces, s: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(value: &QuietSurfaces, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bool(value.web)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<QuietSurfaces, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<QuietSurfaces, D::Error> {
         Ok(QuietSurfaces {
             web: bool::deserialize(d)?,
             tui: false,
@@ -1382,7 +1382,7 @@ pub(crate) struct ProjectAdd<'a> {
     pub leading_branch: &'a str,
     pub status_message: StatusText,
     /// Prefix for the "git succeeded but registration failed" error message.
-    pub add_failed_prefix: &'a str,
+    pub(crate) add_failed_prefix: &'a str,
 }
 
 /// What [`Engine::add_project_without_op`] did.
@@ -1396,7 +1396,7 @@ pub(crate) struct ProjectAddResult {
 
 impl ProjectAddResult {
     /// Why the add failed: its first error, or `fallback`.
-    pub fn failure(&self, fallback: &StatusText) -> StatusText {
+    pub(crate) fn failure(&self, fallback: &StatusText) -> StatusText {
         self.statuses
             .iter()
             .find(|s| s.tone == "error")
@@ -1531,7 +1531,7 @@ impl DeleteReportFacts {
 
     /// The same read off a finished delete cascade, which already carries the
     /// project it resolved.
-    pub fn from_finish_outcome(outcome: &FinishDeleteSessionOutcome) -> Self {
+    pub(crate) fn from_finish_outcome(outcome: &FinishDeleteSessionOutcome) -> Self {
         Self::from_session(
             &outcome.session,
             outcome.project.as_ref().map(|p| p.name.clone()),
@@ -2010,22 +2010,12 @@ impl Engine {
                 title,
                 rename_branch,
             } => {
-                // Through [`Engine::rename_agent`], the implementation the
-                // terminal UI's dialog calls too, so the rules, the refusals
-                // and the statuses are one set. The answer is the final of a
-                // rename that is done, or the keyed busy of a branch rename now
-                // running.
-                let reaction = self.rename_agent(
-                    &session_id,
-                    &title,
-                    if rename_branch {
-                        crate::engine::BranchRename::AlsoTheBranch
-                    } else {
-                        crate::engine::BranchRename::NameOnly
-                    },
-                )?;
-                let status = wire_status_from_reaction(&reaction)
-                    .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))?;
+                let branch = if rename_branch {
+                    crate::engine::BranchRename::AlsoTheBranch
+                } else {
+                    crate::engine::BranchRename::NameOnly
+                };
+                let status = self.rename_session(&session_id, &title, branch)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2099,29 +2089,12 @@ impl Engine {
                 session_id,
                 restart_tabs,
             } => {
-                // Put a managed agent's working copy back at the path it
-                // already had. Refusals are errors rather than a quiet no-op:
-                // this is also an HTTP route and a palette command, so an id
-                // that should never have reached here has to be answered in a
-                // sentence. An id nobody has is a 404, not a refusal about an
-                // agent: without this bail every unknown id fell through to
-                // "dux only recreates a working copy it manages", which is a
-                // sentence about an agent that is not there, and the route's
-                // own 404 arm was unreachable.
-                if !self.sessions.iter().any(|s| s.id == session_id) {
-                    anyhow::bail!("unknown session: {session_id}");
-                }
-                let reaction = self.begin_recreate_working_copy(
-                    &session_id,
-                    if restart_tabs {
-                        crate::engine::TabsAfterRecreate::Restart
-                    } else {
-                        crate::engine::TabsAfterRecreate::Leave
-                    },
-                )?;
-                let status = wire_status_from_reaction(&reaction).ok_or_else(|| {
-                    anyhow::anyhow!("recreating the working copy raised no status")
-                })?;
+                let tabs = if restart_tabs {
+                    crate::engine::TabsAfterRecreate::Restart
+                } else {
+                    crate::engine::TabsAfterRecreate::Leave
+                };
+                let status = self.recreate_working_copy_wire(&session_id, tabs)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
@@ -2829,6 +2802,43 @@ impl Engine {
                 Ok(WireStatus::keyed(key, "busy", busy))
             }
         }
+    }
+
+    /// Put a managed agent's working copy back at the path it already had.
+    ///
+    /// Refusals are errors rather than a quiet no-op: this is also an HTTP route
+    /// and a palette command, so an id that should never have reached here has
+    /// to be answered in a sentence.
+    fn recreate_working_copy_wire(
+        &mut self,
+        session_id: &str,
+        tabs: crate::engine::TabsAfterRecreate,
+    ) -> anyhow::Result<WireStatus> {
+        // An id nobody has is a 404, not a refusal about an agent: without this
+        // bail every unknown id fell through to "dux only recreates a working
+        // copy it manages", which is a sentence about an agent that is not
+        // there, and the route's own 404 arm was unreachable.
+        if !self.sessions.iter().any(|s| s.id == session_id) {
+            anyhow::bail!("unknown session: {session_id}");
+        }
+        let reaction = self.begin_recreate_working_copy(session_id, tabs)?;
+        wire_status_from_reaction(&reaction)
+            .ok_or_else(|| anyhow::anyhow!("recreating the working copy raised no status"))
+    }
+
+    /// Rename an agent through [`Engine::rename_agent`], the implementation the
+    /// terminal UI's dialog calls too, so the rules, the refusals and the
+    /// statuses are one set. The answer is the final of a rename that is done,
+    /// or the keyed busy of a branch rename now running.
+    fn rename_session(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        branch: crate::engine::BranchRename,
+    ) -> anyhow::Result<WireStatus> {
+        let reaction = self.rename_agent(session_id, title, branch)?;
+        wire_status_from_reaction(&reaction)
+            .ok_or_else(|| anyhow::anyhow!("renaming the agent raised no status"))
     }
 
     /// The panic button's arm of [`Self::detach_agent`]: end the agent's
@@ -5509,7 +5519,7 @@ impl Engine {
     /// no working-tree writes) and is the single source of truth shared by the
     /// listing handler and the wire re-validation, so the client's path is always
     /// checked against a fresh classification rather than a stale snapshot.
-    pub fn adoptable_managed_worktrees(
+    pub(crate) fn adoptable_managed_worktrees(
         &self,
         project: &Project,
     ) -> anyhow::Result<Vec<crate::worker::ProjectWorktreeEntry>> {

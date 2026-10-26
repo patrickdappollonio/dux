@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::output::{Listing, Row};
 use super::{CliError, Exit};
 
-pub const REMOTES_FILE: &str = "remotes.toml";
+pub(crate) const REMOTES_FILE: &str = "remotes.toml";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remotes {
@@ -62,9 +62,9 @@ impl Remote {
 
 /// The file every change to [`REMOTES_FILE`] holds an exclusive lock on.
 /// The remotes file itself is replaced by each save, so it cannot be locked.
-pub const REMOTES_LOCK_FILE: &str = "remotes.toml.lock";
+pub(crate) const REMOTES_LOCK_FILE: &str = "remotes.toml.lock";
 
-pub fn remotes_path(root: &Path) -> PathBuf {
+pub(crate) fn remotes_path(root: &Path) -> PathBuf {
     root.join(REMOTES_FILE)
 }
 

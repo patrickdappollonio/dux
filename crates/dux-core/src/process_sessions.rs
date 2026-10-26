@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// schedules it, so this only bounds the pathological case (a process stuck in
 /// uninterruptible I/O) rather than an ordinary shutdown. Not a user setting:
 /// the user's knob is the grace, and this is the floor under the step after it.
-pub const KILL_SETTLE: Duration = Duration::from_secs(3);
+pub(crate) const KILL_SETTLE: Duration = Duration::from_secs(3);
 
 /// How often a purge looks at the process table while it waits.
 const PURGE_POLL: Duration = Duration::from_millis(50);
@@ -49,7 +49,7 @@ static UNREAPED: std::sync::LazyLock<Mutex<HashSet<ProcessSession>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// dux spawned `session`'s leader as its own child.
-pub fn note_spawned(session: ProcessSession) {
+pub(crate) fn note_spawned(session: ProcessSession) {
     UNREAPED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -57,7 +57,7 @@ pub fn note_spawned(session: ProcessSession) {
 }
 
 /// dux reaped `session`'s leader: from now on its number proves nothing.
-pub fn note_reaped(session: ProcessSession) {
+pub(crate) fn note_reaped(session: ProcessSession) {
     UNREAPED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -241,15 +241,15 @@ pub fn end_exactly_with(
 /// What a process is now, as far as a group signal needs: when it started,
 /// the process group it is in, and whether it has already exited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemberState {
+pub(crate) struct MemberState {
     pub start_time: u64,
-    pub pgid: u32,
+    pub(crate) pgid: u32,
     pub exited: bool,
 }
 
 /// [`MemberState`] for `pid`, read now. `None` when it is gone or cannot be
 /// read.
-pub fn member_state(pid: u32) -> Option<MemberState> {
+pub(crate) fn member_state(pid: u32) -> Option<MemberState> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -284,7 +284,7 @@ pub fn member_state(pid: u32) -> Option<MemberState> {
 /// signalled at it. A recorded member whose start time was never known
 /// cannot be checked and does not count. Pure: `look` answers what a pid is
 /// now.
-pub fn group_reserved_by(
+pub(crate) fn group_reserved_by(
     group: u32,
     recorded: &[ProcessIdentity],
     look: &dyn Fn(u32) -> Option<MemberState>,
@@ -302,7 +302,7 @@ pub fn group_reserved_by(
 /// macOS). Every membership rule fails closed on it: such a process is a
 /// member when its session or its parent chain says so, because a start time
 /// that cannot be read cannot rule it out.
-pub const UNKNOWN_START: u64 = 0;
+pub(crate) const UNKNOWN_START: u64 = 0;
 
 /// A session dux created: a PTY's child or a startup command, both started
 /// with `setsid`, so the session id is the leader's pid.
@@ -314,7 +314,7 @@ pub struct ProcessSession {
     /// is told apart from a later one that reused the same pid the same way
     /// whatever the clock on the wall did. Nothing that started before it can
     /// belong to it.
-    pub started_at: u64,
+    pub(crate) started_at: u64,
     /// The machine boot the session was recorded in ([`current_boot`]). A
     /// session recorded in an earlier boot is void: every pid has been handed
     /// out afresh since, so its number names nothing of dux's.
@@ -343,7 +343,7 @@ impl ProcessSession {
 /// (`kern.boottime` is not used: it is derived from the wall clock and moves
 /// when the clock is stepped, without a reboot.) Only when neither can be
 /// read does it fall back to the boot time. Read once per process.
-pub fn current_boot() -> u64 {
+pub(crate) fn current_boot() -> u64 {
     static BOOT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *BOOT.get_or_init(|| {
         let id = platform_boot_id()
@@ -392,7 +392,7 @@ fn platform_boot_id() -> Option<String> {
 /// times are read in: `CLOCK_BOOTTIME` on Linux (what `/proc/<pid>/stat`'s
 /// start time counts), the Mach absolute clock on macOS (what the kernel
 /// stamps a process's start with). Neither is stepped when the wall clock is.
-pub fn boot_nanos_now() -> u64 {
+pub(crate) fn boot_nanos_now() -> u64 {
     #[cfg(target_os = "linux")]
     {
         let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
@@ -412,7 +412,7 @@ pub fn boot_nanos_now() -> u64 {
 /// When process `pid` started, in nanoseconds since boot (see
 /// [`boot_nanos_now`]), or `None` when it cannot be asked (gone, or not
 /// ours to ask on macOS).
-pub fn process_start(pid: u32) -> Option<u64> {
+pub(crate) fn process_start(pid: u32) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -643,7 +643,7 @@ pub fn members(
 /// session yet: Linux and macOS never hand out a number that still names a
 /// live session), each started no earlier than the session. Recorded as the
 /// session's evidence from then on. Blocking: a worker thread's call.
-pub fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity> {
+pub(crate) fn survivors_at_leader_exit(session: ProcessSession) -> Vec<ProcessIdentity> {
     if !session.is_this_boot() {
         return Vec::new();
     }
@@ -883,7 +883,7 @@ pub trait ProcessOps {
 }
 
 /// The platform's process table and signals.
-pub struct SystemProcesses;
+pub(crate) struct SystemProcesses;
 
 impl ProcessOps for SystemProcesses {
     fn table(&mut self) -> Vec<ProcRow> {
@@ -1044,19 +1044,19 @@ impl SpawnGate {
 /// [`AgentProcessRegistry::leader_exit_hook`]), and, when it records into a
 /// registry, which registry and session, so the client can tell whether the
 /// record has landed.
-pub struct LeaderExitHook {
+pub(crate) struct LeaderExitHook {
     run: Box<dyn FnOnce() + Send>,
     recording: Option<(AgentProcessRegistry, ProcessSession)>,
 }
 
 impl LeaderExitHook {
     /// Run it.
-    pub fn run(self) {
+    pub(crate) fn run(self) {
         (self.run)();
     }
 
     /// The registry and session it records into, if any.
-    pub fn recording(&self) -> Option<(AgentProcessRegistry, ProcessSession)> {
+    pub(crate) fn recording(&self) -> Option<(AgentProcessRegistry, ProcessSession)> {
         self.recording.clone()
     }
 }
@@ -1072,12 +1072,12 @@ impl<F: ?Sized + FnOnce() + Send + 'static> From<Box<F>> for LeaderExitHook {
 
 /// How long an occupancy look waits for a record of what an exited leader
 /// left running to be written. Writing one is a look at the process table.
-pub const RECORDING_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const RECORDING_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a removal or a destructive operation waits for a spawn in its
 /// folder to register its session. A spawn takes milliseconds; one still
 /// unregistered after this is treated as something running there.
-pub const SPAWN_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const SPAWN_WAIT: Duration = Duration::from_secs(10);
 
 /// One write for the registry's writer thread, numbered in the order the
 /// registry changed.
@@ -1544,7 +1544,7 @@ impl AgentProcessRegistry {
     /// shell was `cd`'d there, a server a closed tab left running there. The
     /// answer is a phrase naming it, for a refusal. Blocking: reads the
     /// process table and each member's working directory.
-    pub fn cwd_occupant(
+    pub(crate) fn cwd_occupant(
         &self,
         folder: &std::path::Path,
         except: &[ProcessSession],
@@ -1558,7 +1558,7 @@ impl AgentProcessRegistry {
     /// [`Self::cwd_occupant`] for any place `touches` picks: the first process
     /// dux started whose current folder `touches` accepts (or, unreadable,
     /// whose session was started in a folder it accepts).
-    pub fn cwd_occupant_where(
+    pub(crate) fn cwd_occupant_where(
         &self,
         touches: &dyn Fn(&std::path::Path) -> bool,
         except: &[ProcessSession],
@@ -1647,7 +1647,7 @@ impl AgentProcessRegistry {
 
     /// [`Self::register`] for a standalone agent's session (see
     /// `standalone_owners`).
-    pub fn register_standalone(
+    pub(crate) fn register_standalone(
         &self,
         agent_id: &str,
         session: ProcessSession,
@@ -1658,7 +1658,7 @@ impl AgentProcessRegistry {
     }
 
     /// Mark `agent_id` as a standalone agent, so its sessions keep that kind.
-    pub fn mark_standalone(&self, agent_id: &str) {
+    pub(crate) fn mark_standalone(&self, agent_id: &str) {
         let folders: Vec<std::path::PathBuf> = {
             let mut inner = self.lock();
             inner.standalone_owners.insert(agent_id.to_string());
@@ -1684,7 +1684,12 @@ impl AgentProcessRegistry {
 
     /// Keep the pending removal `row_id` of `folder` current in `db_path`
     /// from now on, and write what the registry already knows into it.
-    pub fn watch_pending(&self, row_id: &str, folder: &std::path::Path, db_path: &std::path::Path) {
+    pub(crate) fn watch_pending(
+        &self,
+        row_id: &str,
+        folder: &std::path::Path,
+        db_path: &std::path::Path,
+    ) {
         {
             let mut inner = self.lock();
             Self::ensure_writer(&mut inner, db_path);
@@ -1696,7 +1701,7 @@ impl AgentProcessRegistry {
     }
 
     /// Stop keeping `row_id` current: its removal has run.
-    pub fn unwatch_pending(&self, row_id: &str) {
+    pub(crate) fn unwatch_pending(&self, row_id: &str) {
         self.lock().pending_folders.remove(row_id);
     }
 
@@ -1812,7 +1817,10 @@ impl AgentProcessRegistry {
     /// know it has finished (a test registering sessions nothing runs in,
     /// which the prune would otherwise drop if it read the process table after
     /// they were registered); dux itself never waits for it.
-    pub fn attach_store(&self, db_path: &std::path::Path) -> Option<std::thread::JoinHandle<()>> {
+    pub(crate) fn attach_store(
+        &self,
+        db_path: &std::path::Path,
+    ) -> Option<std::thread::JoinHandle<()>> {
         let loaded = crate::storage::SessionStore::open(db_path)
             .and_then(|store| store.load_process_registry());
         {
@@ -1861,7 +1869,7 @@ impl AgentProcessRegistry {
 
     /// Drop every session nothing of which is still running, under the one
     /// membership rule, and save the result. Blocking: a worker thread's call.
-    pub fn prune_gone(&self) {
+    pub(crate) fn prune_gone(&self) {
         self.prune_gone_with(read_process_table);
     }
 
@@ -1929,7 +1937,7 @@ impl AgentProcessRegistry {
     /// Wait, bounded, until every leader-exit recording started for one of
     /// `sessions` has been written, so a removal never reads what was recorded
     /// for a session before the recording of its leader's exit has landed.
-    pub fn wait_for_recordings(&self, sessions: &[ProcessSession], timeout: Duration) {
+    pub(crate) fn wait_for_recordings(&self, sessions: &[ProcessSession], timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let pending = {
@@ -1950,7 +1958,7 @@ impl AgentProcessRegistry {
     /// deleted), and keep it until the new session is registered: a removal
     /// that claims the folder and then waits ([`Self::wait_for_spawns`]) either
     /// came first, and the check refuses the spawn, or sees the session.
-    pub fn begin_spawn(&self, folder: &std::path::Path) -> SpawnTicket {
+    pub(crate) fn begin_spawn(&self, folder: &std::path::Path) -> SpawnTicket {
         let mut inner = self.lock();
         inner.spawn_seq += 1;
         let id = inner.spawn_seq;
@@ -1966,7 +1974,7 @@ impl AgentProcessRegistry {
     /// Wait until no spawn announced in `folder` or under it is still between
     /// its process starting and its session being registered. `false` when
     /// `timeout` passed first. Blocking: a worker thread's call.
-    pub fn wait_for_spawns(&self, folder: &std::path::Path, timeout: Duration) -> bool {
+    pub(crate) fn wait_for_spawns(&self, folder: &std::path::Path, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
             let pending =
@@ -1990,7 +1998,7 @@ impl AgentProcessRegistry {
     /// taken before the record lands misses a job the leader left behind.
     /// `Err` (a sentence) when it did not settle in time: the look must fail
     /// closed rather than call the place clear.
-    pub fn recordings_settled(&self) -> Result<(), String> {
+    pub(crate) fn recordings_settled(&self) -> Result<(), String> {
         self.recordings_settled_within(RECORDING_WAIT)
     }
 
@@ -2011,7 +2019,7 @@ impl AgentProcessRegistry {
     /// in flight has landed ([`Self::recordings_settled`]), with what was
     /// recorded for each session included. The one way an occupancy look asks
     /// what runs in a set of sessions. Blocking: reads the process table.
-    pub fn running_members(
+    pub(crate) fn running_members(
         &self,
         sessions: &[ProcessSession],
         known: &[ProcessIdentity],
@@ -2028,7 +2036,7 @@ impl AgentProcessRegistry {
     }
 
     /// [`Self::wait_for_recordings`] for every recording in flight.
-    pub fn wait_for_all_recordings(&self, timeout: Duration) {
+    pub(crate) fn wait_for_all_recordings(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline && !self.lock().recording.is_empty() {
             std::thread::sleep(Duration::from_millis(10));
@@ -2072,7 +2080,7 @@ impl AgentProcessRegistry {
 
     /// A registry holding exactly `snapshot`, for a removal finished at the
     /// next start: it answers every question the same way the live run's did.
-    pub fn from_snapshot(snapshot: &RegistrySnapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &RegistrySnapshot) -> Self {
         let registry = Self::default();
         {
             let mut inner = registry.lock();
@@ -2094,7 +2102,7 @@ impl AgentProcessRegistry {
     /// Record `identities` as members of `session` (see
     /// [`survivors_at_leader_exit`]), and into any pending removal of the
     /// folder the session runs in.
-    pub fn record_survivors(&self, session: ProcessSession, identities: &[ProcessIdentity]) {
+    pub(crate) fn record_survivors(&self, session: ProcessSession, identities: &[ProcessIdentity]) {
         if identities.is_empty() {
             return;
         }
@@ -2120,7 +2128,7 @@ impl AgentProcessRegistry {
     }
 
     /// The recorded members of each of `sessions`.
-    pub fn survivors_of(&self, sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
+    pub(crate) fn survivors_of(&self, sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
         let inner = self.lock();
         sessions
             .iter()
@@ -2133,7 +2141,7 @@ impl AgentProcessRegistry {
     /// A callback for a PTY's client to run once its child is gone: it records
     /// what is still running in the session, on a thread of its own because
     /// that is a walk over the process table.
-    pub fn leader_exit_hook(&self, session: ProcessSession) -> LeaderExitHook {
+    pub(crate) fn leader_exit_hook(&self, session: ProcessSession) -> LeaderExitHook {
         let registry = self.clone();
         let mut hook = LeaderExitHook::from(Box::new(move || {
             // Noted before the thread starts, on the thread that saw the exit,
@@ -2161,12 +2169,12 @@ impl AgentProcessRegistry {
 
     /// Whether a record of what `session`'s leader left running is still being
     /// written.
-    pub fn recording_in_flight(&self, session: ProcessSession) -> bool {
+    pub(crate) fn recording_in_flight(&self, session: ProcessSession) -> bool {
         self.lock().recording.contains_key(&session)
     }
 
     /// Every session remembered for `agent_id`.
-    pub fn sessions_of(&self, agent_id: &str) -> Vec<ProcessSession> {
+    pub(crate) fn sessions_of(&self, agent_id: &str) -> Vec<ProcessSession> {
         self.lock()
             .sessions
             .get(agent_id)
@@ -2180,12 +2188,12 @@ impl AgentProcessRegistry {
     /// processes may still be stopping, a terminal, a startup command. A
     /// removal of the folder ends all of them, and its last look before git
     /// runs asks this again to see whether anything new arrived.
-    pub fn sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
+    pub(crate) fn sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
         self.sessions_in_of_kind(folder, SessionStarter::NotAStandaloneAgent)
     }
 
     /// Every session, of any owner and kind, whose recorded folder matches.
-    pub fn sessions_matching(
+    pub(crate) fn sessions_matching(
         &self,
         matches: impl Fn(&std::path::Path) -> bool,
     ) -> Vec<ProcessSession> {
@@ -2204,7 +2212,7 @@ impl AgentProcessRegistry {
     }
 
     /// The folders `sessions` were started in.
-    pub fn folders_of(&self, sessions: &[ProcessSession]) -> Vec<std::path::PathBuf> {
+    pub(crate) fn folders_of(&self, sessions: &[ProcessSession]) -> Vec<std::path::PathBuf> {
         let inner = self.lock();
         let mut folders: Vec<std::path::PathBuf> = inner
             .sessions
@@ -2221,7 +2229,7 @@ impl AgentProcessRegistry {
 
     /// The sessions standalone agents started in `folder` or inside it, live or
     /// retired. Never ended by a removal; while they run they occupy the folder.
-    pub fn standalone_sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
+    pub(crate) fn standalone_sessions_in(&self, folder: &std::path::Path) -> Vec<ProcessSession> {
         self.sessions_in_of_kind(folder, SessionStarter::StandaloneAgent)
     }
 
@@ -2259,7 +2267,7 @@ impl AgentProcessRegistry {
     /// under any other key, is left out: once the agent's own session emptied,
     /// the kernel was free to reuse the number, and the newer session is
     /// somebody else's.
-    pub fn forget_agent(&self, agent_id: &str) -> Vec<ProcessSession> {
+    pub(crate) fn forget_agent(&self, agent_id: &str) -> Vec<ProcessSession> {
         let mut inner = self.lock();
         if let Some(deleted) = inner.startup_runs.get_mut(agent_id) {
             *deleted = true;
@@ -2303,7 +2311,7 @@ impl AgentProcessRegistry {
 
     /// Claim the one startup-command run an agent may have at a time. `None`
     /// while another run is in progress; the guard releases the claim on drop.
-    pub fn begin_startup_run(&self, agent_id: &str) -> Option<StartupRunGuard> {
+    pub(crate) fn begin_startup_run(&self, agent_id: &str) -> Option<StartupRunGuard> {
         let mut inner = self.lock();
         if inner.startup_runs.contains_key(agent_id) {
             return None;
@@ -2322,7 +2330,7 @@ impl AgentProcessRegistry {
 
     /// Who is told when a deleted agent's startup command would not stop,
     /// and the grace such a command is given.
-    pub fn on_startup_stop_failure(
+    pub(crate) fn on_startup_stop_failure(
         &self,
         grace: Duration,
         notice: impl Fn(String) + Send + Sync + 'static,
@@ -2373,7 +2381,11 @@ impl StartupRunGuard {
     /// point (the mark is checked under the same lock the delete sets it
     /// under), the session is ended at once instead, and `true` says so.
     /// Blocking in that case: the run's own worker thread.
-    pub fn register_session(&self, session: ProcessSession, folder: &std::path::Path) -> bool {
+    pub(crate) fn register_session(
+        &self,
+        session: ProcessSession,
+        folder: &std::path::Path,
+    ) -> bool {
         self.registry.register(&self.agent_id, session, folder);
         let (deleted, stop) = {
             let mut inner = self.registry.lock();
@@ -2398,7 +2410,7 @@ impl StartupRunGuard {
     /// Announce the run's spawn in `folder` (see
     /// [`AgentProcessRegistry::begin_spawn`]): `None` when the agent was
     /// deleted before it, and nothing may start.
-    pub fn begin_spawn(&self, folder: &std::path::Path) -> Option<SpawnTicket> {
+    pub(crate) fn begin_spawn(&self, folder: &std::path::Path) -> Option<SpawnTicket> {
         let ticket = self.registry.begin_spawn(folder);
         (!self.agent_deleted()).then_some(ticket)
     }
@@ -2410,7 +2422,7 @@ impl StartupRunGuard {
 
     /// Record what the run's session still has running now that its leader,
     /// the command, has exited. Blocking: the run's own worker thread.
-    pub fn record_survivors(&self, session: ProcessSession) {
+    pub(crate) fn record_survivors(&self, session: ProcessSession) {
         let found = survivors_at_leader_exit(session);
         self.registry.record_survivors(session, &found);
     }
@@ -2419,7 +2431,7 @@ impl StartupRunGuard {
     /// been deleted, under the same lock the delete marks it under, so a
     /// delete either comes first and nothing is created, or comes after and
     /// its own log removal takes what was created. `None` when deleted.
-    pub fn unless_deleted<T>(&self, prepare: impl FnOnce() -> T) -> Option<T> {
+    pub(crate) fn unless_deleted<T>(&self, prepare: impl FnOnce() -> T) -> Option<T> {
         let inner = self.registry.lock();
         if inner
             .startup_runs
@@ -2435,7 +2447,7 @@ impl StartupRunGuard {
     }
 
     /// Whether the agent was deleted while this run was in progress.
-    pub fn agent_deleted(&self) -> bool {
+    pub(crate) fn agent_deleted(&self) -> bool {
         self.registry
             .lock()
             .startup_runs

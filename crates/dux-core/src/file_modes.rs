@@ -23,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// A file dux writes for itself: owner read/write, `0600`.
-pub const PRIVATE_FILE_MODE: u32 = 0o600;
+pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// A directory dux owns: owner read/write/search, `0700`. Search permission is
 /// the load-bearing bit, since it is what another user needs to reach anything
@@ -54,7 +54,7 @@ const GROUP_AND_OTHER: u32 = 0o077;
 /// between them is still followed. Undefended: dux is single-tenant and this is
 /// the user's own config directory, so the case needs an attacker who already
 /// has the access the mode protects.
-pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
+pub(crate) fn restrict_to_owner(path: &Path) -> io::Result<()> {
     // `symlink_metadata` does NOT follow, which is the whole point; for a
     // non-symlink it answers exactly what `metadata` would.
     let meta = match fs::symlink_metadata(path) {
@@ -80,7 +80,7 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
 
 /// Set a socket dux just bound, with the umask's mode, to [`PRIVATE_FILE_MODE`]
 /// exactly; unlike the tightening above, a failure is returned.
-pub fn make_socket_private(path: &Path) -> io::Result<()> {
+pub(crate) fn make_socket_private(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
 }
 

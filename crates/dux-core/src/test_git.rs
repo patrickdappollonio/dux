@@ -27,7 +27,7 @@ use std::process::Command;
 
 /// The template directory fixture repositories are created from. It holds only
 /// a `config` file, which git copies into the new repository.
-pub const FIXTURE_TEMPLATE_DIR: &str =
+pub(crate) const FIXTURE_TEMPLATE_DIR: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/git-template");
 
 /// A `git` command for building or driving a test fixture repository. Any
@@ -40,7 +40,7 @@ pub fn fixture_git() -> Command {
 
 /// Applies the fixture template to an already-built `git` command, for helpers
 /// that build their command some other way (see `git::test_support`).
-pub fn keep_fixture_unsigned(command: &mut Command) -> &mut Command {
+pub(crate) fn keep_fixture_unsigned(command: &mut Command) -> &mut Command {
     command.env("GIT_TEMPLATE_DIR", FIXTURE_TEMPLATE_DIR)
 }
 

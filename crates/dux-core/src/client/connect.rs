@@ -310,7 +310,7 @@ impl Client {
     }
 
     /// The error for a request that got no reply.
-    pub fn no_reply(&self, error: &TransportError) -> CliError {
+    pub(crate) fn no_reply(&self, error: &TransportError) -> CliError {
         match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why.clone()),
             TransportError::NotOwner(why) => CliError::new(Exit::NotRunning, why.clone()),
@@ -458,7 +458,7 @@ fn login_needed(name: &str) -> CliError {
 
 /// The sentence a refusal carries: a JSON body's `message` (else its
 /// `error`), a plain-text body as it is, or the status alone.
-pub fn reply_sentence(reply: &Response) -> String {
+pub(crate) fn reply_sentence(reply: &Response) -> String {
     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&reply.body) {
         for field in ["message", "error"] {
             if let Some(text) = json.get(field).and_then(|v| v.as_str()) {

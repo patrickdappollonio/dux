@@ -94,7 +94,7 @@ const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
 /// Every deprecated key in `doc` the load migrations cannot carry over, each
 /// tried on its own (so one failure never hides another), as its dotted key
 /// and the sentence the migration fails with.
-pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
+pub(crate) fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
     DEPRECATED_CONFIG_KEYS
         .iter()
         .filter_map(|rule| {
@@ -113,7 +113,7 @@ pub fn load_migration_failures(doc: &DocumentMut) -> Vec<(Vec<String>, String)> 
 
 /// Whether `[section] key` is a deprecated key dux still reads (and carries
 /// over to its replacement). The formatter's schema knows these names.
-pub fn is_deprecated_key(section: &str, key: &str) -> bool {
+pub(crate) fn is_deprecated_key(section: &str, key: &str) -> bool {
     DEPRECATED_CONFIG_KEYS
         .iter()
         .any(|rule| rule.old.section == section && rule.old.key == key)
@@ -124,7 +124,7 @@ pub fn is_deprecated_key(section: &str, key: &str) -> bool {
 /// key that replaced it (unless `doc` already sets that one) and the
 /// deprecated key is removed. A value its rule cannot read is left as it is,
 /// for the caller to remove or keep.
-pub fn carry_over_deprecated_key(doc: &mut DocumentMut, section: &str, key: &str) {
+pub(crate) fn carry_over_deprecated_key(doc: &mut DocumentMut, section: &str, key: &str) {
     let Some(rule) = DEPRECATED_CONFIG_KEYS
         .iter()
         .find(|rule| rule.old.section == section && rule.old.key == key)
@@ -139,23 +139,23 @@ pub fn carry_over_deprecated_key(doc: &mut DocumentMut, section: &str, key: &str
 
 /// A value the load migrations write in place of a deprecated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CarriedOver {
+pub(crate) struct CarriedOver {
     /// The path of the setting the value lands in.
     pub key: Vec<String>,
     /// The deprecated key's section and name.
-    pub old_section: &'static str,
-    pub old_key: &'static str,
+    pub(crate) old_section: &'static str,
+    pub(crate) old_key: &'static str,
     /// The deprecated key's value as the file writes it.
-    pub old_value: String,
+    pub(crate) old_value: String,
     /// What to write instead, for the sentence.
-    pub replace_with: &'static str,
+    pub(crate) replace_with: &'static str,
 }
 
 /// Every value the deprecated-key migrations would write into `doc`, each
 /// rule tried on its own: a key that is absent before and present after.
 /// A migration that fails, or drops its key without carrying a value over,
 /// writes none.
-pub fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
+pub(crate) fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
     let mut found = Vec::new();
     for rule in DEPRECATED_CONFIG_KEYS {
         let Some(old_value) = doc
@@ -199,7 +199,7 @@ pub fn carried_over(doc: &DocumentMut) -> Vec<CarriedOver> {
 
 /// Every retired provider's stock block in `doc` the load prunes, as its
 /// dotted key and why.
-pub fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
+pub(crate) fn retired_provider_prunes(doc: &DocumentMut) -> Vec<(Vec<String>, String)> {
     let mut pruned = doc.clone();
     let Some(before) = doc.get("providers").and_then(Item::as_table) else {
         return Vec::new();

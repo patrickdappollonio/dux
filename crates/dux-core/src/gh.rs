@@ -23,9 +23,9 @@ use crate::worker::{
 /// `rateLimit` field. Lets the PR-sync loop back off before it exhausts the
 /// GraphQL points budget (typically 5000/hour, higher on GitHub Enterprise Cloud).
 #[derive(Clone, Debug)]
-pub struct RateLimitInfo {
+pub(crate) struct RateLimitInfo {
     pub remaining: i64,
-    pub reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) reset_at: Option<chrono::DateTime<chrono::Utc>>,
     /// What this one query cost, in GraphQL points. Already asked for, and what
     /// the cycle summary reports: the widened discovery window is a cost
     /// question, so the log has to be able to answer it.
@@ -36,12 +36,12 @@ pub struct RateLimitInfo {
 /// hosts that were actually queried this cycle appear (a host skipped because it
 /// is already backed off, or one with only zero-network sessions, is absent, so
 /// its backoff window is left untouched rather than spuriously cleared).
-pub struct HostSignal {
+pub(crate) struct HostSignal {
     pub host: String,
     pub rate: Option<RateLimitInfo>,
     /// A whole-call failure (spawn error / timeout / unparseable-or-null data) on
     /// at least one of this host's chunks.
-    pub hard_failed: bool,
+    pub(crate) hard_failed: bool,
     /// The failure looked like GitHub rate-limiting (a 403 / secondary limit, or a
     /// `RATE_LIMITED` GraphQL error), as opposed to a network/`gh` error. Lets the
     /// status message say so instead of a vague "network or gh error".
@@ -53,7 +53,7 @@ pub struct HostSignal {
 type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
 
 /// [`PrSyncOutcome`] with each result naming the branch generation it was asked under.
-pub type PrSyncReport = (Vec<PrStatusResult>, Vec<HostSignal>);
+pub(crate) type PrSyncReport = (Vec<PrStatusResult>, Vec<HostSignal>);
 
 /// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
 /// whether the whole call hard-failed, and whether that failure looked like
@@ -68,11 +68,11 @@ type ChunkOutcome = (
 /// Snapshot of the active per-host backoff windows (`host -> until`) passed into
 /// a sync so backed-off hosts are skipped (their sessions keep last-known PRs)
 /// without another `gh` call.
-pub type BackoffSnapshot = std::collections::HashMap<String, Instant>;
+pub(crate) type BackoffSnapshot = std::collections::HashMap<String, Instant>;
 
 /// GraphQL `rateLimit.remaining` floor below which the loop pauses polling
 /// until the quota resets.
-pub const RATE_LIMIT_BACKOFF_FLOOR: i64 = 100;
+pub(crate) const RATE_LIMIT_BACKOFF_FLOOR: i64 = 100;
 
 /// Max GraphQL aliases per `gh api graphql` invocation. Each session emits 1–2
 /// aliases; capping the batch keeps every query ~1 GraphQL point AND stays well
@@ -126,7 +126,7 @@ const GH_READER_DRAIN: Duration = Duration::from_secs(2);
 /// single query per chunk, and returns one [`PrStatusResult`] per session,
 /// naming the branch generation it was asked under, plus a per-host signal for the backoff. Hosts already backed off in
 /// `backoff` are skipped (their sessions keep last-known PRs) with no `gh` call.
-pub fn run_pr_sync(
+pub(crate) fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
@@ -142,7 +142,7 @@ pub fn run_pr_sync(
 /// most of its cycles leave those entries alone. Every deliberate trigger asks
 /// about whatever it was pointed at, whichever tail the agent is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyncScope {
+pub(crate) enum SyncScope {
     /// Every entry in the plan.
     Everything,
     /// Only the agents the sidebar shows as active.
@@ -150,7 +150,7 @@ pub enum SyncScope {
 }
 
 /// [`run_pr_sync`] with the cycle's [`SyncScope`] named.
-pub fn run_pr_sync_scoped(
+pub(crate) fn run_pr_sync_scoped(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
@@ -182,7 +182,7 @@ pub fn run_pr_sync_scoped(
 
 /// The entries a cycle of the given [`SyncScope`] asks GitHub about. Pure, so
 /// which agents a narrowed cycle leaves alone can be asserted without a `gh`.
-pub fn entries_for_scope(entries: Vec<PrSyncEntry>, scope: SyncScope) -> Vec<PrSyncEntry> {
+pub(crate) fn entries_for_scope(entries: Vec<PrSyncEntry>, scope: SyncScope) -> Vec<PrSyncEntry> {
     match scope {
         SyncScope::Everything => entries,
         SyncScope::ActiveOnly => entries.into_iter().filter(|e| !e.inactive).collect(),
@@ -195,7 +195,7 @@ pub fn entries_for_scope(entries: Vec<PrSyncEntry>, scope: SyncScope) -> Vec<PrS
 /// time ever brings it back. Otherwise an inactive sweep is due once that many
 /// seconds have passed since the last one. Pure so the cadence is testable
 /// without a poller, a clock or a `gh`.
-pub fn inactive_sweep_due(since_last: Duration, interval_secs: u64) -> bool {
+pub(crate) fn inactive_sweep_due(since_last: Duration, interval_secs: u64) -> bool {
     interval_secs != 0 && since_last >= Duration::from_secs(interval_secs)
 }
 
@@ -206,7 +206,7 @@ pub fn inactive_sweep_due(since_last: Duration, interval_secs: u64) -> bool {
 /// the blind poll and the initial refresh read the same shared entries vector,
 /// so a per-entry field could not tell them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyncTrigger {
+pub(crate) enum SyncTrigger {
     /// The periodic poll loop, running on its own with nobody asking.
     BlindPoll,
     /// An agent was brought to the foreground. Frequent and cheap to provoke:
@@ -223,7 +223,7 @@ pub enum SyncTrigger {
 /// Single-session PR check (foreground / create / exit triggers). Shares
 /// the batched machinery with a one-element batch; returns the PR plus the
 /// per-host signal so the one-shot caller can arm/clear the shared backoff too.
-pub fn check_pr_for_entry(
+pub(crate) fn check_pr_for_entry(
     entry: &PrSyncEntry,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
@@ -1219,7 +1219,7 @@ pub enum GithubIntegration {
 ///   on-demand re-check on both surfaces is unaffected.
 /// * A probe that has never run is not due here: the surfaces run the startup
 ///   probe themselves, and answering "due" before it lands would double it.
-pub fn gh_reprobe_is_due(
+pub(crate) fn gh_reprobe_is_due(
     status: crate::model::GhStatus,
     integration: GithubIntegration,
     since_last_probe: Option<Duration>,
@@ -1245,7 +1245,7 @@ pub fn gh_reprobe_is_due(
 /// `program` is `gh` in production. It is named rather than hardcoded so the
 /// wiring can be tested against a stand-in whose answers are controlled, without
 /// a network call, a real login, or mutating the test process's `PATH`.
-pub fn probe_github_hosts(program: &OsStr) -> GhProbe {
+pub(crate) fn probe_github_hosts(program: &OsStr) -> GhProbe {
     // Kept deliberately: without it, "a failure to launch preserves the last
     // known good value" would quietly cover `gh` having been uninstalled, and
     // dux would go on believing in hosts it can no longer reach.
@@ -1871,7 +1871,7 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
 /// reconstruction paths and by `Engine::seed_pr_statuses_from_store` (startup PR
 /// badge seeding), so the "OPEN"/"MERGED"/"CLOSED" decode lives in exactly one
 /// place instead of being re-implemented per surface.
-pub fn reconstruct_pr_from_stored(stored: &StoredPr) -> Option<PrInfo> {
+pub(crate) fn reconstruct_pr_from_stored(stored: &StoredPr) -> Option<PrInfo> {
     reconstruct_from_stored(stored)
 }
 
@@ -1933,7 +1933,7 @@ fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) ->
     })
 }
 
-pub fn pull_request_url(host: &str, owner_repo: &str, number: u64) -> String {
+pub(crate) fn pull_request_url(host: &str, owner_repo: &str, number: u64) -> String {
     let host = normalize_github_host(host);
     format!("https://{host}/{owner_repo}/pull/{number}")
 }
@@ -1948,7 +1948,7 @@ pub fn pull_request_url(host: &str, owner_repo: &str, number: u64) -> String {
 /// per-host authentication check meaningful: the host dux qualified is then the
 /// host `gh` actually contacts. Verified against gh 2.95.0: the host-qualified
 /// form is accepted and ignores a conflicting `GH_HOST`; the bare form does not.
-pub fn gh_repo_arg(host: &str, owner_repo: &str) -> String {
+pub(crate) fn gh_repo_arg(host: &str, owner_repo: &str) -> String {
     let host = normalize_github_host(host);
     format!("{host}/{owner_repo}")
 }
@@ -2009,7 +2009,7 @@ fn normalize_github_host(host: &str) -> &str {
 ///
 /// A pure function, shared by the TUI's new-agent-from-pr prompt and the web's
 /// `CreateAgentFromPr` wire flow.
-pub fn parse_pull_request_lookup(
+pub(crate) fn parse_pull_request_lookup(
     raw_input: &str,
     selected_host: &str,
     selected_owner_repo: &str,
@@ -2122,7 +2122,7 @@ pub fn run_pull_request_lookup_job(
 ///
 /// Pure over the pre-resolved `resolution`, so every input form is testable
 /// without git.
-pub fn parse_attach_pull_request_lookup(
+pub(crate) fn parse_attach_pull_request_lookup(
     raw_input: &str,
     resolution: &git::RemoteResolution,
     project_name: &str,
@@ -2200,7 +2200,7 @@ pub fn parse_attach_pull_request_lookup(
 /// resolve attaches identically. `project` is the SESSION's project: its
 /// remote is what a bare number (or a host-less `owner/repo#123`) resolves
 /// against.
-pub fn run_attach_pull_request_lookup_job(
+pub(crate) fn run_attach_pull_request_lookup_job(
     project: Project,
     session_id: String,
     raw_input: &str,
@@ -2235,21 +2235,21 @@ pub fn run_attach_pull_request_lookup_job(
 
 /// A pull request as `gh pr view` reports it, before any project is attached.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullRequestMetadata {
+pub(crate) struct PullRequestMetadata {
     pub number: u64,
     /// With the bidirectional-text controls stripped.
     pub title: String,
     pub state: String,
     pub head_ref_name: String,
     /// The head commit, when `gh` reported one.
-    pub head_ref_oid: Option<String>,
+    pub(crate) head_ref_oid: Option<String>,
 }
 
 /// Run `gh pr view` through `program` for `lookup` and read its answer. Needs no
 /// project: callers that already hold one attach it with
 /// [`resolved_pull_request`]. Bounded by [`GH_CALL_TIMEOUT`] so a hung call
 /// (stalled network, credential prompt) cannot strand a busy status forever.
-pub fn look_up_pull_request(
+pub(crate) fn look_up_pull_request(
     program: &OsStr,
     lookup: &PullRequestLookup,
 ) -> Result<PullRequestMetadata, String> {
@@ -2333,7 +2333,7 @@ fn parse_pull_request_metadata_json(json: &str) -> Result<PullRequestMetadata, S
 
 /// The default branch of `host/owner_repo`, asked of `gh repo view` through
 /// `program` under the same bound as the pull request lookup. Needs no project.
-pub fn look_up_default_branch(
+pub(crate) fn look_up_default_branch(
     program: &OsStr,
     host: &str,
     owner_repo: &str,

@@ -127,7 +127,7 @@ pub fn recreate_working_copy(
 /// Why the changes region is quiet for a MANAGED agent whose working copy is
 /// gone. Names the path, says what happened to a process still running there,
 /// and says what has to happen before the agent can run again.
-pub fn missing_working_copy_reason(worktree: &Path) -> String {
+pub(crate) fn missing_working_copy_reason(worktree: &Path) -> String {
     format!(
         "The working copy at {} no longer exists on disk, so dux cannot show this agent's \
          changes. Anything still running in it keeps running in a directory that is gone, and \
@@ -144,7 +144,7 @@ pub fn missing_working_copy_reason(worktree: &Path) -> String {
 /// stat a deletion does, and telling the user their working copy was deleted
 /// when it is sitting safely on a mount that is merely down would have them
 /// recreate a branch that never needed recreating.
-pub fn unreachable_working_copy_reason(worktree: &Path) -> String {
+pub(crate) fn unreachable_working_copy_reason(worktree: &Path) -> String {
     format!(
         "dux could not read the working copy at {}, so it cannot say whether this agent has \
          changes. Check that the path is readable and that whatever it lives on is mounted, then \
@@ -156,7 +156,7 @@ pub fn unreachable_working_copy_reason(worktree: &Path) -> String {
 /// The same fact for a STANDALONE agent, whose directory is the user's own.
 /// dux never creates, moves or removes that folder, so the remedy is the user's
 /// rather than a button.
-pub fn missing_folder_reason(folder: &Path) -> String {
+pub(crate) fn missing_folder_reason(folder: &Path) -> String {
     format!(
         "The folder {} no longer exists on disk, so dux cannot show this agent's changes. \
          Anything still running in it keeps running in a directory that is gone. Restore the \
@@ -258,7 +258,7 @@ fn providers_joined(names: &[String], last: &str) -> Prose {
 /// been measured, so they get the cautious answer rather than a promise, and so
 /// does any other CLI configured as a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RunningTabFate {
+pub(crate) enum RunningTabFate {
     /// It follows the folder by itself: Claude.
     Follows,
     /// It cannot follow the folder, and its CLI picks its conversation back up
@@ -274,7 +274,7 @@ impl RunningTabFate {
     /// CLI whatever the provider is called, and `resume` is whether the
     /// provider's configuration carries resume arguments, the same answer
     /// every launch asks.
-    pub fn of(command: &str, resume: ConversationResume) -> Self {
+    pub(crate) fn of(command: &str, resume: ConversationResume) -> Self {
         if command.eq_ignore_ascii_case("claude") {
             Self::Follows
         } else if resume == ConversationResume::Resumes {
@@ -473,7 +473,7 @@ pub fn recreate_confirm_prose(
 }
 
 /// The busy sentence while the recreate runs.
-pub fn recreate_busy_message(agent_label: &str) -> crate::status_text::StatusText {
+pub(crate) fn recreate_busy_message(agent_label: &str) -> crate::status_text::StatusText {
     crate::status_text![
         "Recreating the working copy for agent ",
         q(agent_label),
@@ -492,13 +492,13 @@ pub struct TabRestartReport {
     pub fresh: Vec<String>,
     /// Not started again: closed, already running again, or refused by the
     /// time its old process had gone.
-    pub not_restarted: Vec<String>,
+    pub(crate) not_restarted: Vec<String>,
     /// Not started again, because somebody stopped or closed the tab, or
     /// stopped its agent, while the old process shut down.
     pub stopped: Vec<String>,
     /// Started again to pick its conversation back up, which did not take, so
     /// it was started again with a fresh conversation.
-    pub fell_back: Vec<String>,
+    pub(crate) fell_back: Vec<String>,
     /// Started again to pick its conversation back up, and exited right away
     /// after saying something, which its tab shows.
     pub ended: Vec<String>,
@@ -506,15 +506,15 @@ pub struct TabRestartReport {
     pub failed: Vec<(String, String)>,
     /// Restartable tabs that came up while the copy was being recreated, after
     /// the restart was asked for, and so were left running.
-    pub came_up_later: Vec<String>,
+    pub(crate) came_up_later: Vec<String>,
     /// Tabs the restart was asked for whose process exited while the copy was
     /// being recreated, so there was nothing left to restart.
-    pub exited_during_checkout: Vec<String>,
+    pub(crate) exited_during_checkout: Vec<String>,
     /// The wait the old processes were given, when any of them outlasted it and
     /// was force-closed.
-    pub forced_after_seconds: Option<u64>,
+    pub(crate) forced_after_seconds: Option<u64>,
     /// The agent was deleted while its tabs shut down, so nothing started.
-    pub agent_deleted: bool,
+    pub(crate) agent_deleted: bool,
 }
 
 impl TabRestartReport {
@@ -527,7 +527,7 @@ impl TabRestartReport {
 
 /// Why a launch of a tab is refused while a working-copy recreate waits to
 /// start it again.
-pub fn restart_pending_launch_refusal(
+pub(crate) fn restart_pending_launch_refusal(
     agent_label: &str,
     provider: &str,
 ) -> crate::status_text::StatusText {
@@ -543,7 +543,7 @@ pub fn restart_pending_launch_refusal(
 
 /// The final of a recreate whose agent was deleted while its tabs were
 /// shutting down to be restarted.
-pub fn recreate_agent_deleted_message(agent_label: &str) -> crate::status_text::StatusText {
+pub(crate) fn recreate_agent_deleted_message(agent_label: &str) -> crate::status_text::StatusText {
     crate::status_text![
         "Agent ",
         q(agent_label),
@@ -553,7 +553,7 @@ pub fn recreate_agent_deleted_message(agent_label: &str) -> crate::status_text::
 }
 
 /// The spinner while dux waits for the tabs it is restarting to shut down.
-pub fn recreate_restart_busy_message(
+pub(crate) fn recreate_restart_busy_message(
     agent_label: &str,
     restartable: &[String],
 ) -> crate::status_text::StatusText {
@@ -708,7 +708,7 @@ fn restart_report_prose(live: &RunningTabs, report: &TabRestartReport) -> Prose 
 /// those processes do next. `restart` is what dux did when the confirmation
 /// asked it to restart the tabs that cannot follow the folder, and replaces
 /// their sentence.
-pub fn recreate_success_message(
+pub(crate) fn recreate_success_message(
     agent_label: &str,
     worktree: &Path,
     branch_name: &str,

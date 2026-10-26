@@ -33,7 +33,7 @@ const RED: &str = "\x1b[31m";
 const QR_COLORS: &str = "\x1b[30;107m";
 
 /// Indent of every QR row, matching the banner's listener rows.
-pub const QR_INDENT: &str = "  ";
+pub(crate) const QR_INDENT: &str = "  ";
 
 /// How a log line reads at a glance: the glyph it carries and the color a
 /// surface paints it.
@@ -682,7 +682,7 @@ mod tests {
         let lines: Vec<String> = sample_banner()
             .lines()
             .iter()
-            .map(|l| l.render_plain())
+            .map(super::LogLine::render_plain)
             .collect();
         assert_eq!(lines[1], "  -> Local (loopback): http://127.0.0.1:3890");
         assert_eq!(

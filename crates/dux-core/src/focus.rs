@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 /// cross-language twin pinned by shared test vectors). The web works in raw
 /// milliseconds; the semantics (undefined-since -> false, grace<=0 -> false,
 /// elapsed<grace -> true) are identical.
-pub fn within_attention_grace(elapsed: Option<Duration>, grace: Duration) -> bool {
+pub(crate) fn within_attention_grace(elapsed: Option<Duration>, grace: Duration) -> bool {
     match elapsed {
         Some(elapsed) => grace > Duration::ZERO && elapsed < grace,
         None => false,

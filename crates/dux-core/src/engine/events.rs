@@ -227,7 +227,7 @@ impl StatusUpdate {
 
 /// The one status key every "GitHub features came back / went away" message
 /// carries, so the surfaces replace the standing one instead of stacking.
-pub const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
+pub(crate) const GH_AVAILABILITY_STATUS_KEY: &str = "gh-availability";
 
 /// What the App must do after the Engine processed a `WorkerEvent`. The Engine
 /// handles all domain-state mutations (sessions, projects, providers,
@@ -1305,7 +1305,7 @@ pub fn survivors_kept_worktree_message(
 /// It names the folder, because the whole point is to reassure the user that
 /// the directory they pointed dux at is still theirs, and it says what to do
 /// instead rather than only saying no.
-pub fn standalone_delete_directory_refusal(agent_name: &str, folder: &str) -> StatusText {
+pub(crate) fn standalone_delete_directory_refusal(agent_name: &str, folder: &str) -> StatusText {
     crate::status_text![
         "Agent ",
         q(agent_name),
@@ -2075,7 +2075,7 @@ impl Engine {
         )
     }
 
-    pub fn process_project_persistence_completed(
+    pub(crate) fn process_project_persistence_completed(
         &mut self,
         action: ProjectPersistenceAction,
         result: Result<(), String>,
@@ -2896,7 +2896,7 @@ impl Engine {
         busy_message
     }
 
-    pub fn process_agent_launch_failed(
+    pub(crate) fn process_agent_launch_failed(
         &mut self,
         data: AgentLaunchFailedData,
     ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
@@ -3940,7 +3940,10 @@ impl Engine {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map_or_else(|| session_id.to_string(), |session| session.display_label());
+            .map_or_else(
+                || session_id.to_string(),
+                super::super::model::AgentSession::display_label,
+            );
         self.post_status(crate::poller_status::pr_status_not_saved(
             session_id, &label, error,
         ));

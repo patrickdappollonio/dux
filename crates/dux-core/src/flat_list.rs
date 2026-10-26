@@ -50,7 +50,7 @@ pub struct FlatOrder {
 /// `crates/dux-web/web/src/lib/flatList.ts`, hand-written like the rest of that
 /// module's twins of this one, and the two must stay in step: change the rule
 /// here and change it there in the same commit.
-pub fn is_inactive(session: &AgentSession) -> bool {
+pub(crate) fn is_inactive(session: &AgentSession) -> bool {
     matches!(
         session.status,
         SessionStatus::Detached | SessionStatus::Exited

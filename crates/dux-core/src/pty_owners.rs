@@ -442,7 +442,7 @@ impl PtySizeOwners {
     /// grid was accepted mid-`TIOCSWINSZ` and the child is sized for the loser,
     /// so re-applying the returned geometry is the fix. It terminates, because
     /// the winner's own check returns `None`.
-    pub fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
+    pub(crate) fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
         let owners = self.owners.lock().unwrap();
         let landed = owners.applied.get(pty_id)?;
         (landed.seq > seq).then_some((landed.rows, landed.cols))

@@ -65,7 +65,7 @@ impl Drop for SingleInstanceLock {
 impl SingleInstanceLock {
     /// Bind the control socket at `path` and record in the lock file where it is,
     /// or why it could not be bound. Only a dead socket at the path is replaced.
-    pub fn open_control_socket(&mut self, path: &Path) -> Result<(), Unavailable> {
+    pub(crate) fn open_control_socket(&mut self, path: &Path) -> Result<(), Unavailable> {
         let result = match ControlSocket::bind(path) {
             Ok(socket) => {
                 self.control_socket = ControlSocketState::Open(socket);
@@ -278,7 +278,7 @@ fn read_holder_pid_once(file: &mut File) -> Option<u32> {
 
 /// The line a dux adds to its lock file, after its PID, once its SIGUSR1 handler
 /// is in place, so `kill -USR1` reloads it instead of ending it.
-pub const RELOAD_SIGNAL_MARKER: &str = "reload-signal=usr1";
+pub(crate) const RELOAD_SIGNAL_MARKER: &str = "reload-signal=usr1";
 
 /// What this process writes into the lock file it holds: its PID on the
 /// first line, as every reader expects, then the reload-signal marker when
@@ -294,20 +294,20 @@ fn lock_file_text(pid: u32) -> String {
 
 /// The line a dux adds to its lock file once its control socket is bound,
 /// followed by the socket's path.
-pub const CONTROL_SOCKET_PREFIX: &str = "control-socket=";
+pub(crate) const CONTROL_SOCKET_PREFIX: &str = "control-socket=";
 
 /// The line a dux adds instead when it could not bind its control socket,
 /// followed by the reason.
-pub const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unavailable=";
+pub(crate) const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unavailable=";
 
 /// A lock file's contents as written by any dux, whose PID line may be the whole
 /// file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFileContents {
     pub pid: Option<u32>,
-    pub handles_reload_signal: bool,
+    pub(crate) handles_reload_signal: bool,
     pub control_socket: Option<PathBuf>,
-    pub control_socket_unavailable: Option<String>,
+    pub(crate) control_socket_unavailable: Option<String>,
 }
 
 impl LockFileContents {

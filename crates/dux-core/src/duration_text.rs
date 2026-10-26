@@ -6,13 +6,13 @@ use std::time::Duration;
 
 /// `d` rounded to the nearest whole second, and never below one: a wait the
 /// message is about lasted some time, so it does not read as "0s".
-pub fn whole_seconds(d: Duration) -> u64 {
+pub(crate) fn whole_seconds(d: Duration) -> u64 {
     let rounded = (d.as_millis() + 500) / 1000;
     u64::try_from(rounded).unwrap_or(u64::MAX).max(1)
 }
 
 /// [`whole_seconds`] with its unit spelled out: "1 second", "15 seconds".
-pub fn seconds_phrase(d: Duration) -> String {
+pub(crate) fn seconds_phrase(d: Duration) -> String {
     match whole_seconds(d) {
         1 => "1 second".to_string(),
         n => format!("{n} seconds"),

@@ -82,7 +82,7 @@ fn decode_identities(text: &str) -> Vec<crate::process_sessions::ProcessIdentity
 /// in the database so a quit or a crash in the middle of it does not leave a
 /// worktree and a branch behind that no agent owns.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingWorktreeRemoval {
+pub(crate) struct PendingWorktreeRemoval {
     pub session_id: String,
     /// The agent's name at the time, for the status that reports it.
     pub label: String,
@@ -99,7 +99,7 @@ pub struct PendingWorktreeRemoval {
     pub process_registry: crate::process_sessions::RegistrySnapshot,
     /// What was running in them when the delete began, by identity: a later
     /// start acts on a leaderless session only through these.
-    pub process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
+    pub(crate) process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
 }
 
 impl SessionStore {
@@ -771,7 +771,7 @@ impl SessionStore {
     }
 
     /// Write one app-wide value, replacing any previous value for the key.
-    pub fn set_app_state(&self, key: &str, value: &str) -> Result<()> {
+    pub(crate) fn set_app_state(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "insert into app_state(key, value) values(?1, ?2) \
              on conflict(key) do update set value = excluded.value",
@@ -830,7 +830,10 @@ impl SessionStore {
 
     /// Remember a worktree removal the user asked for, until it has finished.
     /// Replaces an earlier row for the same agent.
-    pub fn insert_pending_worktree_removal(&self, row: &PendingWorktreeRemoval) -> Result<()> {
+    pub(crate) fn insert_pending_worktree_removal(
+        &self,
+        row: &PendingWorktreeRemoval,
+    ) -> Result<()> {
         let managed = &row.managed;
         let sessions = row
             .process_sessions
@@ -869,7 +872,7 @@ impl SessionStore {
 
     /// Record what was running in a pending removal's sessions when its delete
     /// began, by identity.
-    pub fn set_pending_removal_snapshot(
+    pub(crate) fn set_pending_removal_snapshot(
         &self,
         session_id: &str,
         snapshot: &[crate::process_sessions::ProcessIdentity],
@@ -914,7 +917,9 @@ impl SessionStore {
 
     /// The saved process registry; empty when none was saved or it cannot
     /// be read.
-    pub fn load_process_registry(&self) -> Result<Vec<crate::process_sessions::StoredSession>> {
+    pub(crate) fn load_process_registry(
+        &self,
+    ) -> Result<Vec<crate::process_sessions::StoredSession>> {
         let body: Option<String> = self
             .conn
             .query_row(
@@ -966,7 +971,7 @@ impl SessionStore {
     }
 
     /// Merge `snapshot` into the registry slice of pending removal `session_id`.
-    pub fn merge_pending_removal_registry(
+    pub(crate) fn merge_pending_removal_registry(
         &self,
         session_id: &str,
         snapshot: &crate::process_sessions::RegistrySnapshot,
@@ -1047,7 +1052,7 @@ impl SessionStore {
 
     /// Follow a branch rename into a pending removal, so the removal a later
     /// start finishes deletes the branch by the name it has now.
-    pub fn rename_pending_removal_branch(
+    pub(crate) fn rename_pending_removal_branch(
         &self,
         session_id: &str,
         old: &str,
@@ -1071,7 +1076,7 @@ impl SessionStore {
     }
 
     /// Forget a pending worktree removal, finished one way or the other.
-    pub fn delete_pending_worktree_removal(&self, session_id: &str) -> Result<()> {
+    pub(crate) fn delete_pending_worktree_removal(&self, session_id: &str) -> Result<()> {
         self.conn
             .execute(
                 "delete from pending_worktree_removals where session_id = ?1",
@@ -1082,7 +1087,7 @@ impl SessionStore {
     }
 
     /// Every worktree removal still waiting to be finished, oldest first.
-    pub fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
+    pub(crate) fn load_pending_worktree_removals(&self) -> Result<Vec<PendingWorktreeRemoval>> {
         let mut stmt = self.conn.prepare(
             "select session_id, label, project_id, project_path, worktree_path, source_branch, \
              branch_name, initial_branch, branch_provenance, delete_branch, process_sessions, \
@@ -1136,7 +1141,7 @@ impl SessionStore {
     }
 
     /// Remove a single extra tab row (closing an extra tab).
-    pub fn delete_agent_tab(&self, tab_id: &str) -> Result<()> {
+    pub(crate) fn delete_agent_tab(&self, tab_id: &str) -> Result<()> {
         let affected = self
             .conn
             .execute("delete from agent_tabs where id = ?1", params![tab_id])?;
@@ -1196,7 +1201,7 @@ impl SessionStore {
     /// them disagreeing. It is not the only writer of the mirror: `upsert_session`
     /// stores whatever the in-memory session carries, and the migration's adopt
     /// repair moves the mirror when the slot moves.
-    pub fn set_slot_provider(
+    pub(crate) fn set_slot_provider(
         &self,
         session_id: &str,
         provider: &str,
@@ -1238,7 +1243,7 @@ impl SessionStore {
     /// tab is represented there as ABSENCE (see
     /// [`crate::model::AgentSession::last_focused_tab`]): a memory naming either
     /// tab becomes NULL, so a restart cannot read one this promotion invalidated.
-    pub fn promote_tab_to_slot(
+    pub(crate) fn promote_tab_to_slot(
         &self,
         session_id: &str,
         new_slot_tab_id: &str,
@@ -1306,7 +1311,7 @@ impl SessionStore {
     }
 
     /// Retarget an extra tab's provider (effective on its next launch).
-    pub fn update_agent_tab_provider(&self, tab_id: &str, provider: &str) -> Result<()> {
+    pub(crate) fn update_agent_tab_provider(&self, tab_id: &str, provider: &str) -> Result<()> {
         let affected = self.conn.execute(
             "update agent_tabs set provider = ?2 where id = ?1",
             params![tab_id, provider],
@@ -1322,7 +1327,7 @@ impl SessionStore {
 
     /// The largest `sort_order` among a session's extra tabs, if any, used to
     /// append a new tab after the existing ones.
-    pub fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
+    pub(crate) fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
         let value: Option<i64> = self.conn.query_row(
             "select max(sort_order) from agent_tabs where session_id = ?1",
             params![session_id],
@@ -1513,7 +1518,11 @@ impl SessionStore {
 
     /// Record the branch a project's new worktrees start from. SQLite only: the
     /// base is derived state and config never carries it.
-    pub fn update_project_leading_branch(&self, project_id: &str, branch: &str) -> Result<()> {
+    pub(crate) fn update_project_leading_branch(
+        &self,
+        project_id: &str,
+        branch: &str,
+    ) -> Result<()> {
         let updated = self.conn.execute(
             r"
             update projects
@@ -1530,7 +1539,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn update_project_auto_reopen(
+    pub(crate) fn update_project_auto_reopen(
         &self,
         project_id: &str,
         auto_reopen_agents: Option<bool>,
@@ -1547,7 +1556,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn update_project_startup_command(
+    pub(crate) fn update_project_startup_command(
         &self,
         project_id: &str,
         startup_command: Option<&str>,
@@ -1564,7 +1573,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn update_project_env(
+    pub(crate) fn update_project_env(
         &self,
         project_id: &str,
         env: &BTreeMap<String, String>,
@@ -1585,7 +1594,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn delete_project(&self, id: &str) -> Result<()> {
+    pub(crate) fn delete_project(&self, id: &str) -> Result<()> {
         self.conn
             .execute("delete from projects where id = ?1", params![id])?;
         Ok(())
@@ -1604,7 +1613,7 @@ impl SessionStore {
     /// project whose id is the empty string would otherwise sweep up every
     /// standalone agent the user has. The kind column, not the project id, is
     /// what says who owns a row.
-    pub fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
+    pub(crate) fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
         let tx = immediate_tx(&self.conn)?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed'")?;
@@ -1715,7 +1724,7 @@ impl SessionStore {
     }
 
     /// Load the latest (highest-numbered) PR for each session that has at least one.
-    pub fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
+    pub(crate) fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r"
             select session_id, pr_number, host, owner_repo, state, title, url
@@ -1805,7 +1814,7 @@ impl SessionStore {
     }
 
     /// Remove a session's pinned pull request, if any (a no-op otherwise).
-    pub fn delete_pr_override(&self, session_id: &str) -> Result<()> {
+    pub(crate) fn delete_pr_override(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "delete from session_pr_overrides where session_id = ?1",
             params![session_id],
@@ -1851,7 +1860,11 @@ impl SessionStore {
 
     /// Record that an explicit rename moved the branch dux minted for a session
     /// to `branch_name`.
-    pub fn set_minted_branch_rename(&self, session_id: &str, branch_name: &str) -> Result<()> {
+    pub(crate) fn set_minted_branch_rename(
+        &self,
+        session_id: &str,
+        branch_name: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "insert into session_minted_branch_renames (session_id, branch_name) values (?1, ?2) \
              on conflict(session_id) do update set branch_name = excluded.branch_name",
@@ -1862,7 +1875,7 @@ impl SessionStore {
 
     /// Forget that a session's branch is the one dux minted under a new name:
     /// the agent is on some other branch now.
-    pub fn delete_minted_branch_rename(&self, session_id: &str) -> Result<()> {
+    pub(crate) fn delete_minted_branch_rename(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "delete from session_minted_branch_renames where session_id = ?1",
             params![session_id],
@@ -1872,7 +1885,7 @@ impl SessionStore {
 
     /// Every `(session_id, branch_name)` an explicit rename moved a minted
     /// branch to.
-    pub fn load_minted_branch_renames(&self) -> Result<Vec<(String, String)>> {
+    pub(crate) fn load_minted_branch_renames(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
             .prepare("select session_id, branch_name from session_minted_branch_renames")?;
@@ -1933,7 +1946,7 @@ impl SessionStore {
     ///
     /// `initial_branch` moves with it for the same reason: the agent was born
     /// again on this branch, so the drift the old value described is gone.
-    pub fn record_branch_minted_by_recreate(
+    pub(crate) fn record_branch_minted_by_recreate(
         &self,
         session_id: &str,
         branch_name: &str,
@@ -2127,7 +2140,7 @@ impl SessionStore {
     /// agent anywhere in the list. Like [`reorder_sessions`] it is "dumb": strict
     /// validation that `ordered_ids` is the complete session set lives in the
     /// engine. `updated_at` is deliberately untouched (preserves recency sorting).
-    pub fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
+    pub(crate) fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
@@ -2398,7 +2411,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn set_auto_reopen_enabled(
+    pub(crate) fn set_auto_reopen_enabled(
         &self,
         id: &str,
         auto_reopen: crate::model::AutoReopen,
@@ -2444,7 +2457,7 @@ fn parse_started_providers(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
 }
 
-pub fn fallback_pr_url(host: &str, owner_repo: &str, pr_number: u64) -> String {
+pub(crate) fn fallback_pr_url(host: &str, owner_repo: &str, pr_number: u64) -> String {
     let host = if host.trim().is_empty() {
         "github.com"
     } else {

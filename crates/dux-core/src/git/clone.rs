@@ -67,7 +67,7 @@ impl CloneProcesses {
     }
 
     /// Stop every running clone, and every clone that starts from now on.
-    pub fn stop_all(&self) {
+    pub(crate) fn stop_all(&self) {
         let mut state = self.lock();
         state.stopping = true;
         for group in state.running.values() {

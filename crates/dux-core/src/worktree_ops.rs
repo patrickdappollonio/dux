@@ -71,7 +71,7 @@ impl WorktreeOpKind {
 }
 
 /// "a pull and a push", in a stable order, each kind once.
-pub fn describe_holders(kinds: &[WorktreeOpKind]) -> String {
+pub(crate) fn describe_holders(kinds: &[WorktreeOpKind]) -> String {
     let mut kinds = kinds.to_vec();
     kinds.sort();
     kinds.dedup();
@@ -158,7 +158,7 @@ fn capitalize(text: &str) -> String {
 impl std::error::Error for HoldRefused {}
 
 /// What a finished removal reports to the removals that joined it.
-pub type RemovalResult = Result<RemovedBranches, String>;
+pub(crate) type RemovalResult = Result<RemovedBranches, String>;
 
 /// The shared slot a leading removal writes its outcome into and every joiner
 /// waits on.
@@ -380,7 +380,7 @@ impl std::fmt::Debug for WorktreeOps {
 /// about to make) is the key built after it exists and after it is gone, even
 /// when the path reaches it through a symlink (a dotfiles-managed config
 /// folder, say). The ONE key builder: every occupancy question compares these.
-pub fn path_key(path: &Path) -> PathBuf {
+pub(crate) fn path_key(path: &Path) -> PathBuf {
     let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
     let mut existing = path;
     loop {
@@ -450,7 +450,7 @@ pub fn folder_contains(outer: &Path, inner: &Path) -> bool {
 /// and a lexical spelling (never resolved by the filesystem) keeps whatever
 /// case it was recorded in. On Linux the filesystem is case-sensitive and
 /// so is the comparison.
-pub fn spelled_under(inner: &Path, outer: &Path) -> bool {
+pub(crate) fn spelled_under(inner: &Path, outer: &Path) -> bool {
     under_with_case(inner, outer, CaseRule::of_this_platform())
 }
 
@@ -462,7 +462,7 @@ pub fn spelled_same(a: &Path, b: &Path) -> bool {
 
 /// How two spellings of a path compare by letter case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaseRule {
+pub(crate) enum CaseRule {
     /// Case is folded, as the filesystem does on macOS.
     Folded,
     /// Case is kept, as written.
@@ -471,7 +471,7 @@ pub enum CaseRule {
 
 impl CaseRule {
     /// The rule of the platform dux runs on: folded on macOS, exact elsewhere.
-    pub fn of_this_platform() -> Self {
+    pub(crate) fn of_this_platform() -> Self {
         if cfg!(target_os = "macos") {
             Self::Folded
         } else {
@@ -489,7 +489,7 @@ pub fn case_key(path: &Path) -> PathBuf {
 
 /// [`case_key`] with the case rule spelled out, so it can be tested on either
 /// platform.
-pub fn case_key_with(path: &Path, case: CaseRule) -> PathBuf {
+pub(crate) fn case_key_with(path: &Path, case: CaseRule) -> PathBuf {
     if case == CaseRule::Exact {
         return path.to_path_buf();
     }
@@ -552,7 +552,7 @@ impl WorktreeOps {
     /// [`Self::release_owner`]. Taking a second hold for an owner that already
     /// holds one replaces it.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
-    pub fn hold_as(
+    pub(crate) fn hold_as(
         &self,
         owner: HoldOwner,
         path: impl AsRef<Path>,
@@ -581,7 +581,7 @@ impl WorktreeOps {
     }
 
     /// Release the hold `owner` took, when it took one. Cheap when it did not.
-    pub fn release_owner(&self, owner: &HoldOwner) {
+    pub(crate) fn release_owner(&self, owner: &HoldOwner) {
         let released = Self::release_owner_locked(&mut self.lock(), owner);
         if released {
             self.inner.changed.notify_all();
@@ -596,7 +596,7 @@ impl WorktreeOps {
     /// Record that `old` was renamed to `new` in the worktree `owner` holds.
     /// Kept only while a removal of that worktree is pending, because that
     /// removal captured the old name and is the only reader.
-    pub fn record_branch_rename(&self, owner: &HoldOwner, old: &str, new: &str) {
+    pub(crate) fn record_branch_rename(&self, owner: &HoldOwner, old: &str, new: &str) {
         let mut state = self.lock();
         let Some(key) = state.owners.get(owner).cloned() else {
             return;
@@ -617,7 +617,7 @@ impl WorktreeOps {
     }
 
     /// Every path an operation holds that `pick` accepts, with what holds it.
-    pub fn holders_where(
+    pub(crate) fn holders_where(
         &self,
         pick: &dyn Fn(&Path) -> bool,
     ) -> Vec<(PathBuf, Vec<WorktreeOpKind>)> {
@@ -633,7 +633,7 @@ impl WorktreeOps {
     /// The refusal for starting something in `path` because a removal of it,
     /// or of a folder containing it, is under way; names the folder being
     /// removed. `None` when nothing covers it.
-    pub fn removal_refusal(&self, path: impl AsRef<Path>) -> Option<HoldRefused> {
+    pub(crate) fn removal_refusal(&self, path: impl AsRef<Path>) -> Option<HoldRefused> {
         self.lock().removal_covering(&Spelled::of(path.as_ref()))
     }
 
@@ -717,7 +717,7 @@ impl WorktreeOps {
     /// dux is removing a worktree inside it. Refused with a sentence when the
     /// wait runs out. Blocking: never on the engine thread or an async task.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
-    pub fn claim_for_destructive_within(
+    pub(crate) fn claim_for_destructive_within(
         &self,
         path: impl AsRef<Path>,
         wait: Duration,
@@ -938,7 +938,7 @@ impl RemovalLease {
 
     /// Block until nothing holds the path, or `timeout` passes. On a timeout,
     /// answers with what was still holding it. Run it on a worker thread only.
-    pub fn wait_for_holders(&self, timeout: Duration) -> Result<(), Vec<WorktreeOpKind>> {
+    pub(crate) fn wait_for_holders(&self, timeout: Duration) -> Result<(), Vec<WorktreeOpKind>> {
         let deadline = Instant::now() + timeout;
         let mut state = self.ops.lock();
         loop {
@@ -966,7 +966,7 @@ impl RemovalLease {
     /// deletes the inner folder too. The later one waits; afterwards its own
     /// folder may already be gone, which its git step answers by forgetting
     /// the registration and nothing more. Run it on a worker thread only.
-    pub fn wait_for_overlapping_removals(&self, timeout: Duration) -> bool {
+    pub(crate) fn wait_for_overlapping_removals(&self, timeout: Duration) -> bool {
         self.ops
             .wait_for_older_overlapping(&self.spelled, self.id, timeout)
     }

@@ -65,7 +65,7 @@ impl QuiesceGuard {
     /// timeout. When `false` (timeout or dead writer) the barrier is NOT safe: a
     /// direct config write can race a still-running writer. Callers should abort
     /// the write and surface a retry error instead.
-    pub fn is_acknowledged(&self) -> bool {
+    pub(crate) fn is_acknowledged(&self) -> bool {
         self.acknowledged
     }
 }
@@ -149,7 +149,7 @@ impl ConfigWriteQueue {
     /// reload's deferred commands: when they wrote, that is what the file
     /// agrees with, not the reloaded text. A save that failed changes
     /// neither, so its change still counts as one a later save must write.
-    pub fn last_written(&self) -> (u64, Option<crate::config::SourceText>) {
+    pub(crate) fn last_written(&self) -> (u64, Option<crate::config::SourceText>) {
         self.last_written
             .lock()
             .map_or((0, None), |guard| guard.clone())
@@ -211,7 +211,7 @@ impl ConfigWriteQueue {
     /// every later save writes only what memory changes relative to the
     /// file as it was read, and a key someone else set or deleted on disk is
     /// never undone. Ordered with the saves on the same channel.
-    pub fn set_base(&self, config: Config) {
+    pub(crate) fn set_base(&self, config: Config) {
         let _ = self.tx.send(WriteMsg::SetBase(Box::new(config)));
     }
 

@@ -24,7 +24,7 @@ use crate::background_serve::TUI_DEVICE_LABEL;
 /// Sized for the place it is rendered: one line inside the center pane, sharing
 /// that line with the sentence that says how to take the terminal back. Names
 /// this parser DOES recognize ("Chrome on Android") already sit well inside it.
-pub const SHORT_LABEL_MAX_CHARS: usize = 24;
+pub(crate) const SHORT_LABEL_MAX_CHARS: usize = 24;
 
 /// The operating system a `User-Agent` names, or `None`.
 ///
@@ -84,7 +84,7 @@ fn detect_browser(ua: &str) -> Option<&'static str> {
 ///
 /// Char based, never byte based: a `User-Agent` is attacker-supplied and can
 /// carry multi-byte UTF-8, and byte slicing inside a character panics.
-pub fn truncate_chars(text: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -139,30 +139,31 @@ mod tests {
     /// duplication is that a change to either parser that the other did not
     /// follow shows up as a failing assertion here.
     mod ua {
-        pub const CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+        pub(crate) const CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
              AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-        pub const CHROME_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+        pub(crate) const CHROME_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-        pub const CHROME_WINDOWS: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+        pub(crate) const CHROME_WINDOWS: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
              AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-        pub const SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+        pub(crate) const SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
              AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15";
-        pub const FIREFOX_LINUX: &str =
+        pub(crate) const FIREFOX_LINUX: &str =
             "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0";
-        pub const EDGE_WINDOWS: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+        pub(crate) const EDGE_WINDOWS: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
              AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 \
              Edg/120.0.0.0";
-        pub const CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 13; Pixel 7) \
+        pub(crate) const CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 13; Pixel 7) \
              AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
-        pub const SAFARI_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) \
+        pub(crate) const SAFARI_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) \
              AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1";
-        pub const EDGE_ANDROID: &str = "Mozilla/5.0 (Linux; Android 13; Pixel 7) \
+        pub(crate) const EDGE_ANDROID: &str = "Mozilla/5.0 (Linux; Android 13; Pixel 7) \
              AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 \
              EdgA/120.0.0.0";
-        pub const EDGE_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) \
+        pub(crate) const EDGE_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) \
              AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 EdgiOS/120.0.0.0 \
              Mobile/15E148 Safari/605.1.15";
-        pub const UNKNOWN_BROWSER_WINDOWS: &str = "SomeCrawler/2.0 (Windows NT 10.0; Win64; x64)";
+        pub(crate) const UNKNOWN_BROWSER_WINDOWS: &str =
+            "SomeCrawler/2.0 (Windows NT 10.0; Win64; x64)";
     }
 
     /// The shared vector: every pair the web's own test asserts must produce the

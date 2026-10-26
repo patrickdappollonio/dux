@@ -17,7 +17,7 @@ use super::remotes::PlainHttp;
 
 /// The longest any reply may take: room for a waiting operation read's
 /// [`super::wait::READ_WAIT`] and a slow network.
-pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long reaching a remote may take before it counts as not answering.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -140,22 +140,23 @@ thread_local! {
 
 /// HTTP/1.1 over the control socket of the dux on this machine.
 #[derive(Clone, Debug)]
-pub struct UnixTransport {
+pub(crate) struct UnixTransport {
     path: PathBuf,
 }
 
 impl UnixTransport {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
-    pub fn path(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Whether something accepts a connection at the socket now, asked for
     /// at most [`PROBE_TIMEOUT`].
-    pub fn answers(&self) -> bool {
+    pub(crate) fn answers(&self) -> bool {
         connect_unix(&self.path, PROBE_TIMEOUT).is_ok()
     }
 }
@@ -591,7 +592,7 @@ fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, TransportError
 }
 
 /// HTTP or HTTPS to a remote dux's web listeners, through ureq.
-pub struct HttpTransport {
+pub(crate) struct HttpTransport {
     base: String,
     url: Option<url::Url>,
     plain_http: PlainHttp,
@@ -601,7 +602,7 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// `base` is the remote's URL, to which request paths are appended; `plain_http` says
     /// whether the remote was added with `--insecure`.
-    pub fn new(base: &str, plain_http: PlainHttp) -> Self {
+    pub(crate) fn new(base: &str, plain_http: PlainHttp) -> Self {
         let url = url::Url::parse(base).ok();
         let mut builder = ureq::Agent::config_builder()
             .timeout_connect(Some(CONNECT_TIMEOUT))

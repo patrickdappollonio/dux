@@ -20,7 +20,7 @@ use super::{CliError, Exit};
 
 /// The longest one read of a record waits for an outcome, which is the
 /// longest the API holds one.
-pub const READ_WAIT: Duration = Duration::from_secs(25);
+pub(crate) const READ_WAIT: Duration = Duration::from_secs(25);
 
 /// How long to pause before reading again after a read got no reply.
 const RETRY_PAUSE: Duration = Duration::from_millis(250);
@@ -117,7 +117,7 @@ impl Client {
 
     /// [`Self::change`], keeping the operation a refusal names, and giving the request
     /// only `timeout` to answer.
-    pub fn try_change(
+    pub(crate) fn try_change(
         &self,
         method: Method,
         path: &str,
@@ -178,7 +178,7 @@ impl Client {
     /// Wait for somebody else's operation `id`, until `deadline`, as [`Self::wait`] does, except
     /// that an id the dux no longer knows has finished and been forgotten (it counts as an
     /// outcome), and a server error is read again within the time rather than ending the wait.
-    pub fn wait_for_other(&self, id: &str, deadline: Instant) -> Result<(), CliError> {
+    pub(crate) fn wait_for_other(&self, id: &str, deadline: Instant) -> Result<(), CliError> {
         let stand_in = OperationRecord {
             id: id.to_string(),
             kind: String::new(),
@@ -302,7 +302,7 @@ fn still_running(id: &str) -> CliError {
 }
 
 /// The longest any wait lasts: a day.
-pub const MAX_WAIT_TIMEOUT: Duration = Duration::from_hours(24);
+pub(crate) const MAX_WAIT_TIMEOUT: Duration = Duration::from_hours(24);
 
 /// How long a change waits: `--wait-timeout` when given, else `[cli]
 /// wait_timeout_seconds` from this machine's config file, or its default when
@@ -319,7 +319,7 @@ pub fn wait_timeout(flag: Option<u64>, config_path: &Path) -> Duration {
 
 /// The moment a wait of `timeout` from now ends, a wait past
 /// [`MAX_WAIT_TIMEOUT`] ending there.
-pub fn deadline_after(timeout: Duration) -> Instant {
+pub(crate) fn deadline_after(timeout: Duration) -> Instant {
     Instant::now() + timeout.min(MAX_WAIT_TIMEOUT)
 }
 
@@ -366,7 +366,7 @@ pub fn describe(record: &OperationRecord) -> String {
 
 /// One piece of a change and what became of it, as one line:
 /// `branch: web refused (not merged)`.
-pub fn part_line(part: &RecordPart) -> String {
+pub(crate) fn part_line(part: &RecordPart) -> String {
     let mut line = format!("{}: {} {}", part.part, part.subject, part.outcome);
     if let Some(reason) = &part.reason {
         line.push_str(&format!(" ({reason})"));

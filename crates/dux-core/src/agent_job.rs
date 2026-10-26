@@ -696,7 +696,7 @@ fn no_free_name(
 /// the default branch means it could not be learned. `name_free` says whether
 /// a copy may take a name; before the project folder is known it can say
 /// nothing but yes.
-pub fn clone_review_copy_outlook(
+pub(crate) fn clone_review_copy_outlook(
     head_branch: &str,
     default_branch: Option<&str>,
     number: u64,
@@ -759,7 +759,7 @@ pub fn typed_copy_review_outlook(
 /// is not the pull request's own branch: a branch of that name already in the
 /// checkout at `folder` (when there is one) is reused as it is, and a name
 /// spelled like no review copy needs nothing.
-pub fn typed_name_review_copy_outlook(
+pub(crate) fn typed_name_review_copy_outlook(
     folder: Option<&Path>,
     head_branch: &str,
     typed: &str,
@@ -780,7 +780,7 @@ pub fn typed_name_review_copy_outlook(
 /// the answer is unknown unless the branch is held elsewhere, which needs no
 /// comparison. The copy's name is the one the create would pick, so the
 /// project's managed worktree folders under `worktrees_root` count as taken.
-pub fn folder_review_copy_outlook(
+pub(crate) fn folder_review_copy_outlook(
     repo_path: &Path,
     worktrees_root: &Path,
     head_branch: &str,
@@ -1842,7 +1842,7 @@ impl CreatePlanContext<'_> {
                 head_commit.as_deref(),
                 &containment,
                 review_copy,
-                ask_id.as_deref(),
+                ask_id,
             ) {
                 BusyBranchCheck::Refused => return None,
                 BusyBranchCheck::Free => None,
@@ -3022,7 +3022,7 @@ pub fn run_create_agent_job(
     let plan = {
         let mut context = CreatePlanContext {
             paths: &paths,
-            worker_tx: worker_tx,
+            worker_tx,
             create_key: &create_key,
             creation_notes: &mut creation_notes,
             worktrees: &worktrees,

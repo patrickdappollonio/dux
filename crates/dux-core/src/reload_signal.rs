@@ -49,7 +49,7 @@ pub fn install() -> Result<(), String> {
 
 /// Whether this process's SIGUSR1 handler is installed, which is what lets
 /// its lock file advertise that it handles the reload signal.
-pub fn is_installed() -> bool {
+pub(crate) fn is_installed() -> bool {
     matches!(INSTALLED.get(), Some(Ok(())))
 }
 
@@ -70,7 +70,7 @@ pub fn dux_may_be_running(lock_path: &Path) -> bool {
 
 /// Who holds `lock_path`, by the same checks as [`dux_may_be_running`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LockHolder {
+pub(crate) enum LockHolder {
     Free,
     Held(u32),
     /// The lock could not be checked; the reason says why.
@@ -78,7 +78,7 @@ pub enum LockHolder {
 }
 
 /// [`LockHolder`] for `lock_path`.
-pub fn lock_holder(lock_path: &Path) -> LockHolder {
+pub(crate) fn lock_holder(lock_path: &Path) -> LockHolder {
     match holder(lock_path) {
         Holder::None => LockHolder::Free,
         Holder::Pid(pid) => LockHolder::Held(pid),

@@ -267,7 +267,7 @@ impl BranchProvenance {
     /// made where the user is standing rather than only in a dialog they have
     /// to go and find. `Some(false)` against a branch dux did create is the
     /// mirror, and it is why the box is a real control rather than a label.
-    pub fn resolve_branch_deletion(self, requested: Option<bool>) -> bool {
+    pub(crate) fn resolve_branch_deletion(self, requested: Option<bool>) -> bool {
         requested.unwrap_or_else(|| self.dux_may_delete_branch())
     }
 
@@ -300,8 +300,8 @@ impl BranchProvenance {
     /// what it is. Names `git branch -D`, because once the worktree is gone no
     /// dux surface can reach the branch. Shared by the TUI status line and the
     /// web toast.
-    pub fn kept_branches_note(
-        &self,
+    pub(crate) fn kept_branches_note(
+        self,
         branch_name: &str,
         initial_branch: &str,
     ) -> crate::status_text::StatusText {
@@ -356,8 +356,8 @@ pub enum BranchKeptReason {
 impl BranchKeptReason {
     /// The sentence(s) naming every branch the removal kept, with its reason.
     /// See [`BranchProvenance::kept_branches_note`] for the drift rule.
-    pub fn kept_branches_note(
-        &self,
+    pub(crate) fn kept_branches_note(
+        self,
         branch_name: &str,
         initial_branch: &str,
     ) -> crate::status_text::StatusText {
@@ -617,7 +617,7 @@ impl AgentWorkspace {
     /// The absolute rule of the standalone agent: dux never creates, moves or
     /// removes the user's folder. Deleting a standalone agent deletes only dux's
     /// own record of it.
-    pub fn deletion_may_remove_directory(&self) -> bool {
+    pub(crate) fn deletion_may_remove_directory(&self) -> bool {
         match self {
             Self::Managed(_) => true,
             Self::Folder(_) => false,
@@ -740,7 +740,7 @@ impl AgentSession {
     /// `None` for a branch that existed before the agent (whatever its history
     /// before then is, it is not dux's to bound), for a branch the agent has
     /// since drifted onto, and for a standalone agent, which has no branch.
-    pub fn branch_minted_at(&self, renamed_to: Option<&str>) -> Option<DateTime<Utc>> {
+    pub(crate) fn branch_minted_at(&self, renamed_to: Option<&str>) -> Option<DateTime<Utc>> {
         let managed = self.workspace.as_managed()?;
         let minted_here = match managed.branch_provenance {
             BranchProvenance::CreatedByDux => true,
@@ -781,7 +781,7 @@ impl AgentSession {
             .any(|started| started == provider.as_str())
     }
 
-    pub fn mark_provider_started(&mut self, provider: &ProviderKind) -> bool {
+    pub(crate) fn mark_provider_started(&mut self, provider: &ProviderKind) -> bool {
         if self.has_started_provider(provider) {
             return false;
         }
@@ -1093,7 +1093,7 @@ pub fn is_lexically_normal_path(path: &str) -> bool {
 /// being answered for by a folder row: the cost is that a file with a backslash
 /// in its name, inside a folded folder, is acted on through the folder rather
 /// than on its own.
-pub fn is_plain_relative_path(path: &str) -> bool {
+pub(crate) fn is_plain_relative_path(path: &str) -> bool {
     is_lexically_normal_path(path) && !path.contains('\\')
 }
 
@@ -1133,7 +1133,7 @@ pub fn folder_count_label(file: &ChangedFile) -> Option<String> {
 /// A folder's contents in words, nested repositories named only when there
 /// are some, and a staged folder's left-out repositories after a middle dot:
 /// "5 files · 1 nested repository not staged".
-pub fn folder_contents_words(contents: &FolderContents) -> String {
+pub(crate) fn folder_contents_words(contents: &FolderContents) -> String {
     let mut words = folder_held_words(contents);
     let mut not_staged = Vec::new();
     if contents.repositories_not_staged > 0 {
@@ -1301,7 +1301,7 @@ impl TerminalOwner {
     /// so removing a project has nothing to do with it: it ends when the user
     /// closes it or dux shuts down. Nothing closes it automatically. The same
     /// note sits on [`Self::closed_by_session_delete`].
-    pub fn closed_by_project_removal(&self, project_id: &str) -> bool {
+    pub(crate) fn closed_by_project_removal(&self, project_id: &str) -> bool {
         match self {
             Self::Project(owner) => owner == project_id,
             Self::Session(_) | Self::Standalone => false,

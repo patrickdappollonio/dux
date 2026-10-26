@@ -41,7 +41,7 @@ use crate::term_identity::TerminalIdentityMode;
 /// A log level dux writes at, ordered from the fewest lines to the most.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
-pub enum LogLevel {
+pub(crate) enum LogLevel {
     Error,
     Warn,
     Info,
@@ -50,16 +50,16 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// Every level, in the order the config comment lists them.
-    pub const ALL: [Self; 4] = [Self::Debug, Self::Info, Self::Warn, Self::Error];
+    pub(crate) const ALL: [Self; 4] = [Self::Debug, Self::Info, Self::Warn, Self::Error];
 
     /// The level a config value names, written exactly as [`Self::as_str`]
     /// spells it, or `None`.
-    pub fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|level| level.as_str() == value)
     }
 
     /// The config spelling.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Error => "error",
             Self::Warn => "warn",
@@ -91,7 +91,7 @@ impl LogLevel {
 }
 
 /// `[logging] level`: the level it names, and `info` for anything else.
-pub fn effective_log_level(configured: &str) -> LogLevel {
+pub(crate) fn effective_log_level(configured: &str) -> LogLevel {
     LogLevel::parse(configured).unwrap_or(LogLevel::Info)
 }
 
@@ -110,7 +110,7 @@ pub fn effective_log_keep(configured: u32) -> u32 {
 /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. The field is seconds, but a `u16` reaches
 /// about 18 hours, so a value meant as milliseconds would otherwise block quit
 /// for that long.
-pub fn effective_shutdown_timeout_seconds(configured: u16) -> u16 {
+pub(crate) fn effective_shutdown_timeout_seconds(configured: u16) -> u16 {
     configured.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)
 }
 
@@ -153,9 +153,9 @@ pub fn effective_pr_poll_inactive_interval_seconds(configured: u32) -> u32 {
 }
 
 /// The least share of the terminal UI's height a resizable pane takes.
-pub const MIN_PANE_HEIGHT_PCT: u16 = 10;
+pub(crate) const MIN_PANE_HEIGHT_PCT: u16 = 10;
 /// The most share of the terminal UI's height a resizable pane takes.
-pub const MAX_PANE_HEIGHT_PCT: u16 = 80;
+pub(crate) const MAX_PANE_HEIGHT_PCT: u16 = 80;
 
 /// `[ui] terminal_pane_height_pct`, `staged_pane_height_pct` and
 /// `commit_pane_height_pct`: held in [`MIN_PANE_HEIGHT_PCT`]..=
@@ -166,7 +166,7 @@ pub fn effective_pane_height_pct(configured: u16) -> u16 {
 }
 
 /// Every `[ui] agent_sort` value, with the order it names.
-pub const AGENT_SORTS: [(&str, FlatSortMode); 6] = [
+pub(crate) const AGENT_SORTS: [(&str, FlatSortMode); 6] = [
     ("active", FlatSortMode::Active),
     ("updated", FlatSortMode::Updated),
     ("created", FlatSortMode::Created),
@@ -176,7 +176,7 @@ pub const AGENT_SORTS: [(&str, FlatSortMode); 6] = [
 ];
 
 /// The order an `[ui] agent_sort` value names, written exactly, or `None`.
-pub fn parse_agent_sort(value: &str) -> Option<FlatSortMode> {
+pub(crate) fn parse_agent_sort(value: &str) -> Option<FlatSortMode> {
     AGENT_SORTS
         .iter()
         .find(|(name, _)| *name == value)
@@ -184,7 +184,7 @@ pub fn parse_agent_sort(value: &str) -> Option<FlatSortMode> {
 }
 
 /// The config spelling of an agent order.
-pub fn agent_sort_name(mode: FlatSortMode) -> &'static str {
+pub(crate) fn agent_sort_name(mode: FlatSortMode) -> &'static str {
     AGENT_SORTS
         .iter()
         .find(|(_, known)| *known == mode)
@@ -246,7 +246,7 @@ pub fn effective_pr_banner_position(configured: &str) -> PrBannerPosition {
 /// `[ui] compose_bar`: the mode it names, read without regard to case or
 /// surrounding spaces, and `auto` for anything else (which the load also
 /// corrects, with a warning of its own).
-pub fn effective_compose_bar(configured: &str) -> ComposeBarMode {
+pub(crate) fn effective_compose_bar(configured: &str) -> ComposeBarMode {
     ComposeBarMode::parse(configured).unwrap_or_default()
 }
 
@@ -272,7 +272,7 @@ pub fn effective_upload_directory(configured: &str) -> String {
 }
 
 /// The longest `[ui] terminal_font_family` the web UI uses.
-pub const MAX_TERMINAL_FONT_FAMILY_CHARS: usize = 200;
+pub(crate) const MAX_TERMINAL_FONT_FAMILY_CHARS: usize = 200;
 
 /// Whether `c` may stay in a terminal font family name. The name is
 /// concatenated into a CSS `font-family` declaration and into the font
@@ -289,7 +289,7 @@ fn font_family_char(c: char) -> bool {
 /// spaces. Empty means the bundled fonts alone. The browser's own guard at
 /// the CSS sink reads any value this returns as it is (a shared fixture pins
 /// the two).
-pub fn effective_terminal_font_family(configured: &str) -> String {
+pub(crate) fn effective_terminal_font_family(configured: &str) -> String {
     let kept: String = configured
         .trim()
         .chars()
@@ -303,7 +303,7 @@ pub fn effective_terminal_font_family(configured: &str) -> String {
 /// directory `root` (whose `themes/` holds the user's own): its own theme
 /// loader, installed by the terminal UI, the one crate that has it, so
 /// [`effective_theme`] answers by the very code the terminal UI runs.
-pub type ThemeResolver = fn(name: &str, root: &std::path::Path) -> bool;
+pub(crate) type ThemeResolver = fn(name: &str, root: &std::path::Path) -> bool;
 
 static THEME_RESOLVER: std::sync::OnceLock<ThemeResolver> = std::sync::OnceLock::new();
 
@@ -318,7 +318,7 @@ pub fn install_theme_resolver(resolver: ThemeResolver) {
 /// in, or a file in `root/themes/`), and its default theme otherwise.
 /// `None` when no theme loader is installed in this process (no terminal UI
 /// here, `dux server`, which draws no theme), so nothing can be said.
-pub fn effective_theme(configured: &str, root: &std::path::Path) -> Option<String> {
+pub(crate) fn effective_theme(configured: &str, root: &std::path::Path) -> Option<String> {
     let resolves = THEME_RESOLVER.get()?;
     Some(if resolves(configured, root) {
         configured.to_string()
@@ -333,7 +333,7 @@ pub fn effective_theme(configured: &str, root: &std::path::Path) -> Option<Strin
 
 /// `[capabilities] terminal_identity`: the mode it names, read without regard
 /// to case or surrounding spaces, and `auto` for anything else.
-pub fn effective_terminal_identity(configured: &str) -> TerminalIdentityMode {
+pub(crate) fn effective_terminal_identity(configured: &str) -> TerminalIdentityMode {
     TerminalIdentityMode::parse(configured).unwrap_or(TerminalIdentityMode::Auto)
 }
 
@@ -341,7 +341,7 @@ pub fn effective_terminal_identity(configured: &str) -> TerminalIdentityMode {
 /// master switch over every passthrough) is off; otherwise the mode it names,
 /// read without regard to case or surrounding spaces, and `focused` for
 /// anything else.
-pub fn effective_clipboard_passthrough(
+pub(crate) fn effective_clipboard_passthrough(
     capabilities: &CapabilitiesConfig,
 ) -> ClipboardPassthroughMode {
     if !capabilities.passthrough {
@@ -358,7 +358,7 @@ pub fn effective_clipboard_passthrough(
 /// `[providers.<name>] web_dragdrop_paste`: the form it names, read without
 /// regard to case or surrounding spaces, and `bare` when it is left out or
 /// names no form.
-pub fn effective_web_dragdrop_paste(configured: Option<&str>) -> WebDragDropPaste {
+pub(crate) fn effective_web_dragdrop_paste(configured: Option<&str>) -> WebDragDropPaste {
     configured
         .and_then(WebDragDropPaste::parse)
         .unwrap_or_default()
@@ -371,7 +371,7 @@ pub fn effective_web_dragdrop_paste(configured: Option<&str>) -> WebDragDropPast
 /// `[editor] default`: the config key of the editor it names (by its key,
 /// an alias or one of its commands), or `None` when it names none, in which
 /// case dux opens the first supported editor it finds on PATH.
-pub fn effective_editor_default(configured: &str) -> Option<&'static str> {
+pub(crate) fn effective_editor_default(configured: &str) -> Option<&'static str> {
     crate::editor::configured_editor_key(configured)
 }
 
@@ -382,7 +382,7 @@ pub fn effective_editor_default(configured: &str) -> Option<&'static str> {
 /// `[server] tailscale`: the mode it names, read without regard to case or
 /// surrounding spaces, and `auto` for anything else (which the load also
 /// corrects, with a warning of its own).
-pub fn effective_tailscale(configured: &str) -> TailscaleMode {
+pub(crate) fn effective_tailscale(configured: &str) -> TailscaleMode {
     TailscaleMode::parse(configured).unwrap_or_default()
 }
 
@@ -445,7 +445,7 @@ pub fn effective_pty_send_timeout_seconds(configured: u32) -> u32 {
 }
 
 /// `[server] heartbeat_seconds`: `0` means the default.
-pub fn effective_heartbeat_seconds(configured: u32) -> u32 {
+pub(crate) fn effective_heartbeat_seconds(configured: u32) -> u32 {
     nonzero_or(configured, DEFAULT_HEARTBEAT_SECONDS)
 }
 
@@ -468,27 +468,27 @@ pub fn effective_heartbeat_deadline_seconds(configured: u32, heartbeat_seconds: 
 }
 
 /// `[server] reconnect_backoff_cap_seconds`: `0` means the default.
-pub fn effective_reconnect_backoff_cap_seconds(configured: u32) -> u32 {
+pub(crate) fn effective_reconnect_backoff_cap_seconds(configured: u32) -> u32 {
     nonzero_or(configured, DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS)
 }
 
 /// `[server] reconnect_attempt_timeout_seconds`: `0` means the default.
-pub fn effective_reconnect_attempt_timeout_seconds(configured: u32) -> u32 {
+pub(crate) fn effective_reconnect_attempt_timeout_seconds(configured: u32) -> u32 {
     nonzero_or(configured, DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS)
 }
 
 /// The longest the web UI's Changes pane waits for its list.
-pub const MAX_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 600;
+pub(crate) const MAX_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 600;
 
 /// `[server] changes_request_timeout_seconds`: `0` means the default, and
 /// above [`MAX_CHANGES_REQUEST_TIMEOUT_SECONDS`] is that ceiling.
-pub fn effective_changes_request_timeout_seconds(configured: u32) -> u32 {
+pub(crate) fn effective_changes_request_timeout_seconds(configured: u32) -> u32 {
     nonzero_or(configured, DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS)
         .min(MAX_CHANGES_REQUEST_TIMEOUT_SECONDS)
 }
 
 /// The longest `[server] title` dux shows, in characters.
-pub const MAX_SERVER_TITLE_CHARS: usize = 200;
+pub(crate) const MAX_SERVER_TITLE_CHARS: usize = 200;
 
 /// True for a character that must not survive into a title: a Unicode control
 /// code (category Cc, via `char::is_control`) OR one of the bidi/format
@@ -513,7 +513,7 @@ fn is_unsafe_title_char(ch: char) -> bool {
 /// space, runs of whitespace collapsed to one, trimmed, and at most
 /// [`MAX_SERVER_TITLE_CHARS`] characters (counted by `char`, never bytes). An
 /// empty result is the default, `dux`.
-pub fn effective_server_title(configured: &str) -> String {
+pub(crate) fn effective_server_title(configured: &str) -> String {
     let mut collapsed = String::new();
     let mut pending_space = false;
     for ch in configured.chars() {
@@ -545,14 +545,14 @@ pub fn effective_server_title(configured: &str) -> String {
 /// names recolor a flat duck silhouette instead, so `yellow` is intentionally
 /// NOT a tint. This is the CANONICAL list; the web frontend mirrors it. Keep
 /// the two in sync.
-pub const CURATED_FAVICON_COLORS: &[&str] = &[
+pub(crate) const CURATED_FAVICON_COLORS: &[&str] = &[
     "violet", "blue", "sky", "cyan", "teal", "green", "amber", "orange", "red", "pink", "rose",
 ];
 
 /// The favicon a `[server] favicon` value names, read without regard to case
 /// or surrounding spaces: a curated tint, or the empty string for the default
 /// duck. `None` for anything else.
-pub fn parse_server_favicon(value: &str) -> Option<String> {
+pub(crate) fn parse_server_favicon(value: &str) -> Option<String> {
     let normalized = value.trim().to_lowercase();
     if normalized.is_empty() || CURATED_FAVICON_COLORS.contains(&normalized.as_str()) {
         Some(normalized)
@@ -563,7 +563,7 @@ pub fn parse_server_favicon(value: &str) -> Option<String> {
 
 /// `[server] favicon`: the tint it names, and the default duck (empty) for
 /// anything else.
-pub fn effective_server_favicon(configured: &str) -> String {
+pub(crate) fn effective_server_favicon(configured: &str) -> String {
     parse_server_favicon(configured).unwrap_or_default()
 }
 
@@ -574,7 +574,7 @@ pub fn effective_server_favicon(configured: &str) -> String {
 /// A setting dux uses as something other than what the file writes, found
 /// by its `effective_*` function.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UseTimeCorrection {
+pub(crate) struct UseTimeCorrection {
     /// The setting, as segments.
     pub path: Vec<String>,
     /// What dux uses.
@@ -587,14 +587,14 @@ pub struct UseTimeCorrection {
 /// Every setting of `config` dux uses as something other than what it says,
 /// each with what it uses and why. `get` reports these beside what the file
 /// says, and the load logs each reason once.
-pub fn use_time_corrections(config: &Config) -> Vec<UseTimeCorrection> {
+pub(crate) fn use_time_corrections(config: &Config) -> Vec<UseTimeCorrection> {
     use_time_corrections_at(config, None)
 }
 
 /// [`use_time_corrections`], with dux's config directory `root` when it is
 /// known, so a setting that depends on files beside the config (the theme)
 /// is judged too.
-pub fn use_time_corrections_at(
+pub(crate) fn use_time_corrections_at(
     config: &Config,
     root: Option<&std::path::Path>,
 ) -> Vec<UseTimeCorrection> {
@@ -1020,23 +1020,23 @@ impl<T: Serialize + ?Sized> ErasedSerialize for T {
 /// A setting with a fixed set of values: the values, as `set` lists them,
 /// and the parser that decides what it accepts, which is the one its
 /// `effective_*` function (or the load) reads the setting with.
-pub struct FixedValues {
+pub(crate) struct FixedValues {
     /// The values, spelled as the config comment spells them.
     pub listed: Vec<&'static str>,
     /// Whether an empty value is accepted too (it means the default).
-    pub or_empty: bool,
+    pub(crate) or_empty: bool,
     accepts: fn(&str) -> bool,
 }
 
 impl FixedValues {
     /// Whether `value` is one dux reads as written.
-    pub fn accepts(&self, value: &str) -> bool {
+    pub(crate) fn accepts(&self, value: &str) -> bool {
         (self.accepts)(value)
     }
 }
 
 /// The fixed values of the setting at `path`, if it has a fixed set.
-pub fn fixed_values(path: &[String]) -> Option<FixedValues> {
+pub(crate) fn fixed_values(path: &[String]) -> Option<FixedValues> {
     let parts: Vec<&str> = path.iter().map(String::as_str).collect();
     let fixed = |listed: Vec<&'static str>, accepts: fn(&str) -> bool| FixedValues {
         listed,

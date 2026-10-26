@@ -72,23 +72,23 @@ impl CookieSecure {
     }
 }
 
-pub const DEFAULT_MINIMUM_PASSWORD_LENGTH: u32 = 12;
-pub const DEFAULT_MINIMUM_PASSWORD_SCORE: u8 = 2;
-pub const DEFAULT_MAX_FAILED_LOGINS: u32 = 5;
-pub const DEFAULT_SESSION_IDLE_SECONDS: u32 = 60;
-pub const DEFAULT_CLI_TOKEN_IDLE_DAYS: u32 = 30;
-pub const DEFAULT_MAX_CONCURRENT_PASSWORD_CHECKS: u32 = 2;
-pub const DEFAULT_PASSWORD_CHECK_QUEUE: u32 = 8;
-pub const DEFAULT_MAX_PASSWORD_BYTES: u32 = 1024;
+pub(crate) const DEFAULT_MINIMUM_PASSWORD_LENGTH: u32 = 12;
+pub(crate) const DEFAULT_MINIMUM_PASSWORD_SCORE: u8 = 2;
+pub(crate) const DEFAULT_MAX_FAILED_LOGINS: u32 = 5;
+pub(crate) const DEFAULT_SESSION_IDLE_SECONDS: u32 = 60;
+pub(crate) const DEFAULT_CLI_TOKEN_IDLE_DAYS: u32 = 30;
+pub(crate) const DEFAULT_MAX_CONCURRENT_PASSWORD_CHECKS: u32 = 2;
+pub(crate) const DEFAULT_PASSWORD_CHECK_QUEUE: u32 = 8;
+pub(crate) const DEFAULT_MAX_PASSWORD_BYTES: u32 = 1024;
 /// The largest `max_password_bytes` accepted: a login body is read into
 /// memory before anything else happens, so this bounds that read.
-pub const MAX_PASSWORD_BYTES_LIMIT: u32 = 64 * 1024;
-pub const DEFAULT_FAILED_LOGIN_WINDOW_SECONDS: u32 = 15 * 60;
-pub const DEFAULT_FAILED_LOGIN_DELAY_SECONDS: u32 = 1;
-pub const DEFAULT_FAILED_LOGIN_MAX_DELAY_SECONDS: u32 = 30;
-pub const DEFAULT_MAX_FAILED_LOGINS_PER_MINUTE: u32 = 30;
-pub const DEFAULT_MAX_TRACKED_ADDRESSES: u32 = 10_000;
-pub const DEFAULT_MAX_BLOCKED_ADDRESSES: u32 = 1_000;
+pub(crate) const MAX_PASSWORD_BYTES_LIMIT: u32 = 64 * 1024;
+pub(crate) const DEFAULT_FAILED_LOGIN_WINDOW_SECONDS: u32 = 15 * 60;
+pub(crate) const DEFAULT_FAILED_LOGIN_DELAY_SECONDS: u32 = 1;
+pub(crate) const DEFAULT_FAILED_LOGIN_MAX_DELAY_SECONDS: u32 = 30;
+pub(crate) const DEFAULT_MAX_FAILED_LOGINS_PER_MINUTE: u32 = 30;
+pub(crate) const DEFAULT_MAX_TRACKED_ADDRESSES: u32 = 10_000;
+pub(crate) const DEFAULT_MAX_BLOCKED_ADDRESSES: u32 = 1_000;
 
 /// The `[server.auth]` table. Field meanings are documented once, in the
 /// canonical config template (`crates/dux-tui/src/config.rs`); the summaries
@@ -384,7 +384,7 @@ impl Problem {
 
 /// The rule that a password long enough for `minimum_password_length` fits
 /// in `max_password_bytes`.
-pub const LENGTH_FITS_BYTES_RULE: &str =
+pub(crate) const LENGTH_FITS_BYTES_RULE: &str =
     "server.auth: minimum_password_length <= max_password_bytes";
 
 impl fmt::Display for Problem {
@@ -407,12 +407,12 @@ fn digest(text: &str) -> u64 {
 /// and every rule is then checked on the keys that read (see
 /// [`ServerAuthConfig::problems`]). A rule spanning keys is checked only
 /// when every key it involves reads. A loader still refuses on any of them.
-pub fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
+pub(crate) fn rule_problems_of(auth: toml::Value) -> Vec<Problem> {
     rule_problems_located(auth, &|_| None)
 }
 
 /// The path of the `[server.auth]` setting `name`, as segments.
-pub fn auth_key(name: &str) -> Vec<String> {
+pub(crate) fn auth_key(name: &str) -> Vec<String> {
     vec!["server".to_string(), "auth".to_string(), name.to_string()]
 }
 
@@ -432,7 +432,7 @@ pub fn auth_setting_names() -> Vec<String> {
 /// file (`line_of`, `None` when it cannot tell) rather than by its name: an
 /// unknown name may be a value pasted in the wrong place, the password above
 /// all, so it is never repeated.
-pub fn rule_problems_located(
+pub(crate) fn rule_problems_located(
     auth: toml::Value,
     line_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Vec<Problem> {
@@ -485,7 +485,7 @@ pub fn rule_problems_located(
 /// The rules spanning keys that cannot be judged in the `server.auth` table
 /// `auth`, because a key they involve does not read or is out of its own
 /// range. A rule that could not be judged was not satisfied.
-pub fn unjudgeable_rules_of(auth: &toml::Value) -> Vec<String> {
+pub(crate) fn unjudgeable_rules_of(auth: &toml::Value) -> Vec<String> {
     let Some(table) = auth.as_table() else {
         return vec![LENGTH_FITS_BYTES_RULE.to_string()];
     };
@@ -511,7 +511,7 @@ pub fn unjudgeable_rules_of(auth: &toml::Value) -> Vec<String> {
 
 /// Whether every value in the `server.auth` table `auth` has its setting's
 /// type (rules aside), or the first that does not.
-pub fn check_types(auth: toml::Value) -> Result<(), String> {
+pub(crate) fn check_types(auth: toml::Value) -> Result<(), String> {
     auth.try_into::<RawServerAuthConfig>()
         .map(|_| ())
         .map_err(|e| e.message().to_string())

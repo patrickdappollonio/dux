@@ -148,7 +148,7 @@ impl Engine {
     /// bounded. Called from the shutdown wait, so a clean quit leaves nothing
     /// half done. A second interrupt (`abort`) stops waiting; whatever is left
     /// stays recorded and the next start finishes it.
-    pub fn finish_pending_worktree_removals(&mut self, abort: Option<&AtomicBool>) {
+    pub(crate) fn finish_pending_worktree_removals(&mut self, abort: Option<&AtomicBool>) {
         let aborted = || abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if self.pending_group_removals.is_empty()
             && self
@@ -217,7 +217,7 @@ impl Engine {
     /// completed (it quit, crashed or was killed in the middle), each in a
     /// background worker, with a status on both surfaces. A removal whose
     /// directory another agent now works in is refused out loud and forgotten.
-    pub fn resume_pending_worktree_removals(&mut self) {
+    pub(crate) fn resume_pending_worktree_removals(&mut self) {
         let rows = match self.session_store.load_pending_worktree_removals() {
             Ok(rows) => rows,
             Err(err) => {
@@ -362,7 +362,7 @@ impl Engine {
     /// Read from the engine's own maps, so it needs no look at the process
     /// table and is cheap on the engine thread. Each comes with what to call it
     /// and whether it is stopping.
-    pub fn pty_occupants_in(
+    pub(crate) fn pty_occupants_in(
         &self,
         folder: &std::path::Path,
     ) -> Vec<(
@@ -417,7 +417,7 @@ impl Engine {
     /// Every process session a removal of `folder` must end first: each one
     /// dux registered as started there (any agent, a deleted one included,
     /// terminals and startup commands too) and each PTY still running there.
-    pub fn process_sessions_in(
+    pub(crate) fn process_sessions_in(
         &self,
         folder: &std::path::Path,
     ) -> Vec<crate::process_sessions::ProcessSession> {
@@ -832,7 +832,7 @@ impl Engine {
     /// What a worker that pulls into or switches a checkout needs to refuse a
     /// move that would make git delete a folder something lives in (see
     /// [`crate::checkout_move`]).
-    pub fn spawn_gate(&self) -> crate::process_sessions::SpawnGate {
+    pub(crate) fn spawn_gate(&self) -> crate::process_sessions::SpawnGate {
         crate::process_sessions::SpawnGate::new(
             self.process_registry.clone(),
             self.removal_coordination.ops.clone(),

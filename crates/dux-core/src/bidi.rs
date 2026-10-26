@@ -11,7 +11,7 @@
 //! the browser's `lib/bidi.ts` where pull request data enters its store.
 
 /// Whether `c` is a bidirectional formatting control or directional mark.
-pub fn is_bidi_control(c: char) -> bool {
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(
         c,
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'

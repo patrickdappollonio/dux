@@ -15,7 +15,7 @@ use crate::action::Action;
 
 /// Resolves an [`Action`] to its current keybinding label (e.g. "Ctrl-g").
 /// Implemented by the TUI's `RuntimeBindings`; core stays keybinding-agnostic.
-pub type KeyLabelResolver<'a> = &'a dyn Fn(Action) -> String;
+pub(crate) type KeyLabelResolver<'a> = &'a dyn Fn(Action) -> String;
 
 /// What a TUI tip may ask the terminal UI about while it renders: the live
 /// key labels, and the glyphs the terminal UI is drawing right now, so a tip
@@ -24,7 +24,7 @@ pub type KeyLabelResolver<'a> = &'a dyn Fn(Action) -> String;
 pub struct TuiTipContext<'a> {
     resolve: KeyLabelResolver<'a>,
     /// The mark the terminal UI's sidebar draws on a standalone row.
-    pub standalone_glyph: &'a str,
+    pub(crate) standalone_glyph: &'a str,
 }
 
 impl<'a> TuiTipContext<'a> {
@@ -552,7 +552,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
 ];
 
 /// The web-surface tip strings, in declaration order.
-pub fn web_tips() -> Vec<String> {
+pub(crate) fn web_tips() -> Vec<String> {
     WELCOME_TIPS
         .iter()
         .filter_map(|t| t.web.map(str::to_string))

@@ -258,7 +258,7 @@ pub fn classify_project_worktrees(
     entries
 }
 
-pub fn run_project_branch_status_job(project: Project, worker_tx: &Sender<WorkerEvent>) {
+pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: &Sender<WorkerEvent>) {
     let repo_path = PathBuf::from(&project.path);
     // Use current_branch_opt so a detached HEAD is treated as "no current
     // branch" (empty string) rather than a hard error.

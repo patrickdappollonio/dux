@@ -29,7 +29,7 @@ pub struct SidebarGroup {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SidebarModel {
     pub groups: Vec<SidebarGroup>,
-    pub agentless_start: Option<usize>,
+    pub(crate) agentless_start: Option<usize>,
 }
 
 /// The short display name used for an orphaned (project-less) group, the same

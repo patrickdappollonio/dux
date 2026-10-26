@@ -97,7 +97,7 @@ impl Engine {
     }
 
     /// A project removal or deletion.
-    pub fn project_admission(&self, project_id: &str) -> Admission {
+    pub(crate) fn project_admission(&self, project_id: &str) -> Admission {
         Admission {
             wants: self.project_wants(project_id),
             takes: vec![Hold::exclusive(InFlightKey::Project(
@@ -107,7 +107,7 @@ impl Engine {
     }
 
     /// A terminal's close.
-    pub fn terminal_admission(&self, terminal_id: &str) -> Admission {
+    pub(crate) fn terminal_admission(&self, terminal_id: &str) -> Admission {
         Admission {
             wants: self.terminal_wants(terminal_id),
             takes: vec![Hold::exclusive(InFlightKey::Terminal(

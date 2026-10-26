@@ -36,7 +36,7 @@ use crate::worker::WorkerEvent;
 /// `add_existing` as well, `path` is a folder that already holds a checkout of
 /// the repository: nothing is cloned, the folder becomes the project.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneRequest {
+pub(crate) struct CloneRequest {
     pub url: String,
     pub path: String,
     pub agent_name: Option<String>,
@@ -151,12 +151,12 @@ pub struct Clones {
     pub pending: HashMap<String, PendingClone>,
     pub processes: CloneProcesses,
     /// Extra variables for every clone's git, empty outside tests.
-    pub git_env: Vec<(String, String)>,
+    pub(crate) git_env: Vec<(String, String)>,
 }
 
 /// A request that passed the checks the engine thread runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreparedClone {
+pub(crate) struct PreparedClone {
     pub url: String,
     /// The destination's identity: its parent canonicalized, plus its name.
     pub destination: PathBuf,
@@ -168,7 +168,7 @@ pub struct PreparedClone {
 /// one, except for a pull request, whose blank name waits for the worker.
 /// `projects` are the workspace's project paths and `home` expands a leading
 /// `~`.
-pub fn prepare_clone(
+pub(crate) fn prepare_clone(
     request: &CloneRequest,
     home: Option<&Path>,
     projects: &[&str],
@@ -224,7 +224,7 @@ fn refuse_project_destination(destination: &Path, projects: &[&str]) -> Result<(
 /// What `raw` holds, judged for the repository of `target`, for a pull request
 /// that would clone there or add what is there. Runs git, so only on a worker.
 /// The folder is never changed.
-pub fn inspect_pr_destination(
+pub(crate) fn inspect_pr_destination(
     raw: &str,
     target: &PullRequestCloneTarget,
     policy: &crate::gh::GithubHostPolicy,
@@ -353,7 +353,7 @@ pub fn check_pr_destination(
 /// The destination `raw` names, after expanding a leading `~`: its parent
 /// canonicalized plus its own name, so two spellings of one folder (a trailing
 /// slash, a symlinked parent) are one destination.
-pub fn destination_identity(raw: &str, home: Option<&Path>) -> Result<PathBuf, StatusText> {
+pub(crate) fn destination_identity(raw: &str, home: Option<&Path>) -> Result<PathBuf, StatusText> {
     let trimmed = raw.trim();
     let expanded = match (trimmed.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home.to_path_buf(),
@@ -414,7 +414,7 @@ pub struct ClonedRepository {
 pub struct LeadingBranchGuess {
     /// The remote's default branch when it could be learned, but the folder
     /// has no branch of that name; `None` when nothing could say.
-    pub remote_default: Option<String>,
+    pub(crate) remote_default: Option<String>,
     /// The leading branch is the one the folder has checked out; otherwise
     /// nothing is checked out and it is `main`.
     pub checked_out: bool,
@@ -450,7 +450,7 @@ pub struct ClonedFor {
 
 impl ClonedFor {
     /// `reason` the agent is missing, after what the clone did.
-    pub fn agent_missing(&self, reason: StatusText) -> StatusText {
+    pub(crate) fn agent_missing(&self, reason: StatusText) -> StatusText {
         self.agent_missing_named(None, reason)
     }
 
@@ -478,7 +478,11 @@ impl ClonedFor {
     /// [`Self::agent_missing`] naming the agent the create actually tried to
     /// make when it got as far as settling a name, which a review copy of a
     /// pull request makes different from the one asked for.
-    pub fn agent_missing_named(&self, attempted: Option<&str>, reason: StatusText) -> StatusText {
+    pub(crate) fn agent_missing_named(
+        &self,
+        attempted: Option<&str>,
+        reason: StatusText,
+    ) -> StatusText {
         let agent = attempted.unwrap_or(&self.agent_name);
         // Wrapping the reason copies its words, not the question it may put.
         let Some(StatusAsk::ReviewCopy(mut question)) = reason.ask().cloned() else {
@@ -521,7 +525,7 @@ impl ClonedFor {
 
     /// The agent exists but its startup command failed, after what the clone
     /// did.
-    pub fn startup_failed(&self, agent: &str, error: &str) -> StatusText {
+    pub(crate) fn startup_failed(&self, agent: &str, error: &str) -> StatusText {
         crate::status_text![
             self.done_so_far(),
             ". Agent ",
@@ -550,7 +554,7 @@ pub struct ClonedProject {
 
 /// What a pull request clone's worker checks and looks up before it claims the
 /// folder.
-pub struct PullRequestJob {
+pub(crate) struct PullRequestJob {
     pub target: PullRequestCloneTarget,
     /// The projects as they were when the request was accepted.
     pub projects: Vec<crate::model::Project>,
@@ -564,7 +568,7 @@ pub struct PullRequestJob {
 }
 
 /// Everything the worker needs.
-pub struct CloneJob {
+pub(crate) struct CloneJob {
     pub status_op_id: String,
     pub url: String,
     pub destination: PathBuf,
@@ -578,12 +582,12 @@ pub struct CloneJob {
     pub mode: CloneMode,
     /// Extra variables for git's environment. Empty outside tests, which use
     /// it to point an address at a local remote.
-    pub git_env: Vec<(String, String)>,
+    pub(crate) git_env: Vec<(String, String)>,
 }
 
 /// Check the destination and the agent name with git, clone, and read what
 /// was cloned; posts `WorkerEvent::RepositoryCloned` either way.
-pub fn run_clone_job(job: CloneJob, worker_tx: &Sender<WorkerEvent>) {
+pub(crate) fn run_clone_job(job: CloneJob, worker_tx: &Sender<WorkerEvent>) {
     let result = clone_and_inspect(&job);
     // A pull request settles the agent's name on the worker, from the typed
     // name or the pull request's branch.
@@ -1072,7 +1076,7 @@ fn add_existing_checkout(
 
 /// The destination a clone goes into, and whether dux made it.
 #[derive(Debug)]
-pub struct DestinationClaim {
+pub(crate) struct DestinationClaim {
     path: PathBuf,
     created: bool,
 }
@@ -1083,7 +1087,7 @@ impl DestinationClaim {
     /// stays for the user to look at), and a folder dux did not make is never
     /// touched. `remove_dir` removes only an empty directory and never follows
     /// a symbolic link.
-    pub fn release_unused(self) {
+    pub(crate) fn release_unused(self) {
         if self.created {
             let _ = std::fs::remove_dir(&self.path);
         }
@@ -1096,7 +1100,7 @@ impl DestinationClaim {
 /// existing one must still be an empty folder and not a symbolic link; the
 /// moment between this look and git starting is accepted, as anyone who can
 /// race it can already run commands as the user.
-pub fn claim_destination(dest: &Path) -> Result<DestinationClaim, StatusText> {
+pub(crate) fn claim_destination(dest: &Path) -> Result<DestinationClaim, StatusText> {
     match std::fs::create_dir(dest) {
         Ok(()) => {
             return Ok(DestinationClaim {
@@ -1214,7 +1218,7 @@ fn clone_failure(address: &str, dest: &Path, error: &crate::git::CloneError) -> 
 /// sentence, a space), and whatever it holds up to its last `@` is the user
 /// and password, whatever characters those hold: a quote or an apostrophe in a
 /// token is still the token.
-pub fn redact_remote_userinfo(text: &str) -> String {
+pub(crate) fn redact_remote_userinfo(text: &str) -> String {
     let mut redacted = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(scheme_end) = rest.find("://") {

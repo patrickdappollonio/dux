@@ -53,7 +53,7 @@ pub struct DecodedText {
 
 impl DecodedText {
     /// Whether the file began with a byte-order mark.
-    pub fn byte_order_mark(&self) -> ByteOrderMark {
+    pub(crate) fn byte_order_mark(&self) -> ByteOrderMark {
         if self.bom {
             ByteOrderMark::Written
         } else {
@@ -104,7 +104,7 @@ impl Unwritable {
 /// would differ. The mark is chosen on its own (the encoding's "with BOM"
 /// row), never typed. Nothing is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeadingMarkInText {
+pub(crate) struct LeadingMarkInText {
     pub encoding: &'static Encoding,
     /// The file itself starts with that character, read in the encoding the
     /// save says it was read in, rather than the person typing it. Such a file
@@ -142,7 +142,7 @@ impl std::error::Error for LeadingMarkInText {}
 /// that encoding cannot write it back unchanged: saving would change bytes the
 /// editor never showed as changed. Nothing is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WouldRewriteUntouched {
+pub(crate) struct WouldRewriteUntouched {
     pub encoding: &'static Encoding,
     pub reason: Unwritable,
 }
@@ -207,7 +207,10 @@ pub fn saved_verdict(text: &str, encoding: &'static Encoding, mark: ByteOrderMar
 /// that encoding cannot write them back. Bytes that do not read in `encoding`
 /// at all are a conversion from another one, which rewrites the whole file on
 /// purpose, and are not this question.
-pub fn would_rewrite_untouched(on_disk: &[u8], encoding: &'static Encoding) -> Option<Unwritable> {
+pub(crate) fn would_rewrite_untouched(
+    on_disk: &[u8],
+    encoding: &'static Encoding,
+) -> Option<Unwritable> {
     match decode(on_disk, Some(encoding)) {
         Ok(Decoded::Text(t)) => t.unwritable,
         _ => None,
@@ -353,7 +356,7 @@ pub fn encoding_for_label(label: &str) -> anyhow::Result<&'static Encoding> {
 }
 
 /// Whether `encoding` has a byte-order mark at all.
-pub fn has_bom(encoding: &'static Encoding) -> bool {
+pub(crate) fn has_bom(encoding: &'static Encoding) -> bool {
     encoding == UTF_8 || encoding == UTF_16LE || encoding == UTF_16BE
 }
 

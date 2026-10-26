@@ -20,7 +20,7 @@ pub fn count_of(n: usize, singular: &str) -> String {
 /// same sentence gets this from `toLocaleString("en-US")`, so the separator is
 /// a comma here too rather than the reader's own locale: the two strings have
 /// to stay identical.
-pub fn group_digits(n: usize) -> String {
+pub(crate) fn group_digits(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().enumerate() {

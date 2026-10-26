@@ -107,7 +107,7 @@ pub struct ShownReason {
 
 /// What a surface sent about a review copy, before the warning it was shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReviewCopyAnswer {
+pub(crate) struct ReviewCopyAnswer {
     /// Whether the box was ticked or the flag given.
     pub agreed: bool,
     /// Whether the answer came from the command line, which agrees with a
@@ -118,7 +118,7 @@ pub struct ReviewCopyAnswer {
 impl ReviewCopyConsent {
     /// Read the fields every surface sends: the answer, and the identifier of
     /// the warning the user was shown.
-    pub fn from_request(answer: ReviewCopyAnswer, warned: Option<String>) -> Self {
+    pub(crate) fn from_request(answer: ReviewCopyAnswer, warned: Option<String>) -> Self {
         match (answer.agreed, warned) {
             (false, _) if answer.by_flag => Self::WithheldByFlag,
             (false, _) => Self::Withheld,
@@ -129,7 +129,7 @@ impl ReviewCopyConsent {
 
     /// [`Self::from_request`] for an agreement given before the project
     /// existed, which names the reason it was shown rather than a full warning.
-    pub fn from_upfront(
+    pub(crate) fn from_upfront(
         answer: ReviewCopyAnswer,
         reason: Option<String>,
         branch: Option<String>,
@@ -160,7 +160,7 @@ impl ReviewCopyConsent {
 
     /// Whether this agreement covers the copy on `copy_branch` for `kind`
     /// that a warning shown now would describe.
-    pub fn covers_shown(&self, kind: &str, copy_branch: &str) -> bool {
+    pub(crate) fn covers_shown(&self, kind: &str, copy_branch: &str) -> bool {
         match self {
             Self::Withheld | Self::WithheldByFlag | Self::Warned(_) => false,
             Self::Blanket => true,
@@ -190,7 +190,7 @@ pub enum PrLookupPurpose {
 /// or `#N`/`N` string and consumed by the `gh pr view` lookup. Shared by the
 /// TUI's new-agent-from-pr prompt and the web's `CreateAgentFromPr` wire flow.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PullRequestLookup {
+pub(crate) struct PullRequestLookup {
     pub host: String,
     pub owner_repo: String,
     pub number: u64,
@@ -358,9 +358,9 @@ pub struct PullRequestPin {
     pub state: String,
     /// The pull request's own branch, which is checked out elsewhere; named in
     /// the sentence that says where a push from the copy goes.
-    pub busy_branch: String,
+    pub(crate) busy_branch: String,
     /// The copy's own branch, where a push from it goes.
-    pub new_branch: String,
+    pub(crate) new_branch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -979,7 +979,7 @@ pub struct PinnedPr {
 #[derive(Clone, Debug)]
 pub struct PrStatusResult {
     pub session_id: String,
-    pub branch_generation: u64,
+    pub(crate) branch_generation: u64,
     pub pr: Option<crate::model::PrInfo>,
 }
 
@@ -994,12 +994,12 @@ pub struct PrSyncEntry {
     /// one is still refreshed, because it can be reopened.
     /// For a pinned session this is the OVERRIDE row, never the `session_prs`
     /// latest (which can be a different, autodetected PR).
-    pub known_pr: Option<StoredPr>,
+    pub(crate) known_pr: Option<StoredPr>,
     /// Whether the agent process has exited. Used to skip PR discovery calls for
     /// sessions that are both exited and merged (nobody is pushing to that branch
     /// anymore, and a merge is final), and to keep an exited session whose PR is
     /// CLOSED out of the blind poll while a one-shot trigger still refreshes it.
-    pub agent_exited: bool,
+    pub(crate) agent_exited: bool,
     /// A manually attached PR. When set, the planner short-circuits the
     /// remote-derived target: the query goes to the pinned `(host, owner_repo)`,
     /// the host policy gates the PINNED host, and the only alias emitted is the
@@ -1019,10 +1019,10 @@ pub struct PrSyncEntry {
     /// agent has since moved off. No pull request from a minted branch can be
     /// older than this, which is what tells it apart from an earlier branch
     /// that used the same name when a pull request is found by head name.
-    pub branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The agent's branch generation when this entry was planned, carried
     /// into the result (see [`PrStatusResult`]).
-    pub branch_generation: u64,
+    pub(crate) branch_generation: u64,
 }
 
 #[derive(Clone, Debug)]

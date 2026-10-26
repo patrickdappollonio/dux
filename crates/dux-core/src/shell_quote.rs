@@ -8,7 +8,7 @@
 //! rule.
 
 /// `s` as ONE POSIX shell word, whatever it contains.
-pub fn single_quote(s: &str) -> String {
+pub(crate) fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

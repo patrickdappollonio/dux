@@ -24,7 +24,7 @@
 /// hand-rolls it. Saturating, so a viewport taller than the content clamps to 0
 /// instead of underflowing.
 #[must_use]
-pub fn max_scroll_offset(viewport: usize, total: usize) -> usize {
+pub(crate) fn max_scroll_offset(viewport: usize, total: usize) -> usize {
     total.saturating_sub(viewport)
 }
 

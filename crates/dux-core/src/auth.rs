@@ -35,28 +35,28 @@ use zeroize::Zeroizing;
 /// configuration (19 MiB, two passes, one lane). Existing hashes keep the
 /// parameters written in their PHC string, so raising these later never
 /// breaks a stored password.
-pub const ARGON2_M_COST_KIB: u32 = 19 * 1024;
+pub(crate) const ARGON2_M_COST_KIB: u32 = 19 * 1024;
 /// Argon2id passes of a NEW hash. See [`ARGON2_M_COST_KIB`].
-pub const ARGON2_T_COST: u32 = 2;
+pub(crate) const ARGON2_T_COST: u32 = 2;
 /// Argon2id lanes of a NEW hash. See [`ARGON2_M_COST_KIB`].
-pub const ARGON2_P_COST: u32 = 1;
+pub(crate) const ARGON2_P_COST: u32 = 1;
 
 /// The largest memory cost a stored hash may ask for, in KiB (256 MiB). A
 /// login runs one verification per attempt, so an absurd value here would be
 /// a memory bomb on every attempt.
-pub const MAX_M_COST_KIB: u32 = 256 * 1024;
+pub(crate) const MAX_M_COST_KIB: u32 = 256 * 1024;
 /// The largest number of passes a stored hash may ask for.
-pub const MAX_T_COST: u32 = 16;
+pub(crate) const MAX_T_COST: u32 = 16;
 /// The largest number of lanes a stored hash may ask for.
-pub const MAX_P_COST: u32 = 16;
+pub(crate) const MAX_P_COST: u32 = 16;
 /// The smallest memory cost a stored hash may use, in KiB: OWASP's floor
 /// (7 MiB, paired there with five passes).
-pub const MIN_M_COST_KIB: u32 = 7 * 1024;
+pub(crate) const MIN_M_COST_KIB: u32 = 7 * 1024;
 /// The smallest total work (memory in KiB times passes) a stored hash may
 /// use. Every configuration OWASP lists reaches about this much (19 MiB times
 /// two passes, 7 MiB times five), so a weaker pasted hash is refused rather
 /// than quietly protecting dux with a hash that is cheap to guess offline.
-pub const MIN_WORK_KIB_PASSES: u64 = 35 * 1024;
+pub(crate) const MIN_WORK_KIB_PASSES: u64 = 35 * 1024;
 /// Accepted digest sizes of a stored hash, in bytes.
 const OUTPUT_LEN_RANGE: std::ops::RangeInclusive<usize> = 16..=64;
 
@@ -90,7 +90,7 @@ impl Password {
 
     /// Its length in characters (Unicode scalar values), the unit
     /// `minimum_password_length` counts in.
-    pub fn char_len(&self) -> usize {
+    pub(crate) fn char_len(&self) -> usize {
         self.0.chars().count()
     }
 
@@ -147,7 +147,7 @@ pub fn hash_password(password: &Password) -> Result<String, AuthError> {
 /// [`MIN_M_COST_KIB`]..=[`MAX_M_COST_KIB`], at most [`MAX_T_COST`] passes and
 /// [`MAX_P_COST`] lanes, and at least [`MIN_WORK_KIB_PASSES`] of total work.
 /// Cheap: nothing is hashed.
-pub fn validate_password_hash(phc: &str) -> Result<(), AuthError> {
+pub(crate) fn validate_password_hash(phc: &str) -> Result<(), AuthError> {
     parse_checked(phc).map(|_| ())
 }
 
@@ -242,7 +242,7 @@ pub enum StrengthLabel {
 
 impl StrengthLabel {
     /// The label for a score; anything above 4 is [`StrengthLabel::Excellent`].
-    pub fn from_score(score: u8) -> Self {
+    pub(crate) fn from_score(score: u8) -> Self {
         match score {
             0 => Self::Weak,
             1 => Self::Fair,

@@ -86,7 +86,7 @@ impl DestructiveCheck {
     /// read: a caller on the engine thread can refuse at once instead of
     /// starting a worker that would only refuse later. `None` says only that
     /// [`Self::clear`] has more to look at.
-    pub fn refused_now(&self, what: &str) -> Option<Refused> {
+    pub(crate) fn refused_now(&self, what: &str) -> Option<Refused> {
         self.targets.iter().find_map(|target| {
             target.occupant.as_ref().map(|reason| {
                 Refused(format!(

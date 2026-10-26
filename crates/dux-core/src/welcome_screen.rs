@@ -38,10 +38,10 @@ pub struct WelcomeScreen {
 /// It names both front ends on purpose: this screen is the first thing a brand
 /// new install shows, and a headline mentioning only a terminal would teach the
 /// user that dux is a terminal-only product with no later prompt to unlearn it.
-pub const TAGLINE: &str =
+pub(crate) const TAGLINE: &str =
     "One git worktree per coding agent, watched from your terminal or your browser.";
 
-pub const STEPS: &[WelcomeStep] = &[
+pub(crate) const STEPS: &[WelcomeStep] = &[
     WelcomeStep {
         number: 1,
         title: "Add a project",

@@ -176,7 +176,7 @@ pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
 /// `refs/remotes/origin/HEAD`. `git clone` sets that ref; repos created with
 /// `git init` plus a manual remote typically lack it, so `None` also means
 /// "unknown" and callers fall back to a heuristic.
-pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
+pub(crate) fn remote_default_branch(repo_path: &Path) -> Option<String> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -219,7 +219,9 @@ pub fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKin
 /// Translates a `BranchWarningKind` from [`branch_warning_kind`] into the
 /// corresponding `ProjectBranchStatus`. `Some(_) -> NotLeading`,
 /// `None -> Leading`.
-pub fn branch_status_from_warning(warning_kind: Option<&BranchWarningKind>) -> ProjectBranchStatus {
+pub(crate) fn branch_status_from_warning(
+    warning_kind: Option<&BranchWarningKind>,
+) -> ProjectBranchStatus {
     match warning_kind {
         Some(_) => ProjectBranchStatus::NotLeading,
         None => ProjectBranchStatus::Leading,
@@ -338,7 +340,7 @@ impl FolderRepoStatus {
     /// else's repository still gets the self-gitignoring seed, though its own
     /// panel stays quiet, or an unignored upload directory pollutes their
     /// `git status`. A plain folder and an unconsultable git get nothing.
-    pub fn git_can_see_path(self) -> bool {
+    pub(crate) fn git_can_see_path(self) -> bool {
         match self {
             Self::WorkingRepo | Self::InsideRepoRootedElsewhere => true,
             Self::NoRepo | Self::Indeterminate | Self::Unprobed | Self::Missing => false,
@@ -388,7 +390,7 @@ impl FolderRepoStatus {
 /// would offer to recreate a working copy sitting safely on a mount that is
 /// merely down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirectoryPresence {
+pub(crate) enum DirectoryPresence {
     /// The stat succeeded. Something is at this path.
     Present,
     /// The stat failed in one of the two ways that mean nothing is there.
@@ -408,7 +410,7 @@ pub enum DirectoryPresence {
 /// answers `Ok` for `symlink_metadata`, because the link itself is there, and
 /// `NotFound` for `metadata`. A working copy whose symlink points at nothing is
 /// gone, not present.
-pub fn directory_presence(path: &Path) -> DirectoryPresence {
+pub(crate) fn directory_presence(path: &Path) -> DirectoryPresence {
     match fs::metadata(path) {
         Ok(_) => DirectoryPresence::Present,
         Err(err) => match err.kind() {
@@ -458,7 +460,7 @@ pub fn folder_repo_status(path: &Path) -> FolderRepoStatus {
 /// offering to recreate a working copy because its mount is unreachable would
 /// have dux check the branch out somewhere else while the real one is still
 /// sitting there.
-pub fn managed_worktree_status(path: &Path) -> FolderRepoStatus {
+pub(crate) fn managed_worktree_status(path: &Path) -> FolderRepoStatus {
     match directory_presence(path) {
         DirectoryPresence::Present => FolderRepoStatus::WorkingRepo,
         DirectoryPresence::Missing => FolderRepoStatus::Missing,
@@ -928,10 +930,10 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    parse_worktree_list_porcelain_z(&output.stdout)
+    Ok(parse_worktree_list_porcelain_z(&output.stdout))
 }
 
-pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>> {
+pub(crate) fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Vec<GitWorktree> {
     let mut worktrees = Vec::new();
     let mut current: Option<GitWorktree> = None;
 
@@ -977,10 +979,10 @@ pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>>
         worktrees.push(entry);
     }
 
-    Ok(worktrees)
+    worktrees
 }
 
-pub fn pull_current_branch(
+pub(crate) fn pull_current_branch(
     repo_path: &Path,
     guard: &crate::checkout_move::CheckoutMoveGuard,
 ) -> Result<()> {
@@ -995,7 +997,7 @@ pub fn pull_current_branch(
     pull_origin_branch(repo_path, &branch, guard)
 }
 
-pub fn pull_branch(
+pub(crate) fn pull_branch(
     repo_path: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
@@ -1004,7 +1006,7 @@ pub fn pull_branch(
     pull_origin_branch(repo_path, branch, guard)
 }
 
-pub fn switch_branch_if_needed(
+pub(crate) fn switch_branch_if_needed(
     repo_path: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
@@ -1020,7 +1022,7 @@ pub fn switch_branch_if_needed(
 
 /// True when the repo has an `origin` remote. Exit-status only, per the
 /// git-safety rules for imperative commands.
-pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
+pub(crate) fn has_origin_remote(repo_path: &Path) -> Result<bool> {
     let status = Command::new("git")
         .args([
             "-C",
@@ -1260,7 +1262,7 @@ fn create_tracking_branch_from(repo_path: &Path, name: &str, remote: &str) -> Re
 /// and file-restore surprises `checkout` silently allows. Returns git's raw
 /// stderr on failure so callers can surface the concrete reason. A switch
 /// that fails removes the local branch it created. Requires git >= 2.23.
-pub fn switch_branch(
+pub(crate) fn switch_branch(
     repo_path: &Path,
     branch_name: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
@@ -1377,7 +1379,7 @@ pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
 /// How long the pushed-branch probe waits for git before giving up. It reads
 /// only local refs, so a healthy repository answers in milliseconds; the bound
 /// is for a wedged filesystem or lock, where waiting longer helps nobody.
-pub const PUSHED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PUSHED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Whether branch `name` has been pushed anywhere this clone knows of: it
 /// tracks a remote branch, or some remote-tracking ref carries its name.
@@ -1475,7 +1477,7 @@ fn run_git_capture_bounded(
 /// `ls-remote` patterns match a ref's tail, so the answer is the exact ref in
 /// its output, not the exit status alone. The refspec is fully qualified, so
 /// a dash-leading branch name cannot be read as an option.
-pub fn origin_has_branch(repo_path: &Path, name: &str) -> Result<bool> {
+pub(crate) fn origin_has_branch(repo_path: &Path, name: &str) -> Result<bool> {
     let full_ref = format!("refs/heads/{name}");
     let output = Command::new("git")
         .args([
@@ -1631,7 +1633,7 @@ pub(crate) fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
 /// bound and was stopped, typed so a caller can tell "out of time" apart from
 /// a reason git gave (`anyhow::Error::downcast_ref`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FetchTimedOut {
+pub(crate) struct FetchTimedOut {
     pub timeout: std::time::Duration,
 }
 
@@ -1654,7 +1656,7 @@ impl std::error::Error for FetchTimedOut {}
 /// `upload-pack`) cannot outlive it. It never prompts for credentials. A
 /// failure or a timeout is an `Err` naming what happened; callers report it
 /// and carry on from the refs they already have.
-pub fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> Result<()> {
+pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> Result<()> {
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
 
@@ -1827,7 +1829,7 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<Unpu
 /// integer, both branches are passed fully qualified as `refs/heads/<name>`,
 /// which cannot begin with a dash, and the trailing `--` pins the pathspec
 /// boundary.
-pub fn commits_missing_from(repo_path: &Path, have: &str, want: &str) -> Result<u32> {
+pub(crate) fn commits_missing_from(repo_path: &Path, have: &str, want: &str) -> Result<u32> {
     let have_ref = format!("refs/heads/{have}");
     let want_ref = format!("refs/heads/{want}");
     let text = run_git_capture(
@@ -1847,7 +1849,11 @@ pub fn commits_missing_from(repo_path: &Path, have: &str, want: &str) -> Result<
 /// begin with a dash, and the trailing `--` pins the pathspec boundary.
 /// `merge-base --is-ancestor` answers through its exit status alone: 0 is yes,
 /// 1 is no, and anything else (a branch that does not exist) is an error.
-pub fn branch_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+pub(crate) fn branch_is_ancestor(
+    repo_path: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool> {
     let ancestor_ref = format!("refs/heads/{ancestor}");
     let descendant_ref = format!("refs/heads/{descendant}");
     let out = Command::new("git")
@@ -1885,7 +1891,7 @@ pub fn branch_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) ->
 /// Answers only yes or no, and every doubt is a no: see
 /// [`branch_contains_commit`] for the cases. The caller adopts something on a
 /// yes. It shells out to git, so callers run it in a background worker.
-pub fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str) -> bool {
+pub(crate) fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str) -> bool {
     branch_contains_commit(repo_path, commit, branch).unwrap_or(false)
 }
 
@@ -1899,7 +1905,7 @@ pub fn commit_is_in_branch_history(repo_path: &Path, commit: &str, branch: &str)
 /// callers run it in a background worker. The branch is passed fully qualified
 /// as `refs/heads/<name>`, which cannot begin with a dash, the object id is hex
 /// and cannot either, and the trailing `--` pins the pathspec boundary.
-pub fn branch_contains_commit(repo_path: &Path, commit: &str, branch: &str) -> Result<bool> {
+pub(crate) fn branch_contains_commit(repo_path: &Path, commit: &str, branch: &str) -> Result<bool> {
     let is_object_id =
         matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit());
     if !is_object_id {
@@ -1934,7 +1940,7 @@ fn is_object_id(text: &str) -> bool {
 
 /// The commit local branch `branch` points at now. The branch is passed fully
 /// qualified, so a dash-leading name is a ref and not an option.
-pub fn branch_tip(repo_path: &Path, branch: &str) -> Result<String> {
+pub(crate) fn branch_tip(repo_path: &Path, branch: &str) -> Result<String> {
     let branch_ref = format!("refs/heads/{branch}");
     run_git_capture(
         repo_path,
@@ -1945,7 +1951,7 @@ pub fn branch_tip(repo_path: &Path, branch: &str) -> Result<String> {
 
 /// Whether `commit`, a full object id, is a commit this repository has. Reads
 /// only; nothing is fetched.
-pub fn commit_is_present(repo_path: &Path, commit: &str) -> bool {
+pub(crate) fn commit_is_present(repo_path: &Path, commit: &str) -> bool {
     is_object_id(commit)
         && Command::new("git")
             .arg("-C")
@@ -1966,7 +1972,7 @@ pub fn commit_is_present(repo_path: &Path, commit: &str) -> bool {
 /// behind" from "could not check". It shells out to git, so callers run it in
 /// a background worker. The branch is passed fully qualified as
 /// `refs/heads/<name>`, which cannot begin with a dash.
-pub fn branch_behind_commit(
+pub(crate) fn branch_behind_commit(
     repo_path: &Path,
     branch: &str,
     commit: &str,
@@ -2021,7 +2027,7 @@ fn worktree_git(worktree: &Path, args: &[&str]) -> Command {
 /// Whether the commit `commit` is in the history of what `worktree` has checked
 /// out now. Answers through the exit status of `merge-base --is-ancestor`, so a
 /// commit this clone lacks is an error and not a no.
-pub fn worktree_head_contains(worktree: &Path, commit: &str) -> Result<bool> {
+pub(crate) fn worktree_head_contains(worktree: &Path, commit: &str) -> Result<bool> {
     if !is_object_id(commit) {
         return Err(anyhow!("\"{commit}\" is not a full commit id"));
     }
@@ -2050,7 +2056,7 @@ pub fn worktree_head_contains(worktree: &Path, commit: &str) -> Result<bool> {
 /// `merge.ff`, a pull strategy) is consulted, and it refuses to overwrite a
 /// local change instead of losing it. The worktree holds the branch, so git
 /// keeps every other worktree from checking it out while this runs.
-pub fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()> {
+pub(crate) fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()> {
     if !is_object_id(commit) {
         return Err(anyhow!("a branch moves to a full commit id only"));
     }
@@ -2088,7 +2094,7 @@ pub fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()> {
 /// Put what `worktree` has checked out back from `from` to `to`, the undo of
 /// [`fast_forward_worktree`]. Refused unless the worktree is still at `from`,
 /// so a branch that has moved on since is not rewound over somebody's work.
-pub fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<()> {
+pub(crate) fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<()> {
     if !is_object_id(to) {
         return Err(anyhow!("a branch moves to a full commit id only"));
     }
@@ -2116,7 +2122,7 @@ pub fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<()> {
 /// ([`branch_behind_commit`]) and that no worktree has the branch checked out,
 /// because a checkout would not follow the ref. The ref is fully qualified, so
 /// a dash-leading name is a ref and not an option.
-pub fn fast_forward_branch(
+pub(crate) fn fast_forward_branch(
     repo_path: &Path,
     branch: &str,
     old_tip: &str,
@@ -2162,7 +2168,7 @@ pub fn fast_forward_branch(
 /// It shells out to git, so callers run it in a background worker.
 /// `for-each-ref` is plumbing; the patterns are fully qualified, so they
 /// cannot begin with a dash, and they follow `--` besides.
-pub fn refs_exist_below(repo_path: &Path, name: &str) -> Result<bool> {
+pub(crate) fn refs_exist_below(repo_path: &Path, name: &str) -> Result<bool> {
     let local = format!("refs/heads/{name}/");
     let remote = format!("refs/remotes/origin/{name}/");
     let text = run_git_capture(
@@ -2188,7 +2194,7 @@ pub struct BranchHolder {
     /// path), compared by canonical path. That is the repository's own folder
     /// for an ordinary project, and a linked worktree for a project added from
     /// one.
-    pub is_project_folder: bool,
+    pub(crate) is_project_folder: bool,
 }
 
 /// The worktree that reserves branch `name`, if any, by the same rules git
@@ -2208,7 +2214,10 @@ pub struct BranchHolder {
 ///
 /// It shells out to git and reads files, so callers run it in a background
 /// worker.
-pub fn worktree_holding_branch(repo_path: &Path, name: &str) -> Result<Option<BranchHolder>> {
+pub(crate) fn worktree_holding_branch(
+    repo_path: &Path,
+    name: &str,
+) -> Result<Option<BranchHolder>> {
     let worktrees = list_worktrees(repo_path)?;
     if let Some(worktree) = worktrees
         .iter()
@@ -2334,7 +2343,7 @@ fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
 /// of project `project_name`, so a caller can ask whether that folder is free
 /// before asking git to create it. The folder is the flattened name
 /// ([`agent_folder_name`]), so this is only ever the answer for a create.
-pub fn managed_worktree_path(
+pub(crate) fn managed_worktree_path(
     worktrees_root: &Path,
     project_name: &str,
     branch_name: &str,
@@ -2369,7 +2378,7 @@ pub fn create_worktree_existing_branch(
 /// refuses the create rather than having the folder created under it, and the
 /// worktree manager sees the folder as occupied for the whole create. An `Err`
 /// from `claim` stops the create with nothing made.
-pub fn create_worktree_existing_branch_claimed(
+pub(crate) fn create_worktree_existing_branch_claimed(
     repo_path: &Path,
     worktrees_root: &Path,
     project_name: &str,
@@ -2404,7 +2413,7 @@ pub fn create_worktree_existing_branch_claimed(
 /// detaches for an ORDINARY branch too, and it also loses the DWIM that gives a
 /// remote-only branch a local tracking branch. So the branch is attached in a
 /// second step, `git switch -- <name>`, whose own separator is enough.
-pub fn add_worktree_existing_branch_at(
+pub(crate) fn add_worktree_existing_branch_at(
     repo_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
@@ -2429,11 +2438,11 @@ pub fn add_worktree_existing_branch_at(
 
 /// One worktree registration, as `git worktree list --porcelain -z` reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorktreeRegistration {
+pub(crate) struct WorktreeRegistration {
     /// The directory git has this worktree registered at.
     pub path: PathBuf,
     /// git's own verdict that the directory behind this registration is gone.
-    pub prunable: bool,
+    pub(crate) prunable: bool,
     /// The registration is locked (`git worktree lock`): git never calls a
     /// locked worktree prunable, even with its directory gone.
     pub locked: bool,
@@ -2446,7 +2455,7 @@ pub struct WorktreeRegistration {
 /// worktree whose path contains a newline is indistinguishable from two
 /// records. Under `-z` every attribute is NUL-terminated and an empty attribute
 /// ends the record, which a path cannot forge.
-pub fn parse_worktree_registrations(output: &[u8]) -> Vec<WorktreeRegistration> {
+pub(crate) fn parse_worktree_registrations(output: &[u8]) -> Vec<WorktreeRegistration> {
     let mut registrations = Vec::new();
     let mut current: Option<WorktreeRegistration> = None;
     for field in output.split(|byte| *byte == 0) {
@@ -2498,7 +2507,10 @@ pub fn parse_worktree_registrations(output: &[u8]) -> Vec<WorktreeRegistration> 
 /// registration whose directory is still there DELETES that directory, also
 /// measured, which is why the prunable check gates the call rather than merely
 /// informing it.
-pub fn forget_missing_worktree_registration(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+pub(crate) fn forget_missing_worktree_registration(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<()> {
     let repo = repo_path.to_string_lossy();
     let listed = Command::new("git")
         .args(["-C", repo.as_ref(), "worktree", "list", "--porcelain", "-z"])
@@ -2589,7 +2601,7 @@ pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &s
 /// returns; a failed delete is logged and does not fail the call. One create
 /// runs at a time, so two calls never share the ref. It shells out to git and
 /// talks to the network, so callers run it in a background worker.
-pub fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -> Result<String> {
+pub(crate) fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -> Result<String> {
     let repo = repo_path.to_string_lossy();
     let check_ref = format!("refs/dux/pull-request-check/{pr_number}");
     let refspec = format!("+pull/{pr_number}/head:{check_ref}");
@@ -2648,7 +2660,7 @@ pub fn create_worktree_from_start_point(
 /// [`create_worktree_from_start_point`], calling `claim` with the worktree's
 /// path once it is known (a generated name included) and BEFORE
 /// `git worktree add` runs. See [`create_worktree_existing_branch_claimed`].
-pub fn create_worktree_from_start_point_claimed(
+pub(crate) fn create_worktree_from_start_point_claimed(
     repo_path: &Path,
     worktrees_root: &Path,
     project_name: &str,
@@ -3360,7 +3372,7 @@ pub struct UncommittedCopySummary {
     /// dirty submodules (" M dir"), untracked embedded repos ("?? dir/"), and
     /// non-regular files such as FIFOs, sockets, and devices (which would
     /// block or fail a byte copy). Relative paths, for the user-facing note.
-    pub skipped_paths: Vec<String>,
+    pub(crate) skipped_paths: Vec<String>,
 }
 
 #[derive(Default)]
@@ -3620,7 +3632,7 @@ pub enum BranchDeletion {
 
 impl BranchDeletion {
     /// git's reason for refusing, or `None` when it did not refuse.
-    pub fn refused_reason(&self) -> Option<&str> {
+    pub(crate) fn refused_reason(&self) -> Option<&str> {
         match self {
             BranchDeletion::Refused { reason } => Some(reason),
             _ => None,
@@ -3633,7 +3645,7 @@ impl BranchDeletion {
 /// the web toast say the same thing, which both need because a surviving branch
 /// makes recreating an agent under the same name fail far from the deletion that
 /// caused it.
-pub fn branch_refusal_note(branch: &str, reason: &str) -> crate::status_text::StatusText {
+pub(crate) fn branch_refusal_note(branch: &str, reason: &str) -> crate::status_text::StatusText {
     let reason = clean_git_reason(reason);
     crate::status_text![
         "Git refused to delete branch ",
@@ -3648,7 +3660,7 @@ pub fn branch_refusal_note(branch: &str, reason: &str) -> crate::status_text::St
 /// one string so it can travel as one name (the web draws it as a single chip).
 /// The branch is single-quoted, because a branch name can come from a pull
 /// request somebody else opened and the user is being invited to paste this.
-pub fn branch_delete_command(branch: &str) -> String {
+pub(crate) fn branch_delete_command(branch: &str) -> String {
     format!("git branch -D {}", crate::shell_quote::single_quote(branch))
 }
 
@@ -3688,7 +3700,7 @@ impl RemoveResult {
     /// nothing extra rather than mentioning a branch the user never saw.
     ///
     /// Lives here so the TUI status line and the web toast say the same thing.
-    pub fn initial_branch_note(
+    pub(crate) fn initial_branch_note(
         &self,
         initial_branch: &str,
     ) -> Option<crate::status_text::StatusText> {
@@ -3817,7 +3829,8 @@ pub fn remove_worktree_keep_branch(repo_path: &Path, worktree_path: &Path) -> Re
 /// been stopped, short enough to sit inside the removal's spinner. Not a user
 /// setting: the removal is already bounded by the close grace, and this is
 /// one pause on a failure path.
-pub const WORKTREE_REMOVAL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const WORKTREE_REMOVAL_RETRY_PAUSE: std::time::Duration =
+    std::time::Duration::from_secs(1);
 
 /// `git worktree remove --force` failed while git still lists the worktree
 /// and its folder is still there: a transient refusal (something writing into
@@ -4005,7 +4018,7 @@ impl std::error::Error for LeftoverWorktreeFolder {}
 ///
 /// Uses `--porcelain=v1 -z`, the machine-stable form; only the presence of the
 /// records is read, never the paths.
-pub fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
+pub(crate) fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -4997,7 +5010,7 @@ fn parse_numstat_line(line: &str) -> Option<DiffStat> {
 /// can reuse the status vocabulary they already render (`FileStatusIcon` and
 /// `fileStatusMeta` on the web).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct FileStatusCodes {
+pub(crate) struct FileStatusCodes {
     pub staged: Option<String>,
     pub unstaged: Option<String>,
 }
@@ -5017,7 +5030,7 @@ pub struct FileStatusCodes {
 /// A failure is classified rather than assumed: a second, cheap `rev-parse`
 /// decides whether git failed because there is no repository (answer `None`)
 /// or for some other reason (a real error the caller surfaces).
-pub fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusCodes>> {
+pub(crate) fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusCodes>> {
     let wt = worktree.to_string_lossy();
     let output = Command::new("git")
         .args([
@@ -5106,7 +5119,7 @@ fn is_inside_work_tree(path: &Path) -> Result<bool> {
 /// Note what IS covered, so the gap is not mistaken for a wider one: a
 /// non-zero exit (the ordinary "no repository here" answer) is `Ok(None)` and
 /// is tested; only the failure to spawn git at all is not.
-pub fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
+pub(crate) fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -5141,7 +5154,7 @@ pub fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
 ///
 /// `check-ignore` consults the index by default, which is what we want: a
 /// TRACKED file that also matches an ignore rule answers "not ignored".
-pub fn path_is_ignored(worktree: &Path, rel_path: &str) -> Result<bool> {
+pub(crate) fn path_is_ignored(worktree: &Path, rel_path: &str) -> Result<bool> {
     let wt = worktree.to_string_lossy();
     let output = Command::new("git")
         .args(["-C", wt.as_ref(), "check-ignore", "-q", "--"])
@@ -5582,7 +5595,7 @@ fn run_pathspecs_output<P: AsRef<[u8]>>(
     Ok(output.stdout)
 }
 
-pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
+pub(crate) fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     stage_with_report(worktree_path, &[file_path.to_string()]).map(|_| ())
 }
 
@@ -6300,7 +6313,7 @@ pub fn file_bytes_at_head(worktree_path: &Path, path: &str) -> Result<Option<Vec
 /// `cat-file -s` (which reads the object header WITHOUT inflating the whole
 /// blob), or `None` for new (untracked) files. Lets a caller cap a diff/read by
 /// size before buffering the full HEAD content into memory.
-pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>> {
+pub(crate) fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -6332,7 +6345,7 @@ pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>
 /// path is absent at HEAD. Streams `cat-file -p` and stops reading at the
 /// limit, so a hundred-megabyte blob costs a few kilobytes of memory: the
 /// caller only wants enough of the head to classify the content.
-pub fn file_prefix_at_head(
+pub(crate) fn file_prefix_at_head(
     worktree_path: &Path,
     path: &str,
     limit: usize,
@@ -6657,7 +6670,7 @@ pub fn standalone_agent_title(typed: &str, folder: &Path) -> String {
 /// punctuation or non-ASCII text) it falls back to a fixed name rather than an
 /// empty one. The web's `standaloneAgentDefaultName` is its twin, pinned by
 /// shared vectors, because the create dialog promises this name.
-pub fn standalone_agent_name_from_folder(folder: &Path) -> String {
+pub(crate) fn standalone_agent_name_from_folder(folder: &Path) -> String {
     let raw = folder
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -6689,7 +6702,7 @@ pub fn standalone_agent_name_from_folder(folder: &Path) -> String {
 }
 
 /// What an agent name may be, said the same way in every refusal of one.
-pub const AGENT_NAME_RULE: &str = "An agent name must be a name git accepts as a branch, so \
+pub(crate) const AGENT_NAME_RULE: &str = "An agent name must be a name git accepts as a branch, so \
      no spaces, none of ~ ^ : ? * [ \\, no \"..\", and it cannot start with \"-\" or end \
      with \"/\", \".\" or \".lock\".";
 
@@ -6760,7 +6773,7 @@ fn never_in_an_agent_name(ch: char) -> bool {
 /// [`AGENT_FOLDER_MAX_UNITS`] is cut, on a character boundary, and gets the
 /// same hash, so it fits the filesystem's limit on one name and two long names
 /// that share their start still get folders of their own.
-pub fn agent_folder_name(name: &str) -> String {
+pub(crate) fn agent_folder_name(name: &str) -> String {
     let flat: String = name
         .chars()
         .map(|ch| {
@@ -6947,7 +6960,7 @@ pub(crate) mod test_support {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitHubRemote {
+pub(crate) struct GitHubRemote {
     pub host: String,
     pub owner_repo: String,
 }
@@ -6964,7 +6977,7 @@ pub struct GitHubRemote {
 /// agent's address does not name, and the eligibility gate after the choice
 /// could not recover because the live address was already gone by then.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteResolution {
+pub(crate) enum RemoteResolution {
     /// git could not read an `origin`, or what it read is not an address dux
     /// can parse into a host and an `owner/repo`.
     Unresolved,
@@ -6979,7 +6992,7 @@ pub enum RemoteResolution {
 impl RemoteResolution {
     /// The allowed remote, for callers whose only question is whether they have
     /// one they may use.
-    pub fn allowed(self) -> Option<GitHubRemote> {
+    pub(crate) fn allowed(self) -> Option<GitHubRemote> {
         match self {
             Self::Allowed(remote) => Some(remote),
             Self::Unresolved | Self::Denied => None,
@@ -6989,7 +7002,7 @@ impl RemoteResolution {
 
 /// Returns the GitHub host and `"owner/repo"` parsed from the `origin` remote
 /// URL, or `None` if the remote doesn't point to GitHub or the command fails.
-pub fn remote_github_repo(
+pub(crate) fn remote_github_repo(
     worktree_path: &Path,
     policy: &crate::gh::GithubHostPolicy,
 ) -> Option<GitHubRemote> {
@@ -6998,7 +7011,7 @@ pub fn remote_github_repo(
 
 /// [`remote_github_repo`] keeping the reason it has no answer. See
 /// [`RemoteResolution`].
-pub fn resolve_remote_github_repo(
+pub(crate) fn resolve_remote_github_repo(
     worktree_path: &Path,
     policy: &crate::gh::GithubHostPolicy,
 ) -> RemoteResolution {
@@ -8455,7 +8468,7 @@ mod tests {
     fn parse_worktree_list_porcelain_z_handles_branches_detached_and_spaces() {
         let input = b"worktree /repo/main checkout\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree /repo/feature\0HEAD 2222222222222222222222222222222222222222\0branch refs/heads/feature/x\0\0worktree /repo/detached\0HEAD abcdef1234567890\0detached\0\0";
 
-        let entries = parse_worktree_list_porcelain_z(input).unwrap();
+        let entries = parse_worktree_list_porcelain_z(input);
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].path, PathBuf::from("/repo/main checkout"));

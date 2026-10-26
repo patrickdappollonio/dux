@@ -134,7 +134,7 @@ pub fn detect_ip() -> Result<IpAddr, TailscaleUnavailable> {
 /// Tailscale's macOS clients put it when `PATH` does not have it (Tailscale's
 /// CLI docs): the Standalone client's launcher and the App Store client's
 /// bundled CLI.
-pub const CLI_CANDIDATES: &[&str] = &[
+pub(crate) const CLI_CANDIDATES: &[&str] = &[
     "tailscale",
     "/usr/local/bin/tailscale",
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
@@ -218,7 +218,7 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
 /// (a macOS `utun`, a custom tun name) carrying an address Tailscale itself
 /// reported in `known`. A bare 100.64.0.0/10 address is not enough: Cloudflare
 /// WARP (100.96.0.0/12) and `NetBird` use the same block.
-pub fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) -> bool {
+pub(crate) fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) -> bool {
     ifaces.iter().any(|(name, ip)| {
         let in_range = match ip {
             IpAddr::V4(v4) => is_tailscale_cgnat(*v4),
@@ -232,7 +232,7 @@ pub fn owned_tailscale_address(ifaces: &[(String, IpAddr)], known: &[IpAddr]) ->
 /// `paths.DefaultTailscaledSocket` and the official container image), checked
 /// so a daemon running in userspace networking, which has no interface, is
 /// still seen. `$TS_SOCKET` is checked as well.
-pub const SOCKET_PATHS: &[&str] = &[
+pub(crate) const SOCKET_PATHS: &[&str] = &[
     "/var/run/tailscale/tailscaled.sock",
     "/run/tailscale/tailscaled.sock",
     "/var/run/tailscaled.socket",
@@ -250,7 +250,7 @@ pub const SOCKET_PATHS: &[&str] = &[
 /// `macsysExtBundleId` and `appStoreExtBundleId`). The apps' CLI cannot always
 /// reach a running app, and a running extension must read as "cannot check",
 /// never as "stopped".
-pub const PROCESS_NAMES: &[&str] = &[
+pub(crate) const PROCESS_NAMES: &[&str] = &[
     "tailscaled",
     "IPNExtension",
     "io.tailscale.ipn.macsys.network-extension",
@@ -281,7 +281,7 @@ fn is_tailscale_process_name(name: &str) -> bool {
 /// Tailscale's interface, a daemon socket) is still read every look, so only a
 /// daemon with no socket at a known path and no interface (userspace
 /// networking with a custom socket) waits up to this long to be seen.
-pub const PROCESS_RESCAN: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const PROCESS_RESCAN: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The last process-table reading, so an empty one is reused for
 /// [`PROCESS_RESCAN`]. A table that showed a daemon is read again every time,
@@ -330,7 +330,7 @@ fn cli_on_disk(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
 /// (see [`socket_answers`]) at a known path or at `$TS_SOCKET`, or a
 /// process with its name is running. `process_running` is asked last, and only
 /// when no socket answers, because it reads the process table.
-pub fn tailscaled_detectable(
+pub(crate) fn tailscaled_detectable(
     answers: &dyn Fn(&std::path::Path) -> bool,
     ts_socket: Option<String>,
     process_running: &dyn Fn() -> bool,
@@ -381,11 +381,11 @@ fn tailscaled_process_running() -> bool {
 /// What this machine shows of Tailscale without asking the CLI, read only when
 /// the CLI could not answer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LocalEvidence {
+pub(crate) struct LocalEvidence {
     /// A Tailscale address on Tailscale's own interface.
-    pub owned_address: bool,
+    pub(crate) owned_address: bool,
     /// A `tailscaled` socket or process.
-    pub daemon_detectable: bool,
+    pub(crate) daemon_detectable: bool,
 }
 
 /// The addresses the last successful look reported for this machine, so a
@@ -393,7 +393,7 @@ pub struct LocalEvidence {
 static KNOWN_TAILSCALE_IPS: std::sync::Mutex<Vec<IpAddr>> = std::sync::Mutex::new(Vec::new());
 
 /// Read this machine's [`LocalEvidence`].
-pub fn local_evidence() -> LocalEvidence {
+pub(crate) fn local_evidence() -> LocalEvidence {
     let known = KNOWN_TAILSCALE_IPS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -453,7 +453,7 @@ fn evidence_from(
 /// (or macOS `IPNExtension`) process AND no socket (cmd/tailscale/cli/diag.go,
 /// `fixTailscaledConnectErrorImpl`); every other connect failure (a socket it
 /// cannot use, a process it found) is not proof of anything.
-pub fn daemon_stopped_message(stderr: &str) -> bool {
+pub(crate) fn daemon_stopped_message(stderr: &str) -> bool {
     let text = stderr.to_ascii_lowercase();
     [
         "failed to connect to local tailscaled; it doesn't appear to be running",
@@ -480,7 +480,7 @@ pub const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// A TIMEOUT maps to [`TailscaleUnavailable::CommandFailed`] rather than to a
 /// variant of its own: to the caller, a daemon that does not answer and one that
 /// answers with an error are the same situation.
-pub fn detect_ip_with(
+pub(crate) fn detect_ip_with(
     program: &str,
     timeout: std::time::Duration,
 ) -> Result<IpAddr, TailscaleUnavailable> {
@@ -494,7 +494,7 @@ pub fn detect_ip_with(
 /// (100.64.0.0/10); when no such IPv4 is present, accepts the first IPv6 in
 /// Tailscale's `fd7a:115c:a1e0::/48` ULA range. Returns `None` for empty or
 /// unparseable output.
-pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
+pub(crate) fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
     let mut ipv6_fallback: Option<IpAddr> = None;
 
     for line in output.lines() {
@@ -618,7 +618,7 @@ pub fn detect_identity(dux_port: u16) -> Result<TailscaleIdentity, TailscaleUnav
 /// process. A daemon the CLI says is not running is an answer ("no Funnel")
 /// only on the same terms. Anything else is
 /// [`TailscaleUnavailable::Unverifiable`].
-pub fn detect_identity_checked(
+pub(crate) fn detect_identity_checked(
     programs: &[&str],
     timeout: std::time::Duration,
     dux_port: u16,
@@ -653,7 +653,7 @@ pub fn detect_identity_checked(
 /// one: the caller keeps what it already knew, because an unknown answer is not
 /// a change, and a serve route that flickered away for one look would otherwise
 /// say "gone" and "back" to every surface.
-pub fn detect_identity_with(
+pub(crate) fn detect_identity_with(
     program: &str,
     timeout: std::time::Duration,
     dux_port: u16,
@@ -834,7 +834,7 @@ fn run_cli_raw(
 /// may answer to this machine's name, and a Funnel route that reaches dux by a
 /// way the display filter does not recognise (the Tailscale address, a LAN
 /// address, a second proxy) must still count.
-pub fn parse_serve_funnel(text: &str) -> Option<bool> {
+pub(crate) fn parse_serve_funnel(text: &str) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     value.as_object()?;
     Some(any_funnel(&value))
@@ -870,7 +870,7 @@ pub fn parse_serve_funnel(text: &str) -> Option<bool> {
 /// no `Tailscale-Funnel-Request` header, a web request through a daemon older
 /// than 1.72 does not either, both arrive from loopback, and both can claim any
 /// Host they like. So dux refuses everything while either stands.
-pub fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
+pub(crate) fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let top = value.as_object()?;
     let foreground: Vec<&serde_json::Map<String, serde_json::Value>> = top
@@ -960,7 +960,7 @@ pub fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
 /// dux's. A web handler (`Proxy`) does not count: Tailscale's serve proxy adds
 /// forwarding headers to every request it forwards, so it never hands dux a
 /// bare stream that looks like this machine.
-pub fn parse_tcp_forward_to_port(text: &str, dux_port: u16) -> Option<bool> {
+pub(crate) fn parse_tcp_forward_to_port(text: &str, dux_port: u16) -> Option<bool> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     value.as_object()?;
     Some(any_tcp_forward_to_port(&value, dux_port))
@@ -1074,7 +1074,7 @@ impl SelfStatus {
 /// CLI that grows or renames a field degrades to "no name" rather than to an
 /// error: the name only ever ADDS a Host the guard accepts, so the safe reading
 /// of an answer dux does not understand is the one that adds nothing.
-pub fn parse_status_json(text: &str) -> Option<SelfStatus> {
+pub(crate) fn parse_status_json(text: &str) -> Option<SelfStatus> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let root = value.as_object()?;
     let running = root.get("BackendState").and_then(|v| v.as_str()) == Some("Running");
@@ -1130,7 +1130,7 @@ pub fn parse_status_json(text: &str) -> Option<SelfStatus> {
 /// Lowercase a DNS name and drop one trailing dot, or `None` when what is left
 /// is not a plain hostname: dot-separated labels of ASCII letters, digits and
 /// hyphens, none of them empty.
-pub fn normalize_dns_name(raw: &str) -> Option<String> {
+pub(crate) fn normalize_dns_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let name = trimmed.strip_suffix('.').unwrap_or(trimmed);
     if name.is_empty() {
@@ -1151,7 +1151,7 @@ pub fn normalize_dns_name(raw: &str) -> Option<String> {
 /// `https://` target cannot be dux, which speaks plain HTTP. The routes kept
 /// under a foreground `tailscale serve` session (one run without `--bg`) count
 /// as well as the background ones.
-pub fn parse_serve_status_json(text: &str, dux_port: u16) -> Option<Vec<ServeRoute>> {
+pub(crate) fn parse_serve_status_json(text: &str, dux_port: u16) -> Option<Vec<ServeRoute>> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let root = value.as_object()?;
     let mut routes = Vec::new();

@@ -174,12 +174,12 @@ impl std::error::Error for WriteConflict {}
 /// two independent `to_rfc3339()` call sites can render the same instant as two
 /// different strings and a token comparison would then never match. There is a
 /// test asserting read, info and write all speak this one string.
-pub fn format_mtime(t: std::time::SystemTime) -> String {
+pub(crate) fn format_mtime(t: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()
 }
 
 /// The freshness stamp of an already-stat'd entry.
-pub fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
+pub(crate) fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
     FileStamp {
         modified: meta.modified().ok().map(format_mtime),
         size: meta.len(),
@@ -339,7 +339,7 @@ pub(crate) fn open_regular_nofollow(
 /// that lands mid-read leaves us reporting the older mtime for newer content,
 /// which makes a fresh buffer look stale (a wasted re-check) instead of making
 /// a stale buffer look fresh (a lost edit).
-pub fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
+pub(crate) fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Read;
 
@@ -693,7 +693,7 @@ pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Res
 ///
 /// Returns the file's stamp AFTER the write either way, so the caller can hand
 /// it back to the client as its new baseline.
-pub fn write_file_checked(
+pub(crate) fn write_file_checked(
     worktree: &Path,
     rel_path: &str,
     content: &str,
@@ -1280,7 +1280,7 @@ pub struct WorktreeEntryInfo {
     /// The same bits as `ls -l` prints them (`"rw-r--r--"`).
     pub permissions: String,
     /// The symlink's target as stored on disk (not resolved), for a symlink.
-    pub symlink_target: Option<String>,
+    pub(crate) symlink_target: Option<String>,
     /// The TARGET's mtime and size, present only when this entry is a symlink
     /// whose target could be stat'd. `None` for everything else, so presence is
     /// the client's test rather than a sentinel value.
@@ -1296,15 +1296,15 @@ pub struct WorktreeEntryInfo {
     /// The mtime goes through the same [`format_mtime`] as every other timestamp
     /// on the wire, because two formatters would silently disagree on the same
     /// instant.
-    pub target_modified: Option<String>,
-    pub target_size: Option<u64>,
+    pub(crate) target_modified: Option<String>,
+    pub(crate) target_size: Option<u64>,
     pub git: GitStatusView,
 }
 
 /// Render permission bits the way `ls -l` does: three rwx triplets, with
 /// setuid/setgid/sticky folded onto the matching execute position (lower-case
 /// when that execute bit is also set, upper-case when it is not).
-pub fn symbolic_permissions(mode: u32) -> String {
+pub(crate) fn symbolic_permissions(mode: u32) -> String {
     let mut out = String::with_capacity(9);
     let triplet = |shift: u32, special: bool, special_lower: char, special_upper: char| {
         let bits = (mode >> shift) & 0o7;

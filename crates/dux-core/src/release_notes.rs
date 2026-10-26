@@ -51,7 +51,7 @@ impl ParsedBody {
 /// title. The single definition behind both `has_renderable_body` methods and the
 /// thing `hasRenderableBody` in `crates/dux-web/web/src/lib/releaseNotes.ts`
 /// mirrors.
-pub fn body_is_renderable(paragraphs: &[String], sections: &[String]) -> bool {
+pub(crate) fn body_is_renderable(paragraphs: &[String], sections: &[String]) -> bool {
     has_content(paragraphs) || has_content(sections)
 }
 
@@ -82,7 +82,7 @@ fn has_content(entries: &[String]) -> bool {
 /// `<br` U+FEFF `/>` land on opposite answers. `tests/fixtures/
 /// release_notes_cross_language.json` pins the ANSWERS from both languages rather
 /// than only the set.
-pub fn is_invisible_char(c: char) -> bool {
+pub(crate) fn is_invisible_char(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
 }
 
@@ -402,7 +402,7 @@ fn user_agent() -> String {
 ///
 /// `api_base` is injectable so tests can point at a local server; production
 /// callers pass [`crate::urls::GITHUB_API_BASE`].
-pub fn latest_release_endpoint(api_base: &str) -> String {
+pub(crate) fn latest_release_endpoint(api_base: &str) -> String {
     format!(
         "{}/repos/{}/releases/latest",
         api_base.trim_end_matches('/'),
@@ -413,7 +413,7 @@ pub fn latest_release_endpoint(api_base: &str) -> String {
 /// The endpoint for ONE release, looked up by its tag. This is the endpoint the
 /// automatic startup path uses, because the screen must describe the version the
 /// user is actually running.
-pub fn tag_release_endpoint(api_base: &str, tag: &str) -> String {
+pub(crate) fn tag_release_endpoint(api_base: &str, tag: &str) -> String {
     format!(
         "{}/repos/{}/releases/tags/{}",
         api_base.trim_end_matches('/'),

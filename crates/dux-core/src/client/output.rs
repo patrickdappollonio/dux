@@ -143,7 +143,7 @@ pub fn select<'a, T>(
 
 /// [`select`] for a query that may not be repeated as typed: `shown` is how
 /// every refusal names it.
-pub fn select_shown<'a, T>(
+pub(crate) fn select_shown<'a, T>(
     noun: &str,
     query: &str,
     shown: &str,
@@ -225,7 +225,11 @@ pub fn confirm(
 /// # Errors
 ///
 /// [`Exit::Usage`] for a relative path sent to the remote `remote` names.
-pub fn path_for_target(path: &str, remote: Option<&str>, cwd: &Path) -> Result<String, CliError> {
+pub(crate) fn path_for_target(
+    path: &str,
+    remote: Option<&str>,
+    cwd: &Path,
+) -> Result<String, CliError> {
     let typed = Path::new(path);
     if typed.is_absolute() {
         return Ok(path.to_string());

@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 ///
 /// This is a probe, so it is a moment in time: a directory can be removed between
 /// the check and the spawn. It is not a guarantee.
-pub fn dir_is_usable(path: &Path) -> bool {
+pub(crate) fn dir_is_usable(path: &Path) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
@@ -59,7 +59,7 @@ pub fn dir_is_usable(path: &Path) -> bool {
 /// This chooses a DIRECTORY; it does not retry a failed spawn. A missing shell or
 /// a bad `[terminal] command` is a configuration problem the user needs to see,
 /// and retrying it at `/` would bury it.
-pub fn standalone_terminal_dir_from(home: Option<PathBuf>) -> PathBuf {
+pub(crate) fn standalone_terminal_dir_from(home: Option<PathBuf>) -> PathBuf {
     match home {
         Some(home) if dir_is_usable(&home) => home,
         _ => PathBuf::from("/"),
@@ -86,7 +86,7 @@ pub fn standalone_terminal_dir() -> PathBuf {
 /// same collapse as `$HOME/...` for config.toml. That one is machine-portable
 /// desired state that gets expanded again on load; this one is display text
 /// nothing ever parses back.
-pub fn shorten_home_from(path: &Path, home: Option<&Path>) -> String {
+pub(crate) fn shorten_home_from(path: &Path, home: Option<&Path>) -> String {
     let Some(home) = home else {
         return path.to_string_lossy().into_owned();
     };

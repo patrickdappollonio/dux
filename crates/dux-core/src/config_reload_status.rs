@@ -86,7 +86,7 @@ impl ConfigReloadOutcome {
 /// Its own key, not the reload's: nothing asked for this write and nothing is
 /// waiting on its answer, so without a sentence the only sign of it is the
 /// preference reverting the next time dux starts.
-pub fn lazy_write_failed(error: &str) -> StatusUpdate {
+pub(crate) fn lazy_write_failed(error: &str) -> StatusUpdate {
     StatusUpdate::keyed(
         "config-write-deferred",
         StatusTone::Warning,

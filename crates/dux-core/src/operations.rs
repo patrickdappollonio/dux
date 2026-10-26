@@ -137,7 +137,7 @@ pub enum OperationKind {
 impl OperationKind {
     /// What dux is doing while a record of this kind runs, as a refusal names
     /// it: "dux is still {this}".
-    pub fn running_phrase(self) -> &'static str {
+    pub(crate) fn running_phrase(self) -> &'static str {
         match self {
             Self::ProjectAdd => "adding a project",
             Self::ProjectRemove => "removing a project",
@@ -170,7 +170,7 @@ enum KeyStamp {
 
 /// How a launch a record waits on ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaunchEnded {
+pub(crate) enum LaunchEnded {
     /// The provider came up.
     Launched,
     /// It did not.
@@ -383,7 +383,7 @@ pub struct OperationPolicy {
 }
 
 impl OperationPolicy {
-    pub fn from_server(server: &crate::config::ServerConfig) -> Self {
+    pub(crate) fn from_server(server: &crate::config::ServerConfig) -> Self {
         Self {
             unknown_after: Duration::from_secs(server.operation_unknown_after_seconds),
             retention: Duration::from_secs(server.operation_retention_seconds),
@@ -416,7 +416,7 @@ pub fn launch_binding_key(tab_id: &str) -> String {
 
 /// The key a failed launch of an agent's first tab moves its waiting records to:
 /// that failure is reported by agent, and a promotion may move the first slot first.
-pub fn launch_failure_key(session_id: &str) -> String {
+pub(crate) fn launch_failure_key(session_id: &str) -> String {
     format!("launch-failed:{session_id}")
 }
 
@@ -555,7 +555,7 @@ impl std::fmt::Debug for RecordWatch {
 impl RecordWatch {
     /// Whether the record is still open: running, or unknown with the work not
     /// yet ended. A discarded or pruned record is not.
-    pub fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         self.operations.with(|registry| {
             registry
                 .records
@@ -722,7 +722,7 @@ impl Operations {
     }
 
     /// The guard's create ended.
-    pub fn clear_create_guard(&self) {
+    pub(crate) fn clear_create_guard(&self) {
         self.with(|registry| registry.create_guard = None);
     }
 
@@ -763,7 +763,7 @@ impl Operations {
 
     /// Move a record to a new id, before anybody was told the old one. A
     /// record waiting on its own id waits on the new one.
-    pub fn rekey(&self, from: &str, to: &str) {
+    pub(crate) fn rekey(&self, from: &str, to: &str) {
         self.with(|registry| {
             if let Some(mut record) = registry.records.remove(from) {
                 if record.awaiting.as_deref() == Some(from) {
@@ -800,7 +800,7 @@ impl Operations {
     }
 
     /// Whether the running record `id` waits for a config reload.
-    pub fn awaits_reload(&self, id: &str) -> bool {
+    pub(crate) fn awaits_reload(&self, id: &str) -> bool {
         self.with(|registry| {
             registry
                 .records
@@ -822,7 +822,7 @@ impl Operations {
 
     /// The owner of the oldest closed reload says how it ended. Its records finish
     /// now, or once the listener changes it set off have ended.
-    pub fn finish_reload(&self, state: OperationState, message: &str, now: Instant) {
+    pub(crate) fn finish_reload(&self, state: OperationState, message: &str, now: Instant) {
         let (closed, waiting) = self.with(|registry| {
             let closed = registry.reloads_closed.pop_front();
             let waiting = registry.listener_pending > 0;
@@ -879,7 +879,7 @@ impl Operations {
 
     /// The reload about to read the file could not start: its waiting records
     /// fail with `message`, and a later reload never completes them.
-    pub fn fail_reload(&self, message: &str, now: Instant) {
+    pub(crate) fn fail_reload(&self, message: &str, now: Instant) {
         let epoch = self.with(|registry| {
             let epoch = registry.reload_epoch;
             registry.reload_epoch += 1;
@@ -896,7 +896,7 @@ impl Operations {
 
     /// Every record waiting on `from` now waits on `to`: the work behind
     /// `from` handed its outcome to a later operation.
-    pub fn hand_off(&self, from: &str, to: &str) {
+    pub(crate) fn hand_off(&self, from: &str, to: &str) {
         self.with(|registry| {
             for record in registry.awaiting(from) {
                 record.awaiting = Some(to.to_string());
@@ -930,7 +930,7 @@ impl Operations {
 
     /// Take `id` back out of what the records waiting on `key` created: the
     /// change made it and then lost it before it ended.
-    pub fn retract_created(&self, key: &str, id: &str) {
+    pub(crate) fn retract_created(&self, key: &str, id: &str) {
         self.with(|registry| {
             for record in registry.awaiting(key) {
                 record.notes.created.retain(|created| created != id);
@@ -958,7 +958,7 @@ impl Operations {
 
     /// Finish every record waiting on `key` with a state its completion point
     /// knows better than a status tone can say.
-    pub fn finish_awaiting_as(
+    pub(crate) fn finish_awaiting_as(
         &self,
         key: &str,
         state: OperationState,
@@ -1091,7 +1091,7 @@ fn running_key(outcome: &crate::wire::WireCommandOutcome) -> Option<String> {
 
 /// What an agent delete did to the worktree and its branches, from the
 /// removal the delete reports.
-pub fn agent_delete_parts(
+pub(crate) fn agent_delete_parts(
     directory: &str,
     branch: &str,
     initial_branch: &str,
@@ -1151,7 +1151,7 @@ pub fn agent_delete_parts(
 
 /// What an agent delete whose worktree removal failed left behind: the
 /// worktree, still on disk, and its branch, never reached.
-pub fn agent_delete_failure_parts(
+pub(crate) fn agent_delete_failure_parts(
     directory: &str,
     branch: &str,
     reason: &str,
@@ -1378,7 +1378,7 @@ impl crate::engine::Engine {
 
     /// Add facts to the record waiting on `key`, or, with no key, to the record
     /// being dispatched right now; a no-op when neither names a record.
-    pub fn note_operation(&self, key: Option<&str>, notes: &OperationNotes) {
+    pub(crate) fn note_operation(&self, key: Option<&str>, notes: &OperationNotes) {
         if let Some(key) = key.or(self.operation_in_dispatch.as_deref()) {
             self.operations.note(key, notes);
         }
@@ -1386,7 +1386,7 @@ impl crate::engine::Engine {
 
     /// A launch reported back: finish the records waiting on `key`. A failed
     /// launch is partial, not failed, for a record whose created tab still exists.
-    pub fn finish_launch_operations(
+    pub(crate) fn finish_launch_operations(
         &self,
         key: &str,
         tab_id: Option<&str>,
@@ -1427,7 +1427,7 @@ impl crate::engine::Engine {
 
     /// Forget the finished records past their retention, so a registry nobody
     /// reads still lets go of them.
-    pub fn prune_operations(&self) {
+    pub(crate) fn prune_operations(&self) {
         self.operations.prune(Instant::now());
     }
 }

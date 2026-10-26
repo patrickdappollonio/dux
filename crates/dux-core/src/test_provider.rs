@@ -43,19 +43,19 @@ use crate::config::{Config, ProviderCommandConfig, default_provider_commands};
 /// shell names one of these explicitly. To allow another program, add its file
 /// name here, and only if running it can touch nothing outside the test's own
 /// scratch directory.
-pub const ALLOWED_TEST_COMMANDS: &[&str] =
+pub(crate) const ALLOWED_TEST_COMMANDS: &[&str] =
     &["sh", "bash", "cat", "sleep", "true", "printf", "echo"];
 
 /// The stand-in every defused provider runs. `sh -c 'exec cat'` rather than a bare
 /// `cat` because a launch appends the provider's resume arguments (`--continue`,
 /// `resume --last`) after `args`: `sh` takes them as positional parameters the
 /// script never reads, where `cat` would try to open them and exit at once.
-pub const HARMLESS_PROVIDER_COMMAND: &str = "sh";
+pub(crate) const HARMLESS_PROVIDER_COMMAND: &str = "sh";
 
 /// The command every defused terminal runs: a plain interactive `sh` with no
 /// arguments, so it reads no login profile and behaves the same on every
 /// machine whatever the developer's own shell is.
-pub const HARMLESS_TERMINAL_COMMAND: &str = "sh";
+pub(crate) const HARMLESS_TERMINAL_COMMAND: &str = "sh";
 
 /// The command every stand-in editor launches. `true` ignores the path it is
 /// handed and exits, so a test that opens a worktree "in an editor" exercises
@@ -65,11 +65,11 @@ pub const HARMLESS_EDITOR_COMMAND: &str = "true";
 /// The shell and arguments a defused project startup command runs through: a
 /// plain `sh -c`, never the default `$SHELL -l -c`, which would source the
 /// developer's own login profile.
-pub const HARMLESS_STARTUP_SHELL: &str = "sh";
+pub(crate) const HARMLESS_STARTUP_SHELL: &str = "sh";
 
 /// The arguments that go with [`HARMLESS_PROVIDER_COMMAND`]. The trailing word is
 /// `$0`, so a `ps` listing names what the process is.
-pub fn harmless_provider_args() -> Vec<String> {
+pub(crate) fn harmless_provider_args() -> Vec<String> {
     vec![
         "-c".to_string(),
         "exec cat".to_string(),
@@ -79,7 +79,7 @@ pub fn harmless_provider_args() -> Vec<String> {
 
 /// Whether a test may spawn `command`, judged by its file name, so `sh` and
 /// `/bin/sh` both count and `claude`, `Cat` and `/bin/claude-notes` do not.
-pub fn is_allowed_test_command(command: &str) -> bool {
+pub(crate) fn is_allowed_test_command(command: &str) -> bool {
     let name = std::path::Path::new(command.trim())
         .file_name()
         .and_then(|name| name.to_str())
@@ -90,7 +90,7 @@ pub fn is_allowed_test_command(command: &str) -> bool {
 /// The refusal the PTY spawn path returns in test builds. An `Err` rather than a
 /// panic because launches run on worker threads, where a panic would vanish and
 /// leave the test waiting; the ordinary spawn-failure path reports it instead.
-pub fn refuse_unlisted_spawn(command: &str) -> anyhow::Result<()> {
+pub(crate) fn refuse_unlisted_spawn(command: &str) -> anyhow::Result<()> {
     if !is_allowed_test_command(command) {
         let message = format!(
             "test guard: refused to spawn '{command}', which is not one of the programs tests \
@@ -111,7 +111,7 @@ pub fn refuse_unlisted_spawn(command: &str) -> anyhow::Result<()> {
 /// An `Err` rather than a panic for the same reason as [`refuse_unlisted_spawn`]:
 /// these launches run on worker threads and report failure through the
 /// ordinary error path.
-pub fn refuse_unlisted_launch(what: &str, command: &str) -> anyhow::Result<()> {
+pub(crate) fn refuse_unlisted_launch(what: &str, command: &str) -> anyhow::Result<()> {
     if !is_allowed_test_command(command) {
         let message = format!(
             "test guard: refused to launch the {what} '{command}', which is not one of the \
