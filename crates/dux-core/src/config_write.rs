@@ -855,183 +855,257 @@ fn merge_changed_at(
     for (key, ours_item) in ours {
         let Some(base_side) = base else {
             // No base: the full patch, through the same in-place writes.
-            match (ours_item, disk.get(key), target.get_mut(key)) {
-                (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
-                    merge_changed(t, disk_table, None, ours_table);
-                }
-                (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
-                    *t = ours_array.clone();
-                }
-                _ => put_in_place(target, key, ours_item.clone()),
-            }
+            merge_key_without_base(target, disk, key, ours_item);
             continue;
         };
         let base_item = base_side.base.get(key);
         let raw_item = base_side.raw.and_then(|raw| raw.get(key));
-        let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
         // A whole table or array missing from the file is merged as an empty
         // one, so each setting (or project) in it gets the same rule as a
         // single deleted setting, and it reappears only if something in it is
         // written.
-        if disk.get(key).is_none() {
-            match (ours_item, base_item) {
-                (Item::Table(ours_table), Some(Item::Table(base_table))) => {
-                    // What dux has seen there, in either form: an inline
-                    // section deleted by hand was seen, so what it held
-                    // stays deleted.
-                    let raw_table = raw_item.and_then(table_like);
-                    let empty = Table::new();
-                    let mut out = Table::new();
-                    merge_changed(
-                        &mut out,
-                        &empty,
-                        Some(MergeBase {
-                            raw: raw_table.as_ref(),
-                            base: base_table,
-                        }),
-                        ours_table,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, Item::Table(out));
-                    }
-                    continue;
-                }
-                (ours_item, Some(base_item))
-                    if is_inline_table(ours_item) && table_like(base_item).is_some() =>
-                {
-                    let (Some(ours_table), Some(base_table)) =
-                        (table_like(ours_item), table_like(base_item))
-                    else {
-                        continue;
-                    };
-                    let raw_table = raw_item.and_then(table_like);
-                    let empty = Table::new();
-                    let mut out = Table::new();
-                    merge_changed(
-                        &mut out,
-                        &empty,
-                        Some(MergeBase {
-                            raw: raw_table.as_ref(),
-                            base: &base_table,
-                        }),
-                        &ours_table,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, toml_edit::value(out.into_inline_table()));
-                    }
-                    continue;
-                }
-                (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
-                    if merges_entries(key, level) =>
-                {
-                    let empty = toml_edit::ArrayOfTables::new();
-                    let mut out = toml_edit::ArrayOfTables::new();
-                    merge_array_of_tables(
-                        &mut out,
-                        &empty,
-                        raw_item.and_then(Item::as_array_of_tables),
-                        Some(base_array),
-                        ours_array,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, Item::ArrayOfTables(out));
-                    }
-                    continue;
-                }
-                _ => {}
-            }
+        if disk.get(key).is_none()
+            && merge_section_missing_from_file(target, key, ours_item, base_item, raw_item, level)
+        {
+            continue;
         }
         let Some(disk_item) = disk.get(key) else {
             // Missing from the file. Memory's own change is written; an
             // unchanged setting is filled in only when the file has never had
             // it (new to this version), and otherwise stays deleted, because
             // someone deleted it by hand.
+            let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
             if !unchanged || raw_item.is_none() {
                 put_in_place(target, key, ours_item.clone());
             }
             continue;
         };
-        match (ours_item, disk_item, target.get_mut(key)) {
-            (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
-                if base_item.is_some_and(Item::is_table) =>
-            {
-                // What dux has seen there, in either form: a section the user
-                // rewrote from inline to a table was seen with every key it
-                // held, so one left out in the rewrite stays out.
-                let raw_table = raw_item.and_then(table_like);
-                let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+        merge_key_in_file(
+            target,
+            key,
+            KeySides {
+                ours: ours_item,
+                disk: disk_item,
+                base: base_item,
+                raw: raw_item,
+            },
+            level,
+        );
+    }
+    remove_gone_from_memory(target, disk, base, ours, level);
+    take_ours_order(target, disk, base, ours);
+}
+
+/// The sides of one key [`merge_changed_at`] merges: memory's, the file's,
+/// the base's and what dux has seen there.
+#[derive(Clone, Copy)]
+struct KeySides<'a> {
+    /// Memory's item.
+    ours: &'a Item,
+    /// The file's item.
+    disk: &'a Item,
+    /// The base's item, absent where the base has none.
+    base: Option<&'a Item>,
+    /// What dux has seen there, absent where it has seen none.
+    raw: Option<&'a Item>,
+}
+
+/// [`merge_changed_at`] for `key`, memory's `ours_item`, with no base: the full
+/// patch, through the same in-place writes.
+fn merge_key_without_base(target: &mut Table, disk: &Table, key: &str, ours_item: &Item) {
+    match (ours_item, disk.get(key), target.get_mut(key)) {
+        (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
+            merge_changed(t, disk_table, None, ours_table);
+        }
+        (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
+            *t = ours_array.clone();
+        }
+        _ => put_in_place(target, key, ours_item.clone()),
+    }
+}
+
+/// [`merge_changed_at`] for a table or array at `key` that is missing from the
+/// file, merged against an empty one. `true` when it was merged here, `false`
+/// when it is merged as a single setting.
+fn merge_section_missing_from_file(
+    target: &mut Table,
+    key: &str,
+    ours_item: &Item,
+    base_item: Option<&Item>,
+    raw_item: Option<&Item>,
+    level: Level,
+) -> bool {
+    match (ours_item, base_item) {
+        (Item::Table(ours_table), Some(Item::Table(base_table))) => {
+            // What dux has seen there, in either form: an inline
+            // section deleted by hand was seen, so what it held
+            // stays deleted.
+            let raw_table = raw_item.and_then(table_like);
+            let empty = Table::new();
+            let mut out = Table::new();
+            merge_changed(
+                &mut out,
+                &empty,
+                Some(MergeBase {
                     raw: raw_table.as_ref(),
-                    base,
-                });
-                merge_changed(t, disk_table, child, ours_table);
+                    base: base_table,
+                }),
+                ours_table,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, Item::Table(out));
             }
-            // An array the base never had (memory and the file each started
-            // one) is merged against an empty one, so the file's own entries
-            // stay beside memory's.
-            (
-                Item::ArrayOfTables(ours_array),
-                Item::ArrayOfTables(disk_array),
-                Some(Item::ArrayOfTables(t)),
-            ) if merges_entries(key, level) && base_item.is_none_or(Item::is_array_of_tables) => {
-                let empty = toml_edit::ArrayOfTables::new();
-                merge_array_of_tables(
-                    t,
-                    disk_array,
-                    raw_item.and_then(Item::as_array_of_tables),
-                    Some(
-                        base_item
-                            .and_then(Item::as_array_of_tables)
-                            .unwrap_or(&empty),
-                    ),
-                    ours_array,
-                );
-            }
-            // A table written inline on either side (a project's `env`, as
-            // dux writes it, or as the user wrote it in either form) is
-            // merged entry by entry like any other table, and keeps the
-            // file's form: a `[projects.env]` subtable stays one, with its
-            // comments, and an inline table stays inline. A table the base
-            // never had (memory and the file each started one) is merged
-            // against an empty one, so the file's own entries stay.
-            (ours_item, disk_item, Some(target_item))
-                if table_like(ours_item).is_some()
-                    && table_like(disk_item).is_some()
-                    && base_item.is_none_or(|item| table_like(item).is_some()) =>
-            {
-                let (Some(ours_table), Some(disk_table), Some(base_table)) = (
-                    table_like(ours_item),
-                    table_like(disk_item),
-                    base_item.map_or(Some(Table::new()), table_like),
-                ) else {
-                    continue;
-                };
-                let raw_table = raw_item.and_then(table_like);
-                let entry_base = Some(MergeBase {
+            return true;
+        }
+        (ours_item, Some(base_item))
+            if is_inline_table(ours_item) && table_like(base_item).is_some() =>
+        {
+            let (Some(ours_table), Some(base_table)) =
+                (table_like(ours_item), table_like(base_item))
+            else {
+                return true;
+            };
+            let raw_table = raw_item.and_then(table_like);
+            let empty = Table::new();
+            let mut out = Table::new();
+            merge_changed(
+                &mut out,
+                &empty,
+                Some(MergeBase {
                     raw: raw_table.as_ref(),
                     base: &base_table,
-                });
-                match target_item {
-                    Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
-                    Item::Value(Value::InlineTable(inline)) => {
-                        let mut out = disk_table.clone();
-                        merge_changed(&mut out, &disk_table, entry_base, &ours_table);
-                        let decor = inline.decor().clone();
-                        *inline = out.into_inline_table();
-                        *inline.decor_mut() = decor;
-                    }
-                    _ => {}
-                }
+                }),
+                &ours_table,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, toml_edit::value(out.into_inline_table()));
             }
-            _ => {
-                if !unchanged {
-                    put_in_place(target, key, ours_item.clone());
+            return true;
+        }
+        (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
+            if merges_entries(key, level) =>
+        {
+            let empty = toml_edit::ArrayOfTables::new();
+            let mut out = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                &mut out,
+                &empty,
+                raw_item.and_then(Item::as_array_of_tables),
+                Some(base_array),
+                ours_array,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, Item::ArrayOfTables(out));
+            }
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
+/// [`merge_changed_at`] for `key`, which the file has: a table on both sides is
+/// merged key by key, a merged array of tables entry by entry, and anything else
+/// is memory's when memory changed it.
+fn merge_key_in_file(target: &mut Table, key: &str, sides: KeySides<'_>, level: Level) {
+    let KeySides {
+        ours: ours_item,
+        disk: disk_item,
+        base: base_item,
+        raw: raw_item,
+    } = sides;
+    let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
+
+    match (ours_item, disk_item, target.get_mut(key)) {
+        (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
+            if base_item.is_some_and(Item::is_table) =>
+        {
+            // What dux has seen there, in either form: a section the user
+            // rewrote from inline to a table was seen with every key it
+            // held, so one left out in the rewrite stays out.
+            let raw_table = raw_item.and_then(table_like);
+            let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+                raw: raw_table.as_ref(),
+                base,
+            });
+            merge_changed(t, disk_table, child, ours_table);
+        }
+        // An array the base never had (memory and the file each started
+        // one) is merged against an empty one, so the file's own entries
+        // stay beside memory's.
+        (
+            Item::ArrayOfTables(ours_array),
+            Item::ArrayOfTables(disk_array),
+            Some(Item::ArrayOfTables(t)),
+        ) if merges_entries(key, level) && base_item.is_none_or(Item::is_array_of_tables) => {
+            let empty = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                t,
+                disk_array,
+                raw_item.and_then(Item::as_array_of_tables),
+                Some(
+                    base_item
+                        .and_then(Item::as_array_of_tables)
+                        .unwrap_or(&empty),
+                ),
+                ours_array,
+            );
+        }
+        // A table written inline on either side (a project's `env`, as
+        // dux writes it, or as the user wrote it in either form) is
+        // merged entry by entry like any other table, and keeps the
+        // file's form: a `[projects.env]` subtable stays one, with its
+        // comments, and an inline table stays inline. A table the base
+        // never had (memory and the file each started one) is merged
+        // against an empty one, so the file's own entries stay.
+        (ours_item, disk_item, Some(target_item))
+            if table_like(ours_item).is_some()
+                && table_like(disk_item).is_some()
+                && base_item.is_none_or(|item| table_like(item).is_some()) =>
+        {
+            let (Some(ours_table), Some(disk_table), Some(base_table)) = (
+                table_like(ours_item),
+                table_like(disk_item),
+                base_item.map_or(Some(Table::new()), table_like),
+            ) else {
+                return;
+            };
+            let raw_table = raw_item.and_then(table_like);
+            let entry_base = Some(MergeBase {
+                raw: raw_table.as_ref(),
+                base: &base_table,
+            });
+            match target_item {
+                Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
+                Item::Value(Value::InlineTable(inline)) => {
+                    let mut out = disk_table.clone();
+                    merge_changed(&mut out, &disk_table, entry_base, &ours_table);
+                    let decor = inline.decor().clone();
+                    *inline = out.into_inline_table();
+                    *inline.decor_mut() = decor;
                 }
+                _ => {}
+            }
+        }
+        _ => {
+            if !unchanged {
+                put_in_place(target, key, ours_item.clone());
             }
         }
     }
-    // Removed in memory (an env variable, a provider): in the base, gone
-    // from ours. Something the base never had stays: it was added on disk.
-    // With no base, whatever the patch left out goes, as in the full patch.
+}
+
+/// Remove from `target` what memory removed (an env variable, a provider): in
+/// the base, gone from `ours`. Something the base never had stays: it was added
+/// on disk. With no base, whatever the patch left out goes, as in the full
+/// patch.
+fn remove_gone_from_memory(
+    target: &mut Table,
+    disk: &Table,
+    base: Option<MergeBase<'_>>,
+    ours: &Table,
+    level: Level,
+) {
     let gone: Vec<String> = disk
         .iter()
         .map(|(key, _)| key.to_string())
@@ -1066,9 +1140,12 @@ fn merge_changed_at(
         }
         target.remove(&key);
     }
-    // Order is meaningful in some tables (`[macros]` above all), so a pure
-    // reorder in memory is a change: the keys ours shares with the file take
-    // ours' order, and anything added on disk keeps its place after them.
+}
+
+/// Order is meaningful in some tables (`[macros]` above all), so a pure reorder
+/// in memory is a change: the keys `ours` shares with the file take ours' order
+/// in `target`, and anything added on disk keeps its place after them.
+fn take_ours_order(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, ours: &Table) {
     let reference: Vec<String> = match base {
         Some(base) => base.base.iter().map(|(key, _)| key.to_string()).collect(),
         None => disk.iter().map(|(key, _)| key.to_string()).collect(),

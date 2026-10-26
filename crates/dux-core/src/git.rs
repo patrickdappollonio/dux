@@ -5995,6 +5995,67 @@ pub fn discard_confirmed<'c>(
     >,
 ) -> Result<usize> {
     refuse_unplain_path(file_path, "discard")?;
+    let (root, entry) = refuse_root_or_git(worktree_path, file_path)?;
+    if tracking == FileTracking::Untracked {
+        return discard_untracked(
+            worktree_path,
+            file_path,
+            root.as_deref(),
+            entry.as_deref(),
+            confirmed,
+            clear,
+        );
+    }
+    // A tracked path is one file restored from HEAD; a folder confirmation
+    // for it means the row the user saw is not what is there now.
+    if matches!(
+        confirmed,
+        Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository)
+    ) {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "\"{file_path}\" changed since you looked: it is now a tracked file. Nothing was \
+             discarded; refresh the changes and look again before discarding it."
+        ))));
+    }
+    refuse_ancestors_in_the_way(worktree_path, file_path)?;
+    let full = worktree_path.join(file_path);
+    match fs::symlink_metadata(&full) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            clear().map_err(anyhow::Error::new)?.require(&full)?;
+        }
+        Ok(meta) if meta.is_dir() => {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "\"{file_path}\" is now a folder, so dux did not restore the file over it; move \
+                 or delete the folder first if you mean to. Nothing was deleted."
+            ))));
+        }
+        _ => {}
+    }
+    let output = tree_move(worktree_path, TreeMove::Checkout)
+        // The path is a path, never a glob or magic pathspec.
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args(["--", file_path])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git checkout failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(1)
+}
+
+/// The worktree `worktree_path` resolved and the location of the entry
+/// `file_path` names, refusing when that entry is the worktree itself or lies
+/// inside `.git`.
+///
+/// # Errors
+///
+/// Fails when the entry resolves to the worktree itself or into `.git`.
+fn refuse_root_or_git(
+    worktree_path: &Path,
+    file_path: &str,
+) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
     // Whatever the path's text says, a discard never lands on the worktree
     // itself or on anything inside `.git`, the two targets whose loss takes
     // every other file (or the whole history) with it.
@@ -6030,116 +6091,158 @@ pub fn discard_confirmed<'c>(
             "refusing to discard {file_path:?}: it resolves to the worktree itself or into .git"
         ));
     }
-    if tracking == FileTracking::Untracked {
-        let full = worktree_path.join(file_path);
-        // Defense-in-depth before a destructive remove: callers classify the
-        // path against live `git status` output (which never yields paths
-        // outside the worktree), but a filesystem delete should not rest on
-        // that invariant alone. The entry's own location (its parent resolved,
-        // so a symlinked parent component that escapes is caught) must lie in
-        // the worktree. A link at the end is not followed: deleting it removes
-        // the link, whatever it points at, even at nothing.
-        let inside =
-            matches!((&root, &entry), (Some(root), Some(entry)) if entry.starts_with(root));
-        if !inside {
-            return Err(anyhow!(
-                "refusing to delete \"{file_path}\": it resolves outside the worktree"
-            ));
-        }
-        // `symlink_metadata`, so a link to a directory is removed as the link.
-        let meta = fs::symlink_metadata(&full)?;
-        let changed = |now: &str| {
-            anyhow::Error::new(Refusal(format!(
-                "\"{file_path}/\" changed since you looked: it is now {now}. Nothing was \
-                 deleted; refresh the changes and look again before deleting it."
-            )))
-        };
-        if meta.is_dir() {
-            // A directory goes only when the delete names what it is: a file
-            // row that a folder has since replaced, or a request that says
-            // nothing, must not clean a folder nobody was shown.
-            let (whole_repository, promised) = match confirmed {
-                Some(ConfirmedEntry::Folder { files }) => (false, files),
-                Some(ConfirmedEntry::Repository) => (true, 0),
-                Some(ConfirmedEntry::File) => return Err(changed("a folder, not one file")),
-                None => {
-                    return Err(anyhow::Error::new(Refusal(format!(
-                        "\"{file_path}/\" is a folder; a folder is deleted only when the \
-                         delete names it as one. Refresh the changes and delete it from its own \
-                         row."
-                    ))));
-                }
-            };
-            // Re-derived now, from git, the way the listing decided it: a
-            // folder that only looks like a repository must be cleaned, not
-            // removed whole, or its ignored files go with it.
-            match untracked_directory_kind(worktree_path, file_path)? {
-                UntrackedDirectoryKind::LinkedWorktree => {
-                    return Err(anyhow!(
-                        "\"{file_path}/\" is a worktree of this same repository, not a \
-                         repository of its own; remove it from the worktree manager so git \
-                         forgets it too"
-                    ));
-                }
-                // A repository of its own is one row, and deleting it removes
-                // it whole, history included; both surfaces' dialogs say so.
-                UntrackedDirectoryKind::Repository => {
-                    if !whole_repository {
-                        return Err(changed("a repository of its own, with a history"));
-                    }
-                    clear().map_err(anyhow::Error::new)?.require(&full)?;
-                    fs::remove_dir_all(&full)?;
-                    return Ok(0);
-                }
-                UntrackedDirectoryKind::Folder => {
-                    if whole_repository {
-                        return Err(changed("an ordinary folder, not a repository"));
-                    }
-                    let inside = refuse_empty_untracked_folder(worktree_path, file_path)?;
-                    let going = inside.deletable_files().count();
-                    if going > promised {
-                        return Err(anyhow::Error::new(Refusal(format!(
-                            "\"{file_path}/\" changed since you looked: it now holds {}, more \
-                             than the {} you agreed to delete. Nothing was deleted; refresh the \
-                             changes and look again before deleting it.",
-                            crate::model::count_words(going, "file", "files"),
-                            promised
-                        ))));
-                    }
-                    clear().map_err(anyhow::Error::new)?.require(&full)?;
-                    clean_untracked_folder(worktree_path, file_path, &inside)?;
-                    return Ok(going);
-                }
-            }
-        }
-        match confirmed {
-            // No confirmation is what an older client sends for a file,
-            // and deleting one file is what it always meant. A symbolic
-            // link is cleared first, judged at its own path: an agent's
-            // folder or a project's repository can be the link itself.
-            None | Some(ConfirmedEntry::File) => {
-                if meta.file_type().is_symlink() {
-                    clear().map_err(anyhow::Error::new)?.require(&full)?;
-                }
-                fs::remove_file(&full)?;
-            }
-            Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
-                return Err(changed("a file, not a folder"));
-            }
-        }
-        return Ok(1);
+    Ok((root, entry))
+}
+
+/// [`discard_confirmed`] for an untracked `file_path`, whose entry resolves to
+/// `entry` in the worktree resolved as `root`: a file or a link is deleted, and
+/// a folder or a repository only as `confirmed` names it.
+///
+/// # Errors
+///
+/// Fails when the entry lies outside the worktree, is not what the user
+/// confirmed, the clearance is refused, or the removal fails.
+fn discard_untracked<'c>(
+    worktree_path: &Path,
+    file_path: &str,
+    root: Option<&Path>,
+    entry: Option<&Path>,
+    confirmed: Option<ConfirmedEntry>,
+    clear: impl FnOnce() -> std::result::Result<
+        crate::destructive::Cleared<'c>,
+        crate::destructive::Refused,
+    >,
+) -> Result<usize> {
+    let full = worktree_path.join(file_path);
+    // Defense-in-depth before a destructive remove: callers classify the
+    // path against live `git status` output (which never yields paths
+    // outside the worktree), but a filesystem delete should not rest on
+    // that invariant alone. The entry's own location (its parent resolved,
+    // so a symlinked parent component that escapes is caught) must lie in
+    // the worktree. A link at the end is not followed: deleting it removes
+    // the link, whatever it points at, even at nothing.
+    let inside = matches!((root, entry), (Some(root), Some(entry)) if entry.starts_with(root));
+    if !inside {
+        return Err(anyhow!(
+            "refusing to delete \"{file_path}\": it resolves outside the worktree"
+        ));
     }
-    // A tracked path is one file restored from HEAD; a folder confirmation
-    // for it means the row the user saw is not what is there now.
-    if matches!(
-        confirmed,
-        Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository)
-    ) {
-        return Err(anyhow::Error::new(Refusal(format!(
-            "\"{file_path}\" changed since you looked: it is now a tracked file. Nothing was \
-             discarded; refresh the changes and look again before discarding it."
-        ))));
+    // `symlink_metadata`, so a link to a directory is removed as the link.
+    let meta = fs::symlink_metadata(&full)?;
+    let changed = |now: &str| {
+        anyhow::Error::new(Refusal(format!(
+            "\"{file_path}/\" changed since you looked: it is now {now}. Nothing was \
+             deleted; refresh the changes and look again before deleting it."
+        )))
+    };
+    if meta.is_dir() {
+        return delete_untracked_directory(worktree_path, file_path, confirmed, clear);
     }
+    match confirmed {
+        // No confirmation is what an older client sends for a file,
+        // and deleting one file is what it always meant. A symbolic
+        // link is cleared first, judged at its own path: an agent's
+        // folder or a project's repository can be the link itself.
+        None | Some(ConfirmedEntry::File) => {
+            if meta.file_type().is_symlink() {
+                clear().map_err(anyhow::Error::new)?.require(&full)?;
+            }
+            fs::remove_file(&full)?;
+        }
+        Some(ConfirmedEntry::Folder { .. } | ConfirmedEntry::Repository) => {
+            return Err(changed("a file, not a folder"));
+        }
+    }
+    Ok(1)
+}
+
+/// [`discard_untracked`] for a directory: it goes only when `confirmed` names
+/// what it is, re-derived now from git, and a folder only when it holds no more
+/// files than the user was told.
+///
+/// # Errors
+///
+/// Fails when the directory is not what the user confirmed, is a linked
+/// worktree, the clearance is refused, or the removal fails.
+fn delete_untracked_directory<'c>(
+    worktree_path: &Path,
+    file_path: &str,
+    confirmed: Option<ConfirmedEntry>,
+    clear: impl FnOnce() -> std::result::Result<
+        crate::destructive::Cleared<'c>,
+        crate::destructive::Refused,
+    >,
+) -> Result<usize> {
+    let full = worktree_path.join(file_path);
+    let changed = |now: &str| {
+        anyhow::Error::new(Refusal(format!(
+            "\"{file_path}/\" changed since you looked: it is now {now}. Nothing was \
+             deleted; refresh the changes and look again before deleting it."
+        )))
+    };
+    // A directory goes only when the delete names what it is: a file
+    // row that a folder has since replaced, or a request that says
+    // nothing, must not clean a folder nobody was shown.
+    let (whole_repository, promised) = match confirmed {
+        Some(ConfirmedEntry::Folder { files }) => (false, files),
+        Some(ConfirmedEntry::Repository) => (true, 0),
+        Some(ConfirmedEntry::File) => return Err(changed("a folder, not one file")),
+        None => {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "\"{file_path}/\" is a folder; a folder is deleted only when the \
+                 delete names it as one. Refresh the changes and delete it from its own \
+                 row."
+            ))));
+        }
+    };
+    // Re-derived now, from git, the way the listing decided it: a
+    // folder that only looks like a repository must be cleaned, not
+    // removed whole, or its ignored files go with it.
+    match untracked_directory_kind(worktree_path, file_path)? {
+        UntrackedDirectoryKind::LinkedWorktree => Err(anyhow!(
+            "\"{file_path}/\" is a worktree of this same repository, not a \
+                 repository of its own; remove it from the worktree manager so git \
+                 forgets it too"
+        )),
+        // A repository of its own is one row, and deleting it removes
+        // it whole, history included; both surfaces' dialogs say so.
+        UntrackedDirectoryKind::Repository => {
+            if !whole_repository {
+                return Err(changed("a repository of its own, with a history"));
+            }
+            clear().map_err(anyhow::Error::new)?.require(&full)?;
+            fs::remove_dir_all(&full)?;
+            Ok(0)
+        }
+        UntrackedDirectoryKind::Folder => {
+            if whole_repository {
+                return Err(changed("an ordinary folder, not a repository"));
+            }
+            let inside = refuse_empty_untracked_folder(worktree_path, file_path)?;
+            let going = inside.deletable_files().count();
+            if going > promised {
+                return Err(anyhow::Error::new(Refusal(format!(
+                    "\"{file_path}/\" changed since you looked: it now holds {}, more \
+                     than the {} you agreed to delete. Nothing was deleted; refresh the \
+                     changes and look again before deleting it.",
+                    crate::model::count_words(going, "file", "files"),
+                    promised
+                ))));
+            }
+            clear().map_err(anyhow::Error::new)?.require(&full)?;
+            clean_untracked_folder(worktree_path, file_path, &inside)?;
+            Ok(going)
+        }
+    }
+}
+
+/// Refuse a restore of `file_path` that would make git remove an ancestor that
+/// is now a file or a link to make room for the folder the file lives in.
+///
+/// # Errors
+///
+/// Fails, naming the ancestor, when one is a file or a link.
+fn refuse_ancestors_in_the_way(worktree_path: &Path, file_path: &str) -> Result<()> {
     // Checked right before git runs, under the caller's hold. `git checkout
     // -- <path>` makes room for the file by removing whatever stands in its
     // way, and none of that was confirmed:
@@ -6172,31 +6275,7 @@ pub fn discard_confirmed<'c>(
             ))));
         }
     }
-    let full = worktree_path.join(file_path);
-    match fs::symlink_metadata(&full) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            clear().map_err(anyhow::Error::new)?.require(&full)?;
-        }
-        Ok(meta) if meta.is_dir() => {
-            return Err(anyhow::Error::new(Refusal(format!(
-                "\"{file_path}\" is now a folder, so dux did not restore the file over it; move \
-                 or delete the folder first if you mean to. Nothing was deleted."
-            ))));
-        }
-        _ => {}
-    }
-    let output = tree_move(worktree_path, TreeMove::Checkout)
-        // The path is a path, never a glob or magic pathspec.
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .args(["--", file_path])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git checkout failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(1)
+    Ok(())
 }
 
 /// Classify a discard request against the worktree's LIVE git status and return

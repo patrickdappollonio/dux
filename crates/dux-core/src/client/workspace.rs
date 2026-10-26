@@ -1176,45 +1176,19 @@ fn pull_request_anywhere(
         .unwrap_or_else(|| reference.to_string());
     match resolved.projects.as_slice() {
         [project] => {
-            // Running the command again with the folder the first run used is
-            // how a review copy asked about afterwards is agreed to, so the
-            // project's own folder is not a different folder.
-            let own_folder = path.is_some_and(|path| {
-                let Ok(typed) = output::path_for_target(path, client.remote_name(), cwd) else {
-                    return false;
-                };
-                projects(client).is_ok_and(|all| {
-                    all.iter().any(|p| {
-                        p.id == project.id
-                            && crate::project_browser::same_directory(&p.path, &typed)
-                    })
-                })
-            });
-            if let Some(path) = path.filter(|_| !own_folder) {
-                return Err(CliError::new(
-                    Exit::Refused,
-                    format!(
-                        "{repository} is already a checkout in project {}, so there is nothing \
-                         to clone or add at {path}. Drop --path to create the agent in that \
-                         project.",
-                        project.name
-                    ),
-                ));
-            }
-            let (question, body) = pull_request_in_project(
-                &project.id,
-                &project.name,
-                called,
-                reference,
-                name,
-                review_copy,
+            return plan_in_project(
+                client,
+                project,
+                &repository,
+                ProjectAsk {
+                    reference,
+                    path,
+                    review_copy,
+                    name,
+                    called,
+                    cwd,
+                },
             );
-            return Ok(Planned::new(
-                question,
-                Method::Post,
-                "/api/v1/sessions".to_string(),
-                Some(body),
-            ));
         }
         [] => {}
         several => {
@@ -1230,30 +1204,259 @@ fn pull_request_anywhere(
         }
     }
     let Some(offer) = resolved.clone else {
-        let mut sentence = match &resolved.uninspected_summary {
-            Some(summary) => format!(
-                "No project dux could check is a checkout of {repository}, and dux could not \
-                 check every project ({summary})."
-            ),
-            None => format!("No project in dux is a checkout of {repository}."),
-        };
-        if let Some(why) = &resolved.clone_unavailable {
-            let why = why.trim_end();
-            let stop = if why.ends_with(['.', '!', '?']) {
-                ""
-            } else {
-                "."
-            };
-            let _ = write!(
-                sentence,
-                " dux could not look the pull request up to offer a clone: {why}{stop}"
-            );
-        }
-        sentence.push_str(" Add --project to choose one.");
-        return Err(CliError::new(Exit::Refused, sentence));
+        return Err(no_project_refusal(
+            resolved.uninspected_summary.as_deref(),
+            resolved.clone_unavailable.as_deref(),
+            &repository,
+        ));
     };
 
-    let folder = if let Some(path) = path {
+    let checked = check_clone_folder(client, &offer, &clone_folder(client, &offer, path, cwd)?)?;
+    let adding = checked.state == "checkout";
+
+    let typed = name.trim();
+    let refusal_ending = if adding {
+        "Nothing was added."
+    } else {
+        "Nothing was cloned."
+    };
+    let outlook = clone_review_copy_outlook(&offer, &checked, typed);
+    let mut notices = Vec::new();
+    if !adding && let Some(summary) = &resolved.uninspected_summary {
+        notices.push(format!(
+            "dux could not find a checked project for {repository}. dux could not check every \
+             project ({summary}), so one of them may already be a checkout of it. dux will \
+             clone it, add it as a project, and create the agent from pull request #{}.",
+            offer.number
+        ));
+    }
+    refuse_or_note_review_copy(outlook, review_copy, refusal_ending, &mut notices)?;
+    let notice = (!notices.is_empty()).then(|| notices.join("\n"));
+
+    let question = clone_question(&offer, &checked, called, reference);
+    let mut body = json!({
+        "path": checked.path,
+        "pull_request": {
+            "host": offer.host,
+            "owner_repo": offer.owner_repo,
+            "number": offer.number,
+        },
+        "add_existing": adding,
+        "review_copy": review_copy.agreed(),
+        // This client agrees with a flag, so a refusal names it.
+        "review_copy_by_flag": !review_copy.agreed(),
+    });
+    if !typed.is_empty() {
+        body["agent_name"] = json!(typed);
+    }
+    let mut planned = Planned::new(
+        question,
+        Method::Post,
+        "/api/v1/projects".to_string(),
+        Some(body),
+    );
+    planned.notice = notice;
+    Ok(planned)
+}
+
+/// What the server makes of `folder` as the destination of a clone for
+/// `offer`: free, or already a checkout of the repository.
+///
+/// # Errors
+///
+/// Fails when the server refuses the folder or cannot be asked.
+fn check_clone_folder(
+    client: &Client,
+    offer: &CloneOffer,
+    folder: &str,
+) -> Result<FolderCheck, CliError> {
+    let mut check = json!({
+        "path": folder,
+        "host": offer.host,
+        "owner_repo": offer.owner_repo,
+        "number": offer.number,
+        "head_branch": offer.head_branch,
+    });
+    if let Some(oid) = &offer.head_oid {
+        check["head_oid"] = json!(oid);
+    }
+    post_for_answer(client, "/api/v1/pull-requests/clone-destination", &check)
+}
+
+/// Whether the agent named `typed` (the pull request's branch when empty) for
+/// `offer` needs a review copy in the folder as `checked`. A checkout's answer
+/// is worked out against that folder and replaces the offer's; both describe
+/// the agent only when it takes the branch's name. A name spelled like a copy
+/// of the branch is one whatever the branch holds. An add cannot tell whether
+/// a branch of that name already exists, which makes a copy unnecessary, so
+/// the server asks for that one.
+fn clone_review_copy_outlook(
+    offer: &CloneOffer,
+    checked: &FolderCheck,
+    typed: &str,
+) -> ReviewCopyOutlook {
+    let adding = checked.state == "checkout";
+    if typed.is_empty() || typed == offer.head_branch {
+        if adding {
+            checked
+                .review_copy
+                .clone()
+                .unwrap_or(ReviewCopyOutlook::Unknown)
+        } else {
+            offer.review_copy.clone()
+        }
+    } else if adding {
+        ReviewCopyOutlook::NotNeeded
+    } else {
+        crate::agent_job::typed_copy_review_outlook(&offer.head_branch, typed, offer.number)
+            .unwrap_or(ReviewCopyOutlook::NotNeeded)
+    }
+}
+
+/// The question a clone (or an add of the checkout `checked` found) for
+/// `offer` asks, creating the agent `called` from the pull request
+/// `reference`.
+fn clone_question(
+    offer: &CloneOffer,
+    checked: &FolderCheck,
+    called: &str,
+    reference: &str,
+) -> String {
+    if checked.state == "checkout" {
+        format!(
+            "Add the folder {} as a project and create {called} from pull request {reference}",
+            checked.path
+        )
+    } else {
+        format!(
+            "Clone {} into {} and create {called} from pull request {reference}",
+            offer.address, checked.path
+        )
+    }
+}
+
+/// What `dux agents add --from-pr` asked for, beside where it goes.
+#[derive(Clone, Copy)]
+struct ProjectAsk<'a> {
+    /// The pull request, as typed.
+    reference: &'a str,
+    /// The folder `--path` names.
+    path: Option<&'a str>,
+    /// Whether a review copy is agreed to.
+    review_copy: ReviewCopy,
+    /// The agent's name, as typed.
+    name: &'a str,
+    /// How the agent is called in the question.
+    called: &'a str,
+    /// The directory the command runs in.
+    cwd: &'a Path,
+}
+
+/// [`pull_request_anywhere`] for the one `project` that has `repository`: the
+/// agent is created there, and a `--path` to any other folder is refused.
+///
+/// # Errors
+///
+/// Fails when `--path` names a folder other than the project's own.
+fn plan_in_project(
+    client: &Client,
+    project: &ResolvedProject,
+    repository: &str,
+    ask: ProjectAsk<'_>,
+) -> Result<Planned, CliError> {
+    let ProjectAsk {
+        reference,
+        path,
+        review_copy,
+        name,
+        called,
+        cwd,
+    } = ask;
+    // Running the command again with the folder the first run used is
+    // how a review copy asked about afterwards is agreed to, so the
+    // project's own folder is not a different folder.
+    let own_folder = path.is_some_and(|path| {
+        let Ok(typed) = output::path_for_target(path, client.remote_name(), cwd) else {
+            return false;
+        };
+        projects(client).is_ok_and(|all| {
+            all.iter().any(|p| {
+                p.id == project.id && crate::project_browser::same_directory(&p.path, &typed)
+            })
+        })
+    });
+    if let Some(path) = path.filter(|_| !own_folder) {
+        return Err(CliError::new(
+            Exit::Refused,
+            format!(
+                "{repository} is already a checkout in project {}, so there is nothing \
+                 to clone or add at {path}. Drop --path to create the agent in that \
+                 project.",
+                project.name
+            ),
+        ));
+    }
+    let (question, body) = pull_request_in_project(
+        &project.id,
+        &project.name,
+        called,
+        reference,
+        name,
+        review_copy,
+    );
+    Ok(Planned::new(
+        question,
+        Method::Post,
+        "/api/v1/sessions".to_string(),
+        Some(body),
+    ))
+}
+
+/// The refusal when no project has `repository` and the server offers no clone:
+/// why dux could not check every project (`uninspected_summary`), and why it
+/// could not offer a clone (`clone_unavailable`).
+fn no_project_refusal(
+    uninspected_summary: Option<&str>,
+    clone_unavailable: Option<&str>,
+    repository: &str,
+) -> CliError {
+    let mut sentence = match uninspected_summary {
+        Some(summary) => format!(
+            "No project dux could check is a checkout of {repository}, and dux could not \
+             check every project ({summary})."
+        ),
+        None => format!("No project in dux is a checkout of {repository}."),
+    };
+    if let Some(why) = clone_unavailable {
+        let why = why.trim_end();
+        let stop = if why.ends_with(['.', '!', '?']) {
+            ""
+        } else {
+            "."
+        };
+        let _ = write!(
+            sentence,
+            " dux could not look the pull request up to offer a clone: {why}{stop}"
+        );
+    }
+    sentence.push_str(" Add --project to choose one.");
+    CliError::new(Exit::Refused, sentence)
+}
+
+/// The folder a clone for `offer` goes into: the one `path` names, or one
+/// named after the repository in the folder the server browses from.
+///
+/// # Errors
+///
+/// Fails when `path` cannot be resolved for the target, or the server cannot
+/// be asked.
+fn clone_folder(
+    client: &Client,
+    offer: &CloneOffer,
+    path: Option<&str>,
+    cwd: &Path,
+) -> Result<String, CliError> {
+    Ok(if let Some(path) = path {
         output::path_for_target(path, client.remote_name(), cwd)?
     } else {
         #[derive(Deserialize)]
@@ -1270,53 +1473,22 @@ fn pull_request_anywhere(
                 .to_string()
         });
         format!("{}/{dir}", start.path.trim_end_matches('/'))
-    };
-    let mut check = json!({
-        "path": folder,
-        "host": offer.host,
-        "owner_repo": offer.owner_repo,
-        "number": offer.number,
-        "head_branch": offer.head_branch,
-    });
-    if let Some(oid) = &offer.head_oid {
-        check["head_oid"] = json!(oid);
-    }
-    let checked: FolderCheck =
-        post_for_answer(client, "/api/v1/pull-requests/clone-destination", &check)?;
-    let adding = checked.state == "checkout";
+    })
+}
 
-    let typed = name.trim();
-    let refusal_ending = if adding {
-        "Nothing was added."
-    } else {
-        "Nothing was cloned."
-    };
-    // A checkout's answer is worked out against that folder and replaces the
-    // offer's; both describe the agent only when it takes the branch's name. A
-    // name spelled like a copy of the branch is one whatever the branch holds.
-    // An add cannot tell whether a branch of that name already exists, which
-    // makes a copy unnecessary, so the server asks for that one.
-    let outlook = if typed.is_empty() || typed == offer.head_branch {
-        if adding {
-            checked.review_copy.unwrap_or(ReviewCopyOutlook::Unknown)
-        } else {
-            offer.review_copy
-        }
-    } else if adding {
-        ReviewCopyOutlook::NotNeeded
-    } else {
-        crate::agent_job::typed_copy_review_outlook(&offer.head_branch, typed, offer.number)
-            .unwrap_or(ReviewCopyOutlook::NotNeeded)
-    };
-    let mut notices = Vec::new();
-    if !adding && let Some(summary) = &resolved.uninspected_summary {
-        notices.push(format!(
-            "dux could not find a checked project for {repository}. dux could not check every \
-             project ({summary}), so one of them may already be a checkout of it. dux will \
-             clone it, add it as a project, and create the agent from pull request #{}.",
-            offer.number
-        ));
-    }
+/// Refuse a pull request whose agent needs a review copy that `review_copy`
+/// does not agree to, or that no free name can be given to; an agreed copy's
+/// warning joins `notices`. `refusal_ending` ends each refusal.
+///
+/// # Errors
+///
+/// Fails in either refused case.
+fn refuse_or_note_review_copy(
+    outlook: ReviewCopyOutlook,
+    review_copy: ReviewCopy,
+    refusal_ending: &str,
+    notices: &mut Vec<String>,
+) -> Result<(), CliError> {
     match outlook {
         ReviewCopyOutlook::NoFreeName { message, .. } => {
             return Err(CliError::new(
@@ -1341,42 +1513,7 @@ fn pull_request_anywhere(
         }
         ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => {}
     }
-    let notice = (!notices.is_empty()).then(|| notices.join("\n"));
-
-    let question = if adding {
-        format!(
-            "Add the folder {} as a project and create {called} from pull request {reference}",
-            checked.path
-        )
-    } else {
-        format!(
-            "Clone {} into {} and create {called} from pull request {reference}",
-            offer.address, checked.path
-        )
-    };
-    let mut body = json!({
-        "path": checked.path,
-        "pull_request": {
-            "host": offer.host,
-            "owner_repo": offer.owner_repo,
-            "number": offer.number,
-        },
-        "add_existing": adding,
-        "review_copy": review_copy.agreed(),
-        // This client agrees with a flag, so a refusal names it.
-        "review_copy_by_flag": !review_copy.agreed(),
-    });
-    if !typed.is_empty() {
-        body["agent_name"] = json!(typed);
-    }
-    let mut planned = Planned::new(
-        question,
-        Method::Post,
-        "/api/v1/projects".to_string(),
-        Some(body),
-    );
-    planned.notice = notice;
-    Ok(planned)
+    Ok(())
 }
 
 /// A create refused because the branch it would make already exists answers

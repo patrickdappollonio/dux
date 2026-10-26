@@ -398,6 +398,137 @@ enum BusyBranchCheck {
     Refused,
 }
 
+/// What a create in `project` says once its worktree is ready, on the branch
+/// `branch_name`, as `attach` made it: attached to the branch that existed, or
+/// a new agent.
+fn new_project_agent_status(
+    project: &crate::model::Project,
+    branch_name: &str,
+    attach: BranchAttach,
+) -> crate::status_text::StatusText {
+    match attach {
+        BranchAttach::AttachExisting => crate::status_text![
+            "Attached to existing branch ",
+            q(branch_name),
+            " in project ",
+            q(project.name),
+            ". The worktree is ready in a fresh session."
+        ],
+        BranchAttach::CreateNew => crate::status_text![
+            "Created ",
+            n(project.default_provider.as_str()),
+            " agent ",
+            q(branch_name),
+            " in project ",
+            q(project.name),
+            ". The new worktree is ready in a fresh session."
+        ],
+    }
+}
+
+/// What a pull request create judged of the local branch it may reuse.
+struct LocalBranchJudgement {
+    /// The pull request's head commit, when it was fetched.
+    head_commit: Option<String>,
+    /// What the local branch pointed at when it was judged.
+    validated_tip: Option<String>,
+    /// Whether the local branch contains the head commit.
+    containment: HeadContainment,
+}
+
+/// The note a create leaves when it moved the user's local branch
+/// `resolved_name` forward to the head of PR `number`.
+fn moved_forward_note(resolved_name: &str, number: u64) -> crate::status_text::StatusText {
+    crate::status_text![
+        "Moved your local branch ",
+        q(resolved_name),
+        " forward to the latest commit of PR ",
+        n(format!("#{}", number)),
+        ", because it had no commits of its own."
+    ]
+}
+
+/// The pin the review copy `copy` of the pull request `number` of `owner_repo`
+/// on `host` (titled `title`, in `state`) carries.
+fn review_copy_pin(
+    copy: &FreshCopy,
+    host: &str,
+    owner_repo: &str,
+    number: u64,
+    title: &str,
+    state: &str,
+) -> crate::worker::PullRequestPin {
+    crate::worker::PullRequestPin {
+        host: host.to_string(),
+        owner_repo: owner_repo.to_string(),
+        number,
+        title: title.to_string(),
+        state: state.to_string(),
+        busy_branch: copy.busy_branch.clone(),
+        new_branch: copy.new_branch.clone(),
+    }
+}
+
+/// A create step refused the create and has already sent the failure.
+#[derive(Debug)]
+struct FailureSent;
+
+/// The pull request a create fetches: from the repository at `repo_path`, of
+/// `owner_repo`, by its `number`.
+#[derive(Clone, Copy, Debug)]
+struct PrFetch<'a> {
+    /// The project's repository.
+    repo_path: &'a Path,
+    /// The repository the pull request is in, as `owner/repo`.
+    owner_repo: &'a str,
+    /// The pull request's number.
+    number: u64,
+}
+
+/// What a create from the pull request `number` (titled `title`) in `project`
+/// says once its agent is on the branch `branch_name`.
+fn pull_request_created_status(
+    project: &crate::model::Project,
+    branch_name: &str,
+    number: u64,
+    title: &str,
+) -> crate::status_text::StatusText {
+    crate::status_text![
+        "Created ",
+        n(project.default_provider.as_str()),
+        " agent ",
+        q(branch_name),
+        " from PR ",
+        n(format!("#{}", number)),
+        " (",
+        n(title),
+        ") in project ",
+        q(project.name),
+        "."
+    ]
+}
+
+/// What a fork of the agent `source_label` (`source`) in `project` says once
+/// its agent is on the branch `branch_name`.
+fn forked_status(
+    project: &crate::model::Project,
+    source: &AgentSession,
+    branch_name: &str,
+    source_label: &str,
+) -> crate::status_text::StatusText {
+    crate::status_text![
+        "Forked ",
+        n(source.provider.as_str()),
+        " agent ",
+        q(branch_name),
+        " from ",
+        q(source_label),
+        " in project ",
+        q(project.name),
+        ". The new worktree starts with the copied uncommitted and untracked changes (gitignored files are not copied) and a fresh session."
+    ]
+}
+
 /// Who has branch `name` checked out, and the reason git could not say. A
 /// lookup that failed is not an answer: a branch that may be checked out is
 /// never moved or reused.
@@ -1014,6 +1145,15 @@ impl CreatePlanContext<'_> {
         }
     }
 
+    /// Report the create failed, naming no agent it was making.
+    fn send_unnamed_failure(&self, message: impl Into<crate::status_text::StatusText>) {
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: self.create_key.to_string(),
+            attempted_name: None,
+            message: message.into(),
+        });
+    }
+
     fn send_failure(&self, message: impl Into<crate::status_text::StatusText>) {
         let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
             status_op_id: self.create_key.to_string(),
@@ -1212,18 +1352,9 @@ impl CreatePlanContext<'_> {
             return None;
         }
         let attach_existing = branch == BranchAttach::AttachExisting || existing;
-        if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
-            self.send_failure(crate::status_text!["Cannot create agent for ", q(project.name), ": the repository at ", n(repo_path.display()), " has no commits yet. Create an initial commit (for example with git commit --allow-empty -m \"Initial commit\"), then try again."]);
-            return None;
-        }
-        if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
-            self.send_failure(crate::status_text![
-                "Cannot create agent for ",
-                q(project.name),
-                ": leading branch ",
-                q(leading_branch),
-                " no longer exists locally. Restore that branch or re-add the project."
-            ]);
+        if !attach_existing
+            && self.refuse_unbranchable_project(&project, &repo_path, &leading_branch)
+        {
             return None;
         }
         self.send_progress(if attach_existing {
@@ -1241,36 +1372,19 @@ impl CreatePlanContext<'_> {
                 "..."
             ]
         });
+        let attach = if attach_existing {
+            BranchAttach::AttachExisting
+        } else {
+            BranchAttach::CreateNew
+        };
         let (branch_name, worktree_path) = self.create_new_project_worktree(
             &project,
             &repo_path,
             &leading_branch,
             &resolved_name,
-            if attach_existing {
-                BranchAttach::AttachExisting
-            } else {
-                BranchAttach::CreateNew
-            },
+            attach,
         )?;
-        let status_message = if attach_existing {
-            crate::status_text![
-                "Attached to existing branch ",
-                q(branch_name),
-                " in project ",
-                q(project.name),
-                ". The worktree is ready in a fresh session."
-            ]
-        } else {
-            crate::status_text![
-                "Created ",
-                n(project.default_provider.as_str()),
-                " agent ",
-                q(branch_name),
-                " in project ",
-                q(project.name),
-                ". The new worktree is ready in a fresh session."
-            ]
-        };
+        let status_message = new_project_agent_status(&project, &branch_name, attach);
         let pending_copy = (uncommitted == UncommittedCopy::CopyIntoAgent).then(|| PendingCopy {
             source: repo_path,
             source_desc: crate::status_text!["project ", q(project.name)],
@@ -1315,6 +1429,114 @@ impl CreatePlanContext<'_> {
             },
             moved_forward: None,
         })
+    }
+
+    /// Refuse a new branch for `project` (whose repository is at `repo_path`)
+    /// when the repository has no commits yet, or its `leading_branch` no longer
+    /// exists locally. `true` when it was refused.
+    fn refuse_unbranchable_project(
+        &self,
+        project: &crate::model::Project,
+        repo_path: &Path,
+        leading_branch: &str,
+    ) -> bool {
+        if git::repo_commit_state(repo_path) == git::CommitState::Unborn {
+            self.send_failure(crate::status_text!["Cannot create agent for ", q(project.name), ": the repository at ", n(repo_path.display()), " has no commits yet. Create an initial commit (for example with git commit --allow-empty -m \"Initial commit\"), then try again."]);
+            return true;
+        }
+        if !git::local_branch_exists(repo_path, leading_branch) {
+            self.send_failure(crate::status_text![
+                "Cannot create agent for ",
+                q(project.name),
+                ": leading branch ",
+                q(leading_branch),
+                " no longer exists locally. Restore that branch or re-add the project."
+            ]);
+            return true;
+        }
+        false
+    }
+
+    /// Refuse a typed name for the agent from PR `number` (one other than the
+    /// pull request's own branch) that may be checked out elsewhere: `holder`
+    /// holds it, or `holder_failed` says why nobody could tell. `true` when it
+    /// was refused.
+    fn refuse_held_typed_branch(
+        &self,
+        resolved_name: &str,
+        number: u64,
+        holder: Option<&git::BranchHolder>,
+        holder_failed: Option<&str>,
+    ) -> bool {
+        // A branch that may be checked out elsewhere is not one to build
+        // on, and with no answer there is nothing to tell the user it is.
+        if let Some(failure) = holder_failed {
+            self.send_failure(crate::status_text![
+                "dux could not check whether branch ",
+                q(resolved_name),
+                format!(
+                    " is checked out elsewhere ({}). Try again, or choose another name for the agent from PR ",
+                    failure.trim_end_matches('.')
+                ),
+                n(format!("#{}", number)),
+                "."
+            ]);
+            return true;
+        }
+        if let Some(holder) = holder {
+            self.send_failure(crate::status_text![
+                "Branch ",
+                q(resolved_name),
+                " is checked out at ",
+                q(crate::home_path::shorten_home(&holder.worktree.path)),
+                ". Choose another name for the agent from PR ",
+                n(format!("#{}", number)),
+                "."
+            ]);
+            return true;
+        }
+        false
+    }
+
+    /// Refuse a typed name for the agent from PR `number` whose local branch
+    /// lacks the pull request's head commit, or could not be checked for it, by
+    /// its `containment`. `true` when it was refused.
+    fn refuse_typed_branch_without_head(
+        &self,
+        resolved_name: &str,
+        number: u64,
+        containment: &HeadContainment,
+    ) -> bool {
+        match containment {
+            HeadContainment::NotLocal | HeadContainment::Contains => false,
+            HeadContainment::Lacks => {
+                self.send_failure(crate::status_text![
+                    "Branch ",
+                    q(resolved_name),
+                    " already exists and does not contain the head commit of PR ",
+                    n(format!("#{}", number)),
+                    ". Choose another name for the agent from PR ",
+                    n(format!("#{}", number)),
+                    "."
+                ]);
+                true
+            }
+            HeadContainment::Unknown(reason) => {
+                self.send_failure(crate::status_text![
+                    "dux could not check whether branch ",
+                    q(resolved_name),
+                    " contains the head commit of PR ",
+                    n(format!("#{}", number)),
+                    format!(
+                        ": {}. Choose another name for the agent from PR ",
+                        reason.trim_end_matches('.')
+                    ),
+                    n(format!("#{}", number)),
+                    "."
+                ]);
+                true
+            }
+        }
     }
 
     /// Decide what to do with the chosen branch name before today's
@@ -1388,62 +1610,14 @@ impl CreatePlanContext<'_> {
             return BusyBranchCheck::Refused;
         }
         if resolved_name != head_branch {
-            // A branch that may be checked out elsewhere is not one to build
-            // on, and with no answer there is nothing to tell the user it is.
-            if let Some(failure) = &holder_failed {
-                self.send_failure(crate::status_text![
-                    "dux could not check whether branch ",
-                    q(resolved_name),
-                    format!(
-                        " is checked out elsewhere ({}). Try again, or choose another name for the agent from PR ",
-                        failure.trim_end_matches('.')
-                    ),
-                    n(format!("#{}", number)),
-                    "."
-                ]);
+            if self.refuse_held_typed_branch(
+                resolved_name,
+                number,
+                holder.as_ref(),
+                holder_failed.as_deref(),
+            ) || self.refuse_typed_branch_without_head(resolved_name, number, containment)
+            {
                 return BusyBranchCheck::Refused;
-            }
-            if let Some(holder) = &holder {
-                self.send_failure(crate::status_text![
-                    "Branch ",
-                    q(resolved_name),
-                    " is checked out at ",
-                    q(crate::home_path::shorten_home(&holder.worktree.path)),
-                    ". Choose another name for the agent from PR ",
-                    n(format!("#{}", number)),
-                    "."
-                ]);
-                return BusyBranchCheck::Refused;
-            }
-            match containment {
-                HeadContainment::NotLocal | HeadContainment::Contains => {}
-                HeadContainment::Lacks => {
-                    self.send_failure(crate::status_text![
-                        "Branch ",
-                        q(resolved_name),
-                        " already exists and does not contain the head commit of PR ",
-                        n(format!("#{}", number)),
-                        ". Choose another name for the agent from PR ",
-                        n(format!("#{}", number)),
-                        "."
-                    ]);
-                    return BusyBranchCheck::Refused;
-                }
-                HeadContainment::Unknown(reason) => {
-                    self.send_failure(crate::status_text![
-                        "dux could not check whether branch ",
-                        q(resolved_name),
-                        " contains the head commit of PR ",
-                        n(format!("#{}", number)),
-                        format!(
-                            ": {}. Choose another name for the agent from PR ",
-                            reason.trim_end_matches('.')
-                        ),
-                        n(format!("#{}", number)),
-                        "."
-                    ]);
-                    return BusyBranchCheck::Refused;
-                }
             }
             // A name nobody has, spelled like a review copy of the pull
             // request's branch, is one: a push from it lands there and not on
@@ -1757,6 +1931,248 @@ impl CreatePlanContext<'_> {
         }
     }
 
+    /// What the pull request `fetch` names makes of a local branch
+    /// `resolved_name`. A local branch is reused only when it holds the pull
+    /// request's own code, so the pull request's head is fetched first. Without
+    /// a local branch there is nothing to compare, but the head is still
+    /// fetched when the project has `agents`, because one of them may already
+    /// have the code. `None` when the fetch failed, with the failure sent.
+    fn judge_local_branch(
+        &self,
+        fetch: PrFetch<'_>,
+        resolved_name: &str,
+        agents: &[crate::worker::AgentAtWorktree],
+    ) -> Option<LocalBranchJudgement> {
+        let local = git::local_branch_exists(fetch.repo_path, resolved_name);
+        // What the branch pointed at when it was judged, so the judgement
+        // is only used for that branch: it is checked again when the
+        // branch is used.
+        let validated_tip = if local {
+            git::branch_tip(fetch.repo_path, resolved_name).ok()
+        } else {
+            None
+        };
+        if !local && agents.is_empty() {
+            return Some(LocalBranchJudgement {
+                head_commit: None,
+                validated_tip,
+                containment: HeadContainment::NotLocal,
+            });
+        }
+        let (commit, containment) =
+            self.fetch_head_containment(fetch, local.then_some(resolved_name))?;
+        Some(LocalBranchJudgement {
+            head_commit: Some(commit),
+            validated_tip,
+            containment,
+        })
+    }
+
+    /// Fetch the head commit of the pull request `fetch` names, and say whether
+    /// the local branch `local_name` (when there is one) contains it. `None`
+    /// when the fetch failed, with the failure sent.
+    fn fetch_head_containment(
+        &self,
+        fetch: PrFetch<'_>,
+        local_name: Option<&str>,
+    ) -> Option<(String, HeadContainment)> {
+        let PrFetch {
+            repo_path,
+            owner_repo,
+            number,
+        } = fetch;
+        let commit = match git::fetch_pull_request_head_commit(repo_path, number) {
+            Ok(commit) => commit,
+            Err(err) => {
+                logger::error(&format!(
+                    "PR head fetch failed for {owner_repo} #{number}: {err}"
+                ));
+                self.send_failure(crate::status_text![
+                    "Failed to fetch PR ",
+                    n(format!("#{}", number)),
+                    " from ",
+                    n(owner_repo),
+                    format!(": {}", err)
+                ]);
+                return None;
+            }
+        };
+        let Some(resolved_name) = local_name else {
+            return Some((commit, HeadContainment::NotLocal));
+        };
+        let containment = match git::branch_contains_commit(repo_path, &commit, resolved_name) {
+            Ok(true) => HeadContainment::Contains,
+            Ok(false) => HeadContainment::Lacks,
+            Err(err) => {
+                logger::error(&format!(
+                    "could not check whether \"{resolved_name}\" contains the head commit of PR #{number}: {err:#}"
+                ));
+                HeadContainment::Unknown(format!("{err:#}"))
+            }
+        };
+        Some((commit, containment))
+    }
+
+    /// Say that the create attaches to the existing branch `resolved_name` of
+    /// the project `project_name`, or fetch the pull request `fetch` names into
+    /// it, as `attach` says. `false` when the fetch failed, with the failure
+    /// sent.
+    fn announce_or_fetch_pr_branch(
+        &self,
+        fetch: PrFetch<'_>,
+        project_name: &str,
+        resolved_name: &str,
+        attach: BranchAttach,
+    ) -> bool {
+        let PrFetch {
+            repo_path,
+            owner_repo,
+            number,
+        } = fetch;
+        if attach == BranchAttach::AttachExisting {
+            let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+                status_op_id: self.create_key.to_string(),
+                message: crate::status_text![
+                    "Attaching to existing branch ",
+                    q(resolved_name),
+                    " for PR ",
+                    n(format!("#{}", number)),
+                    " in project ",
+                    q(project_name),
+                    "..."
+                ],
+            });
+            return true;
+        }
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
+            status_op_id: self.create_key.to_string(),
+            message: crate::status_text![
+                "Fetching PR ",
+                n(format!("#{}", number)),
+                " from ",
+                n(owner_repo),
+                " into branch ",
+                q(resolved_name),
+                "..."
+            ],
+        });
+        if let Err(err) = git::fetch_pull_request_head(repo_path, number, resolved_name) {
+            logger::error(&format!(
+                "PR worktree fetch failed for {owner_repo} #{number}: {err}"
+            ));
+            let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                status_op_id: self.create_key.to_string(),
+                attempted_name: Some(resolved_name.to_string()),
+                message: crate::status_text![
+                    "Failed to fetch PR ",
+                    n(format!("#{}", number)),
+                    " from ",
+                    n(owner_repo),
+                    format!(": {}", err)
+                ],
+            });
+            return false;
+        }
+        true
+    }
+
+    /// The worktree for the agent from the pull request `fetch` names, on the
+    /// branch `resolved_name` of the project `project_name`, and its branch.
+    /// `None` when it could not be made, with the failure sent and a branch dux
+    /// minted (by `provenance`) deleted again.
+    fn create_pr_worktree(
+        &self,
+        fetch: PrFetch<'_>,
+        project_name: &str,
+        resolved_name: &str,
+        provenance: BranchProvenance,
+    ) -> Option<(String, PathBuf)> {
+        let PrFetch {
+            repo_path,
+            owner_repo,
+            number,
+        } = fetch;
+        let claim = |path: &Path| self.claim_worktree_path(path);
+        match git::create_worktree_existing_branch_claimed(
+            repo_path,
+            &self.paths.worktrees_root,
+            project_name,
+            resolved_name,
+            &claim,
+        ) {
+            Ok(result) => Some(result),
+            Err(err) => {
+                logger::error(&format!(
+                    "PR worktree creation failed for {owner_repo} #{number}: {err}"
+                ));
+                // The responsibility boundary: no worktree exists, so the
+                // provenance-driven rollback will not run and nothing else
+                // would remove the ref the fetch minted. Past this point the
+                // rollback owns the branch and this cleanup must not run.
+                //
+                // Only when dux minted it: a local branch that was there
+                // first is the user's and survives the failure.
+                if provenance == BranchProvenance::CreatedByDux {
+                    git::delete_created_branch_best_effort(repo_path, resolved_name);
+                }
+                let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+                    status_op_id: self.create_key.to_string(),
+                    attempted_name: Some(resolved_name.to_string()),
+                    message: crate::status_text![
+                        "Failed to create a worktree for PR ",
+                        n(format!("#{}", number)),
+                        " in project ",
+                        q(project_name),
+                        format!(": {}", err)
+                    ],
+                });
+                None
+            }
+        }
+    }
+
+    /// Confirm the branch `resolved_name` the agent reuses in `worktree_path`
+    /// (see [`Self::confirm_reused_branch`]), moving it forward when it was
+    /// judged to be behind, and leaving a note that it did. [`FailureSent`]
+    /// refuses the create: the worktree is removed again and the failure sent.
+    fn reuse_branch_or_undo(
+        &mut self,
+        fetch: PrFetch<'_>,
+        worktree_path: &Path,
+        resolved_name: &str,
+        head_commit: Option<&str>,
+        validated_tip: Option<&str>,
+        fast_forward: Option<&(String, String)>,
+    ) -> Result<Option<MovedForward>, FailureSent> {
+        match Self::confirm_reused_branch(
+            fetch.repo_path,
+            worktree_path,
+            resolved_name,
+            fetch.number,
+            head_commit,
+            validated_tip,
+            fast_forward,
+        ) {
+            Ok(moved) => {
+                if moved.is_some() {
+                    self.creation_notes
+                        .push(moved_forward_note(resolved_name, fetch.number));
+                }
+                Ok(moved)
+            }
+            Err(sentence) => {
+                if let Err(err) = git::remove_worktree_keep_branch(fetch.repo_path, worktree_path) {
+                    logger::error(&format!(
+                        "could not remove {} after refusing to reuse \"{resolved_name}\": {err:#}",
+                        worktree_path.display()
+                    ));
+                }
+                self.send_failure(sentence);
+                Err(FailureSent)
+            }
+        }
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the resolved pull request's fields and the create's own choices, each handed through once from the request"
@@ -1785,59 +2201,17 @@ impl CreatePlanContext<'_> {
             let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.to_string());
             // From here on a failure names the agent that was being made.
             self.attempted_name = Some(resolved_name.clone());
-            // A local branch is reused only when it holds the pull request's
-            // own code, so the pull request's head is fetched first. Without
-            // a local branch there is nothing to compare, but the head is still
-            // fetched when the project has agents, because one of them may
-            // already have the code.
-            let mut head_commit = None;
-            let local = git::local_branch_exists(&repo_path, &resolved_name);
-            // What the branch pointed at when it was judged, so the judgement
-            // is only used for that branch: it is checked again when the
-            // branch is used.
-            let validated_tip = if local {
-                git::branch_tip(&repo_path, &resolved_name).ok()
-            } else {
-                None
+            let fetch = PrFetch {
+                repo_path: &repo_path,
+                owner_repo,
+                number,
             };
-            let containment = if local || !agents.is_empty() {
-                match git::fetch_pull_request_head_commit(&repo_path, number) {
-                    Err(err) => {
-                        logger::error(&format!(
-                            "PR head fetch failed for {owner_repo} #{number}: {err}"
-                        ));
-                        self.send_failure(crate::status_text![
-                            "Failed to fetch PR ",
-                            n(format!("#{}", number)),
-                            " from ",
-                            n(owner_repo),
-                            format!(": {}", err)
-                        ]);
-                        return None;
-                    }
-                    Ok(commit) if !local => {
-                        head_commit = Some(commit);
-                        HeadContainment::NotLocal
-                    }
-                    Ok(commit) => {
-                        head_commit = Some(commit.clone());
-                        match git::branch_contains_commit(&repo_path, &commit, &resolved_name) {
-                            Ok(true) => HeadContainment::Contains,
-                            Ok(false) => HeadContainment::Lacks,
-                            Err(err) => {
-                                logger::error(&format!(
-                                    "could not check whether \"{resolved_name}\" contains the head commit of PR #{number}: {err:#}"
-                                ));
-                                HeadContainment::Unknown(format!("{err:#}"))
-                            }
-                        }
-                    }
-                }
-            } else {
-                HeadContainment::NotLocal
-            };
-            let mut fast_forward: Option<(String, String)> = None;
-            let fresh_copy = match self.check_busy_pr_branch(
+            let LocalBranchJudgement {
+                head_commit,
+                validated_tip,
+                containment,
+            } = self.judge_local_branch(fetch, &resolved_name, agents)?;
+            let busy = self.check_busy_pr_branch(
                 project,
                 &repo_path,
                 &resolved_name,
@@ -1848,20 +2222,18 @@ impl CreatePlanContext<'_> {
                 &containment,
                 review_copy,
                 ask_id,
-            ) {
+            );
+            let (fresh_copy, fast_forward) = match busy {
                 BusyBranchCheck::Refused => return None,
-                BusyBranchCheck::Free => None,
-                BusyBranchCheck::FastForward { old_tip, commit } => {
-                    fast_forward = Some((old_tip, commit));
-                    None
-                }
+                BusyBranchCheck::Free => (None, None),
+                BusyBranchCheck::FastForward { old_tip, commit } => (None, Some((old_tip, commit))),
                 BusyBranchCheck::FreshCopy(copy) => {
                     // The copy is named after the branch it actually got, so
                     // the sidebar does not show two rows with the busy name.
                     resolved_name.clone_from(&copy.new_branch);
                     self.attempted_name = Some(resolved_name.clone());
                     agent_title = Some(copy.new_branch.clone());
-                    Some(copy)
+                    (Some(copy), None)
                 }
             };
             // Two separate questions. `attach_existing` decides how the worktree
@@ -1880,171 +2252,62 @@ impl CreatePlanContext<'_> {
                 return None;
             }
             let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
-            let attach_existing = fresh_copy.is_none()
-                && (branch == BranchAttach::AttachExisting || local_branch_existed);
-
-            if attach_existing {
-                let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    status_op_id: self.create_key.to_string(),
-                    message: crate::status_text![
-                        "Attaching to existing branch ",
-                        q(resolved_name),
-                        " for PR ",
-                        n(format!("#{}", number)),
-                        " in project ",
-                        q(project.name),
-                        "..."
-                    ],
-                });
+            let attach = if fresh_copy.is_none()
+                && (branch == BranchAttach::AttachExisting || local_branch_existed)
+            {
+                BranchAttach::AttachExisting
             } else {
-                let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    status_op_id: self.create_key.to_string(),
-                    message: crate::status_text![
-                        "Fetching PR ",
-                        n(format!("#{}", number)),
-                        " from ",
-                        n(owner_repo),
-                        " into branch ",
-                        q(resolved_name),
-                        "..."
-                    ],
-                });
-                if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
-                    logger::error(&format!(
-                        "PR worktree fetch failed for {owner_repo} #{number}: {err}"
-                    ));
-                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: self.create_key.to_string(),
-                        attempted_name: Some(resolved_name.clone()),
-                        message: crate::status_text![
-                            "Failed to fetch PR ",
-                            n(format!("#{}", number)),
-                            " from ",
-                            n(owner_repo),
-                            format!(": {}", err)
-                        ],
-                    });
-                    return None;
-                }
-            }
-
-            let claim = |path: &Path| self.claim_worktree_path(path);
-            let (branch_name, worktree_path) = match git::create_worktree_existing_branch_claimed(
-                &repo_path,
-                &self.paths.worktrees_root,
-                &project.name,
-                &resolved_name,
-                &claim,
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    logger::error(&format!(
-                        "PR worktree creation failed for {owner_repo} #{number}: {err}"
-                    ));
-                    // The responsibility boundary: no worktree exists, so the
-                    // provenance-driven rollback will not run and nothing else
-                    // would remove the ref the fetch minted. Past this point the
-                    // rollback owns the branch and this cleanup must not run.
-                    //
-                    // Only when dux minted it: a local branch that was there
-                    // first is the user's and survives the failure.
-                    if !local_branch_existed {
-                        git::delete_created_branch_best_effort(&repo_path, &resolved_name);
-                    }
-                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: self.create_key.to_string(),
-                        attempted_name: Some(resolved_name.clone()),
-                        message: crate::status_text![
-                            "Failed to create a worktree for PR ",
-                            n(format!("#{}", number)),
-                            " in project ",
-                            q(project.name),
-                            format!(": {}", err)
-                        ],
-                    });
-                    return None;
-                }
+                BranchAttach::CreateNew
             };
+            if !self.announce_or_fetch_pr_branch(fetch, &project.name, &resolved_name, attach) {
+                return None;
+            }
+            // Whether the fetch minted `refs/heads/<name>` or the worktree
+            // add DWIMed it out of `origin/<name>`, dux made the local branch
+            // and it is dux's to clean up. Only a local branch that was
+            // already there is the user's and stays.
+            let branch_provenance = if local_branch_existed {
+                BranchProvenance::AttachedExisting
+            } else {
+                BranchProvenance::CreatedByDux
+            };
+            let (branch_name, worktree_path) =
+                self.create_pr_worktree(fetch, &project.name, &resolved_name, branch_provenance)?;
             // A branch the user had is used only as it was judged, and only
             // from inside the worktree that now holds it: git lets no other
             // worktree check it out meanwhile, so what is read here is what the
             // agent gets. A branch to move forward is moved here too, with its
             // files, for the same reason.
-            let mut moved_forward = None;
-            if attach_existing && fresh_copy.is_none() {
-                match Self::confirm_reused_branch(
-                    &repo_path,
+            let moved_forward = if attach == BranchAttach::AttachExisting && fresh_copy.is_none() {
+                self.reuse_branch_or_undo(
+                    fetch,
                     &worktree_path,
                     &resolved_name,
-                    number,
                     head_commit.as_deref(),
                     validated_tip.as_deref(),
                     fast_forward.as_ref(),
-                ) {
-                    Ok(moved) => moved_forward = moved,
-                    Err(sentence) => {
-                        if let Err(err) =
-                            git::remove_worktree_keep_branch(&repo_path, &worktree_path)
-                        {
-                            logger::error(&format!(
-                                "could not remove {} after refusing to reuse \"{resolved_name}\": {err:#}",
-                                worktree_path.display()
-                            ));
-                        }
-                        self.send_failure(sentence);
-                        return None;
-                    }
-                }
-            }
-            if moved_forward.is_some() {
-                self.creation_notes.push(crate::status_text![
-                    "Moved your local branch ",
-                    q(resolved_name),
-                    " forward to the latest commit of PR ",
-                    n(format!("#{}", number)),
-                    ", because it had no commits of its own."
-                ]);
-            }
-            let created = crate::status_text![
-                "Created ",
-                n(project.default_provider.as_str()),
-                " agent ",
-                q(branch_name),
-                " from PR ",
-                n(format!("#{}", number)),
-                " (",
-                n(title),
-                ") in project ",
-                q(project.name),
-                "."
-            ];
-            let (status_lead, pull_request_pin) = match &fresh_copy {
-                None => (None, None),
-                Some(copy) => {
-                    let lead = self.announce_fresh_copy(&repo_path, copy);
-                    let pin = crate::worker::PullRequestPin {
-                        host: host.to_string(),
-                        owner_repo: owner_repo.to_string(),
-                        number,
-                        title: title.to_string(),
-                        state: state.to_string(),
-                        busy_branch: copy.busy_branch.clone(),
-                        new_branch: copy.new_branch.clone(),
-                    };
-                    (lead, Some(Box::new(pin)))
-                }
+                )
+                .ok()?
+            } else {
+                None
             };
+            let (status_lead, pull_request_pin) =
+                fresh_copy.as_ref().map_or((None, None), |copy| {
+                    let pin = review_copy_pin(copy, host, owner_repo, number, title, state);
+                    (
+                        self.announce_fresh_copy(&repo_path, copy),
+                        Some(Box::new(pin)),
+                    )
+                });
             logger::info(&format!(
-                "created PR worktree from {} #{} ({state}) {}",
-                owner_repo,
-                number,
+                "created PR worktree from {owner_repo} #{number} ({state}) {}",
                 gh::pull_request_url(host, owner_repo, number)
             ));
             ManagedCreatePlan {
                 project: project.clone(),
                 provider: project.default_provider.clone(),
                 source_branch: project.current_branch.clone(),
-                status_message: created,
+                status_message: pull_request_created_status(project, &branch_name, number, title),
                 // Quiet on the web: the new row carries the pull-request chip
                 // and its pane launches and streams. A fresh copy's note makes
                 // it loud when the job folds the notes in.
@@ -2057,15 +2320,7 @@ impl CreatePlanContext<'_> {
                 pending_copy: None,
                 status_lead,
                 pull_request_pin,
-                // Whether the fetch minted `refs/heads/<name>` or the worktree
-                // add DWIMed it out of `origin/<name>`, dux made the local branch
-                // and it is dux's to clean up. Only a local branch that was
-                // already there is the user's and stays.
-                branch_provenance: if local_branch_existed {
-                    BranchProvenance::AttachedExisting
-                } else {
-                    BranchProvenance::CreatedByDux
-                },
+                branch_provenance,
                 moved_forward,
             }
         })
@@ -2080,13 +2335,9 @@ impl CreatePlanContext<'_> {
     ) -> Option<ManagedCreatePlan> {
         Some({
             let Some(custom_name) = custom_name else {
-                let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    status_op_id: self.create_key.to_string(),
-                    attempted_name: None,
-                    message: "Forking an agent requires choosing a name first."
-                        .to_string()
-                        .into(),
-                });
+                self.send_unnamed_failure(
+                    "Forking an agent requires choosing a name first.".to_string(),
+                );
                 return None;
             };
             // Forking copies a managed worktree onto a new branch, so a
@@ -2098,12 +2349,8 @@ impl CreatePlanContext<'_> {
                 source_session.managed_worktree().map(PathBuf::from),
                 source_session.branch_name().map(str::to_string),
             ) else {
-                let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            status_op_id: self.create_key.to_string(),
-                            attempted_name: None,
-                            message: crate::status_text!["Agent ", q(source_label), " is a standalone agent, so there is no branch or managed worktree to fork. \
-                                 Add its folder as a project if you want several agents working on it, and fork one of those instead."],
-                        });
+                self.send_unnamed_failure(crate::status_text!["Agent ", q(source_label), " is a standalone agent, so there is no branch or managed worktree to fork. \
+                                 Add its folder as a project if you want several agents working on it, and fork one of those instead."]);
                 return None;
             };
             let _ = self.worker_tx.send(WorkerEvent::CreateAgentProgress {
@@ -2121,15 +2368,11 @@ impl CreatePlanContext<'_> {
                         "failed to resolve HEAD for {}: {err}",
                         source_worktree.display()
                     ));
-                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: self.create_key.to_string(),
-                        attempted_name: None,
-                        message: crate::status_text![
-                            "Failed to inspect the source worktree for agent ",
-                            q(source_label),
-                            format!(": {}", err)
-                        ],
-                    });
+                    self.send_unnamed_failure(crate::status_text![
+                        "Failed to inspect the source worktree for agent ",
+                        q(source_label),
+                        format!(": {}", err)
+                    ]);
                     return None;
                 }
             };
@@ -2152,29 +2395,16 @@ impl CreatePlanContext<'_> {
                         "fork worktree creation failed for {}: {err}",
                         project.path
                     ));
-                    let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        status_op_id: self.create_key.to_string(),
-                        attempted_name: None,
-                        message: crate::status_text![
-                            "Failed to create a forked worktree from agent ",
-                            q(source_label),
-                            format!(": {}", err)
-                        ],
-                    });
+                    self.send_unnamed_failure(crate::status_text![
+                        "Failed to create a forked worktree from agent ",
+                        q(source_label),
+                        format!(": {}", err)
+                    ]);
                     return None;
                 }
             };
-            let status_message = crate::status_text![
-                "Forked ",
-                n(source_session.provider.as_str()),
-                " agent ",
-                q(branch_name),
-                " from ",
-                q(source_label),
-                " in project ",
-                q(project.name),
-                ". The new worktree starts with the copied uncommitted and untracked changes (gitignored files are not copied) and a fresh session."
-            ];
+            let status_message =
+                forked_status(&project, &source_session, &branch_name, source_label);
             // Equal HEADs hold by construction (the worktree was just created
             // from `source_head`); the copy itself runs in the common tail.
             let pending_copy = Some(PendingCopy {
@@ -2612,25 +2842,17 @@ fn run_create_standalone_agent_job(
         });
         return;
     }
-    let session = AgentSession {
-        id: Uuid::new_v4().to_string(),
-        slot_tab_id: Uuid::new_v4().to_string(),
-        provider: provider.clone(),
-        workspace: AgentWorkspace::Folder(FolderWorkspace {
+    let session = new_agent_session(
+        provider.clone(),
+        AgentWorkspace::Folder(FolderWorkspace {
             folder_path: folder.to_string_lossy().to_string(),
         }),
         // Always set. Every row label falls back through the branch name when
         // there is no title, and this agent has no branch, so a title-less
         // standalone agent would render as a nameless row.
-        title: Some(title.to_string()),
-        started_providers: Vec::new(),
-        desired_running: true,
-        auto_reopen_enabled: true,
-        status: SessionStatus::Active,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_focused_tab: None,
-    };
+        Some(title.to_string()),
+        Vec::new(),
+    );
     let provider_cfg = provider_config(config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
@@ -2761,19 +2983,12 @@ fn launch_managed_create(
         moved_forward: _,
     } = plan;
     let repo_path = PathBuf::from(&project.path);
-    if owns_worktree {
-        logger::info(&format!(
-            "created worktree {} on branch {}",
-            worktree_path.display(),
-            branch_name
-        ));
+    let ownership = if owns_worktree {
+        WorktreeOwnership::CreatedByThisJob
     } else {
-        logger::info(&format!(
-            "reusing worktree {} on branch {} for new provider session",
-            worktree_path.display(),
-            branch_name
-        ));
-    }
+        WorktreeOwnership::Preexisting
+    };
+    log_worktree_use(ownership, &worktree_path, &branch_name);
     let started_providers = if launch_with_resume {
         vec![provider.as_str().to_string()]
     } else {
@@ -2794,31 +3009,23 @@ fn launch_managed_create(
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
     };
-    let session = AgentSession {
-        id: Uuid::new_v4().to_string(),
-        slot_tab_id: Uuid::new_v4().to_string(),
+    let session = new_agent_session(
         provider,
-        workspace: AgentWorkspace::Managed(managed.clone()),
+        AgentWorkspace::Managed(managed.clone()),
         title,
         started_providers,
-        desired_running: true,
-        auto_reopen_enabled: true,
-        status: SessionStatus::Active,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_focused_tab: None,
+    );
+    let failed = CreateFailure {
+        repo_path: &repo_path,
+        ownership,
+        rollback: &rollback,
+        worker_tx,
+        create_key,
     };
     let provider_cfg = provider_config(config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
-        if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-            rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
-        }
-        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-            status_op_id: create_key.to_string(),
-            attempted_name: Some(session.display_label()),
-            message: hint.into(),
-        });
+        failed.report(&session, hint.into());
         return;
     }
     // The planned copy of uncommitted changes runs here, after the provider
@@ -2829,11 +3036,7 @@ fn launch_managed_create(
             copy,
             &session,
             &repo_path,
-            if owns_worktree {
-                WorktreeOwnership::CreatedByThisJob
-            } else {
-                WorktreeOwnership::Preexisting
-            },
+            ownership,
             worker_tx,
             create_key,
             &mut creation_notes,
@@ -2842,148 +3045,334 @@ fn launch_managed_create(
     {
         return;
     }
-    // Notes ride the keyed create-op final so they surface as the visible
-    // status/toast, never log-only. A note is a fact the screen does not show,
-    // so it makes even an otherwise quiet create speak. A leading warning goes
-    // ahead of the success line, so the terminal UI's two-row status footer
-    // cannot cut the one part the user must act on, and it makes the final a
-    // warning so it stays on screen longer.
-    //
-    // The lead and the notes are also kept on their own, so a create whose
-    // startup command fails can still say them after its failure sentence.
-    let join = |joined: crate::status_text::StatusText, part: crate::status_text::StatusText| {
-        crate::status_text![joined, " ", part]
-    };
-    let status_warns = status_lead.is_some();
-    let trailing_notes = creation_notes.into_iter().reduce(join);
-    let status_notes = status_lead
-        .clone()
-        .into_iter()
-        .chain(trailing_notes.clone())
-        .reduce(join);
-    let status_quiet = if status_notes.is_some() {
-        crate::statusline::QuietSurfaces::LOUD
-    } else {
-        status_quiet
-    };
-    let status_message = status_lead
-        .into_iter()
-        .chain(std::iter::once(status_message))
-        .chain(trailing_notes)
-        .reduce(join)
-        .unwrap_or_default();
-    let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
-        Ok(env) => env,
-        Err(err) => {
-            // The worktree exists by now, so a failed create removes it like
-            // every other failure past this point: left behind, it (and a
-            // branch dux made) would push the next attempt onto another name
-            // for no visible reason.
-            if owns_worktree && let Some(managed) = session.workspace.as_managed() {
-                rollback_created_worktree(&repo_path, managed, &session.id, Some(&rollback));
+    let status = CreateStatus::compose(status_message, status_lead, creation_notes, status_quiet);
+    ProvisionedCreate {
+        project,
+        session,
+        managed,
+        provider_cfg,
+        repo_path,
+        owns_worktree,
+        launch_with_resume,
+        status,
+        pull_request_pin,
+        rollback,
+        registry,
+    }
+    .launch(paths, config, worker_tx, term_size, create_key, identity);
+}
+
+/// A managed create whose worktree is ready and whose provider is available,
+/// on its way to its launch.
+struct ProvisionedCreate {
+    /// The project the agent is in.
+    project: crate::model::Project,
+    /// The agent.
+    session: AgentSession,
+    /// Its worktree.
+    managed: ManagedWorkspace,
+    /// How its provider runs.
+    provider_cfg: crate::config::ProviderCommandConfig,
+    /// The project's repository.
+    repo_path: PathBuf,
+    /// Whether the create made the worktree, and so takes it back.
+    owns_worktree: bool,
+    /// Whether the launch continues the provider's conversation.
+    launch_with_resume: bool,
+    /// What the create's final says.
+    status: CreateStatus,
+    /// The pull request a review copy is pinned to.
+    pull_request_pin: Option<Box<crate::worker::PullRequestPin>>,
+    /// What takes the worktree back when the launch fails.
+    rollback: Rollback,
+    /// The process sessions the startup command runs in.
+    registry: crate::process_sessions::AgentProcessRegistry,
+}
+
+impl ProvisionedCreate {
+    /// Resolve the agent's environment, run the project's startup command, and
+    /// launch the provider, reporting each step to `worker_tx` under
+    /// `create_key`.
+    fn launch(
+        self,
+        paths: &DuxPaths,
+        config: &Config,
+        worker_tx: &Sender<WorkerEvent>,
+        term_size: (u16, u16),
+        create_key: &str,
+        identity: crate::term_identity::TerminalIdentity,
+    ) {
+        let Self {
+            project,
+            session,
+            managed,
+            provider_cfg,
+            repo_path,
+            owns_worktree,
+            launch_with_resume,
+            status,
+            pull_request_pin,
+            rollback,
+            registry,
+        } = self;
+        let failed = CreateFailure {
+            repo_path: &repo_path,
+            ownership: if owns_worktree {
+                WorktreeOwnership::CreatedByThisJob
+            } else {
+                WorktreeOwnership::Preexisting
+            },
+            rollback: &rollback,
+            worker_tx,
+            create_key,
+        };
+        let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
+            Ok(env) => env,
+            Err(err) => {
+                // The worktree exists by now, so a failed create removes it like
+                // every other failure past this point: left behind, it (and a
+                // branch dux made) would push the next attempt onto another name
+                // for no visible reason.
+                failed.report(
+                    &session,
+                    crate::status_text![
+                        "Invalid environment variables for project ",
+                        q(project.name),
+                        format!(": {:#}", err)
+                    ],
+                );
+                return;
             }
-            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                status_op_id: create_key.to_string(),
-                attempted_name: Some(session.display_label()),
-                message: crate::status_text![
-                    "Invalid environment variables for project ",
-                    q(project.name),
-                    format!(": {:#}", err)
-                ],
-            });
-            return;
-        }
-    };
-    let startup_result = project
-        .startup_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-        .map(|command| {
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.to_string(),
-                message: crate::status_text![
-                    "Running startup command for agent ",
-                    q(session.display_label()),
-                    "..."
-                ],
-            });
-            run_startup_command(
-                paths,
-                StartupCommandRun {
+        };
+        let startup_result = project
+            .startup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(|command| {
+                let run = StartupCommandRun {
                     project: project.clone(),
                     session: session.clone(),
                     managed: managed.clone(),
                     command: command.to_string(),
                     terminal: config.startup_command_terminal.clone(),
                     env: env.clone(),
-                },
-                &registry,
+                };
+                run_create_startup_command(paths, run, &registry, worker_tx, create_key)
+            });
+        let launch_message = if launch_with_resume {
+            format!(
+                "Continuing {} in the existing worktree...",
+                session.provider.as_str()
             )
+        } else {
+            format!(
+                "Launching {} in a fresh session...",
+                session.provider.as_str()
+            )
+        };
+        let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+            status_op_id: create_key.to_string(),
+            message: launch_message.into(),
         });
-    if let Some(result) = &startup_result {
-        match &result.status {
-            Ok(()) => logger::info(&format!(
-                "startup command succeeded for {} (log: {})",
-                result.session_id,
-                result.log_path.display()
-            )),
-            Err(err) => logger::error(&format!(
-                "startup command failed for {}: {err} (log: {})",
-                result.session_id,
-                result.log_path.display()
-            )),
+        // crossterm::terminal::size() returns (cols, rows).
+        let (cols, rows) = term_size;
+        let request = AgentLaunchRequest {
+            // Create is always the session-slot tab, effective provider ==
+            // session.provider. (Evaluated before `session` is moved.)
+            tab_id: session.slot_tab_id().to_owned(),
+            provider: session.provider.clone(),
+            session,
+            provider_config: provider_cfg,
+            env,
+            identity,
+            resume: launch_with_resume,
+            pty_size: (rows, cols),
+            scrollback_lines: config.ui.agent_scrollback_lines,
+            kind: AgentLaunchKind::Create {
+                status_message: status.message,
+                status_warns: status.warns,
+                status_notes: status.notes.map(Box::new),
+                pull_request_pin,
+                repo_path: repo_path.to_string_lossy().to_string(),
+                owns_worktree,
+                startup_result,
+                status_op_id: create_key.to_string(),
+            },
+            // A freshly created agent lands focused-but-minimized;
+            // only fullscreen-seeking gestures set this, and create is never one.
+            wants_fullscreen: false,
+            status_quiet: status.quiet,
+        };
+        let gate = crate::process_sessions::SpawnGate::new(
+            rollback.registries.processes.clone(),
+            rollback.registries.worktrees.clone(),
+        );
+        run_agent_launch_job_with(request, worker_tx, Some(&rollback), &gate);
+    }
+}
+
+/// Log which worktree, at `worktree_path` on `branch_name`, a create uses, as
+/// `ownership` says it came to have it.
+fn log_worktree_use(ownership: WorktreeOwnership, worktree_path: &Path, branch_name: &str) {
+    match ownership {
+        WorktreeOwnership::CreatedByThisJob => logger::info(&format!(
+            "created worktree {} on branch {}",
+            worktree_path.display(),
+            branch_name
+        )),
+        WorktreeOwnership::Preexisting => logger::info(&format!(
+            "reusing worktree {} on branch {} for new provider session",
+            worktree_path.display(),
+            branch_name
+        )),
+    }
+}
+
+/// A new, active agent running `provider` in `workspace`, titled `title`, with
+/// the providers it has `started_providers` already.
+fn new_agent_session(
+    provider: crate::model::ProviderKind,
+    workspace: AgentWorkspace,
+    title: Option<String>,
+    started_providers: Vec<String>,
+) -> AgentSession {
+    AgentSession {
+        id: Uuid::new_v4().to_string(),
+        slot_tab_id: Uuid::new_v4().to_string(),
+        provider,
+        workspace,
+        title,
+        started_providers,
+        desired_running: true,
+        auto_reopen_enabled: true,
+        status: SessionStatus::Active,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_focused_tab: None,
+    }
+}
+
+/// How a managed create that fails once its worktree exists reports it: the
+/// worktree it made is rolled back first.
+struct CreateFailure<'a> {
+    /// The project's repository.
+    repo_path: &'a Path,
+    /// Whether the create made the worktree, and so takes it back.
+    ownership: WorktreeOwnership,
+    /// What takes the worktree back.
+    rollback: &'a Rollback,
+    /// Where the failure is reported.
+    worker_tx: &'a Sender<WorkerEvent>,
+    /// The create's status key.
+    create_key: &'a str,
+}
+
+impl CreateFailure<'_> {
+    /// Roll back the worktree `session` was made in, when the create made it,
+    /// and report the create failed with `message`.
+    fn report(&self, session: &AgentSession, message: crate::status_text::StatusText) {
+        if self.ownership == WorktreeOwnership::CreatedByThisJob
+            && let Some(managed) = session.workspace.as_managed()
+        {
+            rollback_created_worktree(self.repo_path, managed, &session.id, Some(self.rollback));
+        }
+        let _ = self.worker_tx.send(WorkerEvent::CreateAgentFailed {
+            status_op_id: self.create_key.to_string(),
+            attempted_name: Some(session.display_label()),
+            message,
+        });
+    }
+}
+
+/// What a create's final says, and how loudly.
+struct CreateStatus {
+    /// The whole sentence: a leading warning, the success line, then the notes.
+    message: crate::status_text::StatusText,
+    /// Whether it leads with a warning.
+    warns: bool,
+    /// The lead and the notes on their own, so a create whose startup command
+    /// fails can still say them after its failure sentence.
+    notes: Option<crate::status_text::StatusText>,
+    /// The surfaces it is quiet on.
+    quiet: crate::statusline::QuietSurfaces,
+}
+
+impl CreateStatus {
+    /// Notes ride the keyed create-op final so they surface as the visible
+    /// status/toast, never log-only. A note is a fact the screen does not show,
+    /// so it makes even an otherwise quiet create speak. A leading warning
+    /// (`lead`) goes ahead of the success line (`message`), so the terminal
+    /// UI's two-row status footer cannot cut the one part the user must act on,
+    /// and it makes the final a warning so it stays on screen longer.
+    fn compose(
+        message: crate::status_text::StatusText,
+        lead: Option<crate::status_text::StatusText>,
+        notes: Vec<crate::status_text::StatusText>,
+        quiet: crate::statusline::QuietSurfaces,
+    ) -> Self {
+        let join = |joined: crate::status_text::StatusText,
+                    part: crate::status_text::StatusText| {
+            crate::status_text![joined, " ", part]
+        };
+        let warns = lead.is_some();
+        let trailing_notes = notes.into_iter().reduce(join);
+        let status_notes = lead
+            .clone()
+            .into_iter()
+            .chain(trailing_notes.clone())
+            .reduce(join);
+        let quiet = if status_notes.is_some() {
+            crate::statusline::QuietSurfaces::LOUD
+        } else {
+            quiet
+        };
+        let message = lead
+            .into_iter()
+            .chain(std::iter::once(message))
+            .chain(trailing_notes)
+            .reduce(join)
+            .unwrap_or_default();
+        Self {
+            message,
+            warns,
+            notes: status_notes,
+            quiet,
         }
     }
-    let launch_message = if launch_with_resume {
-        format!(
-            "Continuing {} in the existing worktree...",
-            session.provider.as_str()
-        )
-    } else {
-        format!(
-            "Launching {} in a fresh session...",
-            session.provider.as_str()
-        )
-    };
+}
+
+/// Run a create's startup command, `run`, saying so first and logging how it
+/// ended.
+fn run_create_startup_command(
+    paths: &DuxPaths,
+    run: StartupCommandRun,
+    registry: &crate::process_sessions::AgentProcessRegistry,
+    worker_tx: &Sender<WorkerEvent>,
+    create_key: &str,
+) -> crate::startup::StartupCommandResult {
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
         status_op_id: create_key.to_string(),
-        message: launch_message.into(),
+        message: crate::status_text![
+            "Running startup command for agent ",
+            q(run.session.display_label()),
+            "..."
+        ],
     });
-    // crossterm::terminal::size() returns (cols, rows).
-    let (cols, rows) = term_size;
-    let request = AgentLaunchRequest {
-        // Create is always the session-slot tab, effective provider ==
-        // session.provider. (Evaluated before `session` is moved.)
-        tab_id: session.slot_tab_id().to_owned(),
-        provider: session.provider.clone(),
-        session,
-        provider_config: provider_cfg,
-        env,
-        identity,
-        resume: launch_with_resume,
-        pty_size: (rows, cols),
-        scrollback_lines: config.ui.agent_scrollback_lines,
-        kind: AgentLaunchKind::Create {
-            status_message,
-            status_warns,
-            status_notes: status_notes.map(Box::new),
-            pull_request_pin,
-            repo_path: repo_path.to_string_lossy().to_string(),
-            owns_worktree,
-            startup_result,
-            status_op_id: create_key.to_string(),
-        },
-        // A freshly created agent lands focused-but-minimized;
-        // only fullscreen-seeking gestures set this, and create is never one.
-        wants_fullscreen: false,
-        status_quiet,
-    };
-    let gate = crate::process_sessions::SpawnGate::new(
-        rollback.registries.processes.clone(),
-        rollback.registries.worktrees.clone(),
-    );
-    run_agent_launch_job_with(request, worker_tx, Some(&rollback), &gate);
+    let result = run_startup_command(paths, run, registry);
+    match &result.status {
+        Ok(()) => logger::info(&format!(
+            "startup command succeeded for {} (log: {})",
+            result.session_id,
+            result.log_path.display()
+        )),
+        Err(err) => logger::error(&format!(
+            "startup command failed for {}: {err} (log: {})",
+            result.session_id,
+            result.log_path.display()
+        )),
+    }
+    result
 }
 
 /// The shared registries an agent create reports into: the process sessions
@@ -3085,6 +3474,21 @@ pub fn run_agent_launch_job(
     run_agent_launch_job_with(request, worker_tx, None, gate);
 }
 
+/// Take back the worktree a create's launch `request` made, now that the
+/// launch failed: only a create's, and only one the create made.
+fn roll_back_failed_create(request: &AgentLaunchRequest, rollback: Option<&Rollback>) {
+    if let AgentLaunchKind::Create {
+        repo_path,
+        owns_worktree,
+        ..
+    } = &request.kind
+        && *owns_worktree
+        && let Some(managed) = request.session.workspace.as_managed()
+    {
+        rollback_created_worktree(Path::new(repo_path), managed, &request.session.id, rollback);
+    }
+}
+
 /// [`run_agent_launch_job`], with what a create's launch needs to take its
 /// worktree back if the launch fails.
 fn run_agent_launch_job_with(
@@ -3114,16 +3518,7 @@ fn run_agent_launch_job_with(
             "provider availability check failed for {}: {message}",
             request.session.id
         ));
-        if let AgentLaunchKind::Create {
-            repo_path,
-            owns_worktree,
-            ..
-        } = &request.kind
-            && *owns_worktree
-            && let Some(managed) = request.session.workspace.as_managed()
-        {
-            rollback_created_worktree(Path::new(repo_path), managed, &request.session.id, rollback);
-        }
+        roll_back_failed_create(&request, rollback);
         let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
             AgentLaunchFailedData { request, message },
         )));
@@ -3137,21 +3532,7 @@ fn run_agent_launch_job_with(
         Ok(ticket) => ticket,
         Err(refused) => {
             let message = refused.sentence("start this agent there").to_string();
-            if let AgentLaunchKind::Create {
-                repo_path,
-                owns_worktree,
-                ..
-            } = &request.kind
-                && *owns_worktree
-                && let Some(managed) = request.session.workspace.as_managed()
-            {
-                rollback_created_worktree(
-                    Path::new(repo_path),
-                    managed,
-                    &request.session.id,
-                    rollback,
-                );
-            }
+            roll_back_failed_create(&request, rollback);
             let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
                 AgentLaunchFailedData { request, message },
             )));
@@ -3180,21 +3561,7 @@ fn run_agent_launch_job_with(
                 "PTY spawn failed for {}: {err}",
                 request.session.id
             ));
-            if let AgentLaunchKind::Create {
-                repo_path,
-                owns_worktree,
-                ..
-            } = &request.kind
-                && *owns_worktree
-                && let Some(managed) = request.session.workspace.as_managed()
-            {
-                rollback_created_worktree(
-                    Path::new(repo_path),
-                    managed,
-                    &request.session.id,
-                    rollback,
-                );
-            }
+            roll_back_failed_create(&request, rollback);
             let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
                 format!("Failed to start {}: {err}", request.provider_config.command)
             } else {

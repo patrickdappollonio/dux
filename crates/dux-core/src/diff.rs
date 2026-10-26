@@ -108,15 +108,6 @@ pub fn diff_head_via_git_as(
     rel_path: &str,
     requested: Option<&'static encoding_rs::Encoding>,
 ) -> anyhow::Result<DiffHead> {
-    // Everything past the spawn goes through this, so no early return can leave
-    // a child behind.
-    fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
-        if how == Reap::KillFirst {
-            let _ = child.kill();
-        }
-        child.wait().ok().and_then(|status| status.code())
-    }
-
     let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
 
     let head_prefix = crate::git::file_prefix_at_head(worktree, rel_path, BINARY_SAMPLE_BYTES)?;
@@ -142,35 +133,12 @@ pub fn diff_head_via_git_as(
     // form alone answers "the two differ" with exit code 1.
     let no_index = head_prefix.is_none();
 
-    let mut command = Command::new("git");
-    command.args(["-C", worktree.to_string_lossy().as_ref()]);
-    // Pin every setting that changes the patch's shape or its length. A reader
-    // with `diff.context = 10` must not get different counts from the same
-    // file, and a textconv filter must not run a program of the user's choosing
-    // over a file dux is only trying to show the head of.
-    command.args([
-        "-c",
-        "core.quotePath=false",
-        "-c",
-        "diff.noprefix=false",
-        "-c",
-        "diff.algorithm=myers",
-        "-c",
-        "diff.context=3",
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-    ]);
-    if no_index {
-        command.args(["--no-index", "--", "/dev/null", rel_path]);
+    let against = if no_index {
+        DiffAgainst::EmptyFile
     } else {
-        command.args(["HEAD", "--", rel_path]);
-    }
-    // The binary marker below is one of the few git messages this READS rather
-    // than shows, so the child is pinned to the C locale: a translated build
-    // would otherwise print a sentence no prefix check recognises.
-    command.env("LC_ALL", "C").env("LANG", "C");
+        DiffAgainst::Head
+    };
+    let mut command = diff_head_command(worktree, rel_path, against);
 
     let mut child = command
         .stdout(Stdio::piped())
@@ -191,48 +159,20 @@ pub fn diff_head_via_git_as(
     });
 
     let Some(stdout) = child.stdout.take() else {
-        reap(&mut child, Reap::KillFirst);
+        reap_child(&mut child, Reap::KillFirst);
         anyhow::bail!("git diff produced no output stream for {rel_path}");
     };
 
-    // The kept lines as git wrote them. The file's own bytes sit after a
-    // one-byte marker in each hunk line, and are decoded once the encoding
-    // is known; the byte cap is checked again on the decoded text.
-    let mut kept_lines: Vec<Vec<u8>> = Vec::new();
-    let mut kept_bytes = 0usize;
-    let mut shown_lines = 0usize;
-    let mut total_lines = 0usize;
-    let mut total_is_at_least = false;
-    let mut saw_hunk = false;
-    let mut saw_binary_marker = false;
-    let mut read_error = None;
-    for line in BufReader::new(stdout).split(b'\n') {
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => {
-                read_error = Some(e);
-                break;
-            }
-        };
-        total_lines += 1;
-        if !saw_hunk && line.starts_with(b"@@") {
-            saw_hunk = true;
-        }
-        if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
-            saw_binary_marker = true;
-        }
-        if shown_lines < DIFF_HEAD_MAX_LINES && kept_bytes + line.len() < DIFF_HEAD_MAX_BYTES {
-            kept_bytes += line.len() + 1;
-            kept_lines.push(line);
-            shown_lines += 1;
-        }
-        if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
-            total_is_at_least = true;
-            break;
-        }
-    }
+    let PatchHead {
+        kept_lines,
+        total_lines,
+        total_is_at_least,
+        saw_hunk,
+        saw_binary_marker,
+        read_error,
+    } = read_patch_head(stdout);
 
-    let code = reap(
+    let code = reap_child(
         &mut child,
         if total_is_at_least {
             Reap::KillFirst
@@ -285,6 +225,124 @@ pub fn diff_head_via_git_as(
         encoding: Some(encoding.name().to_string()),
         encoding_fallback,
     })
+}
+
+/// Wait for `child`, killing it first as `how` says, and answer its exit code.
+/// Everything past the spawn goes through this, so no early return can leave
+/// a child behind.
+fn reap_child(child: &mut std::process::Child, how: Reap) -> Option<i32> {
+    if how == Reap::KillFirst {
+        let _ = child.kill();
+    }
+    child.wait().ok().and_then(|status| status.code())
+}
+
+/// What [`diff_head_command`] diffs a file against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffAgainst {
+    /// Its version at HEAD.
+    Head,
+    /// The empty file, for a file HEAD does not have.
+    EmptyFile,
+}
+
+/// The `git diff` [`diff_head_via_git_as`] runs for `rel_path` in `worktree`,
+/// `against` HEAD or the empty file.
+fn diff_head_command(worktree: &Path, rel_path: &str, against: DiffAgainst) -> Command {
+    let mut command = Command::new("git");
+    command.args(["-C", worktree.to_string_lossy().as_ref()]);
+    // Pin every setting that changes the patch's shape or its length. A reader
+    // with `diff.context = 10` must not get different counts from the same
+    // file, and a textconv filter must not run a program of the user's choosing
+    // over a file dux is only trying to show the head of.
+    command.args([
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "diff.algorithm=myers",
+        "-c",
+        "diff.context=3",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]);
+    match against {
+        DiffAgainst::EmptyFile => command.args(["--no-index", "--", "/dev/null", rel_path]),
+        DiffAgainst::Head => command.args(["HEAD", "--", rel_path]),
+    };
+    // The binary marker below is one of the few git messages this READS rather
+    // than shows, so the child is pinned to the C locale: a translated build
+    // would otherwise print a sentence no prefix check recognises.
+    command.env("LC_ALL", "C").env("LANG", "C");
+    command
+}
+
+/// What [`read_patch_head`] kept of a patch, and what it saw while reading it.
+struct PatchHead {
+    /// The kept lines as git wrote them.
+    kept_lines: Vec<Vec<u8>>,
+    /// How many lines were read.
+    total_lines: usize,
+    /// Whether reading stopped at the counting cap, so the patch is longer.
+    total_is_at_least: bool,
+    /// Whether a hunk header was read.
+    saw_hunk: bool,
+    /// Whether git's binary summary was read.
+    saw_binary_marker: bool,
+    /// The error that stopped the read early, if one did.
+    read_error: Option<std::io::Error>,
+}
+
+/// Read the head of a patch from `stdout`, keeping lines within the shown caps
+/// and counting up to the counting cap.
+fn read_patch_head(stdout: impl Read) -> PatchHead {
+    // The kept lines as git wrote them. The file's own bytes sit after a
+    // one-byte marker in each hunk line, and are decoded once the encoding
+    // is known; the byte cap is checked again on the decoded text.
+    let mut kept_lines: Vec<Vec<u8>> = Vec::new();
+    let mut kept_bytes = 0usize;
+    let mut shown_lines = 0usize;
+    let mut total_lines = 0usize;
+    let mut total_is_at_least = false;
+    let mut saw_hunk = false;
+    let mut saw_binary_marker = false;
+    let mut read_error = None;
+    for line in BufReader::new(stdout).split(b'\n') {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                read_error = Some(e);
+                break;
+            }
+        };
+        total_lines += 1;
+        if !saw_hunk && line.starts_with(b"@@") {
+            saw_hunk = true;
+        }
+        if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
+            saw_binary_marker = true;
+        }
+        if shown_lines < DIFF_HEAD_MAX_LINES && kept_bytes + line.len() < DIFF_HEAD_MAX_BYTES {
+            kept_bytes += line.len() + 1;
+            kept_lines.push(line);
+            shown_lines += 1;
+        }
+        if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
+            total_is_at_least = true;
+            break;
+        }
+    }
+    PatchHead {
+        kept_lines,
+        total_lines,
+        total_is_at_least,
+        saw_hunk,
+        saw_binary_marker,
+        read_error,
+    }
 }
 
 /// A requested encoding the patch's file lines are not valid in. Its own type,

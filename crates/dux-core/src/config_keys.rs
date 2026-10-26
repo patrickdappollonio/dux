@@ -41,7 +41,7 @@ use anyhow::{Context, Result};
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::auth::{MinimumCheck, Password, Strength};
-use crate::config::{Config, ProviderCommandConfig};
+use crate::config::{Config, PathStep as ShownStep, ProviderCommandConfig};
 pub use crate::config_write::MissingConfig;
 
 /// How a setting may be written.
@@ -1664,144 +1664,6 @@ pub fn shown_file_text(
     values: HeldBack,
     binding_understood: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
-    // What a value at `path` (and every key inside it) makes of its line.
-    fn mask_of(
-        path: &[Step],
-        value: &toml_edit::Value,
-        shown: HeldBack,
-        held_back: &dyn Fn(&[Step]) -> bool,
-        binding_understood: &dyn Fn(&str) -> bool,
-    ) -> Mask {
-        let show = shown == HeldBack::Shown;
-        let mut mask = Mask::Shown;
-        if !show && held_back(path) {
-            mask = Mask::Hidden;
-        }
-        let key_path = keys(path);
-        if !show
-            && key_path.len() == 2
-            && key_path[0] == "keys"
-            && match value {
-                toml_edit::Value::String(text) => !binding_understood(text.value()),
-                toml_edit::Value::Array(items) => items
-                    .iter()
-                    .any(|item| item.as_str().is_some_and(|text| !binding_understood(text))),
-                _ => false,
-            }
-        {
-            mask = Mask::Hidden;
-        }
-        match value {
-            toml_edit::Value::InlineTable(table) => {
-                for (key, child) in table {
-                    let mut at = path.to_vec();
-                    at.push(Step::Key(key.to_string()));
-                    mask = mask.max(mask_of(&at, child, shown, held_back, binding_understood));
-                }
-            }
-            toml_edit::Value::Array(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    let mut at = path.to_vec();
-                    at.push(Step::Index(index));
-                    mask = mask.max(mask_of(&at, item, shown, held_back, binding_understood));
-                }
-            }
-            _ => {}
-        }
-        mask
-    }
-    fn walk(
-        table: &toml_edit::Table,
-        path: &mut Vec<Step>,
-        out: &mut Vec<Entry>,
-        line_of: &dyn Fn(usize) -> usize,
-    ) {
-        for (key, item) in table {
-            path.push(Step::Key(key.to_string()));
-            match item {
-                toml_edit::Item::Value(value) => {
-                    let start = table
-                        .key(key)
-                        .and_then(toml_edit::Key::span)
-                        .or_else(|| value.span())
-                        .map(|span| line_of(span.start));
-                    let end = value.span().map(|span| line_of(span.end.saturating_sub(1)));
-                    if let Some(start) = start {
-                        out.push(Entry::Value {
-                            start,
-                            end: end.unwrap_or(start).max(start),
-                            path: path.clone(),
-                            value: value.clone(),
-                        });
-                    }
-                }
-                toml_edit::Item::Table(child) => {
-                    if let Some(span) = child.span() {
-                        out.push(Entry::Header {
-                            line: line_of(span.start),
-                            path: path.clone(),
-                            array: false,
-                            text: Some(span),
-                        });
-                    }
-                    walk(child, path, out, line_of);
-                }
-                toml_edit::Item::ArrayOfTables(entries) => {
-                    for (index, child) in entries.iter().enumerate() {
-                        path.push(Step::Index(index));
-                        if let Some(span) = child.span() {
-                            out.push(Entry::Header {
-                                line: line_of(span.start),
-                                path: path.clone(),
-                                array: true,
-                                text: Some(span),
-                            });
-                        }
-                        walk(child, path, out, line_of);
-                        path.pop();
-                    }
-                }
-                toml_edit::Item::None => {}
-            }
-            path.pop();
-        }
-    }
-    use crate::config::PathStep as Step;
-    /// What a line holds.
-    enum Entry {
-        Header {
-            line: usize,
-            path: Vec<Step>,
-            /// Whether it opens an entry of an array of tables.
-            array: bool,
-            /// The header itself, `[` to `]`, as written.
-            text: Option<std::ops::Range<usize>>,
-        },
-        Value {
-            start: usize,
-            end: usize,
-            path: Vec<Step>,
-            value: toml_edit::Value,
-        },
-    }
-    /// How a value line is shown.
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum Mask {
-        Shown,
-        Hidden,
-        Plaintext,
-    }
-    fn parts(path: &[Step]) -> Vec<crate::config::PathPart<'_>> {
-        path.iter().map(Step::as_part).collect()
-    }
-    fn keys(path: &[Step]) -> Vec<String> {
-        path.iter()
-            .filter_map(|step| match step {
-                Step::Key(key) => Some(key.clone()),
-                Step::Index(_) => None,
-            })
-            .collect()
-    }
     if let Err(error) = toml::from_str::<toml::Table>(raw) {
         anyhow::bail!(
             "config.toml is not valid TOML ({}), so dux cannot tell where anything sits in it, a \
@@ -1816,7 +1678,6 @@ pub fn shown_file_text(
             crate::config::describe_toml_edit_error(raw, &error)
         )
     })?;
-    let passwords = crate::config::plaintext_passwords(raw);
     let starts: Vec<usize> = std::iter::once(0)
         .chain(raw.match_indices('\n').map(|(at, _)| at + 1))
         .collect();
@@ -1825,74 +1686,39 @@ pub fn shown_file_text(
         Err(index) => index.saturating_sub(1),
     };
     let mut entries = Vec::new();
-    walk(doc.as_table(), &mut Vec::new(), &mut entries, &line_of);
-    // A path whose values a printer holds back without `show`.
-    let held_back = |path: &[Step]| -> bool {
-        let keys = keys(path);
-        crate::config::first_hidden_part_of(&parts(path))
-            || matches!(keys.first().map(String::as_str), Some("env" | "projects"))
-            || sensitive_auth_setting(&keys).is_some()
+    walk_shown_entries(doc.as_table(), &mut Vec::new(), &mut entries, &line_of);
+    let file = ShownFile {
+        raw,
+        lines: raw.split_inclusive('\n').collect(),
+        passwords: crate::config::plaintext_passwords(raw),
+        values,
+        binding_understood,
     };
-    // Whether a plaintext password sits at, below or above `path`.
-    let plaintext = |path: &[Step]| {
-        passwords
-            .iter()
-            .any(|password| password.steps.starts_with(path) || path.starts_with(&password.steps))
-    };
-    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
-    let mut shown: Vec<Option<String>> =
-        lines.iter().map(|line| Some((*line).to_string())).collect();
-    let newline = |line: &str| if line.ends_with('\n') { "\n" } else { "" };
-    let mut headers: Vec<(usize, Vec<Step>)> = Vec::new();
-    let mut in_value = vec![false; lines.len()];
-    let mut is_header = vec![false; lines.len()];
+    let mut shown: Vec<Option<String>> = file
+        .lines
+        .iter()
+        .map(|line| Some((*line).to_string()))
+        .collect();
+    let mut headers: Vec<(usize, Vec<ShownStep>)> = Vec::new();
+    let mut in_value = vec![false; file.lines.len()];
+    let mut is_header = vec![false; file.lines.len()];
     for entry in &entries {
         match entry {
-            Entry::Header {
+            ShownEntry::Header {
                 line,
                 path,
-                array,
+                kind,
                 text,
             } => {
                 headers.push((*line, path.clone()));
-                let Some(line_text) = lines.get(*line) else {
-                    continue;
-                };
-                is_header[*line] = true;
-                if values == HeldBack::Shown || !held_back(path) {
-                    continue;
+                if *line < file.lines.len() {
+                    is_header[*line] = true;
+                    if let Some(header) = file.held_back_header(*line, path, *kind, text.as_ref()) {
+                        shown[*line] = Some(header);
+                    }
                 }
-                // Held back: the header as dux names it, and never the
-                // comment after it.
-                let (open, close) = if *array { ("[[", "]]") } else { ("[", "]") };
-                let header = match text {
-                    Some(span) if !crate::config::first_hidden_part_of(&parts(path)) => {
-                        raw[span.clone()].trim().to_string()
-                    }
-                    _ => {
-                        let named = if *array {
-                            &path[..path.len().saturating_sub(1)]
-                        } else {
-                            &path[..]
-                        };
-                        format!(
-                            "{open}{}{close}",
-                            crate::config::shown_parts(raw, &parts(named))
-                        )
-                    }
-                };
-                let after = text
-                    .as_ref()
-                    .map_or(*line_text, |span| raw.get(span.end..).unwrap_or_default());
-                let after = after.split('\n').next().unwrap_or_default();
-                let comment = if after.contains('#') {
-                    " # (comment not shown)"
-                } else {
-                    ""
-                };
-                shown[*line] = Some(format!("{header}{comment}{}", newline(line_text)));
             }
-            Entry::Value {
+            ShownEntry::Value {
                 start,
                 end,
                 path,
@@ -1903,95 +1729,365 @@ pub fn shown_file_text(
                         *flag = true;
                     }
                 }
-                let mask = if plaintext(path) {
-                    Mask::Plaintext
-                } else {
-                    mask_of(path, value, values, &held_back, binding_understood)
-                };
-                if mask == Mask::Shown {
-                    continue;
-                }
-                let Some(text) = lines.get(*start) else {
-                    continue;
-                };
-                let indent: String = text
-                    .chars()
-                    .take_while(|c| c.is_whitespace() && *c != '\n')
-                    .collect();
-                let key_text = if crate::config::first_hidden_part_of(&parts(path)) {
-                    crate::config::shown_parts(raw, &parts(path))
-                } else {
-                    text.split_once('=').map_or_else(
-                        || text.trim().to_string(),
-                        |(key, _)| key.trim().to_string(),
-                    )
-                };
-                let placeholder = match mask {
-                    Mask::Plaintext => crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
-                    _ => NOT_SHOWN,
-                };
-                // The value's own trailing comment goes with it.
-                let commented = value
-                    .decor()
-                    .suffix()
-                    .and_then(|suffix| {
-                        suffix
-                            .span()
-                            .and_then(|span| raw.get(span))
-                            .or_else(|| suffix.as_str())
-                    })
-                    .is_some_and(|suffix| suffix.contains('#'));
-                let comment = if commented {
-                    " # (comment not shown)"
-                } else {
-                    ""
-                };
-                shown[*start] = Some(format!(
-                    "{indent}{key_text} = {placeholder}{comment}{}",
-                    newline(text)
-                ));
-                // A value written over several lines is one line here.
-                for line in start + 1..=*end {
-                    if let Some(slot) = shown.get_mut(line) {
-                        *slot = None;
+                if let Some(text) = file.held_back_value(*start, path, value) {
+                    shown[*start] = Some(text);
+                    // A value written over several lines is one line here.
+                    for line in start + 1..=*end {
+                        if let Some(slot) = shown.get_mut(line) {
+                            *slot = None;
+                        }
                     }
                 }
             }
         }
     }
-    // Every line a plaintext password spans is masked above, by its path;
-    // one still as written (which no shape dux knows leaves) goes too.
-    for password in &passwords {
-        for line in password.lines.clone() {
-            if is_header.get(line) == Some(&false)
-                && let (Some(Some(now)), Some(was)) = (shown.get(line), lines.get(line))
-                && now == was
-                && !now.trim().is_empty()
-            {
-                shown[line] = Some(format!(
-                    "# {}{}",
-                    crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
-                    newline(was)
-                ));
+    file.mask_password_lines_left(&is_header, &mut shown);
+    if values == HeldBack::Masked {
+        file.mask_held_back_comments(headers, &in_value, &mut shown);
+    }
+    Ok(shown.into_iter().flatten().collect())
+}
+
+/// What a line of the file [`shown_file_text`] prints holds.
+enum ShownEntry {
+    /// A table's header.
+    Header {
+        /// The line it sits on.
+        line: usize,
+        /// The table's path.
+        path: Vec<ShownStep>,
+        /// Whether it opens a table or an entry of an array of tables.
+        kind: HeaderKind,
+        /// The header itself, `[` to `]`, as written.
+        text: Option<std::ops::Range<usize>>,
+    },
+    /// A key and its value.
+    Value {
+        /// The line the key sits on.
+        start: usize,
+        /// The last line the value runs over.
+        end: usize,
+        /// The key's path.
+        path: Vec<ShownStep>,
+        /// The value as written.
+        value: toml_edit::Value,
+    },
+}
+
+/// What a header in the file [`shown_file_text`] prints opens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeaderKind {
+    /// A table: `[name]`.
+    Table,
+    /// An entry of an array of tables: `[[name]]`.
+    ArrayEntry,
+}
+
+/// How [`shown_file_text`] shows a value line.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ShownMask {
+    /// As written.
+    Shown,
+    /// Its key and `(not shown)`.
+    Hidden,
+    /// Its key and the plaintext password placeholder.
+    Plaintext,
+}
+
+/// The parts of a path, as the formatter names them.
+fn shown_parts_of(path: &[ShownStep]) -> Vec<crate::config::PathPart<'_>> {
+    path.iter().map(ShownStep::as_part).collect()
+}
+
+/// The keys of a path, its indexes left out.
+fn shown_keys_of(path: &[ShownStep]) -> Vec<String> {
+    path.iter()
+        .filter_map(|step| match step {
+            ShownStep::Key(key) => Some(key.clone()),
+            ShownStep::Index(_) => None,
+        })
+        .collect()
+}
+
+/// Every header and value under `table`, at `path`, onto `out`, with the line
+/// `line_of` puts each at.
+fn walk_shown_entries(
+    table: &toml_edit::Table,
+    path: &mut Vec<ShownStep>,
+    out: &mut Vec<ShownEntry>,
+    line_of: &dyn Fn(usize) -> usize,
+) {
+    for (key, item) in table {
+        path.push(ShownStep::Key(key.to_string()));
+        match item {
+            toml_edit::Item::Value(value) => {
+                let start = table
+                    .key(key)
+                    .and_then(toml_edit::Key::span)
+                    .or_else(|| value.span())
+                    .map(|span| line_of(span.start));
+                let end = value.span().map(|span| line_of(span.end.saturating_sub(1)));
+                if let Some(start) = start {
+                    out.push(ShownEntry::Value {
+                        start,
+                        end: end.unwrap_or(start).max(start),
+                        path: path.clone(),
+                        value: value.clone(),
+                    });
+                }
+            }
+            toml_edit::Item::Table(child) => {
+                if let Some(span) = child.span() {
+                    out.push(ShownEntry::Header {
+                        line: line_of(span.start),
+                        path: path.clone(),
+                        kind: HeaderKind::Table,
+                        text: Some(span),
+                    });
+                }
+                walk_shown_entries(child, path, out, line_of);
+            }
+            toml_edit::Item::ArrayOfTables(entries) => {
+                for (index, child) in entries.iter().enumerate() {
+                    path.push(ShownStep::Index(index));
+                    if let Some(span) = child.span() {
+                        out.push(ShownEntry::Header {
+                            line: line_of(span.start),
+                            path: path.clone(),
+                            kind: HeaderKind::ArrayEntry,
+                            text: Some(span),
+                        });
+                    }
+                    walk_shown_entries(child, path, out, line_of);
+                    path.pop();
+                }
+            }
+            toml_edit::Item::None => {}
+        }
+        path.pop();
+    }
+}
+
+/// The config file [`shown_file_text`] prints, and how it prints it.
+struct ShownFile<'a> {
+    /// The file's text.
+    raw: &'a str,
+    /// Its lines, each with its newline.
+    lines: Vec<&'a str>,
+    /// Every plaintext password in it.
+    passwords: Vec<crate::config::PlaintextPassword>,
+    /// Whether held-back values are shown.
+    values: HeldBack,
+    /// Whether a key binding is one dux understands.
+    binding_understood: &'a dyn Fn(&str) -> bool,
+}
+
+impl ShownFile<'_> {
+    /// Whether a printer holds back the values at `path` without `show`.
+    fn held_back(path: &[ShownStep]) -> bool {
+        let keys = shown_keys_of(path);
+        crate::config::first_hidden_part_of(&shown_parts_of(path))
+            || matches!(keys.first().map(String::as_str), Some("env" | "projects"))
+            || sensitive_auth_setting(&keys).is_some()
+    }
+
+    /// Whether a plaintext password sits at, below or above `path`.
+    fn plaintext(&self, path: &[ShownStep]) -> bool {
+        self.passwords
+            .iter()
+            .any(|password| password.steps.starts_with(path) || path.starts_with(&password.steps))
+    }
+
+    /// What a value at `path` (and every key inside it) makes of its line.
+    fn mask_of(&self, path: &[ShownStep], value: &toml_edit::Value) -> ShownMask {
+        let show = self.values == HeldBack::Shown;
+        let mut mask = ShownMask::Shown;
+        if !show && Self::held_back(path) {
+            mask = ShownMask::Hidden;
+        }
+        let key_path = shown_keys_of(path);
+        if !show
+            && key_path.len() == 2
+            && key_path[0] == "keys"
+            && match value {
+                toml_edit::Value::String(text) => !(self.binding_understood)(text.value()),
+                toml_edit::Value::Array(items) => items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|text| !(self.binding_understood)(text))
+                }),
+                _ => false,
+            }
+        {
+            mask = ShownMask::Hidden;
+        }
+        match value {
+            toml_edit::Value::InlineTable(table) => {
+                for (key, child) in table {
+                    let mut at = path.to_vec();
+                    at.push(ShownStep::Key(key.to_string()));
+                    mask = mask.max(self.mask_of(&at, child));
+                }
+            }
+            toml_edit::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    let mut at = path.to_vec();
+                    at.push(ShownStep::Index(index));
+                    mask = mask.max(self.mask_of(&at, item));
+                }
+            }
+            _ => {}
+        }
+        mask
+    }
+
+    /// The header on `line`, for the table at `path`, as it is shown when its
+    /// values are held back: the header as dux names it, and never the comment
+    /// after it. `None` when it is shown as written.
+    fn held_back_header(
+        &self,
+        line: usize,
+        path: &[ShownStep],
+        kind: HeaderKind,
+        text: Option<&std::ops::Range<usize>>,
+    ) -> Option<String> {
+        let line_text = self.lines[line];
+        if self.values == HeldBack::Shown || !Self::held_back(path) {
+            return None;
+        }
+        let (open, close) = match kind {
+            HeaderKind::Table => ("[", "]"),
+            HeaderKind::ArrayEntry => ("[[", "]]"),
+        };
+        let header = match text {
+            Some(span) if !crate::config::first_hidden_part_of(&shown_parts_of(path)) => {
+                self.raw[span.clone()].trim().to_string()
+            }
+            _ => {
+                let named = match kind {
+                    HeaderKind::Table => path,
+                    HeaderKind::ArrayEntry => &path[..path.len().saturating_sub(1)],
+                };
+                format!(
+                    "{open}{}{close}",
+                    crate::config::shown_parts(self.raw, &shown_parts_of(named))
+                )
+            }
+        };
+        let after = text.map_or(line_text, |span| {
+            self.raw.get(span.end..).unwrap_or_default()
+        });
+        let after = after.split('\n').next().unwrap_or_default();
+        let comment = if after.contains('#') {
+            " # (comment not shown)"
+        } else {
+            ""
+        };
+        Some(format!("{header}{comment}{}", line_ending(line_text)))
+    }
+
+    /// The line `start` that the value at `path` begins on, as it is shown when
+    /// the value is held back: its key, a placeholder, and a placeholder for its
+    /// own trailing comment. `None` when it is shown as written.
+    fn held_back_value(
+        &self,
+        start: usize,
+        path: &[ShownStep],
+        value: &toml_edit::Value,
+    ) -> Option<String> {
+        let mask = if self.plaintext(path) {
+            ShownMask::Plaintext
+        } else {
+            self.mask_of(path, value)
+        };
+        if mask == ShownMask::Shown {
+            return None;
+        }
+        let text = self.lines.get(start)?;
+        let indent: String = text
+            .chars()
+            .take_while(|c| c.is_whitespace() && *c != '\n')
+            .collect();
+        let key_text = if crate::config::first_hidden_part_of(&shown_parts_of(path)) {
+            crate::config::shown_parts(self.raw, &shown_parts_of(path))
+        } else {
+            text.split_once('=').map_or_else(
+                || text.trim().to_string(),
+                |(key, _)| key.trim().to_string(),
+            )
+        };
+        let placeholder = match mask {
+            ShownMask::Plaintext => crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
+            _ => NOT_SHOWN,
+        };
+        // The value's own trailing comment goes with it.
+        let commented = value
+            .decor()
+            .suffix()
+            .and_then(|suffix| {
+                suffix
+                    .span()
+                    .and_then(|span| self.raw.get(span))
+                    .or_else(|| suffix.as_str())
+            })
+            .is_some_and(|suffix| suffix.contains('#'));
+        let comment = if commented {
+            " # (comment not shown)"
+        } else {
+            ""
+        };
+        Some(format!(
+            "{indent}{key_text} = {placeholder}{comment}{}",
+            line_ending(text)
+        ))
+    }
+
+    /// Every line a plaintext password spans is masked by its path; one still
+    /// as written in `shown` (which no shape dux knows leaves) goes too.
+    fn mask_password_lines_left(&self, is_header: &[bool], shown: &mut [Option<String>]) {
+        for password in &self.passwords {
+            for line in password.lines.clone() {
+                if is_header.get(line) == Some(&false)
+                    && let (Some(Some(now)), Some(was)) = (shown.get(line), self.lines.get(line))
+                    && now == was
+                    && !now.trim().is_empty()
+                {
+                    shown[line] = Some(format!(
+                        "# {}{}",
+                        crate::config::PLAINTEXT_PASSWORD_NOT_SHOWN,
+                        line_ending(was)
+                    ));
+                }
             }
         }
     }
-    // A comment belongs to the table whose header comes last before it.
-    if values == HeldBack::Masked {
+
+    /// A placeholder in `shown` for every comment line inside a held-back table:
+    /// a comment belongs to the table whose header, of `headers`, comes last
+    /// before it.
+    fn mask_held_back_comments(
+        &self,
+        mut headers: Vec<(usize, Vec<ShownStep>)>,
+        in_value: &[bool],
+        shown: &mut [Option<String>],
+    ) {
         headers.sort_by_key(|(line, _)| *line);
-        for (index, text) in lines.iter().enumerate() {
+        for (index, text) in self.lines.iter().enumerate() {
             if in_value[index] || !text.trim_start().starts_with('#') {
                 continue;
             }
             let table = headers.iter().rev().find(|(line, _)| *line < index);
             if let Some((_, path)) = table
-                && held_back(path)
+                && Self::held_back(path)
             {
-                shown[index] = Some(format!("# (comment not shown){}", newline(text)));
+                shown[index] = Some(format!("# (comment not shown){}", line_ending(text)));
             }
         }
     }
-    Ok(shown.into_iter().flatten().collect())
+}
+
+/// The newline `line` ends with, or nothing for a last line without one.
+fn line_ending(line: &str) -> &'static str {
+    if line.ends_with('\n') { "\n" } else { "" }
 }
 
 /// What `set` prints in place of a value that is, or holds, a table.
@@ -2287,245 +2383,24 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
         .into_iter()
         .filter_map(|surface| refusal(surface).map(|why| (surface, why)))
         .collect();
-    let unknown = |reason: String, in_file: Option<String>| GetReport {
-        value: GetValue::Unknown { in_file, reason },
-        corrections: Vec::new(),
-        refused_by: Vec::new(),
-        with_names: None,
-    };
-    // What a starting surface runs with: the file through the load a start
-    // uses. A file that does not load stops every surface.
-    let effective = match crate::config::effective_config_from_text(raw) {
-        Ok(config) if refused_by.len() < 2 => config,
-        Ok(_) => {
-            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
-            return Ok(unknown(named.join("; "), in_file));
-        }
-        Err(problem) => {
-            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
-            let reason = if named.is_empty() {
-                problem.reason().to_string()
-            } else {
-                named.join("; ")
-            };
-            return Ok(unknown(reason, in_file));
+    let effective = match config_in_use_or_why_not(raw, &path, &problems, &refused_by) {
+        Ok(config) => config,
+        Err(reason) => {
+            return Ok(GetReport {
+                value: GetValue::Unknown { in_file, reason },
+                corrections: Vec::new(),
+                refused_by: Vec::new(),
+                with_names: None,
+            });
         }
     };
-    // `[keys]` is the terminal UI's alone: a file the terminal UI will not
-    // start with has no binding in use anywhere.
-    if path.first().map(String::as_str) == Some("keys")
-        && refused_by
-            .iter()
-            .any(|(surface, _)| *surface == Surface::TerminalUi)
-    {
-        let named: Vec<String> = problems
-            .iter()
-            .filter(|problem| problem.stops(Surface::TerminalUi))
-            .map(|problem| problem.message.clone())
-            .collect();
-        return Ok(unknown(named.join("; "), in_file));
-    }
-    // What dux makes of a value where it is used (a level it does not know
-    // read as info, a ceiling, `0` meaning the default), by the same
-    // `effective_*` function every runtime reader goes through.
-    let use_time = crate::config_effective::use_time_corrections_at(&effective, root);
-    let mut effective = serde_json::to_value(&effective).ok();
-    for correction in &use_time {
-        if let Some(slot) = correction
-            .path
-            .iter()
-            .try_fold(effective.as_mut(), |node, segment| {
-                Some(node.and_then(|node| node.get_mut(segment)))
-            })
-            .flatten()
-        {
-            *slot = correction.used.clone();
-        }
-    }
-    // `[keys]` is the terminal UI's alone, so it is what the terminal UI
-    // runs with, by its own resolution: its key migrations, and every
-    // action's default where the file has none.
-    let terminal_ui_starts = !refused_by
-        .iter()
-        .any(|(surface, _)| *surface == Surface::TerminalUi);
-    let keys_resolved = terminal_ui_starts
-        .then(|| crate::config::terminal_ui_keys(raw))
-        .flatten();
-    if let (Some(keys), Some(serde_json::Value::Object(map))) = (&keys_resolved, effective.as_mut())
-        && let Ok(keys) = serde_json::to_value(keys)
-    {
-        map.insert("keys".to_string(), keys);
-    }
-    // The value in use at `at`, as TOML (a table without the nulls its unset
-    // optional settings carry, which TOML has no way to write).
-    let effective_at = |at: &[String]| -> Option<toml::Value> {
-        let mut used = effective.clone();
-        for segment in at {
-            used = used.and_then(|n| n.get(segment).cloned());
-        }
-        match used {
-            Some(serde_json::Value::Null) | None => None,
-            Some(json) => toml::Value::try_from(without_nulls(json)).ok(),
-        }
-    };
-    let used_at = |at: &[String]| effective_at(at).map(|value| render(&value));
-    let used = used_at(&path);
-    // Every path below is a list of segments, never a dotted string split
-    // again: a name may hold a dot.
-    let mut sourced = crate::config::load_corrections_with_sources(raw);
-    sourced.extend(
-        use_time
-            .into_iter()
-            .map(|correction| crate::config::LoadCorrection {
-                path: correction.path,
-                reason: correction.reason,
-                from: None,
-            }),
-    );
-    // The terminal UI's own `[keys]` migrations are corrections it alone
-    // makes (see `surface_of` below).
-    if keys_resolved.is_some() {
-        sourced.extend(crate::config::terminal_ui_key_corrections_with_sources(raw));
-    }
-    let source_of = |at: &[String]| {
-        sourced
-            .iter()
-            .find(|correction| correction.path == at)
-            .and_then(|correction| correction.from.clone())
-    };
-    let corrected: Vec<(Vec<String>, String)> = sourced
-        .iter()
-        .map(|correction| (correction.path.clone(), correction.reason.clone()))
-        .collect();
-    // A correction under `[keys]` is the terminal UI's alone.
-    let surface_of = |at: &[String]| {
-        (at.first().map(String::as_str) == Some("keys")).then_some(Surface::TerminalUi)
-    };
-    let inside =
-        |key: &[String], scope: &[String]| key.len() > scope.len() && key.starts_with(scope);
+    let in_use = InUse::resolve(raw, &file, &effective, root, &refused_by);
+    let used = in_use.used_at(&path);
     let Some(in_file) = in_file else {
-        // Left out of the file, but the load may still write it, from a
-        // deprecated key; that is said with where it came from.
-        let carried = used.as_ref().and_then(|_| {
-            corrected
-                .iter()
-                .find(|(key, _)| *key == path)
-                .map(|(_, reason)| Correction {
-                    from: source_of(&path),
-                    surface: surface_of(&path),
-                    path: path.clone(),
-                    in_file: None,
-                    value_hidden: false,
-                    used: used.clone(),
-                    reason: reason.clone(),
-                })
-        });
-        return Ok(GetReport {
-            value: used.map_or(GetValue::Unset, GetValue::Default),
-            corrections: carried.into_iter().collect(),
-            refused_by,
-            with_names: None,
-        });
-    };
-    // What the load uses in place of what the file says is found by
-    // comparing the two, for every key: the load's own record says why
-    // (the correction or recovery step that covers it, a sibling included),
-    // and a difference it has no record of is still reported.
-    let covering = |key: &[String]| {
-        corrected
-            .iter()
-            .find(|(scope, _)| key == scope.as_slice() || inside(key, scope))
-    };
-    let reason_at = |key: &[String]| {
-        covering(key).map_or_else(
-            || "that is how dux server's load reads the file".to_string(),
-            |(_, reason)| reason.clone(),
-        )
+        return Ok(in_use.left_out_report(&path, used, refused_by));
     };
     if let Some(table) = node.filter(|node| node.is_table()) {
-        // A table is shown as dux uses it: every entry, the ones the file
-        // leaves to their defaults (stock providers among them) marked as
-        // defaults, and every entry the file writes whose value the load
-        // changes or drops listed beside it. An entry dropped whole (a
-        // provider, a retired block) is listed once, at the entry.
-        let mut leaves = Vec::new();
-        leaves_of(table, &mut path.clone(), &mut leaves);
-        let mut corrections: Vec<Correction> = Vec::new();
-        for (at, value) in leaves {
-            if corrections
-                .iter()
-                .any(|done| done.used.is_none() && inside(&at, &done.path))
-            {
-                continue;
-            }
-            let in_file = render(value);
-            let used = used_at(&at);
-            if !compared(value) || used.as_deref() == Some(in_file.as_str()) {
-                continue;
-            }
-            let whole = covering(&at).filter(|(scope, _)| {
-                inside(&at, scope) && inside(scope, &path) && used_at(scope).is_none()
-            });
-            corrections.push(if let Some((scope, reason)) = whole {
-                Correction {
-                    from: None,
-                    surface: surface_of(scope),
-                    path: scope.clone(),
-                    // Through the one value printer: the entry's own keys may
-                    // not all be setting names, nor the entry's name itself.
-                    in_file: value_at(&file, scope)
-                        .and_then(|value| printed_value(raw, scope, value, ValueForm::Get)),
-                    used: None,
-                    value_hidden: crate::config::path_is_hidden(scope),
-                    reason: reason.clone(),
-                }
-            } else {
-                let value_hidden = crate::config::path_is_hidden(&at);
-                Correction {
-                    from: None,
-                    surface: surface_of(&at),
-                    reason: reason_at(&at),
-                    // Through the one value printer: a list may hold
-                    // tables whose keys are no setting names, and a key
-                    // it does not name prints no value at all.
-                    in_file: printed_value(raw, &at, value, ValueForm::Get),
-                    used: if value_hidden {
-                        used.map(|_| NOT_SHOWN.to_string())
-                    } else {
-                        used
-                    },
-                    value_hidden,
-                    path: at.clone(),
-                }
-            });
-        }
-        // Entries the file leaves out that the load writes from a
-        // deprecated key.
-        for (key, reason) in &corrected {
-            if inside(key, &path) && value_at(&file, key).is_none() {
-                let used = used_at(key);
-                if used.is_some() {
-                    corrections.push(Correction {
-                        from: source_of(key),
-                        surface: surface_of(key),
-                        path: key.clone(),
-                        in_file: None,
-                        value_hidden: false,
-                        used,
-                        reason: reason.clone(),
-                    });
-                }
-            }
-        }
-        let in_use = effective_at(&path).unwrap_or_else(|| table.clone());
-        let shown = render_in_use(raw, &path, &in_use, &file, &corrections, HeldBack::Masked);
-        let named = render_in_use(raw, &path, &in_use, &file, &corrections, HeldBack::Shown);
-        return Ok(GetReport {
-            with_names: (named != shown).then_some(named),
-            value: GetValue::Set(shown),
-            corrections,
-            refused_by,
-        });
+        return Ok(in_use.table_report(&path, table, refused_by));
     }
     // A single setting: what the file says, unless the load uses something
     // else for it (or drops the entry holding it), which it says why for.
@@ -2541,8 +2416,8 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
         value: used.clone().map_or(GetValue::Unset, GetValue::Set),
         corrections: vec![Correction {
             from: None,
-            surface: surface_of(&path),
-            reason: reason_at(&path),
+            surface: InUse::surface_of(&path),
+            reason: in_use.reason_at(&path),
             path: path.clone(),
             in_file: Some(in_file),
             value_hidden: false,
@@ -2551,6 +2426,333 @@ fn get_report_inner(raw: &str, key: &Key, root: Option<&Path>) -> Result<GetRepo
         refused_by,
         with_names: None,
     })
+}
+
+/// What a starting surface runs with: the file `raw` through the load a start
+/// uses, or why nothing can say what the setting at `path` is. A file that does
+/// not load stops every surface, and `[keys]` is the terminal UI's alone, so a
+/// file the terminal UI will not start with has no binding in use anywhere.
+fn config_in_use_or_why_not(
+    raw: &str,
+    path: &[String],
+    problems: &[crate::config::StartProblem],
+    refused_by: &[(crate::config::Surface, String)],
+) -> std::result::Result<Config, String> {
+    use crate::config::Surface;
+    let effective = match crate::config::effective_config_from_text(raw) {
+        Ok(config) if refused_by.len() < 2 => config,
+        Ok(_) => {
+            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
+            return Err(named.join("; "));
+        }
+        Err(problem) => {
+            let named: Vec<String> = problems.iter().map(|p| p.message.clone()).collect();
+            return Err(if named.is_empty() {
+                problem.reason().to_string()
+            } else {
+                named.join("; ")
+            });
+        }
+    };
+    if path.first().map(String::as_str) == Some("keys")
+        && refused_by
+            .iter()
+            .any(|(surface, _)| *surface == Surface::TerminalUi)
+    {
+        let named: Vec<String> = problems
+            .iter()
+            .filter(|problem| problem.stops(Surface::TerminalUi))
+            .map(|problem| problem.message.clone())
+            .collect();
+        return Err(named.join("; "));
+    }
+    Ok(effective)
+}
+
+/// What dux uses beside what a config file says: the value in use at every
+/// path, and every correction the load and the places it is used make, with
+/// where each came from.
+struct InUse<'a> {
+    /// The file's text.
+    raw: &'a str,
+    /// The file as TOML.
+    file: &'a toml::Value,
+    /// The config in use, as JSON.
+    effective: Option<serde_json::Value>,
+    /// Every correction, with the deprecated key it came from when there is one.
+    sourced: Vec<crate::config::LoadCorrection>,
+    /// Every correction's path and why it was made. Every path is a list of
+    /// segments, never a dotted string split again: a name may hold a dot.
+    corrected: Vec<(Vec<String>, String)>,
+}
+
+impl<'a> InUse<'a> {
+    /// What dux uses for the file `raw` (parsed as `file`) that loads as
+    /// `effective`, with the settings in `root` where that matters.
+    /// `refused_by` names the surfaces that will not start with it: whether the
+    /// terminal UI is among them decides whether its `[keys]` resolution
+    /// applies.
+    fn resolve(
+        raw: &'a str,
+        file: &'a toml::Value,
+        effective: &Config,
+        root: Option<&Path>,
+        refused_by: &[(crate::config::Surface, String)],
+    ) -> Self {
+        let terminal_ui_starts = !refused_by
+            .iter()
+            .any(|(surface, _)| *surface == crate::config::Surface::TerminalUi);
+        // What dux makes of a value where it is used (a level it does not know
+        // read as info, a ceiling, `0` meaning the default), by the same
+        // `effective_*` function every runtime reader goes through.
+        let use_time = crate::config_effective::use_time_corrections_at(effective, root);
+        let mut effective = serde_json::to_value(effective).ok();
+        for correction in &use_time {
+            if let Some(slot) = correction
+                .path
+                .iter()
+                .try_fold(effective.as_mut(), |node, segment| {
+                    Some(node.and_then(|node| node.get_mut(segment)))
+                })
+                .flatten()
+            {
+                *slot = correction.used.clone();
+            }
+        }
+        // `[keys]` is the terminal UI's alone, so it is what the terminal UI
+        // runs with, by its own resolution: its key migrations, and every
+        // action's default where the file has none.
+        let keys_resolved = terminal_ui_starts
+            .then(|| crate::config::terminal_ui_keys(raw))
+            .flatten();
+        if let (Some(keys), Some(serde_json::Value::Object(map))) =
+            (&keys_resolved, effective.as_mut())
+            && let Ok(keys) = serde_json::to_value(keys)
+        {
+            map.insert("keys".to_string(), keys);
+        }
+        let mut sourced = crate::config::load_corrections_with_sources(raw);
+        sourced.extend(
+            use_time
+                .into_iter()
+                .map(|correction| crate::config::LoadCorrection {
+                    path: correction.path,
+                    reason: correction.reason,
+                    from: None,
+                }),
+        );
+        // The terminal UI's own `[keys]` migrations are corrections it alone
+        // makes (see `surface_of`).
+        if keys_resolved.is_some() {
+            sourced.extend(crate::config::terminal_ui_key_corrections_with_sources(raw));
+        }
+        let corrected = sourced
+            .iter()
+            .map(|correction| (correction.path.clone(), correction.reason.clone()))
+            .collect();
+        Self {
+            raw,
+            file,
+            effective,
+            sourced,
+            corrected,
+        }
+    }
+
+    /// The value in use at `at`, as TOML (a table without the nulls its unset
+    /// optional settings carry, which TOML has no way to write).
+    fn effective_at(&self, at: &[String]) -> Option<toml::Value> {
+        let mut used = self.effective.clone();
+        for segment in at {
+            used = used.and_then(|n| n.get(segment).cloned());
+        }
+        match used {
+            Some(serde_json::Value::Null) | None => None,
+            Some(json) => toml::Value::try_from(without_nulls(json)).ok(),
+        }
+    }
+
+    /// The value in use at `at`, as printed.
+    fn used_at(&self, at: &[String]) -> Option<String> {
+        self.effective_at(at).map(|value| render(&value))
+    }
+
+    /// The deprecated key the correction at `at` carried its value from.
+    fn source_of(&self, at: &[String]) -> Option<Vec<String>> {
+        self.sourced
+            .iter()
+            .find(|correction| correction.path == at)
+            .and_then(|correction| correction.from.clone())
+    }
+
+    /// The one surface a correction at `at` is made by: one under `[keys]` is
+    /// the terminal UI's alone.
+    fn surface_of(at: &[String]) -> Option<crate::config::Surface> {
+        (at.first().map(String::as_str) == Some("keys"))
+            .then_some(crate::config::Surface::TerminalUi)
+    }
+
+    /// Whether `key` sits strictly inside `scope`.
+    fn inside(key: &[String], scope: &[String]) -> bool {
+        key.len() > scope.len() && key.starts_with(scope)
+    }
+
+    /// The correction that covers `key`: its own, or one of a table holding it.
+    fn covering(&self, key: &[String]) -> Option<&(Vec<String>, String)> {
+        self.corrected
+            .iter()
+            .find(|(scope, _)| key == scope.as_slice() || Self::inside(key, scope))
+    }
+
+    /// Why the load uses something other than what the file says at `key`:
+    /// the load's own record (the correction or recovery step that covers it,
+    /// a sibling included), and a difference it has no record of is still
+    /// reported.
+    fn reason_at(&self, key: &[String]) -> String {
+        self.covering(key).map_or_else(
+            || "that is how dux server's load reads the file".to_string(),
+            |(_, reason)| reason.clone(),
+        )
+    }
+
+    /// The report for `path`, which the file leaves out, in use as `used`: the
+    /// load may still write it, from a deprecated key; that is said with where
+    /// it came from.
+    fn left_out_report(
+        &self,
+        path: &[String],
+        used: Option<String>,
+        refused_by: Vec<(crate::config::Surface, String)>,
+    ) -> GetReport {
+        let carried = used.as_ref().and_then(|_| {
+            self.corrected
+                .iter()
+                .find(|(key, _)| *key == path)
+                .map(|(_, reason)| Correction {
+                    from: self.source_of(path),
+                    surface: Self::surface_of(path),
+                    path: path.to_vec(),
+                    in_file: None,
+                    value_hidden: false,
+                    used: used.clone(),
+                    reason: reason.clone(),
+                })
+        });
+        GetReport {
+            value: used.map_or(GetValue::Unset, GetValue::Default),
+            corrections: carried.into_iter().collect(),
+            refused_by,
+            with_names: None,
+        }
+    }
+
+    /// The report for the table `table` at `path`, shown as dux uses it: every
+    /// entry, the ones the file leaves to their defaults (stock providers among
+    /// them) marked as defaults, and every entry the file writes whose value
+    /// the load changes or drops listed beside it. An entry dropped whole (a
+    /// provider, a retired block) is listed once, at the entry.
+    fn table_report(
+        &self,
+        path: &[String],
+        table: &toml::Value,
+        refused_by: Vec<(crate::config::Surface, String)>,
+    ) -> GetReport {
+        let mut corrections = self.changed_entries(path, table);
+        // Entries the file leaves out that the load writes from a
+        // deprecated key.
+        for (key, reason) in &self.corrected {
+            if Self::inside(key, path) && value_at(self.file, key).is_none() {
+                let used = self.used_at(key);
+                if used.is_some() {
+                    corrections.push(Correction {
+                        from: self.source_of(key),
+                        surface: Self::surface_of(key),
+                        path: key.clone(),
+                        in_file: None,
+                        value_hidden: false,
+                        used,
+                        reason: reason.clone(),
+                    });
+                }
+            }
+        }
+        let raw = self.raw;
+        let in_use = self.effective_at(path).unwrap_or_else(|| table.clone());
+        let shown = render_in_use(
+            raw,
+            path,
+            &in_use,
+            self.file,
+            &corrections,
+            HeldBack::Masked,
+        );
+        let named = render_in_use(raw, path, &in_use, self.file, &corrections, HeldBack::Shown);
+        GetReport {
+            with_names: (named != shown).then_some(named),
+            value: GetValue::Set(shown),
+            corrections,
+            refused_by,
+        }
+    }
+
+    /// Every entry the file writes in the table `table` at `path` whose value
+    /// the load changes or drops, found by comparing the two for every key.
+    fn changed_entries(&self, path: &[String], table: &toml::Value) -> Vec<Correction> {
+        let mut leaves = Vec::new();
+        leaves_of(table, &mut path.to_vec(), &mut leaves);
+        let mut corrections: Vec<Correction> = Vec::new();
+        for (at, value) in leaves {
+            if corrections
+                .iter()
+                .any(|done| done.used.is_none() && Self::inside(&at, &done.path))
+            {
+                continue;
+            }
+            let in_file = render(value);
+            let used = self.used_at(&at);
+            if !compared(value) || used.as_deref() == Some(in_file.as_str()) {
+                continue;
+            }
+            let whole = self.covering(&at).filter(|(scope, _)| {
+                Self::inside(&at, scope)
+                    && Self::inside(scope, path)
+                    && self.used_at(scope).is_none()
+            });
+            corrections.push(if let Some((scope, reason)) = whole {
+                Correction {
+                    from: None,
+                    surface: Self::surface_of(scope),
+                    path: scope.clone(),
+                    // Through the one value printer: the entry's own keys may
+                    // not all be setting names, nor the entry's name itself.
+                    in_file: value_at(self.file, scope)
+                        .and_then(|value| printed_value(self.raw, scope, value, ValueForm::Get)),
+                    used: None,
+                    value_hidden: crate::config::path_is_hidden(scope),
+                    reason: reason.clone(),
+                }
+            } else {
+                let value_hidden = crate::config::path_is_hidden(&at);
+                Correction {
+                    from: None,
+                    surface: Self::surface_of(&at),
+                    reason: self.reason_at(&at),
+                    // Through the one value printer: a list may hold
+                    // tables whose keys are no setting names, and a key
+                    // it does not name prints no value at all.
+                    in_file: printed_value(self.raw, &at, value, ValueForm::Get),
+                    used: if value_hidden {
+                        used.map(|_| NOT_SHOWN.to_string())
+                    } else {
+                        used
+                    },
+                    value_hidden,
+                    path: at.clone(),
+                }
+            });
+        }
+        corrections
+    }
 }
 
 /// Every value inside `value` that is not itself a table, with its path

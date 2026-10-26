@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Result, anyhow};
 
 use super::{
-    ContentSide, DiffStat, UNTRACKED_STATS_MAX_FILES, apply_stat, countless_paths,
+    ContentSide, DiffStat, StatusEntry, UNTRACKED_STATS_MAX_FILES, apply_stat, countless_paths,
     diff_excluded_rows, parse_numstat, parse_status_porcelain_z, paths_excluded_from_diffs,
     rename_source, untracked_file_stat,
 };
@@ -492,9 +492,59 @@ pub(super) fn fold_added_directories(
         return staged;
     }
 
-    // Folders that are not whole: every folder holding something other than a
-    // plain addition, and every folder with something untracked inside it
-    // (staged in part).
+    let (not_whole, left_out) = folders_not_whole(&staged, unstaged);
+    // The fold root of each added file: its shallowest ancestor that HEAD
+    // lacks AND that is whole. Trying each ancestor in turn, rather than only
+    // the shallowest one HEAD lacks, is what lets a subfolder staged whole fold
+    // under a folder staged in part. Roots never nest: a whole folder's
+    // subfolders are whole too, so every file under it stops at it first.
+    let root_of: Vec<Option<String>> = staged
+        .iter()
+        .map(|file| {
+            if file.status != "A" {
+                return None;
+            }
+            ancestors(&file.path)
+                .find(|ancestor| missing.contains(*ancestor) && !not_whole.contains(ancestor))
+                .map(str::to_string)
+        })
+        .collect();
+    let mut roots: HashMap<String, usize> = HashMap::new();
+    for root in root_of.iter().flatten() {
+        *roots.entry(root.clone()).or_default() += 1;
+    }
+    if roots.is_empty() {
+        return staged;
+    }
+
+    let mut contents_of = folded_root_contents(worktree, &roots, left_out);
+
+    let mut folded = Vec::with_capacity(staged.len());
+    let mut emitted: HashSet<String> = HashSet::new();
+    for (file, root) in staged.into_iter().zip(root_of) {
+        match root.filter(|root| roots.contains_key(root)) {
+            Some(root) => {
+                if !emitted.contains(&root) {
+                    let contents = contents_of.remove(&root).unwrap_or_default();
+                    emitted.insert(root.clone());
+                    folded.push(folder_row_with(root, "A", contents));
+                }
+            }
+            None => folded.push(file),
+        }
+    }
+    folded
+}
+
+/// The folders among `staged`'s ancestors that are not whole (every folder
+/// holding something other than a plain addition, and every folder with
+/// something untracked in `unstaged` inside it), and the repositories left
+/// untracked that a folder stage leaves out, each with how many repositories and
+/// worktrees it counts.
+fn folders_not_whole<'a>(
+    staged: &'a [ChangedFile],
+    unstaged: &'a [ChangedFile],
+) -> (HashSet<&'a str>, Vec<(&'a ChangedFile, usize, usize)>) {
     let mut not_whole: HashSet<&str> = HashSet::new();
     for file in staged.iter().filter(|file| file.status != "A") {
         not_whole.extend(ancestors(&file.path));
@@ -532,30 +582,17 @@ pub(super) fn fold_added_directories(
         not_whole.insert(file.path.as_str());
         not_whole.extend(ancestors(&file.path));
     }
-    // The fold root of each added file: its shallowest ancestor that HEAD
-    // lacks AND that is whole. Trying each ancestor in turn, rather than only
-    // the shallowest one HEAD lacks, is what lets a subfolder staged whole fold
-    // under a folder staged in part. Roots never nest: a whole folder's
-    // subfolders are whole too, so every file under it stops at it first.
-    let root_of: Vec<Option<String>> = staged
-        .iter()
-        .map(|file| {
-            if file.status != "A" {
-                return None;
-            }
-            ancestors(&file.path)
-                .find(|ancestor| missing.contains(*ancestor) && !not_whole.contains(ancestor))
-                .map(str::to_string)
-        })
-        .collect();
-    let mut roots: HashMap<String, usize> = HashMap::new();
-    for root in root_of.iter().flatten() {
-        *roots.entry(root.clone()).or_default() += 1;
-    }
-    if roots.is_empty() {
-        return staged;
-    }
+    (not_whole, left_out)
+}
 
+/// What each folded root of `roots` (with its count of added files) holds:
+/// its files, its fingerprint from the index, the staged links to repositories
+/// inside it, and what the stage left out of it, from `left_out`.
+fn folded_root_contents(
+    worktree: &Path,
+    roots: &HashMap<String, usize>,
+    left_out: Vec<(&ChangedFile, usize, usize)>,
+) -> HashMap<String, crate::model::FolderContents> {
     // A staged link to a repository (a gitlink, mode 160000) is not a file:
     // it is counted apart, as the untracked side counts the repositories it
     // does not enter. The folded roots are asked once, from the index.
@@ -612,22 +649,7 @@ pub(super) fn fold_added_directories(
             }
         }
     }
-
-    let mut folded = Vec::with_capacity(staged.len());
-    let mut emitted: HashSet<String> = HashSet::new();
-    for (file, root) in staged.into_iter().zip(root_of) {
-        match root.filter(|root| roots.contains_key(root)) {
-            Some(root) => {
-                if !emitted.contains(&root) {
-                    let contents = contents_of.remove(&root).unwrap_or_default();
-                    emitted.insert(root.clone());
-                    folded.push(folder_row_with(root, "A", contents));
-                }
-            }
-            None => folded.push(file),
-        }
-    }
-    folded
+    contents_of
 }
 
 /// What the index holds under some folders, from one `ls-files --stage`.
@@ -1306,25 +1328,7 @@ fn untracked_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
 fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
     let wt = worktree.to_string_lossy();
     let pathspec = format!("{dir}/");
-    let output = Command::new("git")
-        .args([
-            "--literal-pathspecs",
-            "-C",
-            wt.as_ref(),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=no",
-            "--",
-            &pathspec,
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+    let stdout = tracked_status_under(&wt, &pathspec)?;
 
     // Each sub-folder's fingerprint comes from its entries in the same read.
     let index = staged_index(worktree, &[dir], |path| {
@@ -1339,7 +1343,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
     let mut folders: Vec<(String, crate::model::FolderContents)> = Vec::new();
     let mut folder_index: HashMap<String, usize> = HashMap::new();
     let mut entries = 0_usize;
-    for entry in parse_status_porcelain_z(&output.stdout) {
+    for entry in parse_status_porcelain_z(&stdout) {
         if matches!(entry.index_status, ' ' | '?') {
             continue;
         }
@@ -1371,20 +1375,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
                 None => contents.file_count += 1,
             }
         } else {
-            files.push(ChangedFile {
-                status: entry.index_status.to_string(),
-                path: entry.path.clone(),
-                additions: 0,
-                deletions: 0,
-                binary: false,
-                diff_excluded: false,
-                renamed_from: rename_source(entry.index_status, entry.renamed_from.as_ref()),
-                kind: match link {
-                    Some(UntrackedDirectoryKind::LinkedWorktree) => ChangedFileKind::LinkedWorktree,
-                    Some(_) => ChangedFileKind::NestedRepository,
-                    None => ChangedFileKind::File,
-                },
-            });
+            files.push(staged_entry_row(&entry, link));
         }
     }
 
@@ -1410,23 +1401,7 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
             }
         }
         if sum_folders {
-            let mut sums: HashMap<String, (usize, usize)> = HashMap::new();
-            for (path, stat) in &numstat {
-                let DiffStat::Text(additions, deletions) = stat else {
-                    continue;
-                };
-                let Some(rest) = path.strip_prefix(&pathspec) else {
-                    continue;
-                };
-                let (child, deeper) = split_child(rest.as_bytes());
-                if deeper {
-                    let sum = sums
-                        .entry(String::from_utf8_lossy(child).into_owned())
-                        .or_default();
-                    sum.0 += additions;
-                    sum.1 += deletions;
-                }
-            }
+            let sums = child_folder_sums(&numstat, &pathspec);
             let rows: Vec<ChangedFile> = folders
                 .into_iter()
                 .map(|(child, contents)| {
@@ -1448,6 +1423,80 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
             .map(|(child, contents)| folder_row_with(format!("{pathspec}{child}"), "A", contents)),
     );
     Ok(files)
+}
+
+/// `git status --porcelain=v1 -z` for the tracked entries under `pathspec`, in
+/// the worktree `wt`.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or reports a failure.
+fn tracked_status_under(wt: &str, pathspec: &str) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args([
+            "--literal-pathspecs",
+            "-C",
+            wt,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=no",
+            "--",
+            pathspec,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// The row of a staged `entry` listed directly in its folder, a link to a
+/// repository (`link`) told apart from a file.
+fn staged_entry_row(entry: &StatusEntry, link: Option<UntrackedDirectoryKind>) -> ChangedFile {
+    ChangedFile {
+        status: entry.index_status.to_string(),
+        path: entry.path.clone(),
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        diff_excluded: false,
+        renamed_from: rename_source(entry.index_status, entry.renamed_from.as_ref()),
+        kind: match link {
+            Some(UntrackedDirectoryKind::LinkedWorktree) => ChangedFileKind::LinkedWorktree,
+            Some(_) => ChangedFileKind::NestedRepository,
+            None => ChangedFileKind::File,
+        },
+    }
+}
+
+/// The added and deleted lines of every child folder of `pathspec`, summed
+/// from `numstat`.
+fn child_folder_sums(
+    numstat: &HashMap<String, DiffStat>,
+    pathspec: &str,
+) -> HashMap<String, (usize, usize)> {
+    let mut sums: HashMap<String, (usize, usize)> = HashMap::new();
+    for (path, stat) in numstat {
+        let DiffStat::Text(additions, deletions) = stat else {
+            continue;
+        };
+        let Some(rest) = path.strip_prefix(pathspec) else {
+            continue;
+        };
+        let (child, deeper) = split_child(rest.as_bytes());
+        if deeper {
+            let sum = sums
+                .entry(String::from_utf8_lossy(child).into_owned())
+                .or_default();
+            sum.0 += additions;
+            sum.1 += deletions;
+        }
+    }
+    sums
 }
 
 /// Staged line counts under `dir`, leaving `skip` unread. Each spec carries its
