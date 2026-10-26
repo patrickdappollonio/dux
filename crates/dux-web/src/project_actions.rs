@@ -999,10 +999,9 @@ mod tests {
         assert_eq!(listed["path"].as_str(), Some(other_path.as_str()));
     }
 
-    #[test]
-    fn add_project_command_follows_the_flag_precedence_ladder() {
-        use dux_core::wire::WireCommand;
-        let clone = |url: &str| super::AddProjectBody {
+    /// An add body that asks to clone `url`, with every other flag set too.
+    fn clone_body(url: &str) -> super::AddProjectBody {
+        super::AddProjectBody {
             clone_url: Some(url.to_string()),
             agent_name: Some("first".to_string()),
             random_name: true,
@@ -1011,9 +1010,14 @@ mod tests {
                 AddFlag::CreateInitialCommit,
                 AddFlag::InitRepo,
             ])
-        };
+        }
+    }
+
+    #[test]
+    fn add_project_command_puts_a_clone_and_a_pull_request_first() {
+        use dux_core::wire::WireCommand;
         assert_eq!(
-            super::add_project_command(clone("https://example.com/r.git")),
+            super::add_project_command(clone_body("https://example.com/r.git")),
             WireCommand::CloneProject {
                 url: "https://example.com/r.git".to_string(),
                 path: "/repo".to_string(),
@@ -1041,7 +1045,7 @@ mod tests {
                 super::add_project_command(super::AddProjectBody {
                     pull_request: pull_request.clone(),
                     add_existing,
-                    ..clone("https://example.com/r.git")
+                    ..clone_body("https://example.com/r.git")
                 }),
                 WireCommand::CloneProject {
                     url: "https://example.com/r.git".to_string(),
@@ -1054,6 +1058,11 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn add_project_command_carries_the_review_copy_agreement() {
+        use dux_core::wire::WireCommand;
         // The agreement to a review copy a dialog gives before the clone rides
         // the request: the reason it was shown is kept, and a command line's
         // flag carries none.
@@ -1092,8 +1101,13 @@ mod tests {
                 by_flag: true,
             }
         );
+    }
+
+    #[test]
+    fn add_project_command_follows_the_flag_precedence_ladder() {
+        use dux_core::wire::WireCommand;
         assert!(matches!(
-            super::add_project_command(clone("  ")),
+            super::add_project_command(clone_body("  ")),
             WireCommand::AddProjectInitRepo { .. }
         ));
         assert!(matches!(

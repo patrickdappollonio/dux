@@ -1001,41 +1001,7 @@ pub(crate) fn identity_news(
     let admitted_before = previous.and_then(|id| admitted_own_name(id, password));
     let admitted_now = admitted_own_name(next, password);
     if funnel_now && !funnel_before {
-        let name = next
-            .status
-            .tailscale_assigned_name()
-            .unwrap_or("this machine's tailnet name");
-        news.push(if password_set {
-            (
-                StatusTone::Warning,
-                dux_core::status_text![
-                    "A Tailscale Funnel route on this machine publishes it to the public \
-                     internet. It does not forward to dux's port, but if it reaches dux through \
-                     another program on this machine, its visitors are asked for dux's \
-                     password like anyone else from the network. ",
-                    q(FUNNEL_STATUS),
-                    " lists it."
-                ],
-            )
-        } else {
-            (
-                StatusTone::Warning,
-                dux_core::status_text![
-                    format!(
-                        "A Tailscale Funnel route on this machine publishes it to the public \
-                         internet and no password is set, so dux stopped answering to {name}. \
-                         That Funnel does not forward to dux's port, but dux cannot tell \
-                         whether it reaches dux through another program on this machine; if it \
-                         does, anyone on the internet can drive your terminals. Set a password \
-                         ("
-                    ),
-                    q(dux_core::config_auth::SET_PASSWORD_COMMAND),
-                    "), or turn the Funnel route off (",
-                    q(FUNNEL_STATUS),
-                    format!(" lists it) and dux answers to {name} again by itself."),
-                ],
-            )
-        });
+        news.push(funnel_elsewhere_news(next, password));
     }
     let Some(previous) = previous else {
         return news;
@@ -1074,33 +1040,89 @@ pub(crate) fn identity_news(
         _ => {}
     }
     if !next.funnel {
-        // Measured against EVERY route the previous look had, Funnel or not: a
-        // route that only stopped being published is not a new one, and the
-        // Funnel sentence above already said what changed about it.
-        let before: Vec<&str> = served_urls(previous);
-        let before_any: Vec<&str> = previous.serve.iter().map(|r| r.url.as_str()).collect();
-        let after: Vec<&str> = served_urls(next);
-        for url in after.iter().filter(|url| !before_any.contains(url)) {
-            news.push((
-                StatusTone::Info,
+        news.extend(serve_route_news(previous, next));
+    }
+    news
+}
+
+/// The warning for a Tailscale Funnel route that publishes this machine but
+/// does not forward to dux's port, worded for whether a password is set.
+fn funnel_elsewhere_news(
+    next: &TailscaleIdentity,
+    password: Password,
+) -> (dux_core::statusline::StatusTone, StatusText) {
+    use dux_core::statusline::StatusTone;
+    let name = next
+        .status
+        .tailscale_assigned_name()
+        .unwrap_or("this machine's tailnet name");
+    if password == Password::Set {
+        (
+            StatusTone::Warning,
+            dux_core::status_text![
+                "A Tailscale Funnel route on this machine publishes it to the public \
+                 internet. It does not forward to dux's port, but if it reaches dux through \
+                 another program on this machine, its visitors are asked for dux's \
+                 password like anyone else from the network. ",
+                q(FUNNEL_STATUS),
+                " lists it."
+            ],
+        )
+    } else {
+        (
+            StatusTone::Warning,
+            dux_core::status_text![
                 format!(
-                    "tailscale serve now forwards {url} to dux: open it from any device on your \
-                     tailnet. The first visit can take about 30 seconds while Tailscale issues \
-                     the certificate."
-                )
-                .into(),
-            ));
-        }
-        for url in before.iter().filter(|url| !after.contains(url)) {
-            news.push((
-                StatusTone::Info,
-                format!(
-                    "{url} no longer reaches dux: its tailscale serve route was removed or now \
-                     points somewhere else."
-                )
-                .into(),
-            ));
-        }
+                    "A Tailscale Funnel route on this machine publishes it to the public \
+                     internet and no password is set, so dux stopped answering to {name}. \
+                     That Funnel does not forward to dux's port, but dux cannot tell \
+                     whether it reaches dux through another program on this machine; if it \
+                     does, anyone on the internet can drive your terminals. Set a password \
+                     ("
+                ),
+                q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+                "), or turn the Funnel route off (",
+                q(FUNNEL_STATUS),
+                format!(" lists it) and dux answers to {name} again by itself."),
+            ],
+        )
+    }
+}
+
+/// What changed about the `tailscale serve` routes that end at dux between two
+/// looks: each route that arrived and each that left.
+fn serve_route_news(
+    previous: &TailscaleIdentity,
+    next: &TailscaleIdentity,
+) -> Vec<(dux_core::statusline::StatusTone, StatusText)> {
+    use dux_core::statusline::StatusTone;
+    let mut news = Vec::new();
+    // Measured against EVERY route the previous look had, Funnel or not: a
+    // route that only stopped being published is not a new one, and the
+    // Funnel sentence in `identity_news` already said what changed about it.
+    let before: Vec<&str> = served_urls(previous);
+    let before_any: Vec<&str> = previous.serve.iter().map(|r| r.url.as_str()).collect();
+    let after: Vec<&str> = served_urls(next);
+    for url in after.iter().filter(|url| !before_any.contains(url)) {
+        news.push((
+            StatusTone::Info,
+            format!(
+                "tailscale serve now forwards {url} to dux: open it from any device on your \
+                 tailnet. The first visit can take about 30 seconds while Tailscale issues \
+                 the certificate."
+            )
+            .into(),
+        ));
+    }
+    for url in before.iter().filter(|url| !after.contains(url)) {
+        news.push((
+            StatusTone::Info,
+            format!(
+                "{url} no longer reaches dux: its tailscale serve route was removed or now \
+                 points somewhere else."
+            )
+            .into(),
+        ));
     }
     news
 }

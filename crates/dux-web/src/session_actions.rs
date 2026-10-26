@@ -1262,21 +1262,15 @@ mod tests {
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
-    /// While a followed change holds an agent, every other change to it, or
-    /// to a tab or a terminal inside it, is a 409 naming that operation, and
-    /// so is a change to an agent a delete has already taken off the list,
-    /// rather than the 404 of an agent that never existed. A change that
-    /// would end a terminal somebody else is attached to is a 409 listing who
-    /// (a request with no connection of its own exempts nobody), and goes
-    /// ahead only with `force_connected=true`.
-    #[tokio::test]
-    async fn a_change_to_an_agent_another_change_holds_is_a_409_naming_it() {
+    /// The router over an engine where a followed stop holds `s1`, a followed
+    /// delete holds `ghost` (already off the list), and a phone is attached to
+    /// `s2`'s tab.
+    fn held_and_attached_agents_app(tmp: &std::path::Path) -> axum::Router {
         use dux_core::attachments::{ConnectionFacts, Surface, Target, TargetKind};
         use dux_core::engine::InFlightKey;
         use dux_core::operations::{Hold, OperationKind};
 
-        let tmp = dux_core::test_scratch::ScratchDir::new();
-        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        let mut engine = crate::test_support::unstarted_test_engine(tmp);
         engine
             .sessions
             .push(crate::test_support::sample_agent("s1"));
@@ -1323,117 +1317,16 @@ mod tests {
             )
             .unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
-        let app = crate::server::router(handle);
+        crate::server::router(handle)
+    }
 
-        for (method, uri, body, status, says) in [
-            (
-                "DELETE",
-                "/api/v1/sessions/s1",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/s1?operation=1",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s1/kill",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s1/reconnect",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s1/tabs",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s1/tabs/s1-slot/start",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s1/terminals?operation=1",
-                "",
-                StatusCode::CONFLICT,
-                "op-h",
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/ghost",
-                "",
-                StatusCode::CONFLICT,
-                "op-g",
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/s2",
-                "",
-                StatusCode::CONFLICT,
-                r#""error":"attached""#,
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/s2?operation=1",
-                "",
-                StatusCode::CONFLICT,
-                r#""address":"10.1.2.3""#,
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s2/kill",
-                "",
-                StatusCode::CONFLICT,
-                r#""device":"Firefox-on-a-phone""#,
-            ),
-            (
-                "POST",
-                "/api/v1/sessions/s2/reconnect",
-                r#"{"force":true}"#,
-                StatusCode::CONFLICT,
-                r#""id":"s2-slot""#,
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/s2/tabs/s2-slot",
-                "",
-                StatusCode::CONFLICT,
-                r#""error":"attached""#,
-            ),
-            // Going ahead over only blockers somebody was shown: anybody else
-            // in the way refuses it again, each with the key to send back.
-            (
-                "DELETE",
-                "/api/v1/sessions/s2?force_connected=0123456789abcdef",
-                "",
-                StatusCode::CONFLICT,
-                r#""key":""#,
-            ),
-            (
-                "DELETE",
-                "/api/v1/sessions/s2?force_connected=true",
-                "",
-                StatusCode::NO_CONTENT,
-                "",
-            ),
-        ] {
+    /// Send each `(method, uri, body)` and assert its status and that its body
+    /// contains the text given.
+    async fn assert_each_answers(
+        app: &axum::Router,
+        cases: &[(&str, &str, &str, StatusCode, &str)],
+    ) {
+        for &(method, uri, body, status, says) in cases {
             let mut request = Request::builder().method(method).uri(uri);
             if !body.is_empty() {
                 request = request.header("content-type", "application/json");
@@ -1453,6 +1346,144 @@ mod tests {
             assert_eq!(got, status, "{method} {uri}: {text}");
             assert!(text.contains(says), "{method} {uri}: {text}");
         }
+    }
+
+    /// While a followed change holds an agent, every other change to it, or
+    /// to a tab or a terminal inside it, is a 409 naming that operation, and
+    /// so is a change to an agent a delete has already taken off the list,
+    /// rather than the 404 of an agent that never existed.
+    #[tokio::test]
+    async fn a_change_to_an_agent_another_change_holds_is_a_409_naming_it() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let app = held_and_attached_agents_app(tmp.path());
+        assert_each_answers(
+            &app,
+            &[
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s1",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s1?operation=1",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s1/kill",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s1/reconnect",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s1/tabs",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s1/tabs/s1-slot/start",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s1/terminals?operation=1",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-h",
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/sessions/ghost",
+                    "",
+                    StatusCode::CONFLICT,
+                    "op-g",
+                ),
+            ],
+        )
+        .await;
+    }
+
+    /// A change that would end a terminal somebody else is attached to is a
+    /// 409 listing who (a request with no connection of its own exempts
+    /// nobody), and goes ahead only with `force_connected=true`.
+    #[tokio::test]
+    async fn a_change_that_would_end_an_attached_terminal_is_a_409_listing_who() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let app = held_and_attached_agents_app(tmp.path());
+        assert_each_answers(
+            &app,
+            &[
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s2",
+                    "",
+                    StatusCode::CONFLICT,
+                    r#""error":"attached""#,
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s2?operation=1",
+                    "",
+                    StatusCode::CONFLICT,
+                    r#""address":"10.1.2.3""#,
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s2/kill",
+                    "",
+                    StatusCode::CONFLICT,
+                    r#""device":"Firefox-on-a-phone""#,
+                ),
+                (
+                    "POST",
+                    "/api/v1/sessions/s2/reconnect",
+                    r#"{"force":true}"#,
+                    StatusCode::CONFLICT,
+                    r#""id":"s2-slot""#,
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s2/tabs/s2-slot",
+                    "",
+                    StatusCode::CONFLICT,
+                    r#""error":"attached""#,
+                ),
+                // Going ahead over only blockers somebody was shown: anybody else
+                // in the way refuses it again, each with the key to send back.
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s2?force_connected=0123456789abcdef",
+                    "",
+                    StatusCode::CONFLICT,
+                    r#""key":""#,
+                ),
+                (
+                    "DELETE",
+                    "/api/v1/sessions/s2?force_connected=true",
+                    "",
+                    StatusCode::NO_CONTENT,
+                    "",
+                ),
+            ],
+        )
+        .await;
     }
 
     /// The recreate route reads `restart_tabs` from an optional body. Ticked, it

@@ -422,6 +422,151 @@ fn below_minimums(check: &dux_core::auth::MinimumCheck) -> Response {
     )
 }
 
+/// What a password write may replace, or why it may not write at all.
+enum WriteOver {
+    /// The hash the write may replace, empty for a first password.
+    Hash(String),
+    /// The refusal to send instead.
+    Refused(Response),
+}
+
+/// The hash a password write may replace: none for a first password (refused
+/// from anywhere but this machine and the tailnet), else the one `current`
+/// was checked against.
+async fn expected_hash(
+    state: &AppState,
+    a: &super::Assessment,
+    config: &dux_core::config::ServerAuthConfig,
+    current: Option<Password>,
+) -> WriteOver {
+    match config.password_hash() {
+        None => {
+            if !matches!(
+                a.classification.class,
+                ClientClass::ThisMachine | ClientClass::Tailnet
+            ) {
+                let because = a
+                    .classification
+                    .loopback_distrusted
+                    .map(|cause| format!(" {}", route_refusal(a.classification.via, cause)))
+                    .unwrap_or_default();
+                return WriteOver::Refused(refusal(
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        // backtick-ok: an HTTP refusal body, not a status.
+                        "error": "first_password_not_here",
+                        "message": format!(
+                            "The first password can only be set from the machine dux runs on, \
+                             from your tailnet, or with `dux config set \
+                             server.auth.password`.{because}"
+                        ),
+                    }),
+                ));
+            }
+            WriteOver::Hash(String::new())
+        }
+        Some(hash) => {
+            let Some(current) = current else {
+                return WriteOver::Refused(refusal(
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "error": "current_password_required",
+                        "message": "Changing the password needs the current one.",
+                    }),
+                ));
+            };
+            if current.byte_len() > byte_cap(config.max_password_bytes) {
+                return WriteOver::Refused(too_long(config.max_password_bytes));
+            }
+            WriteOver::Refused(match state.auth.verify(&a.classification, current).await {
+                Verify::Right { .. } => return WriteOver::Hash(hash.to_string()),
+                Verify::Wrong => refusal(
+                    StatusCode::FORBIDDEN,
+                    json!({ "error": "wrong_current_password" }),
+                ),
+                Verify::Blocked => super::middleware::blocked(),
+                Verify::Wait(limited) => rate_limited(limited),
+                Verify::Busy => busy(),
+                Verify::NoPassword | Verify::Stale => refusal(
+                    StatusCode::CONFLICT,
+                    json!({
+                        "error": "password_changed",
+                        "message": "The password changed while this was being checked, so nothing was changed. Try again.",
+                    }),
+                ),
+                Verify::Failed(error) => {
+                    server_error(&format!("Could not check the current password: {error}"))
+                }
+            })
+        }
+    }
+}
+
+/// What a password write came to, judged off the async runtime.
+enum PasswordWrite {
+    /// Written, and nothing stops this run's reload from putting it in force.
+    Written {
+        /// The password hash now in the file, to apply at once.
+        hash: Option<String>,
+        /// The write that put it there.
+        file_write: Option<dux_core::config_write::FileWrite>,
+    },
+    /// Written, but problems in the file stop this run's reload from putting
+    /// it in force.
+    NotInForce(Vec<String>),
+    /// Not written.
+    Refused(dux_core::config_keys::SetPasswordError),
+}
+
+/// Write `new` over `expected` in `config_path`, after measuring it against
+/// the live minimums. Blocking: runs on a blocking thread.
+fn write_password(
+    config_path: &std::path::Path,
+    expected: &str,
+    new: &Password,
+    policy: &dux_core::auth::PasswordPolicy,
+    words: &[String],
+    surface: dux_core::config::Surface,
+) -> PasswordWrite {
+    let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+    // Measured against the live minimums first, so the answer describes
+    // the minimums the browser was shown; the write re-checks the file's.
+    let check = dux_core::auth::check_minimums(new, policy, &refs);
+    if !check.passes() {
+        return PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::BelowMinimums(
+            check,
+        ));
+    }
+    let set =
+        match dux_core::config_keys::set_password_if_current(config_path, expected, new, &refs) {
+            Ok(set) => set,
+            Err(refused) => return PasswordWrite::Refused(refused),
+        };
+    let file_write = dux_core::config_write::take_last_write();
+    // Not in force only when the reload of THIS run refuses the file: the
+    // problems that stop the surface whose reload applies it, judged the
+    // way `start_refusal` judges them, never "any problem remains" (a file
+    // only the other surface refuses still loads here).
+    let stopping: Vec<String> = set
+        .remaining_problems
+        .into_iter()
+        .filter(|problem| stops_reload(problem, surface))
+        .map(|problem| problem.detail)
+        .collect();
+    if !stopping.is_empty() {
+        return PasswordWrite::NotInForce(stopping);
+    }
+    // The hash now in the file is the one to apply at once; the reload
+    // that follows brings the rest along.
+    PasswordWrite::Written {
+        hash: std::fs::read_to_string(config_path)
+            .ok()
+            .and_then(|raw| dux_core::config::auth_section_of(&raw).ok())
+            .map(|section| section.password_hash),
+        file_write,
+    }
+}
+
 /// `POST /api/v1/auth/password` with `{current?, new}`: set the first password
 /// (only from this machine or the tailnet; anywhere else it is `dux config set`'s
 /// job), or change the password, which needs the current one. Every browser is
@@ -460,70 +605,9 @@ async fn change_password(
 
     // Which hash the write may replace: none for a first password, else the
     // one the current password was checked against.
-    let expected = match snapshot.config.password_hash() {
-        None => {
-            if !matches!(
-                a.classification.class,
-                ClientClass::ThisMachine | ClientClass::Tailnet
-            ) {
-                let because = a
-                    .classification
-                    .loopback_distrusted
-                    .map(|cause| format!(" {}", route_refusal(a.classification.via, cause)))
-                    .unwrap_or_default();
-                return refusal(
-                    StatusCode::FORBIDDEN,
-                    json!({
-                        // backtick-ok: an HTTP refusal body, not a status.
-                        "error": "first_password_not_here",
-                        "message": format!(
-                            "The first password can only be set from the machine dux runs on, \
-                             from your tailnet, or with `dux config set \
-                             server.auth.password`.{because}"
-                        ),
-                    }),
-                );
-            }
-            String::new()
-        }
-        Some(hash) => {
-            let Some(current) = current else {
-                return refusal(
-                    StatusCode::BAD_REQUEST,
-                    json!({
-                        "error": "current_password_required",
-                        "message": "Changing the password needs the current one.",
-                    }),
-                );
-            };
-            if current.byte_len() > byte_cap(config.max_password_bytes) {
-                return too_long(config.max_password_bytes);
-            }
-            match state.auth.verify(&a.classification, current).await {
-                Verify::Right { .. } => hash.to_string(),
-                Verify::Wrong => {
-                    return refusal(
-                        StatusCode::FORBIDDEN,
-                        json!({ "error": "wrong_current_password" }),
-                    );
-                }
-                Verify::Blocked => return super::middleware::blocked(),
-                Verify::Wait(limited) => return rate_limited(limited),
-                Verify::Busy => return busy(),
-                Verify::NoPassword | Verify::Stale => {
-                    return refusal(
-                        StatusCode::CONFLICT,
-                        json!({
-                            "error": "password_changed",
-                            "message": "The password changed while this was being checked, so nothing was changed. Try again.",
-                        }),
-                    );
-                }
-                Verify::Failed(error) => {
-                    return server_error(&format!("Could not check the current password: {error}"));
-                }
-            }
-        }
+    let expected = match expected_hash(&state, a, config, current).await {
+        WriteOver::Hash(expected) => expected,
+        WriteOver::Refused(refused) => return refused,
     };
 
     if new.byte_len() > byte_cap(config.max_password_bytes) {
@@ -533,47 +617,14 @@ async fn change_password(
     let words = dux_core::auth::guess_words();
     let surface = state.engine.reload_surface();
     let written = tokio::task::spawn_blocking(move || {
-        let refs: Vec<&str> = words.iter().map(String::as_str).collect();
-        // Measured against the live minimums first, so the answer describes
-        // the minimums the browser was shown; the write re-checks the file's.
-        let check = dux_core::auth::check_minimums(&new, &policy, &refs);
-        if !check.passes() {
-            return Err(dux_core::config_keys::SetPasswordError::BelowMinimums(
-                check,
-            ));
-        }
-        let set =
-            dux_core::config_keys::set_password_if_current(&config_path, &expected, &new, &refs)?;
-        let file_write = dux_core::config_write::take_last_write();
-        // Not in force only when the reload of THIS run refuses the file: the
-        // problems that stop the surface whose reload applies it, judged the
-        // way `start_refusal` judges them, never "any problem remains" (a file
-        // only the other surface refuses still loads here).
-        let stopping: Vec<String> = set
-            .remaining_problems
-            .into_iter()
-            .filter(|problem| stops_reload(problem, surface))
-            .map(|problem| problem.detail)
-            .collect();
-        if !stopping.is_empty() {
-            return Ok(Err(stopping));
-        }
-        // The hash now in the file is the one to apply at once; the reload
-        // that follows brings the rest along.
-        Ok(Ok((
-            std::fs::read_to_string(&config_path)
-                .ok()
-                .and_then(|raw| dux_core::config::auth_section_of(&raw).ok())
-                .map(|section| section.password_hash),
-            file_write,
-        )))
+        write_password(&config_path, &expected, &new, &policy, &words, surface)
     })
     .await;
     match written {
         // Stored, but the file has problems that stop dux starting with it (they
         // were there before; the write added none), so the reload that would
         // put it in force is refused and the old password stays the one.
-        Ok(Ok(Err(problems))) => refusal(
+        Ok(PasswordWrite::NotInForce(problems)) => refusal(
             StatusCode::CONFLICT,
             json!({
                 "error": "password_not_in_force",
@@ -585,7 +636,7 @@ async fn change_password(
                 ),
             }),
         ),
-        Ok(Ok(Ok((hash, file_write)))) => {
+        Ok(PasswordWrite::Written { hash, file_write }) => {
             match hash {
                 Some(hash) => state.auth.applied(
                     move |config| config.password_hash.clone_from(&hash),
@@ -604,17 +655,19 @@ async fn change_password(
             );
             response
         }
-        Ok(Err(dux_core::config_keys::SetPasswordError::BelowMinimums(check))) => {
-            below_minimums(&check)
+        Ok(PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::BelowMinimums(
+            check,
+        ))) => below_minimums(&check),
+        Ok(PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::ChangedMeanwhile)) => {
+            refusal(
+                StatusCode::CONFLICT,
+                json!({
+                    "error": "password_changed",
+                    "message": "The password was changed by someone else meanwhile, so nothing was changed. Try again.",
+                }),
+            )
         }
-        Ok(Err(dux_core::config_keys::SetPasswordError::ChangedMeanwhile)) => refusal(
-            StatusCode::CONFLICT,
-            json!({
-                "error": "password_changed",
-                "message": "The password was changed by someone else meanwhile, so nothing was changed. Try again.",
-            }),
-        ),
-        Ok(Err(dux_core::config_keys::SetPasswordError::Failed(error))) => {
+        Ok(PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::Failed(error))) => {
             server_error(&format!("Could not write the password: {error:#}"))
         }
         Err(error) => server_error(&format!("The password change stopped: {error}")),
