@@ -6432,7 +6432,11 @@ impl App {
         // the listener to go away. Done last, after `engine.config` holds the
         // reloaded values, so the start path reads the new port and Tailscale mode.
         let serving_before = self.background_server_is_serving();
-        let wanted = self.engine.config.server.serve_while_tui;
+        let wanted = if self.engine.config.server.serve_while_tui {
+            crate::app::background_server::ServeWanted::On
+        } else {
+            crate::app::background_server::ServeWanted::Off
+        };
         self.apply_serve_while_tui_setting(wanted);
         // `[server] tailscale` is live too, and in this mode the terminal UI owns
         // the reload: the serve is the companion's, and the actor arm that owns it

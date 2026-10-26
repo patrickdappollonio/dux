@@ -4197,7 +4197,14 @@ impl App {
                 ..
             })
         );
-        let action = if binding_lookup_is_suppressed(key, is_searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if is_searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::RuntimeKill)
@@ -4452,7 +4459,14 @@ impl App {
             return Some(false);
         }
 
-        let action = if binding_lookup_is_suppressed(key, is_searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if is_searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Browser)
@@ -4831,7 +4845,14 @@ impl App {
             return Ok(None);
         };
         let searching = list.searching;
-        let action = if binding_lookup_is_suppressed(key, searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings
@@ -4997,7 +5018,7 @@ impl App {
         };
         let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::KillRunning(previous);
@@ -5042,7 +5063,7 @@ impl App {
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
@@ -5073,7 +5094,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5090,7 +5111,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5107,7 +5128,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5124,7 +5145,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5154,7 +5175,7 @@ impl App {
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(direction) => *focus = next_focus(&ring, *focus, direction),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
@@ -5179,7 +5200,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
             ModalKeyStep::Close => {
                 return Some(self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel));
@@ -5199,7 +5220,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
             ModalKeyStep::Close => {
                 return Some(self.resolve_confirm_delete_project(ConfirmAnswer::Cancel));
@@ -5219,7 +5240,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             // Escape is a cancel, and a cancel says so.
             ModalKeyStep::Close => {
                 return Some(self.resolve_confirm_remove_project(ConfirmAnswer::Cancel));
@@ -5239,7 +5260,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5256,7 +5277,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5273,7 +5294,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
             }
@@ -5292,7 +5313,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 self.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
             }
@@ -5317,7 +5338,7 @@ impl App {
         };
         let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(direction) => {
                 *focus = next_focus(
@@ -5350,7 +5371,7 @@ impl App {
         };
         let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
@@ -5371,7 +5392,7 @@ impl App {
             (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 let previous = prompt.previous.clone();
                 self.prompt = PromptState::ManageWorktrees(previous);
@@ -5455,12 +5476,27 @@ impl App {
             return Ok(None);
         };
         let field_focused = *focus == PullRequestInputFocus::Input;
-        let action = if binding_lookup_is_suppressed(key, field_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if field_focused {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, field_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if field_focused {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             ModalKeyStep::Close => {
                 self.prompt = PromptState::None;
                 self.pending_pr_reference = None;
@@ -5493,12 +5529,13 @@ impl App {
         if !matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
             return Ok(None);
         }
-        let action = if binding_lookup_is_suppressed(key, true) {
+        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
+        {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, true) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::Confirm => self.confirm_attach_pull_request_input()?,
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
@@ -5518,12 +5555,13 @@ impl App {
         if !matches!(self.prompt, PromptState::NameStandaloneAgent { .. }) {
             return None;
         }
-        let action = if binding_lookup_is_suppressed(key, true) {
+        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
+        {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, true) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::Confirm => self.confirm_standalone_agent_name(),
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
@@ -5541,12 +5579,27 @@ impl App {
             return None;
         };
         let checkbox_focused = *focus == RenameSessionFocus::RenameBranchCheckbox;
-        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, !checkbox_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::Confirm => {
                 let PromptState::RenameSession {
@@ -5764,12 +5817,27 @@ impl App {
                 | CloneProjectFocus::ReviewCopyCheckbox
                 | CloneProjectFocus::ChooseExisting
         );
-        let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
-        match modal_key_step(action, key, !checkbox_focused) {
+        match modal_key_step(
+            action,
+            key,
+            if checkbox_focused {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            } else {
+                crate::app::modal::TextFieldFocus::Field
+            },
+        ) {
             ModalKeyStep::Close => {
                 self.prompt = PromptState::None;
                 self.pr_clone_check_rx = None;
@@ -25065,7 +25133,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
             dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path),
-            false,
+            crate::app::first_load::SeenNote::Skip,
         ));
         app.last_first_load_lines = 20;
         app.last_first_load_height = 5;

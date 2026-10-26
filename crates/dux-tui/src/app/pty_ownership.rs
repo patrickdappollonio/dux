@@ -3437,7 +3437,7 @@ mod tests {
     fn a_reload_that_turns_serving_on_claims_like_the_palette_command() {
         let (mut app, recorded, _seat) = app_running_everything_with_nothing_serving();
 
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(crate::app::background_server::ServeWanted::On);
         finish_a_start(&mut app, None);
 
         for pty_id in EVERYTHING_RUNNING {

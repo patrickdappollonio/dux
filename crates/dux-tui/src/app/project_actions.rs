@@ -766,7 +766,14 @@ impl App {
             return None;
         };
         let searching = prompt.list.searching;
-        let action = if binding_lookup_is_suppressed(key, searching) {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+        ) {
             None
         } else {
             self.bindings
@@ -875,7 +882,7 @@ impl App {
         };
         let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
-        match modal_key_step(action, key, false) {
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
             ModalKeyStep::Close => {
                 return Some(self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel));
             }

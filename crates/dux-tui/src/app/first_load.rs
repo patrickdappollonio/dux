@@ -166,22 +166,30 @@ pub(crate) struct FirstLoadPrompt {
     pub(crate) mark_seen: bool,
 }
 
+/// Whether closing a first-load screen records that it was seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeenNote {
+    /// It records it, so the screen does not come back by itself.
+    Write,
+    /// It records nothing (a screen opened from the palette).
+    Skip,
+}
 impl FirstLoadPrompt {
-    pub(crate) fn welcome(screen: WelcomeScreen, mark_seen: bool) -> Self {
+    pub(crate) fn welcome(screen: WelcomeScreen, seen: SeenNote) -> Self {
         Self {
             screen: FirstLoadScreen::Welcome(screen),
             scroll: 0,
             focus: FirstLoadButton::Primary,
-            mark_seen,
+            mark_seen: seen == SeenNote::Write,
         }
     }
 
-    pub(crate) fn whats_new(notes: ReleaseNotes, mark_seen: bool) -> Self {
+    pub(crate) fn whats_new(notes: ReleaseNotes, seen: SeenNote) -> Self {
         Self {
             screen: FirstLoadScreen::WhatsNew(Box::new(notes)),
             scroll: 0,
             focus: FirstLoadButton::Primary,
-            mark_seen,
+            mark_seen: seen == SeenNote::Write,
         }
     }
 
@@ -804,8 +812,14 @@ impl App {
                 // DISMISSAL, per the core contract.
                 let screen =
                     dux_core::welcome_screen::welcome_screen(&self.engine.paths.config_path);
-                self.prompt =
-                    PromptState::FirstLoad(FirstLoadPrompt::welcome(screen, plan.mark_seen));
+                self.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
+                    screen,
+                    if plan.mark_seen {
+                        SeenNote::Write
+                    } else {
+                        SeenNote::Skip
+                    },
+                ));
             }
             dux_core::first_load::FirstLoad::WhatsNew => {
                 // The notes BLOCK, so they are fetched on a worker; the plan is
@@ -903,7 +917,14 @@ impl App {
         // it through core keeps the stamp decision in one place.
         let plan =
             dux_core::first_load::after_fetch(plan, dux_core::first_load::NotesOutcome::Fetched);
-        self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(*notes, plan.mark_seen));
+        self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(
+            *notes,
+            if plan.mark_seen {
+                SeenNote::Write
+            } else {
+                SeenNote::Skip
+            },
+        ));
         self.mark_frame_dirty();
     }
 
@@ -950,7 +971,11 @@ impl App {
                     (dux_core::first_load::FirstLoad::WhatsNew, Ok(notes)) => {
                         self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(
                             notes,
-                            plan.mark_seen,
+                            if plan.mark_seen {
+                                SeenNote::Write
+                            } else {
+                                SeenNote::Skip
+                            },
                         ));
                     }
                     _ => {
@@ -970,7 +995,8 @@ impl App {
                 // upgrade's notes. On a failure there is nothing to do here: the
                 // worker's keyed final already carries the reason.
                 if let Ok(notes) = fetched.result {
-                    self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(notes, false));
+                    self.prompt =
+                        PromptState::FirstLoad(FirstLoadPrompt::whats_new(notes, SeenNote::Skip));
                 }
             }
         }
@@ -981,7 +1007,7 @@ impl App {
     /// dux does on its own.
     pub(crate) fn show_welcome_screen_command(&mut self) -> Result<()> {
         let screen = dux_core::welcome_screen::welcome_screen(&self.engine.paths.config_path);
-        self.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(screen, false));
+        self.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(screen, SeenNote::Skip));
         Ok(())
     }
 
@@ -1216,25 +1242,25 @@ mod tests {
     #[test]
     fn each_screen_has_exactly_two_buttons_with_the_agreed_labels() {
         assert_eq!(
-            FirstLoadPrompt::welcome(sample_welcome(), false).buttons(),
+            FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip).buttons(),
             ["Add a project", "Close"]
         );
         assert_eq!(
-            FirstLoadPrompt::whats_new(sample_notes(), false).buttons(),
+            FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip).buttons(),
             ["Open full notes", "Close"]
         );
     }
 
     #[test]
     fn the_whats_new_title_names_the_version_the_user_is_on() {
-        let prompt = FirstLoadPrompt::whats_new(sample_notes(), false);
+        let prompt = FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip);
         assert!(prompt.title().contains("v0.7.0"), "{}", prompt.title());
         // A release payload with no tag falls back to the running build rather
         // than showing a blank version.
         let mut untagged = sample_notes();
         untagged.version = "  ".to_string();
         assert!(
-            FirstLoadPrompt::whats_new(untagged, false)
+            FirstLoadPrompt::whats_new(untagged, SeenNote::Skip)
                 .title()
                 .contains(dux_core::display_version())
         );
@@ -1243,25 +1269,25 @@ mod tests {
     #[test]
     fn the_welcome_links_to_the_website_and_the_notes_link_to_their_own_release() {
         assert_eq!(
-            FirstLoadPrompt::welcome(sample_welcome(), false).link(),
+            FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip).link(),
             dux_core::urls::WEBSITE
         );
         assert_eq!(
-            FirstLoadPrompt::whats_new(sample_notes(), false).link(),
+            FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip).link(),
             "https://github.com/patrickdappollonio/dux/releases/tag/v0.7.0"
         );
         // A release with no link falls back to the releases index, never "".
         let mut linkless = sample_notes();
         linkless.html_url = String::new();
         assert_eq!(
-            FirstLoadPrompt::whats_new(linkless, false).link(),
+            FirstLoadPrompt::whats_new(linkless, SeenNote::Skip).link(),
             dux_core::urls::RELEASES
         );
     }
 
     #[test]
     fn the_focused_button_decides_what_activation_does() {
-        let mut welcome = FirstLoadPrompt::welcome(sample_welcome(), false);
+        let mut welcome = FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip);
         assert_eq!(button_action(&welcome), FirstLoadAction::AddProject);
         welcome.focus = FirstLoadButton::Secondary;
         assert_eq!(
@@ -1272,7 +1298,7 @@ mod tests {
              visible way out at all"
         );
 
-        let mut whats_new = FirstLoadPrompt::whats_new(sample_notes(), false);
+        let mut whats_new = FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip);
         assert_eq!(
             button_action(&whats_new),
             FirstLoadAction::OpenUrl(
@@ -1308,7 +1334,7 @@ mod tests {
     #[test]
     fn the_welcome_button_row_shows_its_address_only_when_it_fits() {
         let colors = colors();
-        let labels = FirstLoadPrompt::welcome(sample_welcome(), false).buttons();
+        let labels = FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip).buttons();
         let wide = button_row(
             labels,
             FirstLoadButton::Primary,
@@ -1342,14 +1368,14 @@ mod tests {
     #[test]
     fn the_whats_new_button_row_renders_no_url_at_any_width() {
         let colors = colors();
-        let prompt = FirstLoadPrompt::whats_new(sample_notes(), false);
+        let prompt = FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip);
         assert_eq!(
             prompt.footer_link(),
             None,
             "the what's-new screen must publish no footer address"
         );
         assert_eq!(
-            FirstLoadPrompt::welcome(sample_welcome(), false)
+            FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip)
                 .footer_link()
                 .as_deref(),
             Some(dux_core::urls::WEBSITE),
@@ -1620,7 +1646,8 @@ mod tests {
     #[test]
     fn the_welcome_modal_paints_the_duck_both_buttons_and_the_prose() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Write));
         let rendered = render_prompt_to_string(&mut app, 120, 40);
         assert!(rendered.contains("Welcome to dux"), "title missing");
         assert!(rendered.contains('⣿'), "the duck must be painted");
@@ -1636,7 +1663,8 @@ mod tests {
     #[test]
     fn the_whats_new_modal_paints_its_headline_features_and_buttons() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(sample_notes(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Write));
         let rendered = render_prompt_to_string(&mut app, 120, 40);
         assert!(
             rendered.contains("What's new in dux v0.7.0"),
@@ -1659,7 +1687,8 @@ mod tests {
     #[test]
     fn the_welcome_secondary_button_leaves_the_screen() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), false));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip));
         if let PromptState::FirstLoad(prompt) = &mut app.prompt {
             prompt.focus = FirstLoadButton::Secondary;
         }
@@ -1677,8 +1706,8 @@ mod tests {
         assert!(!close_key.is_empty(), "the close binding must have a label");
 
         for prompt in [
-            FirstLoadPrompt::welcome(sample_welcome(), false),
-            FirstLoadPrompt::whats_new(sample_notes(), false),
+            FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Skip),
+            FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Skip),
         ] {
             let mut app = test_app(default_bindings());
             app.prompt = PromptState::FirstLoad(prompt);
@@ -1693,7 +1722,8 @@ mod tests {
     #[test]
     fn a_narrow_terminal_drops_the_duck_instead_of_squeezing_the_prose() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Write));
         // 60 columns of terminal leaves under 68 columns of inner width.
         let rendered = render_prompt_to_string(&mut app, 60, 30);
         assert!(
@@ -1713,7 +1743,8 @@ mod tests {
     #[test]
     fn rendering_records_the_button_geometry_for_the_mouse() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Write));
         let _ = render_prompt_to_string(&mut app, 120, 40);
         match app.overlay_layout.active {
             OverlayMouseLayout::FirstLoad {
@@ -1731,7 +1762,8 @@ mod tests {
     #[test]
     fn rendering_records_the_scroll_extent_so_keys_can_clamp() {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Write));
         let _ = render_prompt_to_string(&mut app, 120, 40);
         assert!(app.last_first_load_height > 0);
         assert!(app.last_first_load_lines > 0);
@@ -2114,7 +2146,7 @@ mod tests {
         notes.sections = vec![long.clone(); 4];
 
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(notes, true));
+        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(notes, SeenNote::Write));
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -2171,7 +2203,8 @@ mod tests {
 
     fn app_with_welcome() -> App {
         let mut app = test_app(default_bindings());
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::welcome(sample_welcome(), SeenNote::Write));
         app
     }
 
@@ -2301,7 +2334,7 @@ mod tests {
     #[test]
     fn space_on_the_secondary_button_of_the_whats_new_screen_just_closes_it() {
         let mut app = test_app(default_bindings());
-        let mut prompt = FirstLoadPrompt::whats_new(sample_notes(), true);
+        let mut prompt = FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Write);
         prompt.focus = FirstLoadButton::Secondary;
         app.prompt = PromptState::FirstLoad(prompt);
         app.handle_key(key(KeyCode::Char(' '))).expect("space");
@@ -2366,7 +2399,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         // The what's-new screen's secondary button is a plain dismiss, which makes
         // the assertion about the click alone rather than about a browser launch.
-        app.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(sample_notes(), true));
+        app.prompt =
+            PromptState::FirstLoad(FirstLoadPrompt::whats_new(sample_notes(), SeenNote::Write));
         let _ = render_prompt_to_string(&mut app, 120, 40);
         let OverlayMouseLayout::FirstLoad {
             secondary_button, ..

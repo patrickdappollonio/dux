@@ -940,8 +940,14 @@ fn the_welcome_and_whats_new_screens_wear_the_same_indicator() {
     let app = test_app(default_bindings());
     let welcome = dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path);
     for (label, prompt) in [
-        ("welcome", FirstLoadPrompt::welcome(welcome, false)),
-        ("What's new", FirstLoadPrompt::whats_new(notes, false)),
+        (
+            "welcome",
+            FirstLoadPrompt::welcome(welcome, crate::app::first_load::SeenNote::Skip),
+        ),
+        (
+            "What's new",
+            FirstLoadPrompt::whats_new(notes, crate::app::first_load::SeenNote::Skip),
+        ),
     ] {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::FirstLoad(prompt);

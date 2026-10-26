@@ -523,8 +523,17 @@ pub(crate) enum ModalKeyStep {
 /// The renderer must ask the same question when it picks the footer's key
 /// (`RuntimeBindings::label_for_text_field_dialog`), so the hint can never name
 /// a key the field swallows.
-pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, text_field_focused: bool) -> bool {
-    text_field_focused && text_field_owns_key(key)
+
+/// Whether a dialog's focus rests on a text field, which owns the keys a caret needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFieldFocus {
+    /// A text field has focus.
+    Field,
+    /// A button, checkbox or list has it.
+    Elsewhere,
+}
+pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, focus: TextFieldFocus) -> bool {
+    focus == TextFieldFocus::Field && text_field_owns_key(key)
 }
 
 /// Classify a key into its rung, given the action the bindings resolved it to
@@ -537,13 +546,15 @@ pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, text_field_focused: bo
 pub(crate) fn modal_key_step(
     action: Option<Action>,
     key: KeyEvent,
-    text_field_focused: bool,
+    focus: TextFieldFocus,
 ) -> ModalKeyStep {
     match action {
         Some(Action::CloseOverlay) => ModalKeyStep::Close,
         Some(Action::ToggleSelection) => ModalKeyStep::MoveFocus(focus_move_step(key)),
         Some(Action::Confirm) => ModalKeyStep::Confirm,
-        _ if key.code == KeyCode::Char(' ') && !text_field_focused => ModalKeyStep::ActivateFocus,
+        _ if key.code == KeyCode::Char(' ') && focus == TextFieldFocus::Elsewhere => {
+            ModalKeyStep::ActivateFocus
+        }
         _ => ModalKeyStep::FallThroughToField,
     }
 }
@@ -875,7 +886,7 @@ pub(super) mod tests {
                     focus: FirstLoadButton::Primary,
                     ..FirstLoadPrompt::welcome(
                         dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path),
-                        false,
+                        crate::app::first_load::SeenNote::Skip,
                     )
                 }),
             ),
@@ -1850,27 +1861,51 @@ pub(super) mod tests {
     #[test]
     fn the_ladder_runs_close_then_move_then_act_then_fall_through() {
         assert_eq!(
-            modal_key_step(Some(Action::CloseOverlay), key(KeyCode::Esc), false),
+            modal_key_step(
+                Some(Action::CloseOverlay),
+                key(KeyCode::Esc),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::Close
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Tab), false),
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::Tab),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::MoveFocus(FocusStep::Forward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::BackTab), false),
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::BackTab),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Left), false),
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::Left),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::Confirm), key(KeyCode::Enter), false),
+            modal_key_step(
+                Some(Action::Confirm),
+                key(KeyCode::Enter),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::Confirm
         );
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char('x')), true),
+            modal_key_step(
+                None,
+                key(KeyCode::Char('x')),
+                crate::app::modal::TextFieldFocus::Field
+            ),
             ModalKeyStep::FallThroughToField
         );
     }
@@ -1878,11 +1913,19 @@ pub(super) mod tests {
     #[test]
     fn space_acts_on_a_focused_button_and_types_into_a_focused_field() {
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char(' ')), false),
+            modal_key_step(
+                None,
+                key(KeyCode::Char(' ')),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::ActivateFocus
         );
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char(' ')), true),
+            modal_key_step(
+                None,
+                key(KeyCode::Char(' ')),
+                crate::app::modal::TextFieldFocus::Field
+            ),
             ModalKeyStep::FallThroughToField
         );
     }
@@ -1890,11 +1933,23 @@ pub(super) mod tests {
     #[test]
     fn the_field_gate_only_closes_while_a_field_has_focus() {
         // The shipped bug: Left is in the movement action's default key set.
-        assert!(binding_lookup_is_suppressed(key(KeyCode::Left), true));
-        assert!(binding_lookup_is_suppressed(key(KeyCode::Char('a')), true));
+        assert!(binding_lookup_is_suppressed(
+            key(KeyCode::Left),
+            crate::app::modal::TextFieldFocus::Field
+        ));
+        assert!(binding_lookup_is_suppressed(
+            key(KeyCode::Char('a')),
+            crate::app::modal::TextFieldFocus::Field
+        ));
         // With focus on a checkbox the field owns nothing, so movement works.
-        assert!(!binding_lookup_is_suppressed(key(KeyCode::Left), false));
+        assert!(!binding_lookup_is_suppressed(
+            key(KeyCode::Left),
+            crate::app::modal::TextFieldFocus::Elsewhere
+        ));
         // Tab is never owned by the field, so it stays a focus key in both.
-        assert!(!binding_lookup_is_suppressed(key(KeyCode::Tab), true));
+        assert!(!binding_lookup_is_suppressed(
+            key(KeyCode::Tab),
+            crate::app::modal::TextFieldFocus::Field
+        ));
     }
 }

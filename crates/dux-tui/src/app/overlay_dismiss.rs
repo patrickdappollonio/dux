@@ -1701,7 +1701,7 @@ mod tests {
                 let config_path = app.engine.paths.config_path.clone();
                 app.prompt = PromptState::FirstLoad(FirstLoadPrompt::welcome(
                     dux_core::welcome_screen::welcome_screen(&config_path),
-                    true,
+                    crate::app::first_load::SeenNote::Write,
                 ));
             },
             stamp,

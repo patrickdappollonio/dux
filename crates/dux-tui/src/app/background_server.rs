@@ -13,6 +13,24 @@ use dux_core::engine::EventReaction;
 
 use super::*;
 
+/// Whether `[server] serve_while_tui` asks for the background server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServeWanted {
+    /// It asks for it.
+    On,
+    /// It does not.
+    Off,
+}
+
+/// Whether the web UI has a password set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebPassword {
+    /// Browsers sign in.
+    Set,
+    /// Anyone who can reach it drives the agents.
+    Unset,
+}
+
 impl App {
     /// Whether a listener is up right now.
     pub(crate) fn background_server_is_serving(&self) -> bool {
@@ -350,7 +368,11 @@ impl App {
             ));
         }
 
-        let trust = trust_sentence(self.engine.config.server.auth.has_password());
+        let trust = trust_sentence(if self.engine.config.server.auth.has_password() {
+            WebPassword::Set
+        } else {
+            WebPassword::Unset
+        });
         let op = dux_core::engine::status_op(
             "Starting the web server in the background; the TUI stays right here.".to_string(),
         )
@@ -838,12 +860,12 @@ impl App {
     /// The setting is the startup default AND a live switch, so a reload that
     /// flips it has to act rather than wait for the next start: a user who edits
     /// the file to turn the listener off has asked for the listener to go away.
-    pub(crate) fn apply_serve_while_tui_setting(&mut self, wanted: bool) {
+    pub(crate) fn apply_serve_while_tui_setting(&mut self, wanted: ServeWanted) {
         // A start still in its bind pre-flight counts as on: otherwise a reload
         // that turns the setting off looks like it has nothing to do, and the
         // pre-flight lands afterwards and starts serving anyway.
         let on = self.background_server_is_serving() || self.background_server_preflight_pending;
-        match (on, wanted) {
+        match (on, (wanted == ServeWanted::On)) {
             // A user request, not the startup autostart: a reload turning it on
             // is a live act and reports like the palette command.
             (false, true) => {
@@ -1047,8 +1069,8 @@ fn join_urls(urls: &[String]) -> String {
 
 /// What a background serve's start says about who gets in: the password when
 /// one is set, the risk when none is.
-fn trust_sentence(password_set: bool) -> &'static str {
-    if password_set {
+fn trust_sentence(password: WebPassword) -> &'static str {
+    if password == WebPassword::Set {
         "Browsers sign in with the web password ([server.auth] require decides who is asked)."
     } else {
         "No password is set, so anyone who can reach it drives your agents; set one with \
@@ -1061,8 +1083,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_trust_sentence_names_the_password_or_its_absence() {
-        assert!(super::trust_sentence(true).contains("sign in with the web password"));
-        let open = super::trust_sentence(false);
+        assert!(super::trust_sentence(WebPassword::Set).contains("sign in with the web password"));
+        let open = super::trust_sentence(WebPassword::Unset);
         assert!(open.contains("No password is set") && open.contains("server.auth.password"));
     }
     use std::sync::{Arc, Mutex};
@@ -2385,7 +2407,7 @@ pub(crate) mod tests {
         app.stop_background_server_quietly();
 
         ask_for_a_reload(&mut app, "bind-ok");
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(ServeWanted::On);
         assert!(app.background_server_preflight_pending);
         app.engine.finish_config_reload_operations(
             &dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() },
@@ -2483,7 +2505,7 @@ pub(crate) mod tests {
         let (companion, _recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
 
-        app.apply_serve_while_tui_setting(false);
+        app.apply_serve_while_tui_setting(ServeWanted::Off);
         assert!(
             !app.background_server_is_serving(),
             "a reload that turned it off must stop the listener"
@@ -2491,7 +2513,7 @@ pub(crate) mod tests {
 
         // And back on: the fake's `start` needs no listeners, so this exercises
         // the transition rather than a real bind.
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(ServeWanted::On);
         assert!(
             app.background_server_preflight_pending,
             "a reload that turned it on must dispatch the bind pre-flight"
@@ -2505,7 +2527,7 @@ pub(crate) mod tests {
         let applied =
             dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() };
         ask_for_a_reload(&mut app, "bind-fails");
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(ServeWanted::On);
         app.engine.finish_config_reload_operations(&applied);
         app.apply_background_server_preflight(
             Err("Port 8080 is in use.".to_string()),
@@ -2524,7 +2546,7 @@ pub(crate) mod tests {
 
         ask_for_a_reload(&mut app, "start-refused");
         app.server_flip_preflight_pending = true;
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(ServeWanted::On);
         app.engine.finish_config_reload_operations(&applied);
         assert_eq!(
             record_state(&app, "start-refused"),
@@ -2539,9 +2561,9 @@ pub(crate) mod tests {
         // A reload that turns off a start still binding is over once that
         // start has been cancelled.
         app.server_flip_preflight_pending = false;
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(ServeWanted::On);
         ask_for_a_reload(&mut app, "cancels");
-        app.apply_serve_while_tui_setting(false);
+        app.apply_serve_while_tui_setting(ServeWanted::Off);
         app.engine.finish_config_reload_operations(&applied);
         assert_eq!(
             record_state(&app, "cancels"),
@@ -2806,7 +2828,7 @@ pub(crate) mod tests {
         app.start_background_server(BackgroundServerStart::UserRequest);
         assert!(app.background_server_preflight_pending);
 
-        app.apply_serve_while_tui_setting(false);
+        app.apply_serve_while_tui_setting(ServeWanted::Off);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
         app.apply_background_server_preflight(
@@ -3272,7 +3294,7 @@ pub(crate) mod tests {
             if stop == "the palette's stop" {
                 app.stop_background_server();
             } else {
-                app.apply_serve_while_tui_setting(false);
+                app.apply_serve_while_tui_setting(ServeWanted::Off);
             }
 
             assert!(
