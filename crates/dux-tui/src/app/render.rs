@@ -1381,6 +1381,25 @@ fn confirm_focus_buttons(
     )
 }
 
+/// Whether the embedded terminal's caret is placed as the host cursor: only
+/// for a pane that takes keys and has no take-over card over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caret {
+    /// The host cursor goes where the child's cursor is.
+    Shown,
+    /// It stays hidden.
+    Hidden,
+}
+
+/// Whether the take-over card covers the terminal pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardCover {
+    /// It does, so the hint names the take-over.
+    Covered,
+    /// It does not.
+    Clear,
+}
+
 impl App {
     /// Render the Delete Agent modal's chrome and its Cancel/Delete pair for a
     /// dialog with NO checkbox: the standalone case, where there is no removal
@@ -4249,8 +4268,7 @@ impl App {
         term_area: Rect,
         provider_name: Option<&str>,
         active_surface: SessionSurface,
-        receives_keys: bool,
-        card_up: bool,
+        caret: Caret,
     ) -> (bool, usize) {
         let Some(provider) = self.selected_terminal_surface_client() else {
             return (false, 0);
@@ -4264,9 +4282,12 @@ impl App {
             self.render_terminal_loading(frame, term_area, provider_name, active_surface);
             return (true, 0);
         }
-        let is_alt_screen = provider.is_alt_screen();
-        let scrollback_offset =
-            self.render_terminal_grid(frame, term_area, receives_keys, card_up, is_alt_screen);
+        let screen = if provider.is_alt_screen() {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
+        let scrollback_offset = self.render_terminal_grid(frame, term_area, caret, screen);
         (true, scrollback_offset)
     }
 
@@ -4359,17 +4380,16 @@ impl App {
         &mut self,
         frame: &mut Frame,
         term_area: Rect,
-        receives_keys: bool,
-        card_up: bool,
-        is_alt_screen: bool,
+        caret: Caret,
+        screen: dux_core::pty::ScreenBuffer,
     ) -> usize {
         self.refresh_snapshot_buf();
         self.drop_drifted_selection();
         let scrollback_offset = self.snapshot_buf.scrollback_offset;
         let selection_origin = self.snapshot_selection_origin();
         self.paint_terminal_cells(frame, term_area, selection_origin);
-        self.render_terminal_caret(frame, term_area, receives_keys, card_up);
-        self.render_terminal_scrollback_indicator(frame, term_area, is_alt_screen);
+        self.render_terminal_caret(frame, term_area, caret);
+        self.render_terminal_scrollback_indicator(frame, term_area, screen);
         scrollback_offset
     }
 
@@ -4422,14 +4442,8 @@ impl App {
         }
     }
 
-    fn render_terminal_caret(
-        &self,
-        frame: &mut Frame,
-        term_area: Rect,
-        receives_keys: bool,
-        card_up: bool,
-    ) {
-        if !receives_keys || card_up {
+    fn render_terminal_caret(&self, frame: &mut Frame, term_area: Rect, caret: Caret) {
+        if caret == Caret::Hidden {
             return;
         }
         let Some(cursor) = self.snapshot_buf.cursor else {
@@ -4449,9 +4463,9 @@ impl App {
         &self,
         frame: &mut Frame,
         term_area: Rect,
-        is_alt_screen: bool,
+        screen: dux_core::pty::ScreenBuffer,
     ) {
-        if is_alt_screen {
+        if screen == dux_core::pty::ScreenBuffer::Alternate {
             return;
         }
         let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
@@ -4523,14 +4537,14 @@ impl App {
         frame: &mut Frame,
         hint_area: Rect,
         context: &AgentTerminalContext,
-        card_up: bool,
+        cover: CardCover,
         scrollback_offset: usize,
     ) {
         if hint_area.height == 0 {
             return;
         }
         let hint_line =
-            self.agent_terminal_hint_line(context, hint_area.width, card_up, scrollback_offset);
+            self.agent_terminal_hint_line(context, hint_area.width, cover, scrollback_offset);
         Paragraph::new(hint_line)
             .block(
                 Block::default()
@@ -4544,12 +4558,12 @@ impl App {
         &self,
         context: &AgentTerminalContext,
         width: u16,
-        card_up: bool,
+        cover: CardCover,
         scrollback_offset: usize,
     ) -> Line<'static> {
         if context.is_input && self.scroll_mode_active() {
             self.scroll_mode_cue_line(width)
-        } else if card_up {
+        } else if cover == CardCover::Covered {
             self.takeover_hint_line(width)
         } else if context.is_input {
             self.interactive_terminal_hint_line(scrollback_offset, width)
@@ -4708,15 +4722,23 @@ impl App {
         // Read ownership after sizing spends an armed claim, preventing a
         // one-frame stale take-over card after a successful claim.
         let takeover_card = self.prepare_terminal_takeover();
-        let card_up = takeover_card.is_some();
+        let cover = if takeover_card.is_some() {
+            CardCover::Covered
+        } else {
+            CardCover::Clear
+        };
+        let caret = if receives_keys && cover == CardCover::Clear {
+            Caret::Shown
+        } else {
+            Caret::Hidden
+        };
 
         let (rendered_content, scrollback_offset) = self.render_terminal_client_content(
             frame,
             term_area,
             session_provider_name,
             active_surface,
-            receives_keys,
-            card_up,
+            caret,
         );
 
         if rendered_content {
@@ -4739,7 +4761,7 @@ impl App {
             return;
         }
 
-        self.render_agent_terminal_hint(frame, hint_area, &context, card_up, scrollback_offset);
+        self.render_agent_terminal_hint(frame, hint_area, &context, cover, scrollback_offset);
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
