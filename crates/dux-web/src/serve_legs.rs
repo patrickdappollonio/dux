@@ -1288,9 +1288,10 @@ pub(crate) fn funnel_state_news(
                     .into(),
             },
         )),
-        (Checking, Open)
-        | (Open | Checking | Unconfirmed | CliNotFound | Funnel | FunnelSaved, Checking) => None,
-        (Open, Open) | (Unchecked, _) | (_, Unchecked) => None,
+        (Checking | Open, Open)
+        | (Open | Checking | Unconfirmed | CliNotFound | Funnel | FunnelSaved, Checking)
+        | (Unchecked, _)
+        | (_, Unchecked) => None,
     }
 }
 
@@ -2689,8 +2690,8 @@ mod tests {
 
     #[test]
     fn every_mode_transition_plans_the_steps_that_mode_needs() {
-        let ts = addr("100.64.0.5:8080");
         use TailscaleMode::{Auto, No, Yes};
+        let ts = addr("100.64.0.5:8080");
 
         // → no: stop watching, drop the leg, and stop admitting Tailscale Host
         // literals, in that order.

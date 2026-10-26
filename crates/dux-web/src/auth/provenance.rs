@@ -1359,11 +1359,11 @@ mod tests {
         }
 
         fn value(&mut self) -> Vec<u8> {
-            let len = (self.next() % 24) as usize;
+            let len = usize::try_from(self.next() % 24).expect("below 24");
             (0..len)
                 .map(|_| {
                     loop {
-                        let byte = (self.next() % 256) as u8;
+                        let byte = u8::try_from(self.next() % 256).expect("below 256");
                         if byte == b'\t' || (0x20..0x7f).contains(&byte) || byte >= 0x80 {
                             break byte;
                         }

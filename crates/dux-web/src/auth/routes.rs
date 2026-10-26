@@ -166,14 +166,17 @@ async fn bounded_body(body: Body, limit: usize) -> Option<Zeroizing<Vec<u8>>> {
     Some(Zeroizing::new(bytes.to_vec()))
 }
 
+/// A configured byte cap as a length. A `u32` always fits a `usize` on the
+/// 64-bit targets dux supports.
+fn byte_cap(max_bytes: u32) -> usize {
+    usize::try_from(max_bytes).unwrap_or(usize::MAX)
+}
+
 /// The most a body carrying `fields` passwords of at most `max_bytes` each can
 /// need: JSON may escape every byte of a password as six (`\u00XX`), plus room
 /// for the keys and punctuation. Applied before anything is parsed or hashed.
 fn body_limit(max_bytes: u32, fields: usize) -> usize {
-    (max_bytes as usize)
-        .saturating_mul(6)
-        .saturating_mul(fields)
-        + 1024
+    byte_cap(max_bytes).saturating_mul(6).saturating_mul(fields) + 1024
 }
 
 #[derive(Deserialize)]
@@ -276,7 +279,7 @@ async fn sign_in(
     };
     drop(raw);
     let password = Password::new(body.password);
-    if password.byte_len() > config.max_password_bytes as usize {
+    if password.byte_len() > byte_cap(config.max_password_bytes) {
         return SignIn::Refused(too_long(config.max_password_bytes));
     }
     if !snapshot.has_password() {
@@ -493,7 +496,7 @@ async fn change_password(
                     }),
                 );
             };
-            if current.byte_len() > config.max_password_bytes as usize {
+            if current.byte_len() > byte_cap(config.max_password_bytes) {
                 return too_long(config.max_password_bytes);
             }
             match state.auth.verify(&a.classification, current).await {
@@ -523,7 +526,7 @@ async fn change_password(
         }
     };
 
-    if new.byte_len() > config.max_password_bytes as usize {
+    if new.byte_len() > byte_cap(config.max_password_bytes) {
         return too_long(config.max_password_bytes);
     }
     let policy = config.password_policy();
@@ -585,7 +588,7 @@ async fn change_password(
         Ok(Ok(Ok((hash, file_write)))) => {
             match hash {
                 Some(hash) => state.auth.applied(
-                    move |config| config.password_hash = hash.clone(),
+                    move |config| config.password_hash.clone_from(&hash),
                     file_write,
                 ),
                 None => state.auth.applied(|_| {}, file_write),

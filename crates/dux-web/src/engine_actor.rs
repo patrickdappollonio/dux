@@ -505,7 +505,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// Consider running the spine fingerprint check every Nth tick rather than every
 /// tick. [`SpineCheck::maybe_check`] gates it further on the change signals, so an
 /// interval with no mutation, no streaming transition and no backstop does no work.
-const SPINE_CHECK_TICK_INTERVAL: u64 = 5;
+const SPINE_CHECK_TICK_INTERVAL: u32 = 5;
 
 /// Every ~40 ticks (~2s), run an unconditional spine fingerprint comparison so
 /// mutations that do not bump `mutation_version` are still published.
@@ -819,17 +819,24 @@ impl LiveServerLimits {
     pub fn store_from(&self, server: &dux_core::config::ServerConfig, source: Option<&str>) {
         self.set_search_index_max_files(server.search_index_max_files);
         self.set_access_log(crate::server::AccessLog::of(server));
-        // As dux uses them, through the functions `dux config get` reports.
+        // As dux uses them, through the functions `dux config get` reports. A
+        // `u32` always fits a `usize` on the 64-bit targets dux supports.
         self.set_pty_send_timeout_seconds(
-            dux_core::config_effective::effective_pty_send_timeout_seconds(
-                server.pty_send_timeout_seconds,
-            ) as usize,
+            usize::try_from(
+                dux_core::config_effective::effective_pty_send_timeout_seconds(
+                    server.pty_send_timeout_seconds,
+                ),
+            )
+            .unwrap_or(usize::MAX),
         );
         self.set_heartbeat_deadline_seconds(
-            dux_core::config_effective::effective_heartbeat_deadline_seconds(
-                server.heartbeat_deadline_seconds,
-                server.heartbeat_seconds,
-            ) as usize,
+            usize::try_from(
+                dux_core::config_effective::effective_heartbeat_deadline_seconds(
+                    server.heartbeat_deadline_seconds,
+                    server.heartbeat_seconds,
+                ),
+            )
+            .unwrap_or(usize::MAX),
         );
         self.set_presence_grace_seconds(server.presence_grace_seconds);
         self.set_allowed_hosts(&server.allowed_hosts);
@@ -2087,10 +2094,6 @@ impl EngineHandle {
             .clone()
     }
 
-    /// Snapshot the inputs to classify a project's managed worktrees (project,
-    /// paths, sessions). Instant: the git classification runs off-thread in the
-    /// caller. `None` when the project id is unknown.
-    #[allow(clippy::type_complexity)]
     /// See [`EngineRequest::AdmitManagerRemoval`].
     pub async fn admit_manager_removal(
         &self,
@@ -2132,6 +2135,9 @@ impl EngineHandle {
         rx.await.ok()
     }
 
+    /// Snapshot the inputs to classify a project's managed worktrees (project,
+    /// paths, sessions). Instant: the git classification runs off-thread in the
+    /// caller. `None` when the project id is unknown.
     pub(crate) async fn project_worktree_inputs(
         &self,
         project_id: String,
@@ -2438,13 +2444,13 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::CreateAgentTab(..)
         // Starting a dormant tab dispatches a launch and clears its recorded
         // failure, both of which the spine publishes.
-        | EngineRequest::StartAgentTab(..) => true,
+        | EngineRequest::StartAgentTab(..)
 
         // The attach dispatch itself only mints a pending status op and spawns
         // the lookup worker, but the worker's result lands as an engine event
         // that pins the PR onto the session view (`SessionView.pr`), so lean
         // `true` per the asymmetry note above.
-        EngineRequest::AttachPullRequest(..) => true,
+        | EngineRequest::AttachPullRequest(..)
 
         // Writers of the per-tab activity/attention state that the spine
         // projects. `WritePty` calls `note_pty_input`, which is what lights the
@@ -2453,13 +2459,13 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // `needs_attention`. Both are also observed by the per-tick
         // `poll_attention_transitions` / streaming polls, so answering `true`
         // here mostly makes the same-tick case prompt rather than next-tick.
-        EngineRequest::WritePty(..) | EngineRequest::NoteViewed(..) => true,
+        | EngineRequest::WritePty(..) | EngineRequest::NoteViewed(..)
 
         // Tears down every PTY and marks the agent sessions Detached, so it is a
         // mutator by any reading. Handled inline in the loop, which then breaks
         // out, so this answer is never actually consulted; it is stated
         // truthfully rather than left as a convenient `false`.
-        EngineRequest::Shutdown(..) => true,
+        | EngineRequest::Shutdown(..) => true,
 
         // Pure projections and instant clones off engine state: `Spine`,
         // `Session`, `Bootstrap`, `ResourceTargets` and `CreatedSessionForOp`
@@ -2470,13 +2476,13 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::Session(..)
         | EngineRequest::Bootstrap(..)
         | EngineRequest::ResourceTargets(..)
-        | EngineRequest::CreatedSessionForOp(..) => false,
+        | EngineRequest::CreatedSessionForOp(..)
 
         // Lookups: each arm is an `iter().find()` or a `HashMap::get` followed by
         // a clone of what it found (worktree path, repo root, terminal owner, tab
         // owner, project/session log context, worktree inputs). Read-only by
         // construction.
-        EngineRequest::TerminalOwnerOf(..)
+        | EngineRequest::TerminalOwnerOf(..)
         | EngineRequest::TerminalRoot(..)
         | EngineRequest::TabSession(..)
         | EngineRequest::SlotTabId(..)
@@ -2498,29 +2504,29 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
-        | EngineRequest::BrowseStartDir(..) => false,
+        | EngineRequest::BrowseStartDir(..)
 
         // Attach to an ALREADY-RUNNING PTY, or push bytes at one. Deliberately
         // distinct from `SubscribePty`: `SubscribeTerminal` never launches
         // anything (an unknown terminal id is an error, not a spawn), and
         // `ResizePty` resolves the client through `pty_for`, which borrows the
         // engine immutably. Neither adds, removes, or restates a spine row.
-        EngineRequest::SubscribeTerminal(..) | EngineRequest::ResizePty(..) => false,
+        | EngineRequest::SubscribeTerminal(..) | EngineRequest::ResizePty(..)
 
         // A read of a live PTY's grid through the same immutable `pty_for`
         // borrow `ResizePty` uses. It clones two integers out from under the
         // terminal lock and writes nothing anywhere.
-        EngineRequest::PtyGridSize(..) => false,
+        | EngineRequest::PtyGridSize(..)
 
         // Read-only git. `create_agent_branch_preflight` is a `branch_exists`
         // probe answering "fresh or existing branch?"; it writes nothing.
-        EngineRequest::CreateAgentBranchPlan(..) => false,
+        | EngineRequest::CreateAgentBranchPlan(..)
 
         // A pure read of what the caller needs to resolve a typed pull request
         // reference: the project list, the GitHub host policy, and whether the
         // from-PR command is available. It clones all three and sends them back.
         // The per-project git calls happen on the CALLER's worker, not here.
-        EngineRequest::PullRequestResolutionInputs(..) => false,
+        | EngineRequest::PullRequestResolutionInputs(..)
 
         // Writes that land somewhere the spine does not project. The changed-files
         // revision counter and the last-seen version are SQLite rows that no
@@ -2529,7 +2535,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // untouched until an explicit reload). `RefreshChangedFiles` only spawns a
         // worker (`&self`), and the refreshed lists arrive through the worker-event
         // drain, which bumps the version itself.
-        EngineRequest::NextChangesRev(..)
+        | EngineRequest::NextChangesRev(..)
         | EngineRequest::MarkVersionSeen(..)
         | EngineRequest::ReadRawConfig(..)
         | EngineRequest::WriteRawConfig(..)
@@ -2539,11 +2545,11 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // reads; the status it may raise travels the worker lane.
         | EngineRequest::NoteChangedFilesOutcome(..)
         // Puts a status on the worker lane and touches nothing else.
-        | EngineRequest::PostStatus(..) => false,
+        | EngineRequest::PostStatus(..)
 
         // Broadcast on the status channels only. Statuses are their own transport
         // (toasts on the web); no spine field carries them.
-        EngineRequest::EmitStatus(..)
+        | EngineRequest::EmitStatus(..)
         | EngineRequest::ClearStatus(..)
         | EngineRequest::TakeLateStatusFinals(..)
         | EngineRequest::LateStatusFinalsWaiting(..) => false,
@@ -3428,7 +3434,10 @@ impl EngineService {
     fn check_spine(&mut self, engine: &Engine) {
         self.poll_change_signals(engine);
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count.is_multiple_of(SPINE_CHECK_TICK_INTERVAL) {
+        if self
+            .tick_count
+            .is_multiple_of(u64::from(SPINE_CHECK_TICK_INTERVAL))
+        {
             self.spine_check.maybe_check(
                 engine,
                 self.mutation_version,
@@ -3459,7 +3468,7 @@ impl EngineService {
             // `handle_request` takes). Decided before `req` is moved; the
             // fingerprint compare downstream stays the precise emit gate, so an
             // over-broad `true` only costs a serialize.
-            let mutates = request_mutates_spine(&req);
+            let moves_spine = request_mutates_spine(&req);
             match req {
                 EngineRequest::SubscribePty(tab_id, reply) => {
                     handle_subscribe(
@@ -3538,7 +3547,7 @@ impl EngineService {
                     );
                 }
             }
-            if mutates {
+            if moves_spine {
                 mutated = true;
                 self.note_mutation();
             }
@@ -3928,13 +3937,13 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
     // its churn belongs to instead of silently signalling nothing.
     let (session_terminals, project_terminals): (Vec<_>, Vec<_>) =
         spine.terminals.iter().partition(|t| match &t.owner {
-            dux_core::viewmodel::TerminalOwnerView::Session { .. } => true,
-            dux_core::viewmodel::TerminalOwnerView::Project { .. } => false,
+            dux_core::viewmodel::TerminalOwnerView::Session { .. }
             // Owned by nothing, so it belongs to neither half naturally and one
             // has to be chosen. It fires the sessions event, which is
             // where the flat sidebar list's churn already goes; see the note on
             // `fingerprint_halves`.
-            dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => true,
+            | dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => true,
+            dux_core::viewmodel::TerminalOwnerView::Project { .. } => false,
         });
     let projects = serde_json::to_string(&(&spine.projects, &project_terminals))
         .unwrap_or_else(|_| "[]".to_string());
@@ -4157,7 +4166,7 @@ impl SpineCheck {
     ) {
         self.ticks_since_backstop = self
             .ticks_since_backstop
-            .saturating_add(SPINE_CHECK_TICK_INTERVAL as u32);
+            .saturating_add(SPINE_CHECK_TICK_INTERVAL);
         // Same before-the-build ordering as `new`: a claim racing this check
         // reads as a still-newer generation next interval.
         let ownership_generation = owners.ownership_generation();
@@ -4257,7 +4266,7 @@ fn poll_attention_transitions(
 ) {
     if engine.needs_attention != *prev_attention {
         *version = version.wrapping_add(1);
-        *prev_attention = engine.needs_attention.clone();
+        prev_attention.clone_from(&engine.needs_attention);
     }
 }
 
@@ -6729,9 +6738,8 @@ mod tests {
             match tokio::time::timeout(std::time::Duration::from_millis(200), spine_rx.recv()).await
             {
                 Ok(Ok(SpineChange::Sessions)) => break true,
-                Ok(Ok(SpineChange::Projects)) => {}
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
-                Ok(Err(_)) | Err(_) => {}
+                Ok(Ok(SpineChange::Projects) | Err(_)) | Err(_) => {}
             }
             if std::time::Instant::now() >= deadline {
                 break false;
@@ -6805,9 +6813,8 @@ mod tests {
                 .await
             {
                 Ok(Ok(s)) if s.message == want => break true,
-                Ok(Ok(_)) => {}
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
-                Ok(Err(_)) | Err(_) => {}
+                Ok(Ok(_) | Err(_)) | Err(_) => {}
             }
             if std::time::Instant::now() >= deadline {
                 break false;
@@ -7597,16 +7604,14 @@ mod tests {
         );
 
         // The server log is opened when a serve starts, in every way of serving.
-        for (setting, change) in [
-            (
-                "log_path",
-                (|c: &mut dux_core::config::ServerConfig| c.log_path = "x.log".into())
-                    as fn(&mut dux_core::config::ServerConfig),
-            ),
+        let log_path: fn(&mut dux_core::config::ServerConfig) = |c| c.log_path = "x.log".into();
+        let changes = [
+            ("log_path", log_path),
             ("log_max_bytes", |c| c.log_max_bytes += 1),
             ("log_keep", |c| c.log_keep += 1),
             ("log_compress", |c| c.log_compress = !c.log_compress),
-        ] {
+        ];
+        for (setting, change) in changes {
             let mut next = prev.clone();
             change(&mut next);
             assert!(server_restart_settings_changed(&prev, &next), "{setting}");
@@ -8042,7 +8047,7 @@ mod tests {
 
         // Run every spine-check interval that fits before the backstop would fire.
         let intervals_before_backstop =
-            (SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32) - 1;
+            (SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL) - 1;
         for _ in 0..intervals_before_backstop {
             check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         }
@@ -8074,7 +8079,7 @@ mod tests {
 
         // Drive exactly up to the backstop interval. The version never changed,
         // so the only thing that can run the compare is the backstop.
-        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
+        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL;
         for _ in 0..intervals_to_backstop {
             check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         }
@@ -8249,7 +8254,7 @@ mod tests {
         let mut check = SpineCheck::new(&engine, &owners, &workspace_tx);
         let seed_rev = workspace_rx.borrow_and_update().clone().unwrap().rev;
 
-        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
+        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL;
         for _ in 0..intervals_to_backstop {
             check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         }
@@ -8373,7 +8378,8 @@ mod tests {
         engine.pty_activity.insert(
             "s1".to_string(),
             std::time::Instant::now()
-                - (AGENT_STREAMING_WINDOW + std::time::Duration::from_millis(50)),
+                .checked_sub(AGENT_STREAMING_WINDOW + std::time::Duration::from_millis(50))
+                .expect("the clock is past one streaming window"),
         );
         poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
         assert_eq!(
