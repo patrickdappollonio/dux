@@ -355,13 +355,10 @@ async fn resolve_git_directory(
     session_id: String,
     ask: GitAsk,
 ) -> Result<PathBuf, RouteRejection> {
-    let access = match state.engine.session_git_access(session_id).await {
-        Some(access) => access,
-        None => {
-            return Err((StatusCode::NOT_FOUND, "unknown session")
-                .into_response()
-                .into());
-        }
+    let Some(access) = state.engine.session_git_access(session_id).await else {
+        return Err((StatusCode::NOT_FOUND, "unknown session")
+            .into_response()
+            .into());
     };
     let allowed = match ask {
         GitAsk::Read => access.changes_panel_works(),
@@ -632,35 +629,9 @@ async fn discard(
         _ => deletes_a_link,
     };
     let claim = if claim {
-        let ops = state.engine.worktree_ops().clone();
-        let claimed = target.clone();
-        match tokio::task::spawn_blocking(move || {
-            ops.claim_for_destructive_as(
-                &claimed,
-                dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
-                "a changes-pane delete",
-            )
-        })
-        .await
-        {
-            Ok(Ok(claim)) => Some(claim),
-            Ok(Err(reason)) => {
-                return (
-                    StatusCode::CONFLICT,
-                    format!(
-                        "dux did not delete {}: {reason}.",
-                        dux_core::home_path::shorten_home(&target)
-                    ),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("claim task failed: {e}"),
-                )
-                    .into_response();
-            }
+        match claim_for_a_whole_delete(&state, &target).await {
+            Ok(claim) => Some(claim),
+            Err(refusal) => return refusal.into_response(),
         }
     } else {
         None
@@ -702,6 +673,43 @@ async fn discard(
         Json(serde_json::json!({ "files_deleted": files_deleted })),
     )
         .into_response()
+}
+
+/// Claim `target` for a delete that takes it whole, off the runtime, since a
+/// removal running inside it is waited for. A refusal is a 409 naming the
+/// target.
+async fn claim_for_a_whole_delete(
+    state: &AppState,
+    target: &std::path::Path,
+) -> Result<dux_core::worktree_ops::DestructiveClaim, RouteRejection> {
+    let ops = state.engine.worktree_ops().clone();
+    let claimed = target.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        ops.claim_for_destructive_as(
+            &claimed,
+            dux_core::worktree_ops::DESTRUCTIVE_CLAIM_WAIT,
+            "a changes-pane delete",
+        )
+    })
+    .await
+    {
+        Ok(Ok(claim)) => Ok(claim),
+        Ok(Err(reason)) => Err((
+            StatusCode::CONFLICT,
+            format!(
+                "dux did not delete {}: {reason}.",
+                dux_core::home_path::shorten_home(target)
+            ),
+        )
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("claim task failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
 }
 
 async fn stage_files(
@@ -747,6 +755,68 @@ impl Section {
             Self::Staged => "unstage the files",
             Self::Unstaged => "stage the files",
         }
+    }
+}
+
+/// Split a batch into the paths still in `section`, which the git call acts on,
+/// and the ones that left it, which are reported as refused. Repeats are
+/// dropped. Reading the changed files failing is a 500.
+async fn partition_batch(
+    worktree: &std::path::Path,
+    paths: Vec<String>,
+    section: Section,
+) -> Result<(Vec<String>, Vec<String>), RouteRejection> {
+    let wt = worktree.to_path_buf();
+    let requested = paths;
+    let partition = tokio::task::spawn_blocking(move || {
+        dux_core::git::changed_files_for_decisions(&wt).and_then(|(staged, unstaged)| {
+            let (live, side) = match section {
+                Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
+                Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
+            };
+            // One git call confirms every path inside a folded folder, so an
+            // ignored or missing file there is refused rather than acted on.
+            let answered = dux_core::git::rows_answering(&wt, live, side, &requested)?;
+            let mut seen = std::collections::HashSet::new();
+            let mut done = Vec::new();
+            let mut refused = Vec::new();
+            for path in requested {
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                // A file inside a folded folder is in the section when the
+                // folder is and git lists it there, which is how an expanded
+                // row validates.
+                if answered.contains(&path) {
+                    done.push(path);
+                } else {
+                    refused.push(path);
+                }
+            }
+            Ok((done, refused))
+        })
+    })
+    .await;
+    match partition {
+        Ok(Ok(split)) => Ok(split),
+        Ok(Err(e)) => {
+            dux_core::logger::warn(&format!("[web] could not read changed files: {e:#}"));
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Could not read this worktree's changed files. {}",
+                    dux_core::git::redact_worktree_path(&format!("{e:#}"), worktree)
+                ),
+            )
+                .into_response()
+                .into())
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git task failed: {e}"),
+        )
+            .into_response()
+            .into()),
     }
 }
 
@@ -797,57 +867,9 @@ async fn files_op(
         Err(r) => return r.into_response(),
     };
 
-    let wt = worktree.clone();
-    let requested = paths.clone();
-    let partition = tokio::task::spawn_blocking(move || {
-        dux_core::git::changed_files_for_decisions(&wt).and_then(|(staged, unstaged)| {
-            let (live, side) = match section {
-                Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
-                Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
-            };
-            // One git call confirms every path inside a folded folder, so an
-            // ignored or missing file there is refused rather than acted on.
-            let answered = dux_core::git::rows_answering(&wt, live, side, &requested)?;
-            let mut seen = std::collections::HashSet::new();
-            let mut done = Vec::new();
-            let mut refused = Vec::new();
-            for path in requested {
-                if !seen.insert(path.clone()) {
-                    continue;
-                }
-                // A file inside a folded folder is in the section when the
-                // folder is and git lists it there, which is how an expanded
-                // row validates.
-                if answered.contains(&path) {
-                    done.push(path);
-                } else {
-                    refused.push(path);
-                }
-            }
-            Ok((done, refused))
-        })
-    })
-    .await;
-    let (done, refused) = match partition {
-        Ok(Ok(split)) => split,
-        Ok(Err(e)) => {
-            dux_core::logger::warn(&format!("[web] could not read changed files: {e:#}"));
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "Could not read this worktree's changed files. {}",
-                    dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree)
-                ),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("git task failed: {e}"),
-            )
-                .into_response();
-        }
+    let (done, refused) = match partition_batch(&worktree, paths.clone(), section).await {
+        Ok(split) => split,
+        Err(refusal) => return refusal.into_response(),
     };
     if done.is_empty() {
         return (
@@ -1166,7 +1188,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store
@@ -1204,7 +1226,7 @@ mod tests {
         let engine = crate::test_support::bootstrap_test_engine(&paths).unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
 
-        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = Default::default();
+        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = std::sync::Arc::default();
         let captured = std::sync::Arc::clone(&slot);
         let probe = Router::new().route(
             "/test/state",
@@ -1934,7 +1956,7 @@ mod tests {
         raw.bytes()
             .map(|byte| match byte {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    (byte as char).to_string()
+                    char::from(byte).to_string()
                 }
                 other => format!("%{other:02X}"),
             })
@@ -2715,7 +2737,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store

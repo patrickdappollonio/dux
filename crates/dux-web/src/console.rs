@@ -209,12 +209,11 @@ impl LineWriter {
             }
         }
         match self.tx.try_send(WriterMsg::Line(self.render(line))) {
-            Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
-            // The writer thread is gone (only on process teardown).
-            Err(TrySendError::Disconnected(_)) => {}
+            // Sent, or the writer thread is gone (only on process teardown).
+            Ok(()) | Err(TrySendError::Disconnected(_)) => {}
         }
     }
 
@@ -264,6 +263,12 @@ type Clock = fn() -> String;
 /// must not lose queued lines calls [`Console::flush`] first.
 #[derive(Clone)]
 pub struct Console(Arc<ConsoleInner>);
+
+impl std::fmt::Debug for Console {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Console").finish_non_exhaustive()
+    }
+}
 
 struct ConsoleInner {
     sink: Sink,
@@ -740,6 +745,7 @@ impl Console {
         self.emit(LogTone::Info, &format!("client connected from {ip}"));
     }
 
+    /// Log that the browser at `ip` closed its last socket.
     pub fn client_disconnected(&self, ip: IpAddr) {
         self.emit(LogTone::Info, &format!("client disconnected from {ip}"));
     }
@@ -1498,9 +1504,9 @@ mod tests {
 
     #[test]
     fn writer_thread_preserves_order_across_concurrent_senders() {
-        let (console, sink) = Console::test_capture(Coloring::Plain);
         const SENDERS: usize = 8;
         const PER_SENDER: usize = 50;
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         let mut handles = Vec::new();
         for s in 0..SENDERS {
             let c = console.clone();
@@ -1527,7 +1533,7 @@ mod tests {
                 assert!(n > last, "sender {s}'s lines must stay in send order");
                 last = n;
             }
-            assert_eq!(last, (PER_SENDER - 1) as i64);
+            assert_eq!(last, i64::try_from(PER_SENDER - 1).expect("a small count"));
         }
     }
 

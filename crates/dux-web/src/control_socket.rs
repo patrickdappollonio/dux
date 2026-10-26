@@ -84,7 +84,7 @@ pub(crate) async fn fallback(request: Request) -> Response {
 
 /// The control socket's listener: accepts only connections whose peer runs as
 /// `uid`, closing any other before a byte of its request is read.
-pub struct ControlListener {
+pub(crate) struct ControlListener {
     inner: tokio::net::UnixListener,
     uid: u32,
 }
@@ -92,7 +92,7 @@ pub struct ControlListener {
 impl ControlListener {
     /// Serve `listener` (a clone of the bound control socket) for this
     /// process's own user. Needs an entered tokio runtime.
-    pub fn new(listener: std::os::unix::net::UnixListener) -> io::Result<Self> {
+    pub(crate) fn new(listener: std::os::unix::net::UnixListener) -> io::Result<Self> {
         Self::for_uid(listener, dux_core::control_socket::current_uid())
     }
 

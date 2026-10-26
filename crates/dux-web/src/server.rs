@@ -34,75 +34,77 @@ use crate::engine_actor::{EngineHandle, SpineChange, WorkspaceDoc};
 use crate::event_bus::{self, Event, EventBus};
 use crate::pty_owners::PtySizeOwners;
 
+/// The shared state every route and socket handler of one router reads.
 #[derive(Clone)]
 pub struct AppState {
+    /// The handle every handler talks to the engine thread through.
     pub engine: EngineHandle,
     /// The server's console. A real (stdout) console for `dux server`; a
     /// capturing console for the TUI flip, whose status screen shows the same
     /// lines; a [`Console::noop`] for the background server and every test that
     /// does not assert console output. WS handlers
     /// emit life events through it; the access middleware reads it too.
-    pub console: Console,
+    pub(crate) console: Console,
     /// The `[server]` settings a config reload can move on a listener that is
     /// already bound: `access_log` and `search_index_max_files`. Seeded from
     /// [`RouterParams`] here and rewritten by the engine actor on every reload,
     /// so the routes read the current value per request rather than one frozen
     /// at bind time.
-    pub live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+    pub(crate) live_limits: Arc<crate::engine_actor::LiveServerLimits>,
     /// Caps concurrent EVENTS WebSocket connections
     /// (`[server] max_websocket_events_connections`). An upgrade takes a permit
     /// before upgrading and holds it for the socket's lifetime, and is refused with
     /// a 503 when none are free. Sized and exhausted independently of the agent and
     /// terminal PTY classes.
-    pub ws_events_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) ws_events_semaphore: Arc<tokio::sync::Semaphore>,
     /// Caps concurrent AGENT-PTY WebSocket connections
     /// (`[server] max_websocket_agent_connections`). The embedded-terminal stream
     /// for an agent session. Sized and exhausted INDEPENDENTLY of the events and
     /// terminal classes.
-    pub ws_agent_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) ws_agent_semaphore: Arc<tokio::sync::Semaphore>,
     /// Caps concurrent TERMINAL-PTY WebSocket connections
     /// (`[server] max_websocket_terminal_connections`). The standalone
     /// scratch-terminal stream. Sized and exhausted INDEPENDENTLY of the events and
     /// agent classes.
-    pub ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
     /// Caps concurrent PER-TAB-ADDRESSED PTY WebSocket connections across all
     /// agents (`[server] max_websocket_tab_connections`). Every socket dialled at
     /// `/ws/sessions/:id/tabs/:tab/pty` draws from THIS pool, the session-slot tab
     /// included, and not from `ws_agent_semaphore`, so the per-tab address can
     /// never starve the bare per-agent one.
-    pub ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
     /// Live per-tab-addressed sockets keyed by owning session id, the per-agent
     /// fairness sub-quota on top of `ws_tab_semaphore`. `ws_tab_pty_upgrade` refuses
     /// a session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
     /// so one agent cannot monopolize the shared pool. A [`TabWsGuard`] increments on
     /// connect and decrements on drop, every early return included.
-    pub tab_ws_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    pub(crate) tab_ws_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
-    pub max_ws_tabs_per_agent: u32,
+    pub(crate) max_ws_tabs_per_agent: u32,
     /// Bounds concurrent `/files/tree` listings across all sessions
     /// (`[server] tree_list_max_concurrency`), so a burst cannot exhaust the
     /// blocking-thread pool and starve other blocking work. `None` when the value is
     /// `0`, unlimited, and the route takes no permit. A request beyond the limit
     /// waits rather than being rejected, unlike the `ws_*_semaphore` connection caps:
     /// this bounds small, fast background work, not a long-lived connection.
-    pub tree_list_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    pub(crate) tree_list_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Bounds concurrent release-notes fetches
     /// (`[server] release_notes_max_concurrency`), same shape and reason as
     /// [`tree_list_semaphore`]: the fetch is a blocking HTTPS round trip and every
     /// browser tab can ask for it. A waiter usually answers from the notes cache.
-    pub release_notes_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    pub(crate) release_notes_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// Per-file size cap for a dropped file (`[server] file_drop_max_bytes`),
     /// applied to the upload route as an explicit body limit. `0` disables file
     /// drop entirely and the route refuses every upload.
-    pub file_drop_max_bytes: usize,
+    pub(crate) file_drop_max_bytes: usize,
     /// Bounds how many dropped-file uploads are in flight
     /// (`[server] file_drop_max_concurrency`). Never `None`, unlike
     /// [`tree_list_semaphore`]: a configured `0` clamps to one permit, because this
     /// bounds total buffered-upload MEMORY and unlimited would bound nothing. The
     /// permit is taken in a layer around the handler, since a request body is
     /// buffered in full before the handler's first line runs.
-    pub file_drop_semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) file_drop_semaphore: Arc<tokio::sync::Semaphore>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -110,14 +112,14 @@ pub struct AppState {
     /// `GET /api/v1/sessions/:id/changes` and the `session.changes` event. The git
     /// mutation handlers call `state.changes.invalidate(id)` after a successful
     /// stage/unstage/discard/commit/write so the pane refreshes immediately.
-    pub changes: Arc<ChangesService>,
+    pub(crate) changes: Arc<ChangesService>,
     /// The resource-monitor sampler + single-flight TTL cache behind
     /// `GET /api/v1/resources`, which the web Task Manager polls while open.
-    pub resources: Arc<crate::resource_routes::ResourceService>,
+    pub(crate) resources: Arc<crate::resource_routes::ResourceService>,
     /// `Idempotency-Key -> created resource id` cache (TTL-bounded) so a retried
     /// `POST /api/v1/sessions` or `/projects` after a lost response returns the
     /// same resource instead of creating a duplicate worktree/project.
-    pub idempotency: Arc<crate::rest_common::IdempotencyCache>,
+    pub(crate) idempotency: Arc<crate::rest_common::IdempotencyCache>,
     /// Per-PTY sizing ownership so two viewers of one PTY don't thrash its size.
     /// The most recently attached per-PTY socket owns sizing; a non-owner's resize
     /// frame is ignored (see [`PtySizeOwners`]).
@@ -132,35 +134,44 @@ pub struct AppState {
     /// it on disconnect. Read by `scope_from_headers` to validate an inbound
     /// `X-Connection-Id` (unknown id → broadcast) and by `count` for a later task's
     /// per-class caps. A cheap `Arc` clone so every request/socket shares one map.
-    pub connections: Arc<crate::rest_common::ConnectionRegistry>,
+    pub(crate) connections: Arc<crate::rest_common::ConnectionRegistry>,
     /// This launch's pending first-load screen (welcome / what's-new), decided
     /// ONCE by the resolver task spawned in [`build_app`] and injected into the
     /// bootstrap document per request. See [`crate::first_load_routes`] for why
     /// it is not computed per request and why the version is stamped on
     /// dismissal rather than at startup.
-    pub first_load: Arc<crate::first_load_routes::FirstLoadState>,
+    pub(crate) first_load: Arc<crate::first_load_routes::FirstLoadState>,
     /// This serve's live Tailscale-mode handle, or `None` when nothing is serving
     /// behind this router (tests, and any path with no serve loop). The route
     /// answers "the choice is saved and applies when a listener starts" for
     /// `None` rather than pretending the listener moved.
-    pub tailscale_mode: Option<crate::serve_legs::TailscaleModeControl>,
+    pub(crate) tailscale_mode: Option<crate::serve_legs::TailscaleModeControl>,
     /// Whether this run was started with `--no-tailscale`. Projected into the
     /// bootstrap document so the Preferences row can say the flag outranks the
     /// saved value for as long as this run lasts.
-    pub tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
+    pub(crate) tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
     /// Overrides how long a create handler waits for its resource to surface
     /// before answering `202 Accepted`. `None` in every real serve, which uses
     /// [`crate::rest_common::CREATE_AWAIT_TIMEOUT`] and
     /// [`crate::rest_common::FROM_PR_CREATE_AWAIT_TIMEOUT`]; a test sets a short
     /// window so the deferred reply is exercised without waiting out the real one.
-    pub create_await_timeout: Option<std::time::Duration>,
+    pub(crate) create_await_timeout: Option<std::time::Duration>,
     /// The web login: who each request is, the sessions, the blocklist and the
     /// password checks. Every request passes its layer; every open socket
     /// holds a watch on it (see [`crate::auth`]).
-    pub auth: Arc<crate::auth::AuthState>,
+    pub(crate) auth: Arc<crate::auth::AuthState>,
     /// Flips to `true` when the core serving this router starts handing the
     /// engine to the next one; a long operation wait then answers at once.
-    pub hand_over: Arc<tokio::sync::watch::Sender<bool>>,
+    pub(crate) hand_over: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("max_ws_tabs_per_agent", &self.max_ws_tabs_per_agent)
+            .field("file_drop_max_bytes", &self.file_drop_max_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppState {
@@ -295,10 +306,17 @@ struct SocketLinkQuery {
 impl axum::extract::FromRequestParts<AppState> for SocketClient {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         _state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self::from_parts(parts)))
+    }
+}
+
+impl SocketClient {
+    /// What the socket's query and the request's extensions say about its client.
+    fn from_parts(parts: &axum::http::request::Parts) -> Self {
         let query = axum::extract::Query::<SocketLinkQuery>::try_from_uri(&parts.uri)
             .ok()
             .map(|axum::extract::Query(query)| query);
@@ -322,17 +340,15 @@ impl axum::extract::FromRequestParts<AppState> for SocketClient {
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(peer)| peer.ip());
-        Ok(Self {
+        Self {
             link,
             after,
             browser,
             address: verified.or(peer),
             verified: verified.is_some(),
-        })
+        }
     }
-}
 
-impl SocketClient {
     /// The client's address, the verified one when there is one.
     pub(crate) fn address(&self) -> Option<IpAddr> {
         self.address
@@ -505,6 +521,15 @@ pub struct RouterParams {
     /// The hand-over signal of the core that serves this router (see
     /// [`AppState::hand_over`]). A router nobody hands over gets its own.
     pub(crate) hand_over: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+}
+
+impl std::fmt::Debug for RouterParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouterParams")
+            .field("access_log", &self.access_log)
+            .field("search_index_max_files", &self.search_index_max_files)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Whether the per-request access log prints (`[server] access_log`).
@@ -824,39 +849,14 @@ pub(crate) fn reload_through_the_engine(engine: EngineHandle) -> Arc<dyn Fn() + 
     })
 }
 
-/// Build the dux web router. `extra_gated` is merged into the router as-is (a
-/// test seam for an injected probe route); production callers pass an empty
-/// router. It is "gated" by the same auth layer as every other route.
+/// Warn loudly about every connection cap set to zero.
 ///
-/// ## Middleware stack (outermost to innermost)
-///
-/// 1. **Host allowlist** (DNS-rebinding defense): when `params.bound_ips` is
-///    non-empty, the outermost layer rejects any request whose `Host` header is
-///    not in the allowlist with `403`. Foreign-Host probes are rejected before
-///    the access log runs, so they are never logged.
-/// 2. **Access log**: logs every request (method, path, status, latency) when
-///    the console records and `access_log` is on. Sees the final status
-///    produced by every inner layer, including the auth layer's refusals and
-///    the REST mutation check's 403.
-/// 3. **Auth** (`crate::auth::middleware`): the blocklist, and with a password
-///    set the session check, for HTTP and WebSocket upgrades alike.
-/// 4. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
-///    requests (cross-site request forgery defense). A missing `Origin` (curl,
-///    CLI clients) is allowed; a present but unparseable `Origin` (including the
-///    literal `"null"` from sandboxed iframes) is treated as a mismatch and
-///    rejected. Shares the `same_origin_allowed` helper with the WS upgrade
-///    handlers so REST and WS use one authority-comparison implementation.
-/// 5. **Handlers**: the actual route logic.
-pub fn build_app(
-    engine: EngineHandle,
-    extra_gated: Router<AppState>,
-    params: RouterParams,
-) -> Router {
-    // A zero cap is a valid-but-drastic per-class setting ("refuse all new
-    // connections of this class until restart"). Warn loudly at startup so an
-    // accidental 0 isn't a silent lock-out: every upgrade of that class would 503
-    // with no other clue (explicit failure over silence). The events class at 0
-    // makes the web UI unreachable; the PTY classes at 0 block only their stream.
+/// A zero cap is a valid-but-drastic per-class setting ("refuse all new
+/// connections of this class until restart"). Warn loudly at startup so an
+/// accidental 0 isn't a silent lock-out: every upgrade of that class would 503
+/// with no other clue (explicit failure over silence). The events class at 0
+/// makes the web UI unreachable; the PTY classes at 0 block only their stream.
+fn warn_about_zero_connection_caps(params: &RouterParams) {
     if params.max_websocket_events_connections == 0 {
         dux_core::logger::warn(
             "[server] max_websocket_events_connections = 0: every events WebSocket \
@@ -888,72 +888,30 @@ pub fn build_app(
              WebSocket upgrade will be refused with HTTP 503 until the server restarts",
         );
     }
-    // The event bus and changed-files service are web-layer concerns built here.
-    // `ChangesService::new` spawns its supervised poller, so this must run inside a
-    // tokio runtime context -- the CLI serve paths build inside `block_on`, and the
-    // flip wraps its `build_app` in `runtime.enter()` (see `serve_with_engine`).
-    let event_bus = Arc::new(EventBus::new());
-    let changes = ChangesService::new(engine.clone(), Arc::clone(&event_bus));
-    let resources = crate::resource_routes::ResourceService::new(engine.clone());
-    // Config-reload -> `config.changed` forwarder. The engine actor fires `()` on
-    // its config-reload broadcast after a successful reload; we turn each into a
-    // coarse `config.changed` event so clients on the `config` topic refetch
-    // `/api/v1/bootstrap`. The engine thread is spawned before this builder runs,
-    // so the bus cannot live on the engine; the forwarder bridges the two. Runs for
-    // the server lifetime (like the ChangesService poller) and exits when the engine
-    // is gone. Requires a tokio runtime context, which every `build_app` caller
-    // provides (the CLI serve paths build inside `block_on`; the flip enters it).
-    spawn_config_changed_forwarder(engine.subscribe_config_reloads(), Arc::clone(&event_bus));
-    // Spine-change -> `projects.changed` / `sessions.changed` forwarder. The engine
-    // loop fires a `SpineChange` whenever the projected projects- or
-    // sessions+sidebar-portion changes; we turn each into the matching coarse event
-    // so clients on the `projects` / `sessions` topics know the document moved.
-    // Those clients are also PUSHED the new document itself, on a separate watch
-    // channel read by the socket; this signal is what an older page refetches on.
-    // Same lifetime/teardown story as the config forwarder above.
-    spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
-    // Run the first-load gate ONCE for this launch, off every request path. The
-    // resolver parks the screen (if any) in this state and emits `config.changed`
-    // so already-connected clients refetch bootstrap and find it; clients that
-    // connect later just read it out of their first bootstrap. Same lifetime and
-    // runtime-context story as the forwarders above.
-    let first_load = Arc::new(crate::first_load_routes::FirstLoadState::new(
-        params.release_notes_api_base,
-    ));
-    crate::first_load_routes::spawn_first_load_resolver(
-        engine.clone(),
-        Arc::clone(&event_bus),
-        Arc::clone(&first_load),
-    );
-    // Clone the shared input-ownership registry out of the handle before the
-    // handle itself moves into the state literal below.
-    let engine_pty_owners = engine.pty_input_owners();
-    // Both buses exist by now, so a caller that asked for the ownership publisher
-    // can have it. Built here rather than returned, because the state literal
-    // below moves everything into the router. `set` rather than an assignment:
-    // one publisher per serve, and a second `build_app` on the same slot is a bug
-    // worth ignoring rather than one worth overwriting silently.
-    let pty_grid_bus = Arc::new(crate::pty_sizes::PtyGridBus::default());
-    if let Some(slot) = params.ownership_publisher.as_ref() {
-        let _ = slot.set(crate::ownership_publish::OwnershipPublisher::new(
-            Arc::clone(&event_bus),
-            Arc::clone(&pty_grid_bus),
-        ));
-    }
-    // The router's bind-time values seed the shared cells; a later reload
-    // overwrites them through the actor. Seeded from the params rather than the
-    // engine's config because a serve path or a test may pass either.
-    let live_limits = engine.live_limits();
+}
+
+/// Seed the shared reloadable `[server]` cells from the router's bind-time values.
+fn seed_live_limits(live_limits: &crate::engine_actor::LiveServerLimits, params: &RouterParams) {
     live_limits.set_access_log(params.access_log);
     live_limits.set_allowed_hosts(&params.configured_hosts);
     live_limits.set_search_index_max_files(params.search_index_max_files);
-    live_limits.set_pty_send_timeout_seconds(params.pty_send_timeout_seconds as usize);
-    live_limits.set_heartbeat_deadline_seconds(params.heartbeat_deadline_seconds as usize);
-    let guard_allowed_hosts = live_limits.allowed_hosts();
-    let live_auth = live_limits.auth();
+    live_limits.set_pty_send_timeout_seconds(crate::rest_common::usize_from_u32(
+        params.pty_send_timeout_seconds,
+    ));
+    live_limits.set_heartbeat_deadline_seconds(crate::rest_common::usize_from_u32(
+        params.heartbeat_deadline_seconds,
+    ));
+}
+
+/// Start this router's auth layer over the live `[server.auth]` section.
+fn start_auth(
+    engine: &EngineHandle,
+    params: &RouterParams,
+    live_auth: &Arc<crate::auth::LiveAuth>,
+) -> Arc<crate::auth::AuthState> {
     let paths = engine.paths();
-    let auth = crate::auth::AuthState::start(crate::auth::AuthSetup {
-        live: Arc::clone(&live_auth),
+    crate::auth::AuthState::start(crate::auth::AuthSetup {
+        live: Arc::clone(live_auth),
         exposure: params.live_exposure.clone(),
         bound_ips: params.bound_ips.clone(),
         tailscale_leg: params
@@ -969,81 +927,43 @@ pub fn build_app(
             .clone()
             .unwrap_or_else(|| reload_through_the_engine(engine.clone())),
         opening_hook: params.socket_opening_hook.clone(),
-    });
-    let state = AppState {
-        engine,
-        console: params.console,
-        live_limits,
-        ws_events_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.max_websocket_events_connections as usize,
-        )),
-        ws_agent_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.max_websocket_agent_connections as usize,
-        )),
-        ws_terminal_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.max_websocket_terminal_connections as usize,
-        )),
-        ws_tab_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.max_websocket_tab_connections as usize,
-        )),
-        tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
-        // `0` means unlimited: skip the semaphore entirely rather than build a
-        // zero-permit one, which would block every request forever (the
-        // opposite of the ws_*_semaphore "0 = block all" convention).
-        tree_list_semaphore: if params.tree_list_max_concurrency == 0 {
-            None
-        } else {
-            Some(Arc::new(tokio::sync::Semaphore::new(
-                params.tree_list_max_concurrency as usize,
-            )))
-        },
-        // Same `0 = unlimited` convention as `tree_list_semaphore` above.
-        release_notes_semaphore: if params.release_notes_max_concurrency == 0 {
-            None
-        } else {
-            Some(Arc::new(tokio::sync::Semaphore::new(
-                params.release_notes_max_concurrency as usize,
-            )))
-        },
-        file_drop_max_bytes: params.file_drop_max_bytes,
-        // Deliberately NOT the `0 = unlimited` convention of the two semaphores
-        // above. This one bounds how much upload is held in MEMORY at once, so
-        // "unlimited" would defeat its only purpose; `0` clamps to one permit
-        // instead. Switching file drop off is what `file_drop_max_bytes = 0` is
-        // for.
-        file_drop_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            dux_core::config_effective::effective_file_drop_max_concurrency(
-                params.file_drop_max_concurrency,
-            ) as usize,
-        )),
-        event_bus,
-        changes,
-        resources,
-        idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
-        create_await_timeout: params.create_await_timeout,
-        // Shared with the engine actor loop (see `build_actor_channels`), which
-        // overlays the owner map onto the spine so every client learns which
-        // connection is driving each agent PTY without attaching to it.
-        pty_size_owners: engine_pty_owners,
-        pty_grid_bus: Arc::clone(&pty_grid_bus),
-        connections: Arc::new(match params.connections_gauge {
-            Some(gauge) => crate::rest_common::ConnectionRegistry::with_events_gauge(gauge),
-            None => crate::rest_common::ConnectionRegistry::new(),
-        }),
-        first_load,
-        tailscale_mode: params.tailscale_mode_control.clone(),
-        tailscale_forced_no: params.tailscale_forced_no,
-        auth,
-        hand_over: params
-            .hand_over
-            .clone()
-            .unwrap_or_else(|| Arc::new(tokio::sync::watch::Sender::new(false))),
-    };
+    })
+}
 
+/// The router's grid-change bus, handing the ownership publisher both buses when
+/// the caller asked for one.
+fn grid_bus_with_publisher(
+    params: &RouterParams,
+    event_bus: &Arc<EventBus>,
+) -> Arc<crate::pty_sizes::PtyGridBus> {
+    let pty_grid_bus = Arc::new(crate::pty_sizes::PtyGridBus::default());
+    if let Some(slot) = params.ownership_publisher.as_ref() {
+        let _ = slot.set(crate::ownership_publish::OwnershipPublisher::new(
+            Arc::clone(event_bus),
+            Arc::clone(&pty_grid_bus),
+        ));
+    }
+    pty_grid_bus
+}
+
+/// A semaphore with `limit` permits, or none at all for a limit of `0`, which
+/// means unlimited.
+fn optional_semaphore(limit: u32) -> Option<Arc<tokio::sync::Semaphore>> {
+    if limit == 0 {
+        None
+    } else {
+        Some(Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(limit),
+        )))
+    }
+}
+
+/// Every route of the inner app behind the REST mutation check, the auth layer
+/// and the access log, with `state` attached.
+fn gated_routes(state: AppState, extra_gated: Router<AppState>) -> Router {
     // Every route sits behind the auth layer added below. `extra_gated` is
     // merged as-is so a test can inject a probe route.
-    let router = Router::new()
+    Router::new()
         .route("/ws/events", get(ws_events_upgrade))
         // Nested per-PTY byte-stream sockets. One socket per attached PTY: the
         // agent session's main provider PTY and a companion terminal's PTY. Each
@@ -1109,7 +1029,154 @@ pub fn build_app(
         // The host allowlist (see below) is applied OUTSIDE this layer, so
         // foreign-Host probes are rejected before reaching the access log.
         .layer(middleware::from_fn_with_state(state.clone(), access_log))
-        .with_state(state);
+        .with_state(state)
+}
+
+/// Build the dux web router. `extra_gated` is merged into the router as-is (a
+/// test seam for an injected probe route); production callers pass an empty
+/// router. It is "gated" by the same auth layer as every other route.
+///
+/// ## Middleware stack (outermost to innermost)
+///
+/// 1. **Host allowlist** (DNS-rebinding defense): when `params.bound_ips` is
+///    non-empty, the outermost layer rejects any request whose `Host` header is
+///    not in the allowlist with `403`. Foreign-Host probes are rejected before
+///    the access log runs, so they are never logged.
+/// 2. **Access log**: logs every request (method, path, status, latency) when
+///    the console records and `access_log` is on. Sees the final status
+///    produced by every inner layer, including the auth layer's refusals and
+///    the REST mutation check's 403.
+/// 3. **Auth** (`crate::auth::middleware`): the blocklist, and with a password
+///    set the session check, for HTTP and WebSocket upgrades alike.
+/// 4. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
+///    requests (cross-site request forgery defense). A missing `Origin` (curl,
+///    CLI clients) is allowed; a present but unparseable `Origin` (including the
+///    literal `"null"` from sandboxed iframes) is treated as a mismatch and
+///    rejected. Shares the `same_origin_allowed` helper with the WS upgrade
+///    handlers so REST and WS use one authority-comparison implementation.
+/// 5. **Handlers**: the actual route logic.
+pub fn build_app(
+    engine: EngineHandle,
+    extra_gated: Router<AppState>,
+    params: RouterParams,
+) -> Router {
+    warn_about_zero_connection_caps(&params);
+    // The event bus and changed-files service are web-layer concerns built here.
+    // `ChangesService::new` spawns its supervised poller, so this must run inside a
+    // tokio runtime context -- the CLI serve paths build inside `block_on`, and the
+    // flip wraps its `build_app` in `runtime.enter()` (see `serve_with_engine`).
+    let event_bus = Arc::new(EventBus::new());
+    let changes = ChangesService::new(engine.clone(), Arc::clone(&event_bus));
+    let resources = crate::resource_routes::ResourceService::new(engine.clone());
+    // Config-reload -> `config.changed` forwarder. The engine actor fires `()` on
+    // its config-reload broadcast after a successful reload; we turn each into a
+    // coarse `config.changed` event so clients on the `config` topic refetch
+    // `/api/v1/bootstrap`. The engine thread is spawned before this builder runs,
+    // so the bus cannot live on the engine; the forwarder bridges the two. Runs for
+    // the server lifetime (like the ChangesService poller) and exits when the engine
+    // is gone. Requires a tokio runtime context, which every `build_app` caller
+    // provides (the CLI serve paths build inside `block_on`; the flip enters it).
+    spawn_config_changed_forwarder(engine.subscribe_config_reloads(), Arc::clone(&event_bus));
+    // Spine-change -> `projects.changed` / `sessions.changed` forwarder. The engine
+    // loop fires a `SpineChange` whenever the projected projects- or
+    // sessions+sidebar-portion changes; we turn each into the matching coarse event
+    // so clients on the `projects` / `sessions` topics know the document moved.
+    // Those clients are also PUSHED the new document itself, on a separate watch
+    // channel read by the socket; this signal is what an older page refetches on.
+    // Same lifetime/teardown story as the config forwarder above.
+    spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
+    // Run the first-load gate ONCE for this launch, off every request path. The
+    // resolver parks the screen (if any) in this state and emits `config.changed`
+    // so already-connected clients refetch bootstrap and find it; clients that
+    // connect later just read it out of their first bootstrap. Same lifetime and
+    // runtime-context story as the forwarders above.
+    let first_load = Arc::new(crate::first_load_routes::FirstLoadState::new(
+        params.release_notes_api_base.clone(),
+    ));
+    crate::first_load_routes::spawn_first_load_resolver(
+        engine.clone(),
+        Arc::clone(&event_bus),
+        Arc::clone(&first_load),
+    );
+    // Clone the shared input-ownership registry out of the handle before the
+    // handle itself moves into the state literal below.
+    let engine_pty_owners = engine.pty_input_owners();
+    // Both buses exist by now, so a caller that asked for the ownership publisher
+    // can have it. Built here rather than returned, because the state literal
+    // below moves everything into the router. `set` rather than an assignment:
+    // one publisher per serve, and a second `build_app` on the same slot is a bug
+    // worth ignoring rather than one worth overwriting silently.
+    let pty_grid_bus = grid_bus_with_publisher(&params, &event_bus);
+    // The router's bind-time values seed the shared cells; a later reload
+    // overwrites them through the actor. Seeded from the params rather than the
+    // engine's config because a serve path or a test may pass either.
+    let live_limits = engine.live_limits();
+    seed_live_limits(&live_limits, &params);
+    let guard_allowed_hosts = live_limits.allowed_hosts();
+    let live_auth = live_limits.auth();
+    let auth = start_auth(&engine, &params, &live_auth);
+    let state = AppState {
+        engine,
+        console: params.console,
+        live_limits,
+        ws_events_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(params.max_websocket_events_connections),
+        )),
+        ws_agent_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(params.max_websocket_agent_connections),
+        )),
+        ws_terminal_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(params.max_websocket_terminal_connections),
+        )),
+        ws_tab_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(params.max_websocket_tab_connections),
+        )),
+        tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
+        // `0` means unlimited: skip the semaphore entirely rather than build a
+        // zero-permit one, which would block every request forever (the
+        // opposite of the ws_*_semaphore "0 = block all" convention).
+        tree_list_semaphore: optional_semaphore(params.tree_list_max_concurrency),
+        // Same `0 = unlimited` convention as `tree_list_semaphore` above.
+        release_notes_semaphore: optional_semaphore(params.release_notes_max_concurrency),
+        file_drop_max_bytes: params.file_drop_max_bytes,
+        // Deliberately NOT the `0 = unlimited` convention of the two semaphores
+        // above. This one bounds how much upload is held in MEMORY at once, so
+        // "unlimited" would defeat its only purpose; `0` clamps to one permit
+        // instead. Switching file drop off is what `file_drop_max_bytes = 0` is
+        // for.
+        file_drop_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::rest_common::usize_from_u32(
+                dux_core::config_effective::effective_file_drop_max_concurrency(
+                    params.file_drop_max_concurrency,
+                ),
+            ),
+        )),
+        event_bus,
+        changes,
+        resources,
+        idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
+        create_await_timeout: params.create_await_timeout,
+        // Shared with the engine actor loop (see `build_actor_channels`), which
+        // overlays the owner map onto the spine so every client learns which
+        // connection is driving each agent PTY without attaching to it.
+        pty_size_owners: engine_pty_owners,
+        pty_grid_bus: Arc::clone(&pty_grid_bus),
+        connections: Arc::new(match params.connections_gauge {
+            Some(gauge) => crate::rest_common::ConnectionRegistry::with_events_gauge(gauge),
+            None => crate::rest_common::ConnectionRegistry::new(),
+        }),
+        first_load,
+        tailscale_mode: params.tailscale_mode_control.clone(),
+        tailscale_forced_no: params.tailscale_forced_no,
+        auth,
+        hand_over: params
+            .hand_over
+            .clone()
+            .unwrap_or_else(|| Arc::new(tokio::sync::watch::Sender::new(false))),
+    };
+
+    let router = gated_routes(state, extra_gated);
 
     // Host allowlist (DNS-rebinding defense): outermost layer so it runs before
     // the access log. Active when bound_ips is non-empty; tests that do not
@@ -1422,6 +1489,15 @@ enum PtyTarget {
 }
 
 impl PtyTarget {
+    /// The live-connection class a socket streaming this PTY registers as.
+    fn conn_class(&self) -> crate::rest_common::ConnClass {
+        match self {
+            // extra tabs run provider CLIs, so they count as agent-PTY connections.
+            PtyTarget::Agent(_) | PtyTarget::Tab(_) => crate::rest_common::ConnClass::AgentPty,
+            PtyTarget::Terminal(_) => crate::rest_common::ConnClass::TerminalPty,
+        }
+    }
+
     /// This PTY as the attachment registry names it, with the agent it
     /// belongs to (`None` for a project or standalone terminal).
     fn attachment_target(&self, agent: Option<&str>) -> dux_core::attachments::Target {
@@ -1551,50 +1627,88 @@ struct PtyBeatFrame {
     viewed: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn upgrade_pty_socket(
+/// What a terminal socket's upgrade handler extracted from its request.
+struct PtyUpgrade<'a> {
     ws: WebSocketUpgrade,
+    client: SocketClient,
+    socket_auth: crate::auth::SocketAuth,
+    peer_ip: IpAddr,
+    headers: &'a HeaderMap,
+}
+
+fn upgrade_pty_socket(
+    upgrade: PtyUpgrade<'_>,
     state: &AppState,
     target: PtyTarget,
     agent: Option<&str>,
-    client: SocketClient,
-    peer_ip: IpAddr,
     permit: tokio::sync::OwnedSemaphorePermit,
-    headers: &HeaderMap,
-    socket_auth: crate::auth::SocketAuth,
 ) -> Response {
+    let PtyUpgrade {
+        ws,
+        client,
+        socket_auth,
+        peer_ip,
+        headers,
+    } = upgrade;
     let attach = PtyAttach {
         target: target.attachment_target(agent),
         client,
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let user_agent = captured_user_agent(headers);
+    let context = PtySocketContext::of(state, peer_ip, permit, headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_pty_socket(
-                socket,
-                engine,
-                target,
-                attach,
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-                socket_auth,
-            )
-        })
+        .on_upgrade(move |socket| handle_pty_socket(socket, target, attach, context, socket_auth))
         .into_response()
+}
+
+/// What a terminal socket's handler takes from the router and from its upgrade
+/// request, for the socket's whole life.
+struct PtySocketContext {
+    engine: EngineHandle,
+    console: Console,
+    peer_ip: IpAddr,
+    /// Held for the socket's lifetime purely for its Drop (frees a connection-cap
+    /// slot when the handler returns). Never read.
+    permit: tokio::sync::OwnedSemaphorePermit,
+    pty_size_owners: Arc<PtySizeOwners>,
+    /// The grid-change bus. The socket both PUBLISHES to it (when its own
+    /// resize is granted) and LISTENS on it (for every other connection's), so
+    /// a viewer of this PTY is told the authoritative grid it is not rendering
+    /// at.
+    pty_grid_bus: Arc<crate::pty_sizes::PtyGridBus>,
+    bus: Arc<EventBus>,
+    connections: Arc<crate::rest_common::ConnectionRegistry>,
+    /// The claiming connection's raw `User-Agent`, captured at the upgrade before the
+    /// socket split. This connection IS the claimer at both `pty.owner` emit sites, so
+    /// the value is a plain local (no per-conn map needed); it rides the handover so a
+    /// client on another device can name this one ("Chrome on macOS").
+    user_agent: Option<String>,
+    /// The reloadable `[server]` scalars. Exactly one is read by the handler, at
+    /// open: `pty_send_timeout_seconds`, which bounds the two opening sends. Read
+    /// per socket rather than frozen at bind, so a config reload retimes the next
+    /// connection.
+    live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+}
+
+impl PtySocketContext {
+    fn of(
+        state: &AppState,
+        peer_ip: IpAddr,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        headers: &HeaderMap,
+    ) -> Self {
+        Self {
+            engine: state.engine.clone(),
+            console: state.console.clone(),
+            peer_ip,
+            permit,
+            pty_size_owners: Arc::clone(&state.pty_size_owners),
+            pty_grid_bus: Arc::clone(&state.pty_grid_bus),
+            bus: Arc::clone(&state.event_bus),
+            connections: Arc::clone(&state.connections),
+            user_agent: captured_user_agent(headers),
+            live_limits: Arc::clone(&state.live_limits),
+        }
+    }
 }
 
 /// Who a terminal socket attaches as, and to what.
@@ -1636,31 +1750,30 @@ async fn ws_session_pty_upgrade(
     let Some(slot_tab_id) = state.engine.slot_tab_id(id.clone()).await else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_agent_semaphore,
         peer.ip(),
         "/ws/sessions/:id/pty",
         "max_websocket_agent_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
     upgrade_pty_socket(
-        ws,
+        PtyUpgrade {
+            ws,
+            client,
+            socket_auth,
+            peer_ip: peer.ip(),
+            headers: &headers,
+        },
         &state,
         PtyTarget::Agent(slot_tab_id),
         Some(&id),
-        client,
-        peer.ip(),
         permit,
-        &headers,
-        socket_auth,
     )
 }
 
@@ -1698,31 +1811,30 @@ async fn ws_terminal_pty_upgrade(
         Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Session(&id)) => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_terminal_semaphore,
         peer.ip(),
         "/ws/sessions/:id/terminals/:tid/pty",
         "max_websocket_terminal_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
     upgrade_pty_socket(
-        ws,
+        PtyUpgrade {
+            ws,
+            client,
+            socket_auth,
+            peer_ip: peer.ip(),
+            headers: &headers,
+        },
         &state,
         PtyTarget::Terminal(tid),
         Some(&id),
-        client,
-        peer.ip(),
         permit,
-        &headers,
-        socket_auth,
     )
 }
 
@@ -1760,31 +1872,30 @@ async fn ws_project_terminal_pty_upgrade(
         Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Project(&id)) => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_terminal_semaphore,
         peer.ip(),
         "/ws/projects/:id/terminals/:tid/pty",
         "max_websocket_terminal_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
     upgrade_pty_socket(
-        ws,
+        PtyUpgrade {
+            ws,
+            client,
+            socket_auth,
+            peer_ip: peer.ip(),
+            headers: &headers,
+        },
         &state,
         PtyTarget::Terminal(tid),
         None,
-        client,
-        peer.ip(),
         permit,
-        &headers,
-        socket_auth,
     )
 }
 
@@ -1817,31 +1928,30 @@ async fn ws_standalone_terminal_pty_upgrade(
         Some(owner) if owner.is_at_route(dux_core::model::TerminalRoute::Standalone) => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_terminal_semaphore,
         peer.ip(),
         "/ws/terminals/:tid/pty",
         "max_websocket_terminal_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
     upgrade_pty_socket(
-        ws,
+        PtyUpgrade {
+            ws,
+            client,
+            socket_auth,
+            peer_ip: peer.ip(),
+            headers: &headers,
+        },
         &state,
         PtyTarget::Terminal(tid),
         None,
-        client,
-        peer.ip(),
         permit,
-        &headers,
-        socket_auth,
     )
 }
 
@@ -1867,7 +1977,7 @@ impl TabWsGuard {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let n = map.entry(session_id.clone()).or_insert(0);
-            if *n as u32 >= max_per_agent {
+            if *n >= crate::rest_common::usize_from_u32(max_per_agent) {
                 // At/over the cap (or `max_per_agent == 0` blocks all). Don't leave
                 // a freshly-created zero entry lingering in the map.
                 if *n == 0 {
@@ -1953,44 +2063,30 @@ async fn ws_tab_pty_upgrade(
     // at `max_ws_tabs_per_agent` BEFORE taking a shared tab-pool permit, so one
     // agent's tabs can't monopolize that pool. The guard decrements on drop, so a
     // failed permit acquisition below (early return) also releases the slot.
-    let tab_guard = match TabWsGuard::acquire(
+    let Some(tab_guard) = TabWsGuard::acquire(
         Arc::clone(&state.tab_ws_counts),
         id.clone(),
         state.max_ws_tabs_per_agent,
-    ) {
-        Some(guard) => guard,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many tab connections for this agent; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many tab connections for this agent; try again shortly",
+        )
+            .into_response();
     };
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_tab_semaphore,
         peer.ip(),
         "/ws/sessions/:id/tabs/:tab/pty",
         "max_websocket_tab_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
-    let engine = state.engine.clone();
-    let console = state.console.clone();
-    let pty_size_owners = Arc::clone(&state.pty_size_owners);
-    let pty_grid_bus = Arc::clone(&state.pty_grid_bus);
-    let bus = Arc::clone(&state.event_bus);
-    let connections = Arc::clone(&state.connections);
-    let live_limits = Arc::clone(&state.live_limits);
-    let peer_ip = peer.ip();
-    let user_agent = captured_user_agent(&headers);
+    let context = PtySocketContext::of(&state, peer.ip(), permit, &headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| async move {
             // Hold the per-agent sub-quota guard for the socket's lifetime; it
@@ -2001,23 +2097,7 @@ async fn ws_tab_pty_upgrade(
                 target: target.attachment_target(Some(&id)),
                 client,
             };
-            handle_pty_socket(
-                socket,
-                engine,
-                target,
-                attach,
-                console,
-                peer_ip,
-                permit,
-                pty_size_owners,
-                pty_grid_bus,
-                bus,
-                connections,
-                user_agent,
-                live_limits,
-                socket_auth,
-            )
-            .await;
+            handle_pty_socket(socket, target, attach, context, socket_auth).await;
         })
         .into_response()
 }
@@ -2030,35 +2110,22 @@ async fn ws_tab_pty_upgrade(
 /// only while this connection owns sizing (see [`PtySizeOwners`]). Close (or any
 /// stream end) detaches by dropping the subscription/forwarder and releasing
 /// sizing ownership.
-#[allow(clippy::too_many_arguments)]
 async fn handle_pty_socket(
     socket: WebSocket,
-    engine: EngineHandle,
     target: PtyTarget,
     attach: PtyAttach,
-    console: Console,
-    peer_ip: std::net::IpAddr,
-    // Held for the socket's lifetime purely for its Drop (frees a connection-cap
-    // slot when this returns). Never read.
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    pty_size_owners: Arc<PtySizeOwners>,
-    // The grid-change bus. This socket both PUBLISHES to it (when its own
-    // resize is granted) and LISTENS on it (for every other connection's), so
-    // a viewer of this PTY is told the authoritative grid it is not rendering
-    // at.
-    pty_grid_bus: Arc<crate::pty_sizes::PtyGridBus>,
-    bus: Arc<EventBus>,
-    connections: Arc<crate::rest_common::ConnectionRegistry>,
-    // The claiming connection's raw `User-Agent`, captured at the upgrade before the
-    // socket split. This connection IS the claimer at both `pty.owner` emit sites, so
-    // the value is a plain local (no per-conn map needed); it rides the handover so a
-    // client on another device can name this one ("Chrome on macOS").
-    user_agent: Option<String>,
-    // The reloadable `[server]` scalars. Exactly one is read here, at open:
-    // `pty_send_timeout_seconds`, which bounds the two opening sends. Read per
-    // socket rather than frozen at bind, so a config reload retimes the next
-    // connection.
-    live_limits: Arc<crate::engine_actor::LiveServerLimits>,
+    PtySocketContext {
+        engine,
+        console,
+        peer_ip,
+        permit: _permit,
+        pty_size_owners,
+        pty_grid_bus,
+        bus,
+        connections,
+        user_agent,
+        live_limits,
+    }: PtySocketContext,
     // Closes the socket the moment its session ends or its client stops being
     // allowed, and holds the session's lease while it is open.
     socket_auth: crate::auth::SocketAuth,
@@ -2069,12 +2136,7 @@ async fn handle_pty_socket(
     // id is a fresh server UUID (PTY sockets carry no client-facing id of their
     // own); the guard deregisters on every exit path.
     let registry_id = uuid::Uuid::new_v4().to_string();
-    let conn_class = match &target {
-        // extra tabs run provider CLIs, so they count as agent-PTY connections.
-        PtyTarget::Agent(_) | PtyTarget::Tab(_) => crate::rest_common::ConnClass::AgentPty,
-        PtyTarget::Terminal(_) => crate::rest_common::ConnClass::TerminalPty,
-    };
-    connections.insert(registry_id.clone(), conn_class);
+    connections.insert(registry_id.clone(), target.conn_class());
     let _conn_guard = ConnectionGuard {
         id: registry_id.clone(),
         registry: Arc::clone(&connections),
@@ -2108,12 +2170,7 @@ async fn handle_pty_socket(
     // the pty behind a client that can never see it. `PtyOwnershipGuard` also
     // broadcasts the owner-cleared `pty.owner`, without which every other
     // device's card keeps naming a browser tab that closed.
-    let _ownership_guard = PtyOwnershipGuard {
-        pty_id: target.pty_id().to_string(),
-        conn_id,
-        owners: Arc::clone(&pty_size_owners),
-        bus: Arc::clone(&bus),
-    };
+    let _ownership_guard = PtyOwnershipGuard::new(target.pty_id(), conn_id, &pty_size_owners, &bus);
     // Attached before the subscribe, which can launch the provider: a PTY that a
     // change has reserved turns the socket away instead of relaunching it.
     let heard = dux_core::attachments::Heard::now();
@@ -2145,168 +2202,38 @@ async fn handle_pty_socket(
         live_limits: Arc::clone(&live_limits),
     };
 
-    // Subscribe to the target PTY. An agent subscribe also launches/resumes the
-    // provider if it isn't running yet (the same flow the legacy Subscribe uses);
-    // a terminal subscribe attaches to an already-created companion terminal.
-    let subscription = match &target {
-        // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
-        // dormant extra tab this launches it via `launch_agent`, which resolves
-        // resume vs. fresh dynamically per `tab_resume_decision` (not always fresh).
-        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone()).await,
-        PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
-    };
     // Bind the guard for the socket's full lifetime. Dropping it when this
     // function returns removes the subscriber immediately on disconnect.
-    let (_viewer_guard, repaint, rx) = match subscription {
-        Ok(sub) => sub,
-        Err(e) => {
-            // Subscribe failed after the upgrade (e.g. the agent failed to launch,
-            // or the terminal vanished in the gap). Close with the provider-gone
-            // code so the client stops instead of reconnecting and re-launching
-            // the doomed provider forever.
-            dux_core::logger::warn(&format!(
-                "PTY socket subscribe failed for {peer_ip} (pty {:?}): {e}",
-                target.pty_id()
-            ));
-            {
-                let mut guard = sink.lock().await;
-                let _ = guard.send(provider_gone_close()).await;
-            }
-            // The console's count is decremented by `_client_count_guard` above,
-            // on this return like any other; saying so again here would count
-            // this socket out twice.
-            return;
-        }
+    let Some((_viewer_guard, repaint, rx)) =
+        subscribe_or_close(&engine, &target, &sink, peer_ip).await
+    else {
+        // The console's count is decremented by `_client_count_guard` above,
+        // on this return like any other; saying so again here would count
+        // this socket out twice.
+        return;
     };
-    // Who is driving right now, read once for the handshake frame. This is what
-    // stops a foregrounded arrival from wedging itself as a phantom owner: with
-    // a plain claim now refused SILENTLY, the client's optimistic "I am
-    // foregrounded so I must be the owner" guess would never be corrected, and it
-    // would render typing surfaces over a pty whose every keystroke the server
-    // drops. The client seeds its verdict from this and keeps the foreground
-    // guess only for deciding whether to claim an UNOWNED pty.
-    //
-    // The ownership epoch is read in the SAME lock acquisition as the owner and
-    // travels on the frame: the handshake rides the PTY socket while `pty.owner`
-    // broadcasts ride the events socket, two TCP connections with no ordering
-    // between them. Stamping the snapshot lets a client that has already applied
-    // a strictly newer `pty.owner` recognize this frame as stale and keep the
-    // newer verdict, instead of re-seeding itself as a phantom owner from an
-    // outdated `owner: null` that nothing would ever correct.
-    // The owner's device label rides the same snapshot: it is recorded with the
-    // owner id at claim time, so this one lock acquisition answers who drives,
-    // since when, and from what device. A mere attach broadcasts no `pty.owner`,
-    // so the handshake is the only frame that can name the driving device to a
-    // watcher that simply opened the pane.
-    let owner_snapshot = pty_size_owners.current_owner(target.pty_id());
-    // The seq of the last resize that actually REACHED the child, read BEFORE the
-    // actor-queued grid read below, which makes it a valid LOWER bound for the
-    // grid the handshake carries: the grid read is enqueued behind every resize
-    // already accepted, and the actor drains in order. Seeded into this socket's
-    // forwarding filter and handed to the client on the handshake, so a stale
-    // broadcast still in flight when the handshake was sent can never regress
-    // the grid after it. Reading it early only errs towards forwarding a
-    // redundant same-geometry change, which the client de-duplicates.
-    //
-    // The APPLIED mark and not the STAMPED one, and that is a distinction with
-    // teeth. The terminal UI stamps its claim and applies in a second step, and a
-    // browser's resize is stamped and then queued, so a handshake that lands
-    // inside either window WOULD seed its filter at N while the grid it carries
-    // is still the pre-N geometry; the apply's own broadcast then arrives stamped
-    // N, is dropped as "not newer", and nothing ever re-announces it: that viewer
-    // sits on a stale grid for the life of the socket.
-    let handshake_grid_seq = pty_size_owners.applied_grid_seq(target.pty_id());
-    // Hand the client this PTY socket's connection id as the first frame (a Text
-    // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
-    // opens with a `connected` frame. The client records it and compares it against
-    // the `owner` field of every `pty.owner` event: an equal id means this client
-    // is the (new) owner, a different id means another device took over. This
-    // comparison is definitive: two devices claiming at once cannot both conclude
-    // they lost. A fresh id is allocated per
-    // socket open, so a reconnect re-issues one.
-    // Stamp this (re)open's scrollback replay with a process-monotonic generation
-    // id and hand it to the client on the `connected` handshake, immediately before
-    // the replay Binary frame it labels. The client records the last generation it
-    // applied and drops any replay whose generation it has already applied, so a
-    // duplicate replay or a late blob from a torn-down forwarder can never stack a
-    // second copy of the scrollback on top of the buffer (the mobile
-    // duplicated-text bug). A fresh generation per open makes every legitimate
-    // reconnect strictly newer, so the guard only ever fires on the anomaly.
-    let replay_generation = next_replay_generation();
-    // Subscribe to the grid-change bus BEFORE reading the grid for the
-    // handshake, and before the loop starts. A broadcast receiver does not
-    // replay sends that happened before it existed, so subscribing after the
-    // read would leave a hole: a resize landing between the read and the
-    // subscribe would be reported to nobody on this socket and its viewer would
-    // sit on a stale grid until the next change.
-    let grid_changes = pty_grid_bus.subscribe();
-    // The grid the child is actually drawing for, read once for the handshake.
-    // A viewer compares it against its own xterm's grid: one PTY has one
-    // authoritative grid (the owner's), and every other attached browser is
-    // rendering the same byte stream into a differently sized terminal without,
-    // until this frame, any way to know it.
-    let grid = engine.pty_grid_size(target.pty_id().to_string()).await;
+    let (handshake, grid_changes) = read_pty_handshake(
+        &engine,
+        &pty_size_owners,
+        &pty_grid_bus,
+        target.pty_id(),
+        conn_id,
+    )
+    .await;
+    let handshake_grid_seq = handshake.grid_seq;
     // Read ONCE per socket, before the two sends it bounds, so both halves of an
     // attach share one deadline even if a reload lands between them.
     let opening_send_deadline = pty_opening_send_timeout(&live_limits);
-    'attached: {
-        // A client that never receives its handshake or its replay sees a
-        // permanently blank terminal pane on a connection that looks alive from both
-        // ends, so both sends are BOUNDED and CHECKED. Either one giving up leaves
-        // this block, which drops straight into the ordinary teardown below: the pty
-        // ownership is released and the connection permit is freed, exactly as a
-        // clean disconnect would. Proceeding into the select loop instead would park
-        // a socket nobody can ever see anything on.
-        // The session is judged again right here, and again before the replay:
-        // `subscribe_pty` can take a while (it may launch the provider), and a
-        // session revoked meanwhile must get its close and not one byte of the
-        // terminal (decided, after review: the loop's own watch only starts
-        // after both opening sends).
-        if let Some(code) = socket_auth.verdict_now() {
-            let _ = sink.lock().await.send(auth_close(code)).await;
-            break 'attached;
-        }
-        if with_send_deadline(
-            opening_send_deadline,
-            send_pty_connected(
-                &sink,
-                conn_id,
-                replay_generation,
-                owner_snapshot,
-                grid,
-                handshake_grid_seq,
-            ),
-        )
-        .await
-        .is_err()
-        {
-            dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
-                conn_id,
-                crate::pty_log::FailedSend::ConnectedHandshake,
-            ));
-            break 'attached;
-        }
-        if let Some(code) = socket_auth.verdict_now() {
-            let _ = sink.lock().await.send(auth_close(code)).await;
-            break 'attached;
-        }
-        // Replay the buffered scrollback/repaint before streaming live bytes.
-        let replay_bytes = repaint.len();
-        if with_send_deadline(opening_send_deadline, send_binary(&sink, repaint))
-            .await
-            .is_err()
-        {
-            dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
-                conn_id,
-                crate::pty_log::FailedSend::ScrollbackReplay,
-            ));
-            break 'attached;
-        }
-        dux_core::logger::debug(&crate::pty_log::describe_replay_sent(
-            target.pty_id(),
-            replay_generation,
-            replay_bytes,
-        ));
+    if send_pty_opening(
+        &sink,
+        &socket_auth,
+        opening_send_deadline,
+        handshake,
+        repaint,
+        target.pty_id(),
+    )
+    .await
+    {
         AttachedPtySocket {
             engine: &engine,
             target: &target,
@@ -2332,6 +2259,223 @@ async fn handle_pty_socket(
     }
 
     // The guards above release ownership and connection accounting on every exit.
+}
+
+/// Subscribe a terminal socket to its PTY. An agent subscribe also
+/// launches/resumes the provider if it isn't running yet (the same flow the
+/// legacy Subscribe uses); a terminal subscribe attaches to an already-created
+/// companion terminal. A failure closes the socket with the provider-gone code.
+async fn subscribe_or_close(
+    engine: &EngineHandle,
+    target: &PtyTarget,
+    sink: &SharedSink,
+    peer_ip: IpAddr,
+) -> Option<crate::engine_actor::PtySubscription> {
+    let subscription = match target {
+        // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
+        // dormant extra tab this launches it via `launch_agent`, which resolves
+        // resume vs. fresh dynamically per `tab_resume_decision` (not always fresh).
+        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone()).await,
+        PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
+    };
+    match subscription {
+        Ok(sub) => Some(sub),
+        Err(e) => {
+            // Subscribe failed after the upgrade (e.g. the agent failed to launch,
+            // or the terminal vanished in the gap). Close with the provider-gone
+            // code so the client stops instead of reconnecting and re-launching
+            // the doomed provider forever.
+            dux_core::logger::warn(&format!(
+                "PTY socket subscribe failed for {peer_ip} (pty {:?}): {e}",
+                target.pty_id()
+            ));
+            {
+                let mut guard = sink.lock().await;
+                let _ = guard.send(provider_gone_close()).await;
+            }
+            None
+        }
+    }
+}
+
+/// Read what a terminal socket's `connected` handshake carries, subscribing to
+/// the grid-change bus at the one point that leaves no hole.
+async fn read_pty_handshake(
+    engine: &EngineHandle,
+    owners: &PtySizeOwners,
+    grid_bus: &crate::pty_sizes::PtyGridBus,
+    pty_id: &str,
+    conn_id: u64,
+) -> (
+    PtyHandshake,
+    tokio::sync::broadcast::Receiver<crate::pty_sizes::PtyGridChange>,
+) {
+    // Who is driving right now, read once for the handshake frame. This is what
+    // stops a foregrounded arrival from wedging itself as a phantom owner: with
+    // a plain claim now refused SILENTLY, the client's optimistic "I am
+    // foregrounded so I must be the owner" guess would never be corrected, and it
+    // would render typing surfaces over a pty whose every keystroke the server
+    // drops. The client seeds its verdict from this and keeps the foreground
+    // guess only for deciding whether to claim an UNOWNED pty.
+    //
+    // The ownership epoch is read in the SAME lock acquisition as the owner and
+    // travels on the frame: the handshake rides the PTY socket while `pty.owner`
+    // broadcasts ride the events socket, two TCP connections with no ordering
+    // between them. Stamping the snapshot lets a client that has already applied
+    // a strictly newer `pty.owner` recognize this frame as stale and keep the
+    // newer verdict, instead of re-seeding itself as a phantom owner from an
+    // outdated `owner: null` that nothing would ever correct.
+    // The owner's device label rides the same snapshot: it is recorded with the
+    // owner id at claim time, so this one lock acquisition answers who drives,
+    // since when, and from what device. A mere attach broadcasts no `pty.owner`,
+    // so the handshake is the only frame that can name the driving device to a
+    // watcher that simply opened the pane.
+    let owner_snapshot = owners.current_owner(pty_id);
+    // The seq of the last resize that actually REACHED the child, read BEFORE the
+    // actor-queued grid read below, which makes it a valid LOWER bound for the
+    // grid the handshake carries: the grid read is enqueued behind every resize
+    // already accepted, and the actor drains in order. Seeded into this socket's
+    // forwarding filter and handed to the client on the handshake, so a stale
+    // broadcast still in flight when the handshake was sent can never regress
+    // the grid after it. Reading it early only errs towards forwarding a
+    // redundant same-geometry change, which the client de-duplicates.
+    //
+    // The APPLIED mark and not the STAMPED one, and that is a distinction with
+    // teeth. The terminal UI stamps its claim and applies in a second step, and a
+    // browser's resize is stamped and then queued, so a handshake that lands
+    // inside either window WOULD seed its filter at N while the grid it carries
+    // is still the pre-N geometry; the apply's own broadcast then arrives stamped
+    // N, is dropped as "not newer", and nothing ever re-announces it: that viewer
+    // sits on a stale grid for the life of the socket.
+    let handshake_grid_seq = owners.applied_grid_seq(pty_id);
+    // Hand the client this PTY socket's connection id as the first frame (a Text
+    // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
+    // opens with a `connected` frame. The client records it and compares it against
+    // the `owner` field of every `pty.owner` event: an equal id means this client
+    // is the (new) owner, a different id means another device took over. This
+    // comparison is definitive: two devices claiming at once cannot both conclude
+    // they lost. A fresh id is allocated per
+    // socket open, so a reconnect re-issues one.
+    // Stamp this (re)open's scrollback replay with a process-monotonic generation
+    // id and hand it to the client on the `connected` handshake, immediately before
+    // the replay Binary frame it labels. The client records the last generation it
+    // applied and drops any replay whose generation it has already applied, so a
+    // duplicate replay or a late blob from a torn-down forwarder can never stack a
+    // second copy of the scrollback on top of the buffer (the mobile
+    // duplicated-text bug). A fresh generation per open makes every legitimate
+    // reconnect strictly newer, so the guard only ever fires on the anomaly.
+    let replay_generation = next_replay_generation();
+    // Subscribe to the grid-change bus BEFORE reading the grid for the
+    // handshake, and before the loop starts. A broadcast receiver does not
+    // replay sends that happened before it existed, so subscribing after the
+    // read would leave a hole: a resize landing between the read and the
+    // subscribe would be reported to nobody on this socket and its viewer would
+    // sit on a stale grid until the next change.
+    let grid_changes = grid_bus.subscribe();
+    // The grid the child is actually drawing for, read once for the handshake.
+    // A viewer compares it against its own xterm's grid: one PTY has one
+    // authoritative grid (the owner's), and every other attached browser is
+    // rendering the same byte stream into a differently sized terminal without,
+    // until this frame, any way to know it.
+    let grid = engine.pty_grid_size(pty_id.to_string()).await;
+    (
+        PtyHandshake {
+            conn_id,
+            replay_generation,
+            owner_snapshot,
+            grid,
+            grid_seq: handshake_grid_seq,
+        },
+        grid_changes,
+    )
+}
+
+/// What a terminal socket's `connected` handshake carries.
+struct PtyHandshake {
+    conn_id: u64,
+    replay_generation: u64,
+    owner_snapshot: (Option<u64>, u64, Option<String>),
+    grid: Option<(u16, u16)>,
+    grid_seq: u64,
+}
+
+/// Send a terminal socket's two opening frames, the `connected` handshake and
+/// the scrollback replay, and answer whether the socket may go on to stream.
+///
+/// A client that never receives its handshake or its replay sees a
+/// permanently blank terminal pane on a connection that looks alive from both
+/// ends, so both sends are BOUNDED and CHECKED. Either one giving up answers
+/// `false`, and the socket drops straight into the ordinary teardown: the pty
+/// ownership is released and the connection permit is freed, exactly as a
+/// clean disconnect would. Proceeding into the select loop instead would park
+/// a socket nobody can ever see anything on.
+///
+/// The session is judged again before the handshake, and again before the replay:
+/// `subscribe_pty` can take a while (it may launch the provider), and a
+/// session revoked meanwhile must get its close and not one byte of the
+/// terminal (decided, after review: the loop's own watch only starts
+/// after both opening sends).
+async fn send_pty_opening(
+    sink: &SharedSink,
+    socket_auth: &crate::auth::SocketAuth,
+    deadline: std::time::Duration,
+    handshake: PtyHandshake,
+    repaint: Vec<u8>,
+    pty_id: &str,
+) -> bool {
+    let PtyHandshake {
+        conn_id,
+        replay_generation,
+        owner_snapshot,
+        grid,
+        grid_seq,
+    } = handshake;
+    if let Some(code) = socket_auth.verdict_now() {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        return false;
+    }
+    if with_send_deadline(
+        deadline,
+        send_pty_connected(
+            sink,
+            conn_id,
+            replay_generation,
+            owner_snapshot,
+            grid,
+            grid_seq,
+        ),
+    )
+    .await
+    .is_err()
+    {
+        dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
+            conn_id,
+            crate::pty_log::FailedSend::ConnectedHandshake,
+        ));
+        return false;
+    }
+    if let Some(code) = socket_auth.verdict_now() {
+        let _ = sink.lock().await.send(auth_close(code)).await;
+        return false;
+    }
+    // Replay the buffered scrollback/repaint before streaming live bytes.
+    let replay_bytes = repaint.len();
+    if with_send_deadline(deadline, send_binary(sink, repaint))
+        .await
+        .is_err()
+    {
+        dux_core::logger::info(&crate::pty_log::describe_connection_reaped(
+            conn_id,
+            crate::pty_log::FailedSend::ScrollbackReplay,
+        ));
+        return false;
+    }
+    dux_core::logger::debug(&crate::pty_log::describe_replay_sent(
+        pty_id,
+        replay_generation,
+        replay_bytes,
+    ));
+    true
 }
 
 enum PtyLoopAction {
@@ -2890,6 +3034,21 @@ struct WireEvent {
     device: Option<String>,
 }
 
+impl WireEvent {
+    /// The first frame of an events socket, handing the client its connection
+    /// id (the `X-Connection-Id` REST mutations echo back).
+    fn connected(connection_id: &str) -> Self {
+        Self {
+            event: "connected".to_string(),
+            id: Some(connection_id.to_string()),
+            rev: None,
+            owner: None,
+            epoch: None,
+            device: None,
+        }
+    }
+}
+
 /// Process-monotonic id stamped on every PTY scrollback replay (see the
 /// `connected`-frame send in [`handle_pty_socket`]). Global rather than per-PTY on
 /// purpose: the client only ever compares generations WITHIN one socket's lifetime
@@ -3118,46 +3277,66 @@ async fn ws_events_upgrade(
         )
             .into_response();
     }
-    let permit = match acquire_ws_permit(
+    let Some(permit) = acquire_ws_permit(
         &state.ws_events_semaphore,
         peer.ip(),
         "/ws/events",
         "max_websocket_events_connections",
-    ) {
-        Some(permit) => permit,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
+    ) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections; try again shortly",
+        )
+            .into_response();
     };
-    let console = state.console.clone();
-    let engine = state.engine.clone();
-    let bus = Arc::clone(&state.event_bus);
-    let changes = Arc::clone(&state.changes);
-    let connections = Arc::clone(&state.connections);
-    let peer_ip = peer.ip();
-    let facts = client.events_facts(captured_user_agent(&headers));
-    let after = client.after;
+    let context = EventsSocketContext {
+        engine: state.engine.clone(),
+        bus: Arc::clone(&state.event_bus),
+        changes: Arc::clone(&state.changes),
+        console: state.console.clone(),
+        peer_ip: peer.ip(),
+        permit,
+        connections: Arc::clone(&state.connections),
+        facts: client.events_facts(captured_user_agent(&headers)),
+        after: client.after,
+    };
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_events_socket(
-                socket,
-                engine,
-                bus,
-                changes,
-                console,
-                peer_ip,
-                permit,
-                connections,
-                socket_auth,
-                facts,
-                after,
-            )
-        })
+        .on_upgrade(move |socket| handle_events_socket(socket, context, socket_auth))
         .into_response()
+}
+
+/// What an events socket's handler takes from the router and from its upgrade
+/// request, for the socket's whole life.
+struct EventsSocketContext {
+    engine: EngineHandle,
+    bus: Arc<EventBus>,
+    changes: Arc<ChangesService>,
+    console: Console,
+    peer_ip: IpAddr,
+    /// Held for the socket's lifetime purely for its Drop (frees a connection-cap
+    /// slot when the handler returns). Never read.
+    permit: tokio::sync::OwnedSemaphorePermit,
+    connections: Arc<crate::rest_common::ConnectionRegistry>,
+    /// Who this browser tab is, for the attachment registry: the tab's
+    /// terminal sockets link themselves to this connection.
+    facts: dux_core::attachments::ConnectionFacts,
+    /// The lost events connection this tab had before, whose terminals this
+    /// one takes over (`?after=<id>`).
+    after: Option<String>,
+}
+
+/// Close an events socket whose session ended before its opening frames were
+/// all sent: the tab's presence ends deliberately and the console counts it out.
+async fn close_signed_out_events_socket(
+    presence: &TabPresenceGuard,
+    sink: &SharedSink,
+    console: &Console,
+    peer_ip: IpAddr,
+    code: u16,
+) {
+    presence.end_deliberately();
+    let _ = sink.lock().await.send(auth_close(code)).await;
+    console.client_disconnected(peer_ip);
 }
 
 /// Drive one `/ws/events` connection as a single `tokio::select!` loop owning the
@@ -3169,26 +3348,23 @@ async fn ws_events_upgrade(
 /// live status broadcast, the status-clear broadcast, and the on-connect status
 /// snapshot, all filtered by the per-connection scope rule ([`scope_delivers`])
 /// so one client's operation toasts never leak to another.
-#[allow(clippy::too_many_arguments)]
 async fn handle_events_socket(
     socket: WebSocket,
-    engine: EngineHandle,
-    bus: Arc<EventBus>,
-    changes: Arc<ChangesService>,
-    console: Console,
-    peer_ip: std::net::IpAddr,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    connections: Arc<crate::rest_common::ConnectionRegistry>,
+    EventsSocketContext {
+        engine,
+        bus,
+        changes,
+        console,
+        peer_ip,
+        permit: _permit,
+        connections,
+        facts,
+        after,
+    }: EventsSocketContext,
     // Closes the socket the moment its session ends or its client stops being
     // allowed, and holds the session's lease while it is open: an open tab is
     // what keeps a signed-in browser from going idle.
     socket_auth: crate::auth::SocketAuth,
-    // Who this browser tab is, for the attachment registry: the tab's
-    // terminal sockets link themselves to this connection.
-    facts: dux_core::attachments::ConnectionFacts,
-    // The lost events connection this tab had before, whose terminals this
-    // one takes over (`?after=<id>`).
-    after: Option<String>,
 ) {
     console.client_connected(peer_ip);
     // A server-assigned random id correlating REST actions with the statuses they
@@ -3233,26 +3409,13 @@ async fn handle_events_socket(
     // meantime must get its close and nothing else. Checked before the late
     // warnings are TAKEN, too, so a refused socket cannot consume them.
     if let Some(code) = socket_auth.opening_verdict().await {
-        presence.end_deliberately();
-        let _ = sink.lock().await.send(auth_close(code)).await;
-        console.client_disconnected(peer_ip);
+        close_signed_out_events_socket(&presence, &sink, &console, peer_ip, code).await;
         return;
     }
 
     // First frame: hand the client its connection id (the `X-Connection-Id` REST
     // mutations echo back so their status toasts scope to this connection only).
-    let _ = send_json(
-        &sink,
-        &WireEvent {
-            event: "connected".to_string(),
-            id: Some(connection_id.clone()),
-            rev: None,
-            owner: None,
-            epoch: None,
-            device: None,
-        },
-    )
-    .await;
+    let _ = send_json(&sink, &WireEvent::connected(&connection_id)).await;
 
     // Subscribe to the live status + status-clear broadcasts BEFORE reading the
     // snapshot: the broadcast does not replay to a receiver created after a send,
@@ -3274,9 +3437,7 @@ async fn handle_events_socket(
     let workspace_alive = true;
 
     if let Some(code) = socket_auth.verdict_now() {
-        presence.end_deliberately();
-        let _ = sink.lock().await.send(auth_close(code)).await;
-        console.client_disconnected(peer_ip);
+        close_signed_out_events_socket(&presence, &sink, &console, peer_ip, code).await;
         return;
     }
 
@@ -3291,9 +3452,7 @@ async fn handle_events_socket(
     }
 
     if let Some(code) = socket_auth.verdict_now() {
-        presence.end_deliberately();
-        let _ = sink.lock().await.send(auth_close(code)).await;
-        console.client_disconnected(peer_ip);
+        close_signed_out_events_socket(&presence, &sink, &console, peer_ip, code).await;
         return;
     }
 
@@ -4019,11 +4178,11 @@ async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) -> Result<(), ()> {
 fn pty_opening_send_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
     let seconds = limits.pty_send_timeout_seconds();
     let seconds = if seconds == 0 {
-        dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as usize
+        crate::rest_common::usize_from_u32(dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS)
     } else {
         seconds
     };
-    std::time::Duration::from_secs(seconds as u64)
+    std::time::Duration::from_secs(crate::rest_common::u64_from_usize(seconds))
 }
 
 /// The deadline for the BEAT ECHO, and the reason it is not the one above.
@@ -4065,13 +4224,13 @@ const PTY_BEAT_ECHO_CEILING: std::time::Duration = std::time::Duration::from_sec
 fn pty_beat_echo_timeout(limits: &crate::engine_actor::LiveServerLimits) -> std::time::Duration {
     let seconds = limits.heartbeat_deadline_seconds();
     let seconds = if seconds == 0 {
-        dux_core::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS as usize
+        crate::rest_common::usize_from_u32(dux_core::config::DEFAULT_HEARTBEAT_DEADLINE_SECONDS)
     } else {
         seconds
     };
     std::cmp::min(
         PTY_BEAT_ECHO_CEILING,
-        std::time::Duration::from_secs(seconds as u64),
+        std::time::Duration::from_secs(crate::rest_common::u64_from_usize(seconds)),
     )
 }
 
@@ -4154,6 +4313,17 @@ struct PtyOwnershipGuard {
     conn_id: u64,
     owners: Arc<PtySizeOwners>,
     bus: Arc<EventBus>,
+}
+
+impl PtyOwnershipGuard {
+    fn new(pty_id: &str, conn_id: u64, owners: &Arc<PtySizeOwners>, bus: &Arc<EventBus>) -> Self {
+        Self {
+            pty_id: pty_id.to_string(),
+            conn_id,
+            owners: Arc::clone(owners),
+            bus: Arc::clone(bus),
+        }
+    }
 }
 
 impl Drop for PtyOwnershipGuard {
@@ -4324,8 +4494,12 @@ impl QuietWatchdog {
                 if quiet > watch.deadline {
                     break;
                 }
-                tokio::time::sleep(watch.deadline - quiet + std::time::Duration::from_millis(5))
-                    .await;
+                // The check above leaves `quiet` at most the deadline, so this
+                // never saturates.
+                tokio::time::sleep(
+                    watch.deadline.saturating_sub(quiet) + std::time::Duration::from_millis(5),
+                )
+                .await;
             }
             watch.attachments.detach(
                 watch.token,
@@ -4796,7 +4970,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             let now = chrono::Utc::now();
@@ -5567,7 +5741,7 @@ mod tests {
             .expect("the watchdog fires within the bound");
         let scope = Scope {
             ptys: ["s1-slot".to_string()].into(),
-            agents: Default::default(),
+            agents: std::collections::BTreeSet::new(),
         };
         // Read with the registry's own clock far from the deadline: only the
         // revocation, not the registry's own quiet rule, can empty it here.
@@ -6455,17 +6629,17 @@ mod tests {
         let limits = crate::engine_actor::LiveServerLimits::default();
         assert_eq!(
             pty_opening_send_timeout(&limits),
-            std::time::Duration::from_secs(
-                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as u64
-            ),
+            std::time::Duration::from_secs(u64::from(
+                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS
+            )),
             "an unseeded cell must fall back to the default, not to no bound"
         );
         limits.set_pty_send_timeout_seconds(0);
         assert_eq!(
             pty_opening_send_timeout(&limits),
-            std::time::Duration::from_secs(
-                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS as u64
-            ),
+            std::time::Duration::from_secs(u64::from(
+                dux_core::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS
+            )),
             "zero must not mean no bound: that is the one answer this cannot give"
         );
         limits.set_pty_send_timeout_seconds(180);
@@ -7816,7 +7990,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             let now = chrono::Utc::now();

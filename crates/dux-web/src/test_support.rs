@@ -63,7 +63,6 @@ pub(crate) fn router_no_auth() -> (ScratchDir, Router) {
 /// a background task. Returns the bound `SocketAddr` so an integration test can
 /// issue real HTTP/WebSocket requests against it. The `ScratchDir` is kept alive by
 /// the returned guard; drop it to clean up the engine's on-disk state.
-#[allow(dead_code)]
 pub(crate) async fn boot_plain_test_server() -> (ScratchDir, SocketAddr) {
     let tmp = ScratchDir::new();
     let app = server::router(test_engine_handle(tmp.path()));

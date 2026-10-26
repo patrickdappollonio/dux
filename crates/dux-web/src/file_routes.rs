@@ -232,6 +232,11 @@ struct OpenedEditor {
 /// encoded bytes before anything is written.
 ///
 /// [`MAX_SAVED_BYTES`]: dux_core::worktree_file::MAX_SAVED_BYTES
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "MAX_EDITABLE_BYTES is five megabytes, which a usize holds on every target, and a const cannot call TryFrom"
+)]
 const MAX_EDIT_WRITE_BYTES: usize =
     6 * dux_core::worktree_file::MAX_EDITABLE_BYTES as usize + 64 * 1024;
 
@@ -780,6 +785,41 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
+/// The answer to a save the write itself refused: a freshness conflict carrying
+/// the file's current stamp, a file too large to save, text the chosen encoding
+/// cannot hold, or a path or containment problem.
+fn write_refusal(e: &anyhow::Error) -> Response {
+    if let Some(conflict) = e.downcast_ref::<dux_core::worktree_file::WriteConflict>() {
+        return (
+            StatusCode::CONFLICT,
+            Json(WriteConflictBody {
+                modified: conflict.current.as_ref().and_then(|s| s.modified.clone()),
+                size: conflict.current.as_ref().map(|s| s.size),
+                deleted: conflict.deleted,
+            }),
+        )
+            .into_response();
+    }
+    if let Some(too_large) = e.downcast_ref::<dux_core::worktree_file::SaveTooLarge>() {
+        return (StatusCode::PAYLOAD_TOO_LARGE, too_large.to_string()).into_response();
+    }
+    if let Some(refused) = e.downcast_ref::<dux_core::text_encoding::Unmappable>() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(UnmappableBody {
+                error: "unmappable",
+                message: refused.to_string(),
+                character: refused.character.to_string(),
+                line: refused.line,
+                column: refused.column,
+                encoding: refused.encoding.name(),
+            }),
+        )
+            .into_response();
+    }
+    (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+}
+
 /// The root extractor runs before the body is read, so an address problem (an
 /// unknown or malformed id) answers 404 before any body diagnostic, oversize
 /// included; that extractor-first ordering is deliberate and pinned by
@@ -864,37 +904,7 @@ async fn write_file<R: EditorRoot>(
     .await
     {
         Ok(Ok(written)) => written,
-        Ok(Err(e)) => {
-            if let Some(conflict) = e.downcast_ref::<dux_core::worktree_file::WriteConflict>() {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(WriteConflictBody {
-                        modified: conflict.current.as_ref().and_then(|s| s.modified.clone()),
-                        size: conflict.current.as_ref().map(|s| s.size),
-                        deleted: conflict.deleted,
-                    }),
-                )
-                    .into_response();
-            }
-            if let Some(too_large) = e.downcast_ref::<dux_core::worktree_file::SaveTooLarge>() {
-                return (StatusCode::PAYLOAD_TOO_LARGE, too_large.to_string()).into_response();
-            }
-            if let Some(refused) = e.downcast_ref::<dux_core::text_encoding::Unmappable>() {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(UnmappableBody {
-                        error: "unmappable",
-                        message: refused.to_string(),
-                        character: refused.character.to_string(),
-                        line: refused.line,
-                        column: refused.column,
-                        encoding: refused.encoding.name(),
-                    }),
-                )
-                    .into_response();
-            }
-            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-        }
+        Ok(Err(e)) => return write_refusal(&e),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1592,7 +1602,7 @@ mod tests {
                         leading_branch: None,
                         auto_reopen_agents: None,
                         startup_command: None,
-                        env: Default::default(),
+                        env: std::collections::BTreeMap::new(),
                     })
                     .unwrap();
                 store
@@ -2432,7 +2442,11 @@ mod tests {
         #[tokio::test]
         async fn a_save_whose_file_would_be_too_large_is_refused_naming_that_limit() {
             let (_tmp, wt, app) = router_with_session();
-            let content = "a".repeat(dux_core::worktree_file::MAX_SAVED_BYTES as usize + 1);
+            let content = "a".repeat(
+                usize::try_from(dux_core::worktree_file::MAX_SAVED_BYTES)
+                    .expect("ten megabytes fits a usize")
+                    + 1,
+            );
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",

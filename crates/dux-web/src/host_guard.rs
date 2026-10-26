@@ -200,6 +200,16 @@ pub struct HostAllowlist {
     host_rules: bool,
 }
 
+impl std::fmt::Debug for HostAllowlist {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostAllowlist")
+            .field("bound_ips", &self.bound_ips)
+            .field("has_unspecified", &self.has_unspecified)
+            .field("host_rules", &self.host_rules)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Answers whether the web password is set right now.
 pub type PasswordSet = Arc<dyn Fn() -> bool + Send + Sync>;
 

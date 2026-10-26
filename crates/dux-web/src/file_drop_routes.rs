@@ -177,12 +177,10 @@ async fn hold_a_file_drop_permit(
 ) -> Response {
     let permit = tokio::time::timeout(
         PERMIT_WAIT,
-        state.file_drop_semaphore.clone().acquire_owned(),
+        std::sync::Arc::clone(&state.file_drop_semaphore).acquire_owned(),
     )
     .await;
-    let _permit = if let Ok(permit) = permit {
-        permit
-    } else {
+    let Ok(_permit) = permit else {
         dux_core::logger::warn(
             "[server] /api/v1/file-drop refused: no upload slot came free within \
              the wait (file_drop_max_concurrency)",
@@ -217,23 +215,28 @@ fn unknown_pane(pane_id: &str) -> String {
     )
 }
 
-async fn upload_dropped_file(
-    State(state): State<AppState>,
-    Query(query): Query<DropQuery>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
+/// The pty a drop is for, resolved from the pane's id, or the refusal that
+/// answers before the body is looked at: file drop switched off, a pane id
+/// nothing answers to, or a terminal another device is driving.
+async fn drop_pty(
+    state: &AppState,
+    query: &DropQuery,
+) -> Result<String, crate::rest_common::RouteRejection> {
     if state.file_drop_max_bytes == 0 {
-        return (
+        return Err((
             StatusCode::FORBIDDEN,
             "File drop is switched off on this server. Set [server] \
              file_drop_max_bytes in config.toml to a size in bytes and restart \
              to turn it back on."
                 .to_string(),
         )
-            .into_response();
+            .into_response()
+            .into());
     }
     if !id_within_bound(&query.pty) {
-        return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
+        return Err((StatusCode::NOT_FOUND, unknown_pane(&query.pty))
+            .into_response()
+            .into());
     }
 
     // Canonicalized once, before anything is asked about it. A pane addresses its
@@ -243,7 +246,9 @@ async fn upload_dropped_file(
     // ownership is recorded against the real pty key, so a check asked with the
     // placeholder would find nothing and pass a drop it should have refused.
     let Some(pty) = state.engine.pty_key_for_pane_id(query.pty.clone()).await else {
-        return (StatusCode::NOT_FOUND, unknown_pane(&query.pty)).into_response();
+        return Err((StatusCode::NOT_FOUND, unknown_pane(&query.pty))
+            .into_response()
+            .into());
     };
 
     // The courtesy check: the websocket's own write check enforces input authority,
@@ -255,31 +260,41 @@ async fn upload_dropped_file(
         && let Some(conn) = query.conn
         && state.input_held_by_someone_else(&pty, conn)
     {
-        return (
+        return Err((
             StatusCode::CONFLICT,
             "Another device is driving this terminal, so the path could not be \
              pasted. Take over input and drop the file again."
                 .to_string(),
         )
-            .into_response();
+            .into_response()
+            .into());
     }
+    Ok(pty)
+}
 
-    let bytes = match body {
-        Ok(b) => b,
-        Err(_) => {
-            // The limit is enforced by the body-limit layer, which rejects with
-            // its own terse message; replace it with one that names the setting.
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "That file is over the {} byte limit for a dropped file. \
-                     Nothing was written. Raise [server] file_drop_max_bytes in \
-                     config.toml and restart to allow bigger files.",
-                    state.file_drop_max_bytes
-                ),
-            )
-                .into_response();
-        }
+async fn upload_dropped_file(
+    State(state): State<AppState>,
+    Query(query): Query<DropQuery>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let pty = match drop_pty(&state, &query).await {
+        Ok(pty) => pty,
+        Err(refusal) => return refusal.into_response(),
+    };
+
+    let Ok(bytes) = body else {
+        // The limit is enforced by the body-limit layer, which rejects with
+        // its own terse message; replace it with one that names the setting.
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "That file is over the {} byte limit for a dropped file. \
+                 Nothing was written. Raise [server] file_drop_max_bytes in \
+                 config.toml and restart to allow bigger files.",
+                state.file_drop_max_bytes
+            ),
+        )
+            .into_response();
     };
 
     let destination = match query.dir.clone() {
@@ -484,7 +499,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store
@@ -623,7 +638,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store
@@ -638,7 +653,7 @@ mod tests {
         let (handle, join) = crate::engine_actor::spawn_engine_thread(engine);
 
         // The router owns its state, so a probe route hands a clone back out.
-        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = Default::default();
+        let slot: std::sync::Arc<std::sync::Mutex<Option<AppState>>> = std::sync::Arc::default();
         let captured = std::sync::Arc::clone(&slot);
         let probe = Router::new().route(
             "/test/state",
@@ -1277,7 +1292,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store

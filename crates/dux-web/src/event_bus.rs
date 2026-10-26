@@ -40,8 +40,11 @@ pub enum Event {
     /// `rev` carries the monotonic revision where the client needs ordering/dedup
     /// (e.g. `session.changes`).
     Resource {
+        /// The event's name, such as `session.changes`.
         event: String,
+        /// The one resource the event is about, or `None` for a collection.
         id: Option<String>,
+        /// The resource's revision, for an event a client orders or deduplicates.
         rev: Option<u64>,
         /// The claiming connection's `PtySizeOwners` id for a `pty.owner` handover,
         /// `None` for every other event. A viewer compares it against its own
@@ -77,12 +80,14 @@ pub fn session_id_from_changes_topic(topic: &str) -> Option<&str> {
 }
 
 /// The broadcast fan-out plus the global per-topic interest refcount.
+#[derive(Debug)]
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
     interest: Mutex<HashMap<String, usize>>,
 }
 
 impl EventBus {
+    /// A bus with no subscriber and no interest counted.
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(EVENT_BUS_CAPACITY);
         Self {
@@ -104,6 +109,10 @@ impl EventBus {
 
     /// Increment the interest refcount for `topic` (a connection just subscribed
     /// to a topic it was not already holding).
+    ///
+    /// # Panics
+    ///
+    /// When a thread panicked while holding the interest lock.
     pub fn add_interest(&self, topic: &str) {
         let mut map = self
             .interest
@@ -115,6 +124,10 @@ impl EventBus {
     /// Decrement the interest refcount for `topic`, removing it at zero. Saturating
     /// and underflow-logged: dropping interest in a topic that was never counted is
     /// a bookkeeping bug, so it is logged rather than panicking or wrapping.
+    ///
+    /// # Panics
+    ///
+    /// When a thread panicked while holding the interest lock.
     pub fn drop_interest(&self, topic: &str) {
         let mut map = self
             .interest
@@ -138,6 +151,10 @@ impl EventBus {
     /// The session ids that currently have at least one `:changes` subscriber.
     /// Drives the changed-files poller: idle sessions (no subscriber) are never
     /// polled.
+    ///
+    /// # Panics
+    ///
+    /// When a thread panicked while holding the interest lock.
     pub fn interested_sessions(&self) -> Vec<String> {
         let map = self
             .interest
@@ -151,6 +168,10 @@ impl EventBus {
 
     /// Whether any connection currently holds interest in `topic`. Used by the
     /// poller's grace-eviction to decide a session's cache can be dropped.
+    ///
+    /// # Panics
+    ///
+    /// When a thread panicked while holding the interest lock.
     pub fn has_interest(&self, topic: &str) -> bool {
         self.interest
             .lock()

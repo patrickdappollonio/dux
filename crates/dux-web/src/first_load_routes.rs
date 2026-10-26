@@ -54,7 +54,7 @@ const RELEASE_NOTES_STATUS_KEY: &str = "release-notes-fetch";
 /// the on-demand read talks to. Held in [`crate::server::AppState`] as an `Arc` so
 /// every request sees one decision. The screen is `None` until the resolver task
 /// finishes, and again once a client dismisses it.
-pub struct FirstLoadState {
+pub(crate) struct FirstLoadState {
     pending: Mutex<Option<PendingFirstLoadView>>,
     /// Where release-notes fetches point. Production passes
     /// `dux_core::urls::GITHUB_API_BASE`; tests point it at a local server so no
@@ -63,7 +63,7 @@ pub struct FirstLoadState {
 }
 
 impl FirstLoadState {
-    pub fn new(api_base: impl Into<String>) -> Self {
+    pub(crate) fn new(api_base: impl Into<String>) -> Self {
         Self {
             pending: Mutex::new(None),
             api_base: api_base.into(),
@@ -72,7 +72,7 @@ impl FirstLoadState {
 
     /// The screen to show, for injection into the bootstrap document. A cheap
     /// clone under a short lock; the guard never crosses an `.await`.
-    pub fn pending(&self) -> Option<PendingFirstLoadView> {
+    pub(crate) fn pending(&self) -> Option<PendingFirstLoadView> {
         self.pending
             .lock()
             .expect("the pending lock is not poisoned")
@@ -99,7 +99,7 @@ pub fn routes() -> Router<AppState> {
 /// Spawned once from `build_app`. Requires a tokio runtime context, which every
 /// `build_app` caller provides (the CLI serve paths build inside `block_on`; the
 /// flip enters the runtime).
-pub fn spawn_first_load_resolver(
+pub(crate) fn spawn_first_load_resolver(
     engine: EngineHandle,
     bus: Arc<EventBus>,
     state: Arc<FirstLoadState>,
