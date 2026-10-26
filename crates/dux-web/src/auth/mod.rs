@@ -384,14 +384,23 @@ pub(crate) struct Assessment {
 #[derive(Clone, Debug)]
 pub(crate) struct RequestAuth(pub(crate) Arc<Assessment>);
 
+/// How a password that was right measures up against today's minimums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PasswordStrength {
+    /// Below today's minimums.
+    Weak,
+    /// Meets them.
+    Sufficient,
+}
+
 /// What a password check came to.
 #[derive(Debug)]
 pub(crate) enum Verify {
-    /// Right. `generation` is the one it was checked against; `weak` says it
-    /// is below today's minimums.
+    /// Right. `generation` is the one it was checked against; `strength` says
+    /// how it measures up against today's minimums.
     Right {
         generation: String,
-        weak: bool,
+        strength: PasswordStrength,
     },
     Wrong,
     /// This failure blocked the client's address.
@@ -569,8 +578,12 @@ impl AuthState {
                 .chain(&bearer)
                 .copied()
                 .filter(|digest| {
-                    self.sessions
-                        .check(digest, &snapshot.generation, idle, true)
+                    self.sessions.check(
+                        digest,
+                        &snapshot.generation,
+                        idle,
+                        sessions::LastUse::Refresh,
+                    )
                 })
                 .collect::<Vec<_>>()
                 .first()
@@ -626,7 +639,7 @@ impl AuthState {
                 digest,
                 &snapshot.generation,
                 idle_windows(&snapshot.config),
-                false,
+                sessions::LastUse::Keep,
             )
         });
         (!valid).then_some(socket::CLOSE_SIGNED_OUT)
@@ -748,10 +761,15 @@ impl AuthState {
                     let words: Vec<&str> = words.iter().map(String::as_str).collect();
                     !dux_core::auth::check_minimums(&password, &policy, &words).passes()
                 };
+                let strength = if weak {
+                    PasswordStrength::Weak
+                } else {
+                    PasswordStrength::Sufficient
+                };
                 // Released here, as the Argon2 work ends, whatever became of
                 // the request.
                 drop(permit);
-                (outcome, weak)
+                (outcome, strength)
             })
             .await;
             state.settle(&snapshot, &c, checked, reservation).await
@@ -769,21 +787,24 @@ impl AuthState {
         &self,
         snapshot: &AuthSnapshot,
         c: &Classification,
-        checked: Result<(Result<bool, dux_core::auth::AuthError>, bool), tokio::task::JoinError>,
+        checked: Result<
+            (Result<bool, dux_core::auth::AuthError>, PasswordStrength),
+            tokio::task::JoinError,
+        >,
         reservation: admission::Reservation,
     ) -> Verify {
         // The reservation is given back only once the outcome is counted, so
         // there is no moment when the check is neither pending nor counted.
         let _reservation = reservation;
         match checked {
-            Ok((Ok(true), weak)) => {
+            Ok((Ok(true), strength)) => {
                 if self.snapshot().generation != snapshot.generation {
                     return Verify::Stale;
                 }
                 self.admission.record_success(c);
                 Verify::Right {
                     generation: snapshot.generation.clone(),
-                    weak,
+                    strength,
                 }
             }
             Ok((Ok(false), _)) => {
@@ -825,13 +846,13 @@ impl AuthState {
 
     /// Note how the password that just signed in measures up, saying so once
     /// per password when it is below today's minimums.
-    pub(crate) fn note_strength(&self, generation: &str, weak: bool) {
+    pub(crate) fn note_strength(&self, generation: &str, strength: PasswordStrength) {
         let mut slot = self
             .weak
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let was = slot.as_deref() == Some(generation);
-        if weak {
+        if strength == PasswordStrength::Weak {
             *slot = Some(generation.to_string());
             if !was {
                 drop(slot);

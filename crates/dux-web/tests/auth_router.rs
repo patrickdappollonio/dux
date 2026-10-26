@@ -2123,23 +2123,44 @@ fn forged_serve(request: Req) -> Req {
         .header("x-forwarded-for", "100.64.0.9")
 }
 
-/// A serve route to dux beside a known raw forward, or beside an exposure dux
-/// could not confirm.
-fn exposure_with_route(
+/// A serve route to dux beside an exposure dux could not confirm, or on its
+/// own.
+fn exposure_with_route(funnel: dux_web::exposure::FunnelState) -> dux_web::exposure::ExposureCell {
+    exposure_of(funnel, route_identity())
+}
+
+/// A serve route to dux beside a known raw forward onto its port.
+fn exposure_with_route_and_forward(
     funnel: dux_web::exposure::FunnelState,
-    forward_to_dux: bool,
 ) -> dux_web::exposure::ExposureCell {
-    use dux_web::exposure::{ExposureCell, IdentityFacts};
-    let exposure = ExposureCell::new(funnel);
-    exposure.set_identity(Some(IdentityFacts {
-        forward_to_dux,
+    exposure_of(
+        funnel,
+        dux_web::exposure::IdentityFacts {
+            forward_to_dux: true,
+            ..route_identity()
+        },
+    )
+}
+
+/// This machine's Tailscale addresses and one serve route to dux.
+fn route_identity() -> dux_web::exposure::IdentityFacts {
+    dux_web::exposure::IdentityFacts {
+        forward_to_dux: false,
         own_ips: own_tailscale_ips(),
         routes: vec![dux_core::tailscale::ServeRoute {
             url: "https://box.tail0000.ts.net".to_string(),
             funnel: false,
         }],
-        ..IdentityFacts::default()
-    }));
+        ..dux_web::exposure::IdentityFacts::default()
+    }
+}
+
+fn exposure_of(
+    funnel: dux_web::exposure::FunnelState,
+    identity: dux_web::exposure::IdentityFacts,
+) -> dux_web::exposure::ExposureCell {
+    let exposure = dux_web::exposure::ExposureCell::new(funnel);
+    exposure.set_identity(Some(identity));
     exposure
 }
 
@@ -2154,7 +2175,7 @@ async fn an_unconfirmed_exposure_never_lets_serve_headers_pass_as_the_tailnet() 
         FunnelState::CliNotFound,
         FunnelState::Unchecked,
     ] {
-        let exposure = exposure_with_route(funnel, false);
+        let exposure = exposure_with_route(funnel);
         let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), {
             move |p| p.with_live_exposure(exposure)
         });
@@ -2174,7 +2195,7 @@ async fn an_unconfirmed_exposure_never_lets_serve_headers_pass_as_the_tailnet() 
 #[tokio::test]
 async fn a_known_forward_never_lets_forged_serve_headers_set_the_first_password() {
     use dux_web::exposure::FunnelState;
-    let exposure = exposure_with_route(FunnelState::Open, true);
+    let exposure = exposure_with_route_and_forward(FunnelState::Open);
     let dux = Dux::start_tuned("", move |p| p.with_live_exposure(exposure));
     let refused = dux
         .send(
@@ -2198,7 +2219,7 @@ async fn a_known_forward_never_lets_forged_serve_headers_set_the_first_password(
 #[tokio::test]
 async fn a_known_forward_never_bans_the_tailnet_address_forged_headers_name() {
     use dux_web::exposure::FunnelState;
-    let exposure = exposure_with_route(FunnelState::Open, true);
+    let exposure = exposure_with_route_and_forward(FunnelState::Open);
     let dux = Dux::start_tuned(
         &format!(
             "password_hash = \"{}\"\nmax_failed_logins = 2\nfailed_login_delay_seconds = 0\n\
@@ -2682,7 +2703,7 @@ async fn concurrent_guesses_from_one_address_are_not_all_checked() {
 async fn serve_from_this_machines_own_tailscale_address_is_never_written_to_the_blocklist() {
     use dux_web::exposure::FunnelState;
     let own = own_tailscale_ips()[0].to_string();
-    let exposure = exposure_with_route(FunnelState::Open, false);
+    let exposure = exposure_with_route(FunnelState::Open);
     let dux = Dux::start_tuned(
         &format!(
             "password_hash = \"{}\"\nmax_failed_logins = 2\nfailed_login_delay_seconds = 0\n\
@@ -2724,7 +2745,7 @@ async fn serve_from_this_machines_own_tailscale_address_is_never_written_to_the_
 async fn under_a_funnel_this_machine_through_the_serve_url_still_signs_in() {
     use dux_web::exposure::FunnelState;
     let own = own_tailscale_ips()[0].to_string();
-    let exposure = exposure_with_route(FunnelState::Funnel, false);
+    let exposure = exposure_with_route(FunnelState::Funnel);
     let dux = Dux::start_tuned(
         &format!("password_hash = \"{}\"", hash_of(PASSWORD)),
         move |p| p.with_live_exposure(exposure),
@@ -2758,7 +2779,7 @@ async fn under_a_funnel_this_machine_through_the_serve_url_still_signs_in() {
 async fn a_tailnet_guesser_through_serve_cannot_dodge_the_block_with_x_real_ip() {
     use dux_web::exposure::FunnelState;
     let start = || {
-        let exposure = exposure_with_route(FunnelState::Open, false);
+        let exposure = exposure_with_route(FunnelState::Open);
         Dux::start_tuned(
             &format!(
                 "password_hash = \"{}\"\nrequire = \"tailnet\"\nmax_failed_logins = 2\n\

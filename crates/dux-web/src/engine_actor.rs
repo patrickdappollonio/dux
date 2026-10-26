@@ -426,7 +426,7 @@ pub enum EngineRequest {
     AdmitManagerRemoval {
         project_id: String,
         path: std::path::PathBuf,
-        delete_branch: bool,
+        branch: dux_core::worktree_manager::BranchRemoval,
         reply: oneshot::Sender<Option<dux_core::worktree_manager::RemovalAdmission>>,
     },
     /// What stands in the way of deleting or moving `path` and everything
@@ -2062,7 +2062,7 @@ impl EngineHandle {
         &self,
         project_id: String,
         path: std::path::PathBuf,
-        delete_branch: bool,
+        branch: dux_core::worktree_manager::BranchRemoval,
     ) -> Option<dux_core::worktree_manager::RemovalAdmission> {
         let (reply, rx) = oneshot::channel();
         if self
@@ -2070,7 +2070,7 @@ impl EngineHandle {
             .send(EngineRequest::AdmitManagerRemoval {
                 project_id,
                 path,
-                delete_branch,
+                branch,
                 reply,
             })
             .await
@@ -4835,18 +4835,10 @@ fn handle_request(
         EngineRequest::AdmitManagerRemoval {
             project_id,
             path,
-            delete_branch,
+            branch,
             reply,
         } => {
-            let _ = reply.send(engine.admit_manager_removal(
-                &project_id,
-                &path,
-                if delete_branch {
-                    dux_core::worktree_manager::BranchRemoval::Delete
-                } else {
-                    dux_core::worktree_manager::BranchRemoval::Keep
-                },
-            ));
+            let _ = reply.send(engine.admit_manager_removal(&project_id, &path, branch));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine
@@ -9210,7 +9202,7 @@ mod tests {
                 EngineRequest::AdmitManagerRemoval {
                     project_id: "p1".into(),
                     path: "/tmp/wt".into(),
-                    delete_branch: false,
+                    branch: dux_core::worktree_manager::BranchRemoval::Keep,
                     reply: dead_reply(),
                 },
                 false,

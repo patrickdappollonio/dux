@@ -64,7 +64,7 @@ impl Speaker {
         Self { console, engine }
     }
 
-    fn say(&self, loudness: Loudness, key: &str, message: &str, quiet_web: bool) {
+    fn say(&self, loudness: Loudness, key: &str, message: &str, quiet_on: QuietSurfaces) {
         dux_core::logger::warn(&format!("[server] {message}"));
         match loudness {
             Loudness::Warning => self.console.warn(message),
@@ -72,9 +72,7 @@ impl Speaker {
         }
         if let Some(engine) = &self.engine {
             let mut update = StatusUpdate::keyed(key, StatusTone::Warning, message);
-            if quiet_web {
-                update.quiet_on = QuietSurfaces::WEB;
-            }
+            update.quiet_on = quiet_on;
             engine.post_status(update);
         }
     }
@@ -86,11 +84,21 @@ impl Speaker {
     }
 
     pub(crate) fn proxy_warning(&self) {
-        self.say(Loudness::Warning, PROXY_KEY, &proxy_sentence(), false);
+        self.say(
+            Loudness::Warning,
+            PROXY_KEY,
+            &proxy_sentence(),
+            QuietSurfaces::LOUD,
+        );
     }
 
     pub(crate) fn weak_password(&self) {
-        self.say(Loudness::Warning, WEAK_KEY, &weak_sentence(), false);
+        self.say(
+            Loudness::Warning,
+            WEAK_KEY,
+            &weak_sentence(),
+            QuietSurfaces::LOUD,
+        );
     }
 
     pub(crate) fn blocked(&self, entry: &str, failures: u32, path: &str, kept: &BanKept) {
@@ -98,7 +106,7 @@ impl Speaker {
             Loudness::Warning,
             BLOCKED_KEY,
             &blocked_sentence(entry, failures, path, kept),
-            false,
+            QuietSurfaces::LOUD,
         );
     }
 
@@ -109,7 +117,7 @@ impl Speaker {
             Loudness::Warning,
             BLOCKED_KEY,
             &unverified_limit_sentence(ip, why, failures, path),
-            false,
+            QuietSurfaces::LOUD,
         );
     }
 
@@ -120,13 +128,18 @@ impl Speaker {
             Loudness::Warning,
             OWN_ENTRY_KEY,
             &own_entry_sentence(entry, ip),
-            false,
+            QuietSurfaces::LOUD,
         );
     }
 
     /// A raw TCP forward onto dux's port appeared.
     pub(crate) fn forward_known(&self) {
-        self.say(Loudness::Warning, FORWARD_KEY, &forward_sentence(), false);
+        self.say(
+            Loudness::Warning,
+            FORWARD_KEY,
+            &forward_sentence(),
+            QuietSurfaces::LOUD,
+        );
     }
 
     /// The forward is gone.
@@ -134,23 +147,33 @@ impl Speaker {
         self.withdraw(FORWARD_KEY);
     }
 
-    fn exposed(&self, reach: &[String], funnel: bool) {
+    fn exposed(&self, reach: &[String], publication: Publication) {
         self.say(
             Loudness::Alarm,
             EXPOSED_KEY,
-            &exposed_sentence(reach, funnel),
-            true,
+            &exposed_sentence(reach, publication),
+            QuietSurfaces::WEB,
         );
     }
 }
 
+/// Whether a Tailscale Funnel or forward is known to reach dux's port from
+/// beyond this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Publication {
+    /// One is known to.
+    Published,
+    /// None is known to.
+    Unpublished,
+}
+
 /// The alarm for a dux reachable beyond this machine with no password.
-pub(crate) fn exposed_sentence(reach: &[String], funnel: bool) -> String {
+pub(crate) fn exposed_sentence(reach: &[String], publication: Publication) -> String {
     let mut ways: Vec<String> = Vec::new();
     if !reach.is_empty() {
         ways.push(format!("it listens on {}", reach.join(", ")));
     }
-    if funnel {
+    if publication == Publication::Published {
         ways.push(
             "a Tailscale Funnel or forward reaches its port from beyond this machine".to_string(),
         );
@@ -329,7 +352,14 @@ impl ExposedWarning {
         let published = state.exposure().known_published();
         let due = !state.snapshot().has_password() && (!reach.is_empty() || published);
         if due && !self.said {
-            state.speaker.exposed(&reach, published);
+            state.speaker.exposed(
+                &reach,
+                if published {
+                    Publication::Published
+                } else {
+                    Publication::Unpublished
+                },
+            );
         } else if !due && self.said {
             state.speaker.withdraw(EXPOSED_KEY);
         }
@@ -463,7 +493,10 @@ mod tests {
 
     #[test]
     fn the_alarm_names_the_reach_the_risk_and_the_fix() {
-        let text = exposed_sentence(&["every IPv4 address".to_string()], false);
+        let text = exposed_sentence(
+            &["every IPv4 address".to_string()],
+            Publication::Unpublished,
+        );
         let lower = text.to_ascii_lowercase();
         assert!(lower.contains("no password"), "{text}");
         assert!(text.contains("every IPv4 address"), "{text}");
@@ -471,7 +504,7 @@ mod tests {
             text.contains("dux config set server.auth.password"),
             "{text}"
         );
-        let funnel = exposed_sentence(&[], true);
+        let funnel = exposed_sentence(&[], Publication::Published);
         assert!(funnel.contains("Funnel"), "{funnel}");
     }
 

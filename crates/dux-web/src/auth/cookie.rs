@@ -12,36 +12,54 @@ pub(crate) fn name(port: u16) -> String {
     format!("dux_session_{port}")
 }
 
-/// Whether the cookie is marked `Secure`: per `cookie_secure`, and on `auto`
-/// only when dux knows the browser reached it over HTTPS, which today is a
+/// Whether dux knows the browser reached it over HTTPS, which today is a
 /// request through a confirmed `tailscale serve` HTTPS route. An arbitrary
 /// `X-Forwarded-Proto` is never believed.
-pub(crate) fn secure(setting: CookieSecure, https_serve_route: bool) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HttpsRoute {
+    /// Through a confirmed `tailscale serve` HTTPS route, or a Funnel.
+    Confirmed,
+    /// Anything else.
+    Unconfirmed,
+}
+
+/// Whether the cookie is marked `Secure`: per `cookie_secure`, and on `auto`
+/// only over an [`HttpsRoute::Confirmed`] route.
+fn secure(setting: CookieSecure, route: HttpsRoute) -> bool {
     match setting {
         CookieSecure::Always => true,
         CookieSecure::Never => false,
-        CookieSecure::Auto => https_serve_route,
+        CookieSecure::Auto => route == HttpsRoute::Confirmed,
+    }
+}
+
+/// The ` Secure` attribute's text, empty when [`secure`] says no.
+fn secure_attribute(setting: CookieSecure, route: HttpsRoute) -> &'static str {
+    if secure(setting, route) {
+        "; Secure"
+    } else {
+        ""
     }
 }
 
 /// The `Set-Cookie` value that hands a browser its session.
-pub(crate) fn set(port: u16, value: &str, secure: bool) -> HeaderValue {
+pub(crate) fn set(port: u16, value: &str, setting: CookieSecure, route: HttpsRoute) -> HeaderValue {
     let text = format!(
         "{}={value}; Path=/; HttpOnly; SameSite=Strict{}",
         name(port),
-        if secure { "; Secure" } else { "" }
+        secure_attribute(setting, route)
     );
     HeaderValue::from_str(&text).expect("a token and a port are header-safe")
 }
 
 /// The `Set-Cookie` value that makes a browser forget its session: the same
 /// name, path and flags, an empty value, and an expiry in the past.
-pub(crate) fn clear(port: u16, secure: bool) -> HeaderValue {
+pub(crate) fn clear(port: u16, setting: CookieSecure, route: HttpsRoute) -> HeaderValue {
     let text = format!(
         "{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; \
          Expires=Thu, 01 Jan 1970 00:00:00 GMT{}",
         name(port),
-        if secure { "; Secure" } else { "" }
+        secure_attribute(setting, route)
     );
     HeaderValue::from_str(&text).expect("header-safe")
 }
@@ -77,7 +95,7 @@ mod tests {
 
     #[test]
     fn the_cookie_is_host_only_http_only_strict_and_secure_only_when_known() {
-        let set = set(3890, "abc", false);
+        let set = set(3890, "abc", CookieSecure::Never, HttpsRoute::Unconfirmed);
         let text = set.to_str().unwrap();
         assert_eq!(
             text,
@@ -85,22 +103,22 @@ mod tests {
         );
         assert!(!text.to_ascii_lowercase().contains("domain"));
         assert!(
-            super::set(3890, "abc", true)
+            super::set(3890, "abc", CookieSecure::Always, HttpsRoute::Unconfirmed)
                 .to_str()
                 .unwrap()
                 .ends_with("; Secure")
         );
-        let clear = clear(3890, false);
+        let clear = clear(3890, CookieSecure::Never, HttpsRoute::Unconfirmed);
         assert!(clear.to_str().unwrap().contains("Max-Age=0"));
         assert!(clear.to_str().unwrap().starts_with("dux_session_3890=;"));
     }
 
     #[test]
     fn secure_follows_the_setting_and_never_a_forwarded_header() {
-        assert!(secure(CookieSecure::Always, false));
-        assert!(!secure(CookieSecure::Never, true));
-        assert!(secure(CookieSecure::Auto, true));
-        assert!(!secure(CookieSecure::Auto, false));
+        assert!(secure(CookieSecure::Always, HttpsRoute::Unconfirmed));
+        assert!(!secure(CookieSecure::Never, HttpsRoute::Confirmed));
+        assert!(secure(CookieSecure::Auto, HttpsRoute::Confirmed));
+        assert!(!secure(CookieSecure::Auto, HttpsRoute::Unconfirmed));
     }
 
     #[test]

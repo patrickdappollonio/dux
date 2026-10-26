@@ -343,6 +343,18 @@ pub struct Classification {
     pub own_network: bool,
 }
 
+impl Classification {
+    /// Whether this request came over a route dux knows is HTTPS, as the
+    /// session cookie's `Secure` flag asks it.
+    pub(crate) fn https_route(&self) -> crate::auth::cookie::HttpsRoute {
+        if self.https_serve_route {
+            crate::auth::cookie::HttpsRoute::Confirmed
+        } else {
+            crate::auth::cookie::HttpsRoute::Unconfirmed
+        }
+    }
+}
+
 /// How a request reached dux. Unverified requests are slowed in one bucket
 /// per route (decided, after review), so internet visitors and proxied
 /// traffic can never slow or lock out the owner on this machine, who signs in
@@ -732,14 +744,28 @@ mod tests {
         classify(&RequestFacts::of(arrival, &headers(pairs)), exposure, &[])
     }
 
-    fn served(url: &str, funnel: bool) -> Exposure {
+    /// A look that found this machine's address and one `tailscale serve`
+    /// route at `url`, not funneled.
+    fn served(url: &str) -> Exposure {
+        exposing(ServeRoute {
+            url: url.to_string(),
+            funnel: false,
+        })
+    }
+
+    /// [`served`], with the route funneled to the internet.
+    fn funneled(url: &str) -> Exposure {
+        exposing(ServeRoute {
+            url: url.to_string(),
+            funnel: true,
+        })
+    }
+
+    fn exposing(route: ServeRoute) -> Exposure {
         Exposure {
             funnel: FunnelState::Open,
             identity: Some(IdentityFacts {
-                routes: vec![ServeRoute {
-                    url: url.to_string(),
-                    funnel,
-                }],
+                routes: vec![route],
                 own_ips: vec![OWN_TAILSCALE.parse().unwrap()],
                 ..IdentityFacts::default()
             }),
@@ -922,7 +948,7 @@ mod tests {
             ("tailscale-funnel-request", "?1"),
             ("tailscale-user-login", "x@example.com"),
         ];
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let c = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &marked, &exposure);
         assert_eq!(c.class, ClientClass::Internet);
         assert!(c.transport_encrypted, "Funnel is always HTTPS");
@@ -995,7 +1021,7 @@ mod tests {
         // A Funnel over HTTP marks its requests, so a serve route still works.
         let funnel = Exposure {
             funnel: FunnelState::Funnel,
-            ..served("https://box.tail.ts.net", false)
+            ..served("https://box.tail.ts.net")
         };
         let serve = class_of(
             Some(arrival("127.0.0.1:1", LOOPBACK)),
@@ -1013,7 +1039,7 @@ mod tests {
 
     #[test]
     fn a_forwarded_request_is_the_network_unless_a_confirmed_serve_route_vouches_for_it() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let through_serve = [
             ("host", "box.tail.ts.net"),
             ("x-forwarded-for", "100.64.0.9"),
@@ -1057,7 +1083,7 @@ mod tests {
         let funnelled = class_of(
             Some(arrival("127.0.0.1:1", LOOPBACK)),
             &through_serve,
-            &served("https://box.tail.ts.net", true),
+            &funneled("https://box.tail.ts.net"),
         );
         assert_eq!(funnelled.class, ClientClass::Network);
 
@@ -1126,7 +1152,7 @@ mod tests {
         let posing = class_of(
             Some(arrival("198.51.100.9:1", "192.168.1.2:3890")),
             &[("tailscale-user-login", "owner@example.com")],
-            &served("https://box.tail.ts.net", false),
+            &served("https://box.tail.ts.net"),
         );
         assert_eq!(posing.class, ClientClass::Network);
     }
@@ -1211,7 +1237,7 @@ mod tests {
 
     #[test]
     fn serve_is_proven_only_when_the_nearest_hop_names_a_tailscale_address() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let with = |extra: &[(&'static str, &'static str)]| {
             let mut headers = vec![
                 ("host", "box.tail.ts.net"),
@@ -1256,7 +1282,7 @@ mod tests {
 
     #[test]
     fn this_machine_through_its_own_serve_url_is_the_network_and_unverified() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let c = class_of(
             Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
@@ -1374,7 +1400,7 @@ mod tests {
     /// a blocked address named anywhere stays blocked.
     #[test]
     fn random_header_bytes_never_raise_trust_or_hide_an_address() {
-        let serve = served("https://box.tail.ts.net", false);
+        let serve = served("https://box.tail.ts.net");
         let text = |value: &str| value.as_bytes().to_vec();
         let scenarios: Vec<Scenario<'_>> = vec![
             (

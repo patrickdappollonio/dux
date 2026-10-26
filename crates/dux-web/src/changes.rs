@@ -136,6 +136,16 @@ pub struct ChangesService {
     fresh_validation_reads: AtomicUsize,
 }
 
+/// What kind of failure a cached error records, which decides whether it may
+/// replace a cached success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    /// Git genuinely failed: a now-stale success yields to the error.
+    Real,
+    /// A poll tick gave up waiting: it never replaces a concurrent success.
+    Timeout,
+}
+
 impl ChangesService {
     /// Build the service and spawn the supervised poll loop. MUST be called from
     /// within a tokio runtime context (the serve paths call it inside their
@@ -249,7 +259,7 @@ impl ChangesService {
                                 ));
                                 let rev = svc.engine.next_changes_rev(id_for_err.clone()).await;
                                 let generation = svc.invalidation_gen.load(Ordering::SeqCst);
-                                // `clobber_ok = false`: this timeout races a freshly
+                                // `Failure::Timeout`: this timeout races a freshly
                                 // elected owner whose good `Cached::Ok` carries a lower
                                 // rev, which the plain `rev >= existing` guard would let
                                 // this error overwrite into a spurious 409.
@@ -258,7 +268,7 @@ impl ChangesService {
                                     rev,
                                     generation,
                                     "changed-files computation timed out".to_string(),
-                                    false,
+                                    Failure::Timeout,
                                 );
                             }
                         }
@@ -591,7 +601,7 @@ impl ChangesService {
                     "changed-files compute failed for session {session_id}: {message}"
                 ));
                 // A genuine git failure must replace a now-stale success (`clobber_ok`).
-                let _ = self.store_err(session_id, rev, generation, message, true);
+                let _ = self.store_err(session_id, rev, generation, message, Failure::Real);
             }
             Err(join_err) => {
                 let rev = self.engine.next_changes_rev(session_id.to_string()).await;
@@ -599,7 +609,7 @@ impl ChangesService {
                 dux_core::logger::error(&format!(
                     "changed-files compute task failed for session {session_id}: {join_err}"
                 ));
-                let _ = self.store_err(session_id, rev, generation, message, true);
+                let _ = self.store_err(session_id, rev, generation, message, Failure::Real);
             }
         }
     }
@@ -681,10 +691,11 @@ impl ChangesService {
 
     /// Store a cached error and escalate to a keyed `Warning` after a streak.
     ///
-    /// `clobber_ok` controls whether this error may overwrite an existing
-    /// `Cached::Ok`. The real-failure paths in [`Self::compute`] pass `true`: git
-    /// genuinely failed, so a now-stale success must yield to the error. The
-    /// poll-tick timeout path passes `false`: it runs after its compute was
+    /// `failure` decides whether this error may overwrite an existing
+    /// `Cached::Ok`. The real-failure paths in [`Self::compute`] pass
+    /// [`Failure::Real`]: git genuinely failed, so a now-stale success must yield
+    /// to the error. The poll-tick timeout path passes [`Failure::Timeout`]: it
+    /// runs after its compute was
     /// cancelled and races a freshly-elected owner whose successful `Cached::Ok`
     /// (stored with a LOWER rev than this later-minted timeout rev) must not be
     /// clobbered by a giving-up timeout, which would surface a spurious 409. A
@@ -698,8 +709,9 @@ impl ChangesService {
         rev: u64,
         generation: u64,
         message: String,
-        clobber_ok: bool,
+        failure: Failure,
     ) -> bool {
+        let clobber_ok = failure == Failure::Real;
         let stored = {
             let mut cache = lock(&self.cache);
             // Keep the higher rev (a stale error must not clobber a newer entry),
@@ -1285,7 +1297,7 @@ mod tests {
         let mut statuses = svc.engine.subscribe_status();
 
         for rev in 1..=u64::from(dux_core::changes_status::ERROR_WARN_THRESHOLD) {
-            let _ = svc.store_err("s1", rev, 0, "git busy".to_string(), true);
+            let _ = svc.store_err("s1", rev, 0, "git busy".to_string(), Failure::Real);
         }
         let warning = loop {
             let status = statuses.recv().await.expect("a status");
@@ -1429,7 +1441,7 @@ mod tests {
         // A poll-tick timeout error mints a HIGHER rev (it ran later) but must NOT
         // overwrite the concurrent success: `clobber_ok = false`. Otherwise a GET
         // would see a spurious 409 over a perfectly good result.
-        let escalated = svc.store_err("s1", 6, 0, "timed out".to_string(), false);
+        let escalated = svc.store_err("s1", 6, 0, "timed out".to_string(), Failure::Timeout);
         match lock(&svc.cache).get("s1") {
             Some(Cached::Ok { rev, .. }) => assert_eq!(*rev, 5, "the fresh Ok must survive"),
             _ => panic!("a timeout error clobbered a concurrent success"),
@@ -1440,7 +1452,7 @@ mod tests {
 
         // A GENUINE git error (`clobber_ok = true`) with a higher rev DOES replace
         // the stale success, so a real failure still surfaces as 409.
-        let _ = svc.store_err("s1", 7, 0, "git failed".to_string(), true);
+        let _ = svc.store_err("s1", 7, 0, "git failed".to_string(), Failure::Real);
         match lock(&svc.cache).get("s1") {
             Some(Cached::Err { rev, .. }) => assert_eq!(*rev, 7, "a real error must win"),
             _ => panic!("a real git error should replace the stale Ok"),

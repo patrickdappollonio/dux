@@ -195,14 +195,15 @@ async fn login(
         SignIn::Refused(refusal) => return refusal,
     };
     let a = &auth.0;
-    let secure = cookie::secure(
-        a.snapshot.config.cookie_secure,
-        a.classification.https_serve_route,
-    );
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie::set(a.cookie_port, &token.cookie_value, secure),
+        cookie::set(
+            a.cookie_port,
+            &token.cookie_value,
+            a.snapshot.config.cookie_secure,
+            a.classification.https_route(),
+        ),
     );
     response
 }
@@ -283,8 +284,11 @@ async fn sign_in(
     }
     let a = &auth.0;
     match state.auth.verify(&a.classification, password).await {
-        Verify::Right { generation, weak } => {
-            state.auth.note_strength(&generation, weak);
+        Verify::Right {
+            generation,
+            strength,
+        } => {
+            state.auth.note_strength(&generation, strength);
             match state.auth.issue_session(&a.facts, &generation, kind).await {
                 Ok(super::Issued::Session(token)) => SignIn::Token(token, body.label),
                 Ok(super::Issued::Blocked) => SignIn::Refused(super::middleware::blocked()),
@@ -344,14 +348,15 @@ async fn logout(
     for digest in &a.presented {
         state.auth.end_session(*digest).await;
     }
-    let secure = cookie::secure(
-        a.snapshot.config.cookie_secure,
-        a.classification.https_serve_route,
-    );
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, cookie::clear(a.cookie_port, secure));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie::clear(
+            a.cookie_port,
+            a.snapshot.config.cookie_secure,
+            a.classification.https_route(),
+        ),
+    );
     response
 }
 
@@ -585,10 +590,14 @@ async fn change_password(
                 None => state.auth.applied(|_| {}, file_write),
             }
             let mut response = StatusCode::NO_CONTENT.into_response();
-            let secure = cookie::secure(config.cookie_secure, a.classification.https_serve_route);
-            response
-                .headers_mut()
-                .insert(header::SET_COOKIE, cookie::clear(a.cookie_port, secure));
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                cookie::clear(
+                    a.cookie_port,
+                    config.cookie_secure,
+                    a.classification.https_route(),
+                ),
+            );
             response
         }
         Ok(Err(dux_core::config_keys::SetPasswordError::BelowMinimums(check))) => {
