@@ -1596,6 +1596,16 @@ pub(crate) const NO_PANE_CHORD_ADVICE: &str = "no pane chord reaches dux from th
      every key bound to focus_next and focus_prev types into the agent there. Rebind focus_next \
      under [keys] in config.toml (Ctrl-o is its default) to get a keyboard way out.";
 
+/// Where Tab and Shift-Tab go while the typeable center pane has the keyboard
+/// (`[ui] tab_reaches_agent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabKey {
+    /// They reach the live agent.
+    ReachesAgent,
+    /// They move between panes, as everywhere else.
+    MovesPanes,
+}
+
 /// Keys the minimized, typeable center pane forwards to the agent's PTY
 /// instead of resolving as dux bindings.
 ///
@@ -1617,14 +1627,14 @@ pub(crate) const NO_PANE_CHORD_ADVICE: &str = "no pane chord reaches dux from th
 /// The sibling of [`text_field_owns_key`]: `app::input::handle_key` suppresses
 /// the Global and Center binding lookups with it while the pane is typeable
 /// and at the live edge, so hints must not advertise a key it swallows.
-pub(crate) fn center_typing_owns_key(key: &KeyEvent, tab_reaches_agent: bool) -> bool {
+pub(crate) fn center_typing_owns_key(key: &KeyEvent, tab_key: TabKey) -> bool {
     let mods = key.modifiers;
     if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) {
         // Ctrl+c is the one chord the agent gets (see above). Any extra
         // modifier turns it back into a dux-side chord.
         return key.code == KeyCode::Char('c') && mods == KeyModifiers::CONTROL;
     }
-    if tab_reaches_agent && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+    if (tab_key == TabKey::ReachesAgent) && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         return true;
     }
     matches!(
@@ -1961,11 +1971,11 @@ impl RuntimeBindings {
     pub(crate) fn label_for_typeable_center(
         &self,
         action: Action,
-        tab_reaches_agent: bool,
+        tab_key: TabKey,
     ) -> Option<String> {
         self.label_for_reaching(action, |k| {
             let event: KeyEvent = k.into();
-            !center_typing_owns_key(&event, tab_reaches_agent)
+            !center_typing_owns_key(&event, tab_key)
         })
     }
 
@@ -1974,13 +1984,13 @@ impl RuntimeBindings {
     /// `focus_prev` types into the agent there, so nothing on the keyboard
     /// moves focus off the pane. A user who rebinds both to Tab alone lands
     /// here, and the surfaces answer with [`NO_PANE_CHORD_ADVICE`].
-    pub(crate) fn typeable_center_traps_focus(&self, tab_reaches_agent: bool) -> bool {
-        tab_reaches_agent
+    pub(crate) fn typeable_center_traps_focus(&self, tab_key: TabKey) -> bool {
+        (tab_key == TabKey::ReachesAgent)
             && self
-                .label_for_typeable_center(Action::FocusNext, true)
+                .label_for_typeable_center(Action::FocusNext, TabKey::ReachesAgent)
                 .is_none()
             && self
-                .label_for_typeable_center(Action::FocusPrev, true)
+                .label_for_typeable_center(Action::FocusPrev, TabKey::ReachesAgent)
                 .is_none()
     }
 
@@ -2387,7 +2397,11 @@ pub(crate) fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
         // app_cursor is false on purpose: these patterns match bytes the HOST
         // sends to dux, and dux never sets DECCKM on the host, so cursor keys
         // always arrive in the CSI form.
-        One(code) => crate::key_encode::encode_key(code, norm.modifiers, false),
+        One(code) => crate::key_encode::encode_key(
+            code,
+            norm.modifiers,
+            crate::key_encode::CursorKeys::Normal,
+        ),
         _ => None,
     }
 }
@@ -2455,7 +2469,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
             assert!(
-                center_typing_owns_key(&key, false),
+                center_typing_owns_key(&key, TabKey::MovesPanes),
                 "{key:?} types into the agent"
             );
         }
@@ -2478,7 +2492,7 @@ mod tests {
             ),
         ] {
             assert!(
-                !center_typing_owns_key(&key, false),
+                !center_typing_owns_key(&key, TabKey::MovesPanes),
                 "{key:?} reaches the bindings"
             );
         }
@@ -2496,11 +2510,11 @@ mod tests {
         ];
         for key in tabs {
             assert!(
-                !center_typing_owns_key(&key, false),
+                !center_typing_owns_key(&key, TabKey::MovesPanes),
                 "{key:?} moves panes while the option is off"
             );
             assert!(
-                center_typing_owns_key(&key, true),
+                center_typing_owns_key(&key, TabKey::ReachesAgent),
                 "{key:?} types into the agent while the option is on"
             );
         }
@@ -2513,7 +2527,7 @@ mod tests {
             KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
         ] {
             assert!(
-                !center_typing_owns_key(&key, true),
+                !center_typing_owns_key(&key, TabKey::ReachesAgent),
                 "{key:?} stays a dux chord whatever the option says"
             );
         }
@@ -2526,7 +2540,7 @@ mod tests {
     fn typeable_center_traps_focus_only_when_every_pane_key_is_typed() {
         let defaults = default_bindings();
         assert!(
-            !defaults.typeable_center_traps_focus(true),
+            !defaults.typeable_center_traps_focus(TabKey::ReachesAgent),
             "the default Ctrl-o and Ctrl-y are the way out"
         );
 
@@ -2540,11 +2554,11 @@ mod tests {
                 .unwrap_or_default(),
         });
         assert!(
-            tab_only.typeable_center_traps_focus(true),
+            tab_only.typeable_center_traps_focus(TabKey::ReachesAgent),
             "with both pane actions on Tab alone, nothing moves focus off the pane"
         );
         assert!(
-            !tab_only.typeable_center_traps_focus(false),
+            !tab_only.typeable_center_traps_focus(TabKey::MovesPanes),
             "the same bindings are fine while Tab still moves panes"
         );
     }

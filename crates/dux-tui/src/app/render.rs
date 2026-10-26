@@ -3860,7 +3860,14 @@ impl App {
         // labels come from the same ownership predicate the routing uses.
         let pane_key = |action: Action| {
             self.bindings
-                .label_for_typeable_center(action, tab_reaches_agent)
+                .label_for_typeable_center(
+                    action,
+                    if tab_reaches_agent {
+                        crate::keybindings::TabKey::ReachesAgent
+                    } else {
+                        crate::keybindings::TabKey::MovesPanes
+                    },
+                )
                 .unwrap_or_default()
         };
         let next_pane = pane_key(Action::FocusNext);

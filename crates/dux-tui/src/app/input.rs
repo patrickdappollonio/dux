@@ -1060,7 +1060,11 @@ impl App {
     fn route_minimized_center_key(&mut self, key: KeyEvent) -> bool {
         let typing_owns_key = crate::keybindings::center_typing_owns_key(
             &key,
-            self.engine.config.ui.tab_reaches_agent,
+            if self.engine.config.ui.tab_reaches_agent {
+                crate::keybindings::TabKey::ReachesAgent
+            } else {
+                crate::keybindings::TabKey::MovesPanes
+            },
         );
         let card_owns_center = self.takeover_card_owns_center_key();
         if card_owns_center && self.handle_takeover_card_key(key, typing_owns_key) {
@@ -1751,7 +1755,11 @@ impl App {
         // The child's DECCKM state is read at encode time so an app that
         // flips application cursor keys on or off mid-session gets the form
         // it currently expects.
-        let app_cursor = provider.has_app_cursor();
+        let app_cursor = if provider.has_app_cursor() {
+            crate::key_encode::CursorKeys::Application
+        } else {
+            crate::key_encode::CursorKeys::Normal
+        };
         let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key, app_cursor) else {
             return;
         };
@@ -11265,10 +11273,10 @@ impl App {
         // this toggle just gave to the agent.
         let next_pane = self
             .bindings
-            .label_for_typeable_center(Action::FocusNext, true);
+            .label_for_typeable_center(Action::FocusNext, crate::keybindings::TabKey::ReachesAgent);
         let prev_pane = self
             .bindings
-            .label_for_typeable_center(Action::FocusPrev, true);
+            .label_for_typeable_center(Action::FocusPrev, crate::keybindings::TabKey::ReachesAgent);
         let handed_over = "Tab and Shift-Tab now reach the agent in the center pane.";
         match (next_pane, prev_pane) {
             (Some(next_pane), Some(prev_pane)) => self.set_ui_hint(format!(

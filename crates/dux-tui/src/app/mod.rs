@@ -4339,7 +4339,11 @@ pub(crate) fn tab_reaches_agent_trap_warning(
     config: &Config,
 ) -> Option<String> {
     bindings
-        .typeable_center_traps_focus(config.ui.tab_reaches_agent)
+        .typeable_center_traps_focus(if config.ui.tab_reaches_agent {
+            crate::keybindings::TabKey::ReachesAgent
+        } else {
+            crate::keybindings::TabKey::MovesPanes
+        })
         .then(|| {
             format!(
                 "Tab reaches the agent in the center pane, but {}",
