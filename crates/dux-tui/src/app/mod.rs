@@ -319,6 +319,15 @@ pub(crate) enum ClickCount {
     /// It only places the cursor.
     Single,
 }
+
+/// Whether the agent list folds its inactive agents behind the Inactive toggle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InactiveTail {
+    /// They are hidden behind the toggle.
+    Collapsed,
+    /// They are listed.
+    Expanded,
+}
 /// What the status line showed when the command palette last opened.
 #[derive(Default)]
 pub(crate) enum PaletteOpenedOver {
@@ -4455,7 +4464,7 @@ pub(crate) fn tab_reaches_agent_trap_warning(
 /// filter pass `&|_| true`.
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
-    inactive_collapsed: bool,
+    tail: InactiveTail,
     sort_mode: AgentSortMode,
     is_hot: &dyn Fn(usize) -> bool,
     is_visible: &dyn Fn(usize) -> bool,
@@ -4474,7 +4483,7 @@ pub(crate) fn build_left_items(
     let mut items: Vec<LeftItem> = order.active.into_iter().map(LeftItem::Session).collect();
     if !order.inactive.is_empty() {
         items.push(LeftItem::InactiveToggle);
-        if !inactive_collapsed {
+        if tail == InactiveTail::Expanded {
             items.extend(order.inactive.into_iter().map(LeftItem::Session));
         }
     }
@@ -6566,7 +6575,11 @@ impl App {
         // the Inactive tail (and the user has not dismissed it for this exact
         // query), the tail renders OPEN without mutating `inactive_collapsed`,
         // so clearing the query restores the user's collapse preference.
-        let effective_collapsed = self.inactive_collapsed && !self.inactive_tail_forced_open();
+        let effective_collapsed = if self.inactive_collapsed && !self.inactive_tail_forced_open() {
+            InactiveTail::Collapsed
+        } else {
+            InactiveTail::Expanded
+        };
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         // Precompute the "hot" bit (working || needs-attention) per session so the
         // predicate can borrow this Vec while `build_left_items` borrows
@@ -9177,17 +9190,25 @@ mod tests {
         // Collapsed (default): the active row, then a single Inactive toggle; the
         // inactive session is hidden.
         assert_eq!(
-            build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &|_| {
-                true
-            }),
+            build_left_items(
+                &sessions,
+                InactiveTail::Collapsed,
+                AgentSortMode::Active,
+                &|_| false,
+                &|_| { true }
+            ),
             vec![LeftItem::Session(0), LeftItem::InactiveToggle],
         );
 
         // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
-                true
-            }),
+            build_left_items(
+                &sessions,
+                InactiveTail::Expanded,
+                AgentSortMode::Active,
+                &|_| false,
+                &|_| { true }
+            ),
             vec![
                 LeftItem::Session(0),
                 LeftItem::InactiveToggle,
@@ -9202,7 +9223,13 @@ mod tests {
         a.status = SessionStatus::Active;
         let mut b = test_session("b", "other", 0);
         b.status = SessionStatus::Active;
-        let items = build_left_items(&[a, b], true, AgentSortMode::Active, &|_| false, &|_| true);
+        let items = build_left_items(
+            &[a, b],
+            InactiveTail::Collapsed,
+            AgentSortMode::Active,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(items, vec![LeftItem::Session(0), LeftItem::Session(1)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }
@@ -9219,7 +9246,7 @@ mod tests {
         assert_eq!(
             build_left_items(
                 &[real, ghost],
-                true,
+                InactiveTail::Collapsed,
                 AgentSortMode::Active,
                 &|_| false,
                 &|_| true
@@ -9248,7 +9275,13 @@ mod tests {
             mk("i4", SessionStatus::Exited, 20),   // newer
         ];
         let hot = |i: usize| i == 2;
-        let items = build_left_items(&sessions, false, AgentSortMode::Active, &hot, &|_| true);
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Expanded,
+            AgentSortMode::Active,
+            &hot,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9276,9 +9309,13 @@ mod tests {
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
 
-        let asc = build_left_items(&sessions, true, AgentSortMode::NameAsc, &|_| false, &|_| {
-            true
-        });
+        let asc = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::NameAsc,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             asc,
             vec![
@@ -9290,7 +9327,7 @@ mod tests {
 
         let desc = build_left_items(
             &sessions,
-            true,
+            InactiveTail::Collapsed,
             AgentSortMode::NameDesc,
             &|_| false,
             &|_| true,
@@ -9333,9 +9370,13 @@ mod tests {
             s
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
-        let items = build_left_items(&sessions, true, AgentSortMode::Manual, &|_| false, &|_| {
-            true
-        });
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Manual,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9368,7 +9409,7 @@ mod tests {
         ];
         let items = build_left_items(
             &sessions,
-            false,
+            InactiveTail::Expanded,
             AgentSortMode::NameAsc,
             &|_| false,
             &|_| true,
@@ -9402,9 +9443,13 @@ mod tests {
             mk("i1", SessionStatus::Detached, 5),  // older
             mk("i2", SessionStatus::Detached, 50), // newer
         ];
-        let items = build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
-            true
-        });
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Expanded,
+            AgentSortMode::Active,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9427,10 +9472,13 @@ mod tests {
         };
         let sessions = vec![mk("s0", 0), mk("s1", 100), mk("s2", 50)];
 
-        let updated =
-            build_left_items(&sessions, true, AgentSortMode::Updated, &|_| false, &|_| {
-                true
-            });
+        let updated = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Updated,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             updated,
             vec![
@@ -9441,10 +9489,13 @@ mod tests {
             "Updated must order the active bucket newest-first",
         );
 
-        let created =
-            build_left_items(&sessions, true, AgentSortMode::Created, &|_| false, &|_| {
-                true
-            });
+        let created = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Created,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             created,
             vec![
@@ -9481,7 +9532,13 @@ mod tests {
             AgentSortMode::NameAsc,
             AgentSortMode::NameDesc,
         ] {
-            let items = build_left_items(&sessions, true, mode, &|_| false, &|_| true);
+            let items = build_left_items(
+                &sessions,
+                InactiveTail::Collapsed,
+                mode,
+                &|_| false,
+                &|_| true,
+            );
             assert_eq!(
                 items,
                 vec![LeftItem::Session(0), LeftItem::Session(1)],
@@ -9509,7 +9566,7 @@ mod tests {
         let visible = |i: usize| i == 0 || i == 2;
         let items = build_left_items(
             &sessions,
-            false,
+            InactiveTail::Expanded,
             AgentSortMode::Active,
             &|_| false,
             &visible,
@@ -9540,7 +9597,13 @@ mod tests {
             mk("i1", SessionStatus::Detached),
         ];
         let visible = |i: usize| i == 0;
-        let items = build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &visible);
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Active,
+            &|_| false,
+            &visible,
+        );
         assert_eq!(items, vec![LeftItem::Session(0)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }

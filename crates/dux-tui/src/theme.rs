@@ -133,6 +133,14 @@ pub(crate) struct Glyphs {
     pub terminals: &'static str,
 }
 
+/// Which glyph set the terminal UI draws its icons from (`[ui] nerd_font_icons`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IconSet {
+    /// The Nerd Fonts add-on.
+    Nerd,
+    /// The default set, which needs no special font.
+    Plain,
+}
 impl Glyphs {
     /// The default set: plain Unicode a stock terminal font carries.
     pub(crate) const PLAIN: Glyphs = Glyphs {
@@ -189,8 +197,8 @@ impl Glyphs {
     };
 
     /// The set the live `[ui] nerd_font_icons` value selects.
-    pub(crate) fn for_config(nerd_font_icons: bool) -> &'static Glyphs {
-        if nerd_font_icons {
+    pub(crate) fn for_config(icons: IconSet) -> &'static Glyphs {
+        if icons == IconSet::Nerd {
             &Self::NERD
         } else {
             &Self::PLAIN
@@ -1025,7 +1033,10 @@ mod tests {
     fn the_plain_set_marks_a_project_with_the_reference_mark() {
         assert_eq!(Glyphs::PLAIN.project, "\u{203B}");
         assert_eq!(Glyphs::PLAIN.standalone, "\u{2737}");
-        assert_eq!(Glyphs::for_config(false), &Glyphs::PLAIN);
+        assert_eq!(
+            Glyphs::for_config(crate::theme::IconSet::Plain),
+            &Glyphs::PLAIN
+        );
     }
 
     /// The Nerd set is pinned against the official glyph names, must stay
@@ -1036,7 +1047,10 @@ mod tests {
     fn the_nerd_set_uses_current_nerd_font_codepoints() {
         assert_eq!(Glyphs::NERD.project, "\u{F07B}", "nf-fa-folder");
         assert_eq!(Glyphs::NERD.standalone, "\u{F005}", "nf-fa-star");
-        assert_eq!(Glyphs::for_config(true), &Glyphs::NERD);
+        assert_eq!(
+            Glyphs::for_config(crate::theme::IconSet::Nerd),
+            &Glyphs::NERD
+        );
         let plain = Glyphs::PLAIN.all();
         for (index, (name, glyph)) in Glyphs::NERD.all().into_iter().enumerate() {
             let cp = glyph.chars().next().unwrap() as u32;

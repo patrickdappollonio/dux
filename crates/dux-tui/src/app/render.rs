@@ -166,29 +166,44 @@ enum TabActivityGlyph {
     Attention,
 }
 
+/// The one activity cue a tab pill's glyph slot carries, highest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabCue {
+    /// The tab asked for attention.
+    NeedsAttention,
+    /// The tab is working.
+    Working,
+    /// Nothing to show.
+    Quiet,
+}
+
+/// Which half of the attention blink a frame is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlinkPhase {
+    /// The dot is drawn.
+    Lit,
+    /// The slot is blank.
+    Dark,
+}
+
 /// Resolve a tab pill's glyph slot from that tab's snapshot.
 ///
 /// The precedence copies `render_agent_row`: attention beats the working spinner,
 /// because a flagged tab may still be streaming the prompt it wants answered.
 /// Typing is deliberately absent, matching the web strip. Pure and allocation
 /// free, so it can run once per pill per frame.
-fn tab_activity_glyph(
-    working: bool,
-    needs_attention: bool,
-    blink_on: bool,
-    spinner_idx: usize,
-) -> TabActivityGlyph {
-    if needs_attention {
+fn tab_activity_glyph(cue: TabCue, blink: BlinkPhase, spinner_idx: usize) -> TabActivityGlyph {
+    if cue == TabCue::NeedsAttention {
         // The hidden half of the blink is a BLANK rather than a fall-through to
         // the spinner: a slot that alternated dot and spinner would read as two
         // competing cues instead of one blinking one.
-        return if blink_on {
+        return if blink == BlinkPhase::Lit {
             TabActivityGlyph::Attention
         } else {
             TabActivityGlyph::Blank
         };
     }
-    if working {
+    if cue == TabCue::Working {
         let frames = crate::theme::SPINNER_FRAMES;
         return TabActivityGlyph::Working(frames[spinner_idx % frames.len()]);
     }
@@ -1537,6 +1552,17 @@ enum CloseTabEffect {
     DeletesTab,
 }
 
+/// What the project browser's input row is doing, which picks its footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowseMode {
+    /// A path is being typed into the path editor.
+    EditingPath,
+    /// A search filters the entries.
+    Searching,
+    /// The list is being browsed.
+    Browsing,
+}
+
 impl App {
     /// Render the Delete Agent modal's chrome and its Cancel/Delete pair for a
     /// dialog with NO checkbox: the standalone case, where there is no removal
@@ -2011,7 +2037,11 @@ impl App {
     /// the engine's config on every call so a palette toggle or a config
     /// reload takes effect on the next frame.
     pub(crate) fn glyphs(&self) -> &'static crate::theme::Glyphs {
-        crate::theme::Glyphs::for_config(self.engine.config.ui.nerd_font_icons)
+        crate::theme::Glyphs::for_config(if self.engine.config.ui.nerd_font_icons {
+            crate::theme::IconSet::Nerd
+        } else {
+            crate::theme::IconSet::Plain
+        })
     }
 
     fn agent_row_cues(&self, session: &AgentSession) -> AgentRowCues {
@@ -2957,12 +2987,18 @@ impl App {
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
                     self.glyphs(),
-                    typing,
-                    working,
+                    dux_core::row_state::TerminalRowFacts {
+                        working: working,
+                        typing: typing,
+                    },
                     spinner,
                     row.display_title.as_deref(),
                     &row.owner_name,
-                    row.standalone,
+                    if row.standalone {
+                        TerminalOwnerKind::Standalone
+                    } else {
+                        TerminalOwnerKind::Owned
+                    },
                     term_text_width,
                     self.start_time.elapsed().as_millis(),
                     term_highlight,
@@ -3969,9 +4005,18 @@ impl App {
             if label_w >= 2 {
                 let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
                 match tab_activity_glyph(
-                    items[i].working,
-                    items[i].needs_attention,
-                    blink_on,
+                    if items[i].needs_attention {
+                        TabCue::NeedsAttention
+                    } else if items[i].working {
+                        TabCue::Working
+                    } else {
+                        TabCue::Quiet
+                    },
+                    if blink_on {
+                        BlinkPhase::Lit
+                    } else {
+                        BlinkPhase::Dark
+                    },
                     spinner_idx,
                 ) {
                     TabActivityGlyph::Blank => {
@@ -6493,12 +6538,15 @@ impl App {
                 goto: self.bindings.label_for(Action::GoToPath),
                 exit_path: self.bindings.label_for(Action::ExitPathEditorOnProjectAdd),
             };
-            let bottom_spans = self.browse_projects_input_footer(
-                *editing_path,
-                *searching,
-                &footer_keys,
-                area.width.saturating_sub(2),
-            );
+            let mode = if *editing_path {
+                BrowseMode::EditingPath
+            } else if *searching {
+                BrowseMode::Searching
+            } else {
+                BrowseMode::Browsing
+            };
+            let bottom_spans =
+                self.browse_projects_input_footer(mode, &footer_keys, area.width.saturating_sub(2));
             let list_block = Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .border_style(Style::default().fg(self.theme.overlay_border))
@@ -6558,12 +6606,11 @@ impl App {
 
     fn browse_projects_input_footer(
         &self,
-        editing_path: bool,
-        searching: bool,
+        mode: BrowseMode,
         keys: &BrowseProjectsFooterKeys,
         width: u16,
     ) -> Line<'static> {
-        let hints = if editing_path {
+        let hints = if mode == BrowseMode::EditingPath {
             // The path editor completes and adds on the literal Tab and Enter
             // (`handle_project_browser_path_editor_key`), not through a binding.
             vec![
@@ -6571,7 +6618,7 @@ impl App {
                 Hint::fixed("Enter", "add"),
                 Hint::key(keys.exit_path.clone(), "browse").pinned(),
             ]
-        } else if searching {
+        } else if mode == BrowseMode::Searching {
             // Nothing merely ends the search here: the open key opens the
             // highlighted entry (`handle_project_browser_prompt_key`), and the
             // close key clears the search.
@@ -13553,6 +13600,14 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
         ),
     }
 }
+/// Who owns a terminal, as far as its sidebar row's second line cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalOwnerKind {
+    /// Nothing owns it: the row names its spawn directory under the star.
+    Standalone,
+    /// An agent or a project owns it: the row names the owner under the arrow.
+    Owned,
+}
 
 /// Build a terminal row's three lines (primary label, owner + state word, and a
 /// trailing blank spacer) so a companion-terminal row is structurally identical
@@ -13577,8 +13632,7 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
     glyphs: &crate::theme::Glyphs,
-    typing: bool,
-    working: bool,
+    facts: dux_core::row_state::TerminalRowFacts,
     spinner: char,
     // The resolved display title (already normalized + collision-disambiguated by
     // the shared `terminal_title` rule), or `None` when the terminal is idle.
@@ -13586,7 +13640,7 @@ fn terminal_row_lines(
     owner_name: &str,
     // Whether this terminal is standalone (owned by nothing at all), resolved by
     // the caller through an exhaustive match on the owner.
-    standalone: bool,
+    owner: TerminalOwnerKind,
     text_width: u16,
     elapsed_ms: u128,
     // The live sidebar query and the style to emphasize its hit with, or `None`
@@ -13597,9 +13651,9 @@ fn terminal_row_lines(
     // The glyph SHAPE encodes state (typing caret, running spinner, else the
     // steady dot); its color is the neutral identity color, never the live-state
     // color (that lives on the state word below).
-    let glyph = if typing {
+    let glyph = if facts.typing {
         crate::theme::TYPING_GLYPH.to_string()
-    } else if working {
+    } else if facts.working {
         spinner.to_string()
     } else {
         crate::theme::DOT_GLYPH.to_string()
@@ -13632,15 +13686,11 @@ fn terminal_row_lines(
     // web's `terminalStateWord`); this surface only words it. The busy word is
     // "Running" (a terminal runs a process; it does not "work" like an agent);
     // agents keep "Working".
-    let word =
-        match dux_core::row_state::terminal_row_state(dux_core::row_state::TerminalRowFacts {
-            working,
-            typing,
-        }) {
-            dux_core::row_state::RowState::Typing => "Typing",
-            dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
-            _ => "Idle",
-        };
+    let word = match dux_core::row_state::terminal_row_state(facts) {
+        dux_core::row_state::RowState::Typing => "Typing",
+        dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
+        _ => "Idle",
+    };
     // The same working cue the agent row wears: the word pulses toward the muted
     // tone and a cycling ellipsis follows it in a fixed three-cell slot.
     let (word_text, word_color) = if word == TERMINAL_WORKING_WORD {
@@ -13653,7 +13703,7 @@ fn terminal_row_lines(
                 dux_core::working_cue::pulse_step(elapsed),
             ),
         )
-    } else if typing {
+    } else if facts.typing {
         (word.to_string(), theme.session_typing)
     } else {
         (word.to_string(), muted)
@@ -13663,7 +13713,7 @@ fn terminal_row_lines(
     // owned terminal wears the muted return arrow ("owned by"); a standalone
     // terminal wears the standalone star and its directory in the standalone
     // identity tone, the one indicator every standalone row shares.
-    let (marker, marker_fg) = if standalone {
+    let (marker, marker_fg) = if owner == TerminalOwnerKind::Standalone {
         (
             format!("  {} ", glyphs.standalone),
             theme.standalone_location_fg,
@@ -13674,7 +13724,7 @@ fn terminal_row_lines(
     // A standalone terminal's label is its spawn directory, a path cut from its
     // start; an owned terminal's is its owner's name, cut from its end.
     let marker_span = Span::styled(marker, Style::default().fg(marker_fg));
-    let marker = if standalone {
+    let marker = if owner == TerminalOwnerKind::Standalone {
         MetaMarker::path(marker_span)
     } else {
         MetaMarker::name(marker_span)
@@ -15796,18 +15846,18 @@ mod tests {
     /// these one column right.
     #[test]
     fn the_project_glyph_keeps_the_agent_rows_columns_in_line() {
-        for nerd_font_icons in [false, true] {
-            assert_agent_row_columns_line_up(nerd_font_icons);
+        for icons in [crate::theme::IconSet::Plain, crate::theme::IconSet::Nerd] {
+            assert_agent_row_columns_line_up(icons);
         }
     }
 
-    fn assert_agent_row_columns_line_up(nerd_font_icons: bool) {
+    fn assert_agent_row_columns_line_up(icons: crate::theme::IconSet) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let glyphs = crate::theme::Glyphs::for_config(nerd_font_icons);
+        let glyphs = crate::theme::Glyphs::for_config(icons);
         let mut app = test_app(default_bindings());
-        app.engine.config.ui.nerd_font_icons = nerd_font_icons;
+        app.engine.config.ui.nerd_font_icons = icons == crate::theme::IconSet::Nerd;
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
@@ -16062,12 +16112,14 @@ mod tests {
                 let (_, line2) = terminal_row_lines(
                     &theme,
                     &crate::theme::Glyphs::PLAIN,
-                    false,
-                    true,
+                    dux_core::row_state::TerminalRowFacts {
+                        working: true,
+                        typing: false,
+                    },
                     '◠',
                     Some("cargo test"),
                     "proj",
-                    false,
+                    TerminalOwnerKind::Owned,
                     width,
                     elapsed,
                     None,
@@ -16137,12 +16189,14 @@ mod tests {
         let (idle0, idle1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            false,
+            dux_core::row_state::TerminalRowFacts {
+                working: false,
+                typing: false,
+            },
             '◜',
             None,
             "my-branch",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -16170,12 +16224,14 @@ mod tests {
         let (working0, working1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            true,
+            dux_core::row_state::TerminalRowFacts {
+                working: true,
+                typing: false,
+            },
             '◠',
             Some("cargo test"),
             "proj",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -16207,12 +16263,14 @@ mod tests {
         let (typing0, typing1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            true,
-            true,
+            dux_core::row_state::TerminalRowFacts {
+                working: true,
+                typing: true,
+            },
             '◝',
             Some("vim"),
             "proj",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -16233,12 +16291,14 @@ mod tests {
         let (_, line2) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            false,
+            dux_core::row_state::TerminalRowFacts {
+                working: false,
+                typing: false,
+            },
             '◜',
             None,
             "~/notes",
-            true,
+            TerminalOwnerKind::Standalone,
             40,
             0,
             None,
@@ -18887,32 +18947,32 @@ mod tests {
         let spinner = crate::theme::SPINNER_FRAMES[3];
 
         assert_eq!(
-            tab_activity_glyph(false, false, true, 3),
+            tab_activity_glyph(TabCue::Quiet, BlinkPhase::Lit, 3),
             TabActivityGlyph::Blank,
             "an idle tab's slot is blank"
         );
         assert_eq!(
-            tab_activity_glyph(true, false, true, 3),
+            tab_activity_glyph(TabCue::Working, BlinkPhase::Lit, 3),
             TabActivityGlyph::Working(spinner),
             "a working tab carries the shared spinner frame"
         );
         assert_eq!(
-            tab_activity_glyph(false, true, true, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
             TabActivityGlyph::Attention,
             "a flagged tab carries the attention dot"
         );
         assert_eq!(
-            tab_activity_glyph(true, true, true, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
             TabActivityGlyph::Attention,
             "attention beats the working spinner, as it does on the agent row"
         );
         assert_eq!(
-            tab_activity_glyph(false, true, false, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
             TabActivityGlyph::Blank,
             "the hidden half of the blink is blank"
         );
         assert_eq!(
-            tab_activity_glyph(true, true, false, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
             TabActivityGlyph::Blank,
             "a flagged AND working tab goes blank in the hidden blink phase; a slot \
              that alternated dot and spinner would read as two cues"
@@ -18942,7 +19002,15 @@ mod tests {
                 TabActivityGlyph::Blank
             };
             assert_eq!(
-                tab_activity_glyph(false, true, on, 0),
+                tab_activity_glyph(
+                    TabCue::NeedsAttention,
+                    if on {
+                        BlinkPhase::Lit
+                    } else {
+                        BlinkPhase::Dark
+                    },
+                    0
+                ),
                 expected,
                 "the pill must follow the sidebar's blink at {elapsed}ms"
             );
@@ -22184,7 +22252,23 @@ mod tests {
         let theme = crate::theme::Theme::default_dark();
         let line_two = |owner: &str, standalone: bool, width: u16| {
             let (_, line2) = terminal_row_lines(
-                &theme, glyphs, false, false, '◜', None, owner, standalone, width, 0, None,
+                &theme,
+                glyphs,
+                dux_core::row_state::TerminalRowFacts {
+                    working: false,
+                    typing: false,
+                },
+                '◜',
+                None,
+                owner,
+                if standalone {
+                    TerminalOwnerKind::Standalone
+                } else {
+                    TerminalOwnerKind::Owned
+                },
+                width,
+                0,
+                None,
             );
             line_text(&line2)
         };
