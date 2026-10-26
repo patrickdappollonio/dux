@@ -5,9 +5,9 @@ use dux_core::auth::Password;
 use dux_core::config_keys;
 
 fn seed(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
     let path = dir.path().join("config.toml");
-    std::fs::write(&path, body).unwrap();
+    std::fs::write(&path, body).expect("write the config file");
     (dir, path)
 }
 

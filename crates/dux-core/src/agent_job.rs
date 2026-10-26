@@ -1346,7 +1346,10 @@ impl CreatePlanContext<'_> {
     ///
     /// A holder check that cannot run is logged and treated as "free": the
     /// check is an improvement on a path that works, never a new way to fail.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a separate fact about the pull request create, gathered by the planning step that calls it"
+    )]
     fn check_busy_pr_branch(
         &self,
         project: &crate::model::Project,
@@ -1516,7 +1519,6 @@ impl CreatePlanContext<'_> {
     /// branch that appeared after the "no such branch" answer is held to the
     /// same test as one that was there first: it must contain the pull
     /// request's head.
-    #[allow(clippy::too_many_arguments)]
     fn confirm_reused_branch(
         repo_path: &Path,
         worktree: &Path,
@@ -1755,7 +1757,10 @@ impl CreatePlanContext<'_> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the resolved pull request's fields and the create's own choices, each handed through once from the request"
+    )]
     fn plan_pull_request(
         &mut self,
         project: &crate::model::Project,
@@ -2403,7 +2408,10 @@ fn rollback_managed_create(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the create job's session, rollback, progress channel and notes, which this step of the copy reads and reports into"
+)]
 fn handle_copy_mismatch(
     copy: PendingCopy,
     check_error: Option<anyhow::Error>,
@@ -2483,7 +2491,10 @@ fn skipped_paths_note(paths: &[String]) -> crate::status_text::StatusText {
     note
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the create job's session, rollback, progress channel and notes, which this step of the copy reads and reports into"
+)]
 fn apply_pending_copy(
     copy: PendingCopy,
     session: &AgentSession,
@@ -2570,7 +2581,10 @@ fn apply_pending_copy(
 
 /// Launch a standalone agent in a caller-owned folder using only global env.
 /// It performs no worktree provisioning, and rollback never touches the folder.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the create job, handed over once by the job that dispatches it"
+)]
 fn run_create_standalone_agent_job(
     folder: &Path,
     title: &str,
@@ -2704,7 +2718,10 @@ fn run_create_standalone_agent_job(
     run_agent_launch_job(request, worker_tx, gate);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the create job, handed over once by the job that planned it"
+)]
 fn launch_managed_create(
     plan: ManagedCreatePlan,
     paths: &DuxPaths,
@@ -2986,7 +3003,10 @@ pub struct CreateJobRegistries {
 /// Creates an agent on the calling worker thread: provisions its worktree (or takes its folder, for
 /// a standalone agent), runs the startup command and launches the provider, reporting each step and
 /// the outcome to `worker_tx` under `status_op_id`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the create job, handed over once by the worker that starts it"
+)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
     paths: DuxPaths,

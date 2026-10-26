@@ -150,14 +150,15 @@ impl Corpus {
 
     /// `ln((N + 1) / (df + 1)) + 1`, scaled by 1000 and rounded.
     fn idf_milli(&self, token: &str) -> u32 {
-        let total = self.documents.len() as f64;
-        let df = self
-            .documents
-            .iter()
-            .filter(|document| document.contains_prefix(token))
-            .count() as f64;
+        let total = crate::numeric::usize_to_f64(self.documents.len());
+        let df = crate::numeric::usize_to_f64(
+            self.documents
+                .iter()
+                .filter(|document| document.contains_prefix(token))
+                .count(),
+        );
         let idf = ((total + 1.0) / (df + 1.0)).ln() + 1.0;
-        (idf * 1000.0).round().max(0.0) as u32
+        crate::numeric::f64_to_u32_saturating((idf * 1000.0).round().max(0.0))
     }
 
     /// Every match, best first, ties in table order.

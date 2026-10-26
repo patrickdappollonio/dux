@@ -31,7 +31,7 @@ static ROTATION: LazyLock<Arc<RotationCell>> = LazyLock::new(|| {
 /// The threshold [`log`] gates on, kept outside [`LOGGER`] because the file is
 /// opened once for the process while the level moves with the config: a reload
 /// retunes it through [`set_level`].
-static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
+static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info.as_u8());
 
 struct Logger {
     log: RotatingLog,
@@ -109,7 +109,7 @@ pub fn error(message: &str) {
 /// reload cannot move it.
 pub(crate) fn set_level(level: &str) {
     LEVEL.store(
-        crate::config_effective::effective_log_level(level) as u8,
+        crate::config_effective::effective_log_level(level).as_u8(),
         Ordering::Relaxed,
     );
 }
@@ -350,7 +350,10 @@ impl RotatingLog {
         if settings.max_bytes > 0
             && !state.rotation_broken
             && state.size > 0
-            && state.size.saturating_add(bytes.len() as u64) > settings.max_bytes
+            && state
+                .size
+                .saturating_add(crate::numeric::usize_to_u64(bytes.len()))
+                > settings.max_bytes
         {
             self.rotate(&mut state, settings);
         }
@@ -367,7 +370,9 @@ impl RotatingLog {
                 Err(_) => break,
             }
         }
-        state.size = state.size.saturating_add(written as u64);
+        state.size = state
+            .size
+            .saturating_add(crate::numeric::usize_to_u64(written));
         let _ = state.file.flush();
     }
 
@@ -1056,7 +1061,7 @@ mod tests {
             );
             assert_eq!(
                 log.state.lock().unwrap().size,
-                "third line\n".len() as u64,
+                crate::numeric::usize_to_u64("third line\n".len()),
                 "the counter must restart with the new file"
             );
         }
@@ -1262,7 +1267,10 @@ mod tests {
             fs::write(&path, &existing).unwrap();
 
             let log = log_in(dir.path(), settings(64, 3));
-            assert_eq!(log.state.lock().unwrap().size, existing.len() as u64);
+            assert_eq!(
+                log.state.lock().unwrap().size,
+                crate::numeric::usize_to_u64(existing.len())
+            );
 
             log.write_line("the first line after the upgrade\n");
             assert_eq!(

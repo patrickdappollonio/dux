@@ -3,9 +3,9 @@
 use dux_core::auth::Password;
 
 fn try_set(body: &str) -> Result<(), String> {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
     let path = dir.path().join("config.toml");
-    std::fs::write(&path, body).unwrap();
+    std::fs::write(&path, body).expect("write the config file");
     // 16 characters, strong, well under the 40 the file asks for.
     let pw = Password::new("Tr0ub4dor&3-zqx!".to_string());
     dux_core::config_keys::set_password(&path, &pw, &[])

@@ -213,7 +213,7 @@ pub fn end_exactly_with(
             .collect())
     };
     let signal = |pid: u32, signal: rustix::process::Signal| {
-        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
             let _ = rustix::process::kill_process(pid, signal);
         }
     };
@@ -401,9 +401,9 @@ pub(crate) fn boot_nanos_now() -> u64 {
     #[cfg(target_os = "linux")]
     {
         let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
-        (now.tv_sec as u64)
+        (now.tv_sec.cast_unsigned())
             .saturating_mul(1_000_000_000)
-            .saturating_add(now.tv_nsec as u64)
+            .saturating_add(now.tv_nsec.cast_unsigned())
     }
     #[cfg(target_os = "macos")]
     {
@@ -459,8 +459,12 @@ fn parse_linux_stat_with(pid: u32, stat: &str, ticks_per_second: u64) -> Option<
         pid,
         ppid: (ppid != 0).then_some(ppid),
         sid: Some(sid),
-        start_time: (u128::from(ticks) * 1_000_000_000 / u128::from(ticks_per_second.max(1)))
-            as u64,
+        // Saturates rather than wraps: only a corrupt stat line could hold a
+        // start time past u64 nanoseconds (some 584 years of uptime).
+        start_time: u64::try_from(
+            u128::from(ticks) * 1_000_000_000 / u128::from(ticks_per_second.max(1)),
+        )
+        .unwrap_or(u64::MAX),
         name,
         exited: matches!(*state, "Z" | "X" | "x"),
     })
@@ -917,7 +921,7 @@ impl ProcessOps for SystemProcesses {
     }
 
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal) {
-        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
             // ESRCH (already gone) is the ordinary race with a process exiting
             // on its own; nothing else is actionable here either, because the
             // next look at the table says whether it went.
@@ -1017,13 +1021,12 @@ pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
 }
 
-#[expect(
-    clippy::missing_fields_in_debug,
-    reason = "the registry's state sits behind a lock a Debug print must not take"
-)]
 impl std::fmt::Debug for AgentProcessRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The state sits behind a lock a Debug print must not take, so this
+        // says how many handles share it and nothing about what it holds.
         f.debug_struct("AgentProcessRegistry")
+            .field("handles", &Arc::strong_count(&self.inner))
             .finish_non_exhaustive()
     }
 }
@@ -2660,7 +2663,7 @@ mod tests {
         };
         registry.register("a", first, &folder);
         registry.record_survivors(first, &[live]);
-        for n in 1..=SESSIONS_PER_AGENT as u32 + 10 {
+        for n in 1..=u32::try_from(SESSIONS_PER_AGENT).expect("a small cap") + 10 {
             registry.register(
                 "a",
                 ProcessSession {

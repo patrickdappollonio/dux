@@ -194,14 +194,14 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
             if !sockaddr.is_null() {
                 match i32::from((*sockaddr).sa_family) {
                     libc::AF_INET => {
-                        let v4 = &*(sockaddr as *const libc::sockaddr_in);
+                        let v4 = &*sockaddr.cast::<libc::sockaddr_in>();
                         found.push((
                             name,
                             IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))),
                         ));
                     }
                     libc::AF_INET6 => {
-                        let v6 = &*(sockaddr as *const libc::sockaddr_in6);
+                        let v6 = &*sockaddr.cast::<libc::sockaddr_in6>();
                         found.push((
                             name,
                             IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr)),

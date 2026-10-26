@@ -7,7 +7,7 @@ fn hash() -> String {
     hash_password(&Password::new(
         "correct horse battery staple veranda".into(),
     ))
-    .unwrap()
+    .expect("hash the test password")
 }
 
 fn refuses(text: &str, surface: Surface) -> bool {

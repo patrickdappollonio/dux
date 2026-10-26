@@ -239,7 +239,10 @@ fn spell_seconds(seconds: u64) -> String {
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     ];
     let unit = if seconds == 1 { "second" } else { "seconds" };
-    match WORDS.get(seconds as usize) {
+    match usize::try_from(seconds)
+        .ok()
+        .and_then(|index| WORDS.get(index))
+    {
         Some(word) => format!("{word} {unit}"),
         None => format!("{seconds} {unit}"),
     }

@@ -342,7 +342,11 @@ mod tests {
 
         // Simulate the monitor being closed and reopened after a gap longer
         // than STALE_BASELINE, with no sampling in between.
-        collector.last_refresh = Some(Instant::now() - STALE_BASELINE - Duration::from_millis(1));
+        collector.last_refresh = Some(
+            Instant::now()
+                .checked_sub(STALE_BASELINE + Duration::from_millis(1))
+                .unwrap(),
+        );
         let (_, third_was_baseline) = collector.sample(&Vec::new());
         assert!(
             third_was_baseline,
@@ -404,15 +408,28 @@ mod tests {
         // Back-to-back (same instant, or a few ms later) -> retain, do NOT
         // re-baseline, so the prior reading is kept rather than zeroed.
         assert!(!needs_baseline(Some(now), now));
-        assert!(!needs_baseline(Some(now - Duration::from_millis(5)), now));
+        assert!(!needs_baseline(
+            Some(now.checked_sub(Duration::from_millis(5)).unwrap()),
+            now
+        ));
         // Recent but still within the stale window -> retain.
         assert!(!needs_baseline(
-            Some(now - (STALE_BASELINE - Duration::from_millis(1))),
+            Some(
+                now.checked_sub(
+                    STALE_BASELINE
+                        .checked_sub(Duration::from_millis(1))
+                        .unwrap()
+                )
+                .unwrap(),
+            ),
             now,
         ));
         // A gap longer than the stale window -> re-baseline.
         assert!(needs_baseline(
-            Some(now - (STALE_BASELINE + Duration::from_millis(1))),
+            Some(
+                now.checked_sub(STALE_BASELINE + Duration::from_millis(1))
+                    .unwrap()
+            ),
             now,
         ));
     }

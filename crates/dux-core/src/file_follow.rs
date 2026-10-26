@@ -114,7 +114,7 @@ fn scan(file: &std::fs::File, want: &Want) -> std::io::Result<Scan> {
         if read == 0 || !raw.ends_with(b"\n") {
             break;
         }
-        position += read as u64;
+        position += crate::numeric::usize_to_u64(read);
         let index = total;
         total += 1;
         match want {
@@ -224,7 +224,7 @@ pub fn open_log(
         Some((generation, line)) if generation == current => {
             let mut scanned = scan(&file, &Want::After { skip: line, cap }).map_err(io)?;
             let lines = std::mem::take(&mut scanned.lines);
-            let reached = line + lines.len() as u64;
+            let reached = line + crate::numeric::usize_to_u64(lines.len());
             let end = if reached < scanned.total {
                 note = Some(capped_note(cap));
                 reached
@@ -259,7 +259,7 @@ pub fn open_log(
             let room = cap - lines.len();
             let mut scanned = scan(&file, &Want::After { skip: 0, cap: room }).map_err(io)?;
             let fresh = std::mem::take(&mut scanned.lines);
-            let taken = fresh.len() as u64;
+            let taken = crate::numeric::usize_to_u64(fresh.len());
             lines.extend(fresh);
             let end = if taken < scanned.total {
                 note = Some(capped_note(cap));
@@ -324,7 +324,7 @@ fn kept_copy(
     }
     let mut scanned = scan(&old, &Want::After { skip: line, cap })?;
     let lines = std::mem::take(&mut scanned.lines);
-    let end = line + lines.len() as u64;
+    let end = line + crate::numeric::usize_to_u64(lines.len());
     Ok(Some(KeptRead {
         more: end < scanned.total,
         end: end.min(scanned.total),
@@ -407,7 +407,7 @@ impl FileFollower {
         {
             return;
         }
-        self.position += fresh.len() as u64;
+        self.position += crate::numeric::usize_to_u64(fresh.len());
         self.partial.extend_from_slice(&fresh);
     }
 

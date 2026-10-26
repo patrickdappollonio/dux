@@ -404,7 +404,7 @@ fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
         |e| anyhow::anyhow!("could not read {}: {e}", path.display()),
     )?;
     let mut buffer = Vec::new();
-    file.take(limit as u64)
+    file.take(crate::numeric::usize_to_u64(limit))
         .read_to_end(&mut buffer)
         .with_context(|| format!("could not read {}", path.display()))?;
     Ok(Some(buffer))
@@ -873,7 +873,7 @@ mod tests {
     #[test]
     fn oversized_working_file_is_refused() {
         let repo = init_repo();
-        let big = vec![b'a'; (MAX_EDITABLE_BYTES + 1) as usize];
+        let big = vec![b'a'; crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES + 1)];
         std::fs::write(repo.path().join("big.txt"), &big).expect("write big");
         let err = file_diff_contents(repo.path(), "big.txt").unwrap_err();
         assert!(

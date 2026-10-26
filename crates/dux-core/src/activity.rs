@@ -395,7 +395,7 @@ mod tests {
                 for _ in 0..5000 {
                     let snap = ring.snapshot();
                     assert!(snap.lines.len() <= CAP);
-                    assert!(snap.lines.len() as u64 <= snap.generation);
+                    assert!(crate::numeric::usize_to_u64(snap.lines.len()) <= snap.generation);
                 }
             })
         };
@@ -416,6 +416,9 @@ mod tests {
 
         let snap = ring.snapshot();
         assert_eq!(snap.lines.len(), CAP, "ring stays capped");
-        assert_eq!(snap.generation, (THREADS * PER_THREAD) as u64);
+        assert_eq!(
+            snap.generation,
+            crate::numeric::usize_to_u64(THREADS * PER_THREAD)
+        );
     }
 }

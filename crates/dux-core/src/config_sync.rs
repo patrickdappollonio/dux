@@ -82,12 +82,16 @@ where
                 changed_config = true;
             }
             if &merged_stored_project != stored_project {
-                session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
+                session_store.upsert_project_at(
+                    &merged_stored_project,
+                    crate::numeric::usize_to_i64_wrapping(stored_index),
+                )?;
                 stored[stored_index] = merged_stored_project;
                 changed_store = true;
             }
         } else {
-            session_store.upsert_project_at(cfg_project, index as i64)?;
+            session_store
+                .upsert_project_at(cfg_project, crate::numeric::usize_to_i64_wrapping(index))?;
             changed_store = true;
             stored.push(cfg_project.clone());
         }

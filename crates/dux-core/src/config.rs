@@ -2018,6 +2018,10 @@ pub(crate) const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 /// relative tail that already fills `PATH_MAX` cannot fit under any worktree
 /// whatsoever. How much of the remaining room a particular worktree leaves is
 /// not knowable at load, and is left to the syscall.
+#[expect(
+    clippy::as_conversions,
+    reason = "PATH_MAX is a small positive constant, and no From or TryFrom runs in a const"
+)]
 pub(crate) const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 
 /// Why a configured `ui.upload_directory` cannot be used, or `None` when it is

@@ -157,7 +157,10 @@ mod tests {
         focus.on_focus_lost();
         let t = Instant::now();
         focus.on_focus_gained(t);
-        assert!(!focus.should_stamp_viewed(t + grace - Duration::from_millis(1), grace));
+        assert!(!focus.should_stamp_viewed(
+            (t + grace).checked_sub(Duration::from_millis(1)).unwrap(),
+            grace
+        ));
     }
 
     #[test]
@@ -203,7 +206,10 @@ mod tests {
         // A later regain starts a fresh grace from the new instant.
         let t1 = t0 + Duration::from_secs(10);
         focus.on_focus_gained(t1);
-        assert!(!focus.should_stamp_viewed(t1 + grace - Duration::from_millis(1), grace));
+        assert!(!focus.should_stamp_viewed(
+            (t1 + grace).checked_sub(Duration::from_millis(1)).unwrap(),
+            grace
+        ));
         assert!(focus.should_stamp_viewed(t1 + grace, grace));
     }
 

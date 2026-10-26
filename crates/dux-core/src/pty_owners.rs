@@ -160,7 +160,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
-        let owners = self.owners.lock().unwrap();
+        let owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let record = owners.map.get(pty_id);
         (
             record.map(|r| r.conn_id),
@@ -212,7 +215,10 @@ impl PtySizeOwners {
             epoch: None,
             seq: None,
         };
-        let mut owners = self.owners.lock().unwrap();
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let mut outcome = match owners.map.get(pty_id) {
             Some(record) if record.conn_id == conn_id => ResizeClaim {
                 apply: true,
@@ -292,7 +298,7 @@ impl PtySizeOwners {
     pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
             .lock()
-            .unwrap()
+            .expect("the pty owners lock is not poisoned")
             .map
             .get(pty_id)
             .is_some_and(|record| record.conn_id == conn_id)
@@ -329,7 +335,10 @@ impl PtySizeOwners {
         device: Option<&str>,
         enqueue: impl FnOnce(),
     ) -> WriteClaim {
-        let mut owners = self.owners.lock().unwrap();
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let claim = match owners.map.get(pty_id) {
             Some(record) if record.conn_id == conn_id => WriteClaim {
                 allowed: true,
@@ -382,7 +391,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn write_if_owner(&self, pty_id: &str, conn_id: u64, write: impl FnOnce()) -> bool {
-        let owners = self.owners.lock().unwrap();
+        let owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let allowed = owners
             .map
             .get(pty_id)
@@ -407,7 +419,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        let mut owners = self.owners.lock().unwrap();
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         if owners
             .map
             .get(pty_id)
@@ -434,7 +449,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release_all(&self, conn_id: u64) -> Vec<(String, u64)> {
-        let mut owners = self.owners.lock().unwrap();
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let held: Vec<String> = owners
             .map
             .iter()
@@ -471,7 +489,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn accept_grid_apply(&self, pty_id: &str, seq: u64, rows: u16, cols: u16) -> bool {
-        let mut owners = self.owners.lock().unwrap();
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let landed = owners.applied.entry(pty_id.to_string()).or_default();
         if seq <= landed.seq {
             return false;
@@ -488,7 +509,10 @@ impl PtySizeOwners {
     /// so re-applying the returned geometry is the fix. It terminates, because
     /// the winner's own check returns `None`.
     pub(crate) fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
-        let owners = self.owners.lock().unwrap();
+        let owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
         let landed = owners.applied.get(pty_id)?;
         (landed.seq > seq).then_some((landed.rows, landed.cols))
     }
@@ -536,7 +560,7 @@ impl PtySizeOwners {
     pub fn grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
-            .unwrap()
+            .expect("the pty owners lock is not poisoned")
             .grid_seq
             .get(pty_id)
             .copied()
@@ -557,7 +581,7 @@ impl PtySizeOwners {
     pub fn applied_grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
-            .unwrap()
+            .expect("the pty owners lock is not poisoned")
             .applied
             .get(pty_id)
             .map_or(0, |landed| landed.seq)
@@ -571,7 +595,10 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn ownership_generation(&self) -> u64 {
-        self.owners.lock().unwrap().generation
+        self.owners
+            .lock()
+            .expect("the pty owners lock is not poisoned")
+            .generation
     }
 
     /// A point-in-time copy of the owner map (pty id -> owning connection id),
@@ -584,7 +611,7 @@ impl PtySizeOwners {
     pub fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
         self.owners
             .lock()
-            .unwrap()
+            .expect("the pty owners lock is not poisoned")
             .map
             .iter()
             .map(|(pty_id, record)| (pty_id.clone(), record.conn_id))

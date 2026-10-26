@@ -1295,7 +1295,7 @@ pub fn append_blocked_entry(
                         .is_some_and(|single| in_span(single, first, last))
             };
             let folded = array.iter().filter(|value| folds(value)).count();
-            if entries.len() - folded >= max_entries as usize {
+            if entries.len() - folded >= crate::numeric::u32_to_usize(max_entries) {
                 return Err(anyhow::Error::new(BanNoop(BanWrite::AtLimit)));
             }
             // toml_edit keeps the comment trailing an entry in the NEXT
@@ -1383,8 +1383,12 @@ fn entry_span(entry: &str) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
             let n = u128::from(u32::from(v4));
             let (lo, hi) = (n & !host, n | host);
             (
-                IpAddr::V4(std::net::Ipv4Addr::from(lo as u32)),
-                IpAddr::V4(std::net::Ipv4Addr::from(hi as u32)),
+                IpAddr::V4(std::net::Ipv4Addr::from(
+                    u32::try_from(lo).expect("an IPv4 range's ends fit in 32 bits"),
+                )),
+                IpAddr::V4(std::net::Ipv4Addr::from(
+                    u32::try_from(hi).expect("an IPv4 range's ends fit in 32 bits"),
+                )),
             )
         }
         IpAddr::V6(v6) => {

@@ -6,9 +6,9 @@ use dux_core::config::load_config_file;
 use dux_core::config_keys::{GetValue, get_report, lookup};
 
 fn server_uses(raw: &str) -> dux_core::config::Config {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
     let path = dir.path().join("config.toml");
-    std::fs::write(&path, raw).unwrap();
+    std::fs::write(&path, raw).expect("write the config file");
     load_config_file(&path).expect("dux server loads this file")
 }
 

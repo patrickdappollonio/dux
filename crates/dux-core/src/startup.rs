@@ -523,7 +523,7 @@ pub fn run_claimed_startup_command(
 /// caller reaps it. Interrupted waits are retried; any other error returns at
 /// once and the caller's ordinary `wait` reaps as before.
 fn wait_for_exit_unreaped(pid: u32) {
-    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+    let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) else {
         return;
     };
     loop {
@@ -1255,7 +1255,7 @@ mod tests {
         // The job and its own `sleep` are in the command's process group (the
         // command led its session and group): end them all.
         for leader in &session {
-            if let Some(group) = rustix::process::Pid::from_raw(leader.sid as i32) {
+            if let Some(group) = rustix::process::Pid::from_raw(leader.sid.cast_signed()) {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
             }
         }
@@ -1268,7 +1268,9 @@ mod tests {
         );
         assert!(result.status.is_ok(), "{:?}", result.status);
         assert!(
-            recorded.iter().any(|identity| identity.pid as i32 == job),
+            recorded
+                .iter()
+                .any(|identity| identity.pid.cast_signed() == job),
             "the job was recorded as what the command left running: {recorded:?}"
         );
         let log = read_log(&result.log_path).expect("log");
@@ -1335,7 +1337,7 @@ mod tests {
             registry
                 .sessions_of("session-1")
                 .iter()
-                .any(|session| session.sid == pid as u32),
+                .any(|session| session.sid == pid.cast_unsigned()),
             "its session is registered for the agent"
         );
     }
@@ -1633,7 +1635,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         for leader in &registry.sessions_of("session-1") {
-            if let Some(group) = rustix::process::Pid::from_raw(leader.sid as i32) {
+            if let Some(group) = rustix::process::Pid::from_raw(leader.sid.cast_signed()) {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
             }
         }
@@ -1819,7 +1821,7 @@ mod review16_tests {
             .unwrap();
         let started = Instant::now();
         std::thread::sleep(Duration::from_millis(1500));
-        let alive = alive(job as u32);
+        let alive = alive(job.cast_unsigned());
         // Clean up the job's whole group, whatever happened.
         if let Some(pid) = rustix::process::Pid::from_raw(job) {
             if let Ok(pgid) = rustix::process::getpgid(Some(pid)) {
@@ -1892,7 +1894,7 @@ mod review16_tests {
         impl Drop for EndSessions {
             fn drop(&mut self) {
                 for session in &self.0 {
-                    if let Some(group) = rustix::process::Pid::from_raw(session.sid as i32) {
+                    if let Some(group) = rustix::process::Pid::from_raw(session.sid.cast_signed()) {
                         let _ = rustix::process::kill_process_group(
                             group,
                             rustix::process::Signal::KILL,

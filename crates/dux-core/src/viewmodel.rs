@@ -1473,7 +1473,11 @@ impl Engine {
                 .get(TabIdRef::new(&t.id))
                 .cloned()
                 .unwrap_or_else(|| t.provider.clone());
-            tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, (i + 1) as u32));
+            tabs.push(self.tab_view(
+                TabIdRef::new(&t.id),
+                &effective,
+                u32::try_from(i + 1).expect("an agent has far fewer than 2^32 tabs"),
+            ));
         }
         let conversation = if crate::config::provider_config(&self.config, &s.provider)
             .supports_session_resume()

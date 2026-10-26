@@ -1056,7 +1056,10 @@ pub fn resolve_reference_projects(
 /// pull request is looked up through `gh_program` in the same job, so the
 /// confirmation can show which pull request the user is agreeing to. A lookup
 /// that fails is carried as its own sentence beside the empty match list.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the resolution job, handed over once by the surface that starts it"
+)]
 pub fn run_reference_resolution_job(
     reference: &TypedReference,
     raw_input: String,

@@ -7,18 +7,21 @@ use dux_core::config_keys::{lookup, set_plain};
 /// directly, uses `used`; a set of it is refused, names what dux would use,
 /// and leaves the file as it was.
 fn refused_naming_what_dux_uses(key: &str, value: &str, used: u64) {
-    let (table, field) = key.split_once('.').unwrap();
+    let (table, field) = key
+        .split_once('.')
+        .expect("the key names a table and a field");
     let written = format!("[{table}]\n{field} = {value}\n");
-    let loaded = dux_core::config::effective_config_from_text(&written).unwrap();
+    let loaded =
+        dux_core::config::effective_config_from_text(&written).expect("the written value loads");
     assert_eq!(
-        serde_json::to_value(&loaded).unwrap()[table][field],
+        serde_json::to_value(&loaded).expect("a config serializes to JSON")[table][field],
         serde_json::json!(used),
         "precondition: the load uses {used} for {key} = {value}"
     );
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
     let path = dir.path().join("config.toml");
-    std::fs::write(&path, "").unwrap();
-    let error = match set_plain(&path, &lookup(key).unwrap(), value) {
+    std::fs::write(&path, "").expect("write an empty config file");
+    let error = match set_plain(&path, &lookup(key).expect("the key names a setting"), value) {
         Ok(report) => panic!(
             "{key} = {value} was reported as set (now = {}), but every surface uses {used}",
             report.now
@@ -30,7 +33,10 @@ fn refused_naming_what_dux_uses(key: &str, value: &str, used: u64) {
         "{key}: {error}"
     );
     assert!(error.contains("nothing was changed"), "{key}: {error}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the config file back"),
+        ""
+    );
 }
 
 #[test]

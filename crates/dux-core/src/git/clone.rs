@@ -55,7 +55,7 @@ impl CloneProcesses {
         let child = start().map_err(SpawnRefused::Failed)?;
         state.next += 1;
         let token = state.next;
-        state.running.insert(token, child.id() as i32);
+        state.running.insert(token, child.id().cast_signed());
         Ok((child, token))
     }
 
@@ -216,7 +216,7 @@ pub(crate) fn clone_repository_with_env(
                     CloneError::Failed(format!("couldn't run git: {error}"))
                 }
             })?;
-    let group = child.id() as i32;
+    let group = child.id().cast_signed();
 
     // Every chunk git writes is progress. Read on a thread of its own and handed
     // over a channel, so the stall clock can wait on it with a bound.

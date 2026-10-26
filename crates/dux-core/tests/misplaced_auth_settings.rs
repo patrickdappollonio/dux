@@ -19,7 +19,7 @@ fn hash() -> String {
     hash_password(&Password::new(
         "correct horse battery staple veranda".into(),
     ))
-    .unwrap()
+    .expect("hash the test password")
 }
 
 /// `require = "everywhere"` written under `[server]` instead of `[server.auth]`

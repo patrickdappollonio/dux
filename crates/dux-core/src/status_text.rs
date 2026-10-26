@@ -231,8 +231,10 @@ impl StatusText {
 /// - anything else: words, or a whole [`StatusText`] or [`Prose`] spliced in.
 #[macro_export]
 macro_rules! status_text {
-    ($($part:tt)*) => {{
-        #[allow(unused_mut)]
+    () => {
+        $crate::status_text::StatusText::new()
+    };
+    ($($part:tt)+) => {{
         let mut __status_text = $crate::status_text::StatusText::new();
         $crate::__status_text_parts!(__status_text; $($part)*);
         __status_text

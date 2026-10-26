@@ -631,7 +631,7 @@ fn fetch_release(api_base: &str, url: &str, tag: Option<&str>) -> Result<Release
     let body = response
         .body_mut()
         .with_config()
-        .limit(MAX_BODY_BYTES as u64)
+        .limit(crate::numeric::usize_to_u64(MAX_BODY_BYTES))
         .read_to_string()
         .with_context(|| format!("failed to read the release response from {url}"))?;
 
@@ -1407,7 +1407,7 @@ Its description.
         assert!(is_invisible_char('\u{0085}'), "next line");
         // Zero-width characters render as literally nothing on both surfaces.
         for c in ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'] {
-            assert!(is_invisible_char(c), "{:04X}", c as u32);
+            assert!(is_invisible_char(c), "{:04X}", u32::from(c));
         }
         // ...and ordinary text is not invisible.
         for c in ['a', '-', '#', '日', '🦆'] {

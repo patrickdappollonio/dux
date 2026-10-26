@@ -340,14 +340,14 @@ fn write_target(path: &Path) -> Result<PathBuf> {
 /// fails `cargo clippy --all-targets --all-features -- -D warnings`. This is a
 /// regression guard: all runtime config writes must go through `ConfigWriteQueue`.
 /// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
-/// recover, bootstrap project-sync) silence the lint with `#[allow(deprecated)]`
+/// recover, bootstrap project-sync) silence the lint with `#[expect(deprecated)]`
 /// and a short comment explaining why direct write is correct there.
 ///
 /// # Errors
 ///
 /// Fails when the temporary file cannot be written, synced or renamed into place.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic(path, contents, Durability::Fsync)
@@ -363,7 +363,7 @@ use crate::config::{Config, MacrosConfig, ProjectConfig, ProvidersConfig};
 ///
 /// Fails as [`patch_config_file_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
     patch_config_file_with(config_path, config, Durability::Fsync)
@@ -1706,7 +1706,7 @@ fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthCo
 ///
 /// Fails as [`save_config_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     save_config_with(config_path, config, Durability::Fsync)
@@ -1769,7 +1769,7 @@ pub fn render_config_documented(config: &Config) -> String {
 ///
 /// Fails as [`write_config_plain_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
     write_config_plain_with(config_path, config, Durability::Fsync)
@@ -2196,35 +2196,35 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         crate::logger::warn(msg);
         eprintln!("dux config migration warning: {msg}");
     }
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_events_connections",
-        config.server.max_websocket_events_connections as usize,
+        config.server.max_websocket_events_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_agent_connections",
-        config.server.max_websocket_agent_connections as usize,
+        config.server.max_websocket_agent_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_terminal_connections",
-        config.server.max_websocket_terminal_connections as usize,
+        config.server.max_websocket_terminal_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_tab_connections",
-        config.server.max_websocket_tab_connections as usize,
+        config.server.max_websocket_tab_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_tabs_per_agent",
-        config.server.max_websocket_tabs_per_agent as usize,
+        config.server.max_websocket_tabs_per_agent,
     );
     patch_table_str(doc, "server", "title", &config.server.title);
     patch_table_str(doc, "server", "favicon", &config.server.favicon);
@@ -2240,83 +2240,83 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "search_index_max_files",
         config.server.search_index_max_files,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "replay_wait_seconds",
-        config.server.replay_wait_seconds as usize,
+        config.server.replay_wait_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_backoff_cap_seconds",
-        config.server.reconnect_backoff_cap_seconds as usize,
+        config.server.reconnect_backoff_cap_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_attempts",
-        config.server.reconnect_attempts as usize,
+        config.server.reconnect_attempts,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_attempt_timeout_seconds",
-        config.server.reconnect_attempt_timeout_seconds as usize,
+        config.server.reconnect_attempt_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "changes_request_timeout_seconds",
-        config.server.changes_request_timeout_seconds as usize,
+        config.server.changes_request_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "heartbeat_seconds",
-        config.server.heartbeat_seconds as usize,
+        config.server.heartbeat_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "heartbeat_deadline_seconds",
-        config.server.heartbeat_deadline_seconds as usize,
+        config.server.heartbeat_deadline_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "pty_send_timeout_seconds",
-        config.server.pty_send_timeout_seconds as usize,
+        config.server.pty_send_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "operation_unknown_after_seconds",
-        config.server.operation_unknown_after_seconds as usize,
+        config.server.operation_unknown_after_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "operation_retention_seconds",
-        config.server.operation_retention_seconds as usize,
+        config.server.operation_retention_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "presence_grace_seconds",
-        config.server.presence_grace_seconds as usize,
+        config.server.presence_grace_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "tree_list_max_concurrency",
-        config.server.tree_list_max_concurrency as usize,
+        config.server.tree_list_max_concurrency,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "release_notes_max_concurrency",
-        config.server.release_notes_max_concurrency as usize,
+        config.server.release_notes_max_concurrency,
     );
     patch_table_usize(
         doc,
@@ -2324,11 +2324,11 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "file_drop_max_bytes",
         config.server.file_drop_max_bytes,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "file_drop_max_concurrency",
-        config.server.file_drop_max_concurrency as usize,
+        config.server.file_drop_max_concurrency,
     );
 
     // [server.auth] is deliberately absent: see `render_auth_section`.
@@ -2449,7 +2449,7 @@ fn patch_table_u32(doc: &mut DocumentMut, section: &str, key: &str, value: u32) 
 }
 fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
     let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value as i64);
+    table[key] = toml_edit::value(crate::numeric::usize_to_i64_wrapping(value));
 }
 
 fn patch_table_value(
@@ -2464,7 +2464,7 @@ fn patch_table_value(
 
 fn patch_table_u64(doc: &mut DocumentMut, section: &str, key: &str, value: u64) {
     let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value as i64);
+    table[key] = toml_edit::value(value.cast_signed());
 }
 
 fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {
@@ -2513,7 +2513,7 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
         }
         tbl["resume_args"] = toml_edit::value(resume);
         if let Some(timeout_ms) = config.resume_wait_timeout_ms {
-            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms as i64);
+            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms.cast_signed());
         }
 
         // The AI commit-message feature was removed; drop the obsolete oneshot
@@ -3249,7 +3249,10 @@ pub fn escape_toml_multiline(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests call the deprecated wrappers directly to verify their behaviour
+#[expect(
+    deprecated,
+    reason = "the tests call the deprecated wrappers directly to verify their behaviour"
+)]
 mod tests {
     use super::*;
 

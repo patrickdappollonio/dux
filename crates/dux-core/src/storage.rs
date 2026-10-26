@@ -1424,7 +1424,7 @@ impl SessionStore {
             params![session_id],
             |row| row.get(0),
         )?;
-        Ok(rev as u64)
+        Ok(rev.cast_unsigned())
     }
 
     /// Insert or update a project. If a project with the same path already
@@ -1771,7 +1771,7 @@ impl SessionStore {
             ",
             params![
                 pr.session_id,
-                pr.pr_number as i64,
+                pr.pr_number.cast_signed(),
                 pr.host,
                 pr.owner_repo,
                 pr.state,
@@ -1798,7 +1798,7 @@ impl SessionStore {
         )?;
         let sid = session_id.to_string();
         let rows = stmt.query_map(params![session_id], |row| {
-            let pr_number = row.get::<_, i64>(0)? as u64;
+            let pr_number = row.get::<_, i64>(0)?.cast_unsigned();
             let host: String = row.get(1)?;
             let owner_repo: String = row.get(2)?;
             Ok(StoredPr {
@@ -1830,7 +1830,7 @@ impl SessionStore {
             ",
         )?;
         let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)? as u64;
+            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
             let host: String = row.get(2)?;
             let owner_repo: String = row.get(3)?;
             Ok(StoredPr {
@@ -1874,7 +1874,7 @@ impl SessionStore {
                 pr.session_id,
                 pr.host,
                 pr.owner_repo,
-                pr.pr_number as i64,
+                pr.pr_number.cast_signed(),
                 pr.state,
                 pr.title,
                 pr.url
@@ -1896,7 +1896,7 @@ impl SessionStore {
             ",
         )?;
         let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)? as u64;
+            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
             let host: String = row.get(2)?;
             let owner_repo: String = row.get(3)?;
             Ok(StoredPr {
@@ -2263,7 +2263,11 @@ impl SessionStore {
                 "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
             )?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id, project_id])?;
+                stmt.execute(params![
+                    crate::numeric::usize_to_i64_wrapping(position),
+                    id,
+                    project_id
+                ])?;
             }
         }
         tx.commit()?;
@@ -2282,7 +2286,7 @@ impl SessionStore {
         {
             let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id])?;
+                stmt.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;
@@ -2302,7 +2306,7 @@ impl SessionStore {
         {
             let mut stmt = tx.prepare("update projects set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id])?;
+                stmt.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;
@@ -2363,7 +2367,7 @@ impl SessionStore {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ids.iter().enumerate() {
-                update.execute(params![position as i64, id])?;
+                update.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;

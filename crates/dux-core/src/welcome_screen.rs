@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(s.steps[2].title, "Launch");
         // Numbers are carried, not derived, and they are 1-based and sequential.
         for (i, step) in s.steps.iter().enumerate() {
-            assert_eq!(step.number as usize, i + 1);
+            assert_eq!(usize::from(step.number), i + 1);
         }
     }
 

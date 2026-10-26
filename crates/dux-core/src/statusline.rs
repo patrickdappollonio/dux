@@ -292,7 +292,9 @@ const SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
 /// `since` instant (advances every 100 ms). Used by the TUI's `render_footer`
 /// when displaying a `Busy` status from the keyed controller.
 pub(crate) fn spinner_frame_for(since: Instant) -> &'static str {
-    let index = ((since.elapsed().as_millis() / 100) as usize) % SPINNER_FRAMES.len();
+    let frames = u128::from(crate::numeric::usize_to_u64(SPINNER_FRAMES.len()));
+    let index = usize::try_from((since.elapsed().as_millis() / 100) % frames)
+        .expect("a remainder of the frame count fits in a usize");
     SPINNER_FRAMES[index]
 }
 
@@ -2032,7 +2034,12 @@ mod tests {
         assert_eq!(c.snapshot().len(), 1);
 
         // A second short of three windows still keeps it.
-        let changes = c.tick(t0 + window * 3 - Duration::from_secs(1), BUSY_TIMEOUT);
+        let changes = c.tick(
+            (t0 + window * 3)
+                .checked_sub(Duration::from_secs(1))
+                .unwrap(),
+            BUSY_TIMEOUT,
+        );
         assert!(changes.cleared_keys.is_empty(), "{changes:?}");
         assert_eq!(c.snapshot().len(), 1);
 
@@ -2369,13 +2376,15 @@ mod tests {
         // retired HERE, at the one door every finished operation passes through.
         // That is what makes liveness general instead of per registry: a plain
         // keyed `set`, a resolved op's message, and a bare clear all count.
+        type Finish<'a> = Box<dyn Fn(&mut KeyedStatusController) + 'a>;
+
         let t0 = Instant::now();
-        for (name, finish) in [
+        let finishes: [(&str, Finish<'_>); 3] = [
             (
                 "an info final",
                 Box::new(|c: &mut KeyedStatusController| {
                     c.set(t0, Some("k".into()), StatusTone::Info, "done");
-                }) as Box<dyn Fn(&mut KeyedStatusController)>,
+                }),
             ),
             (
                 "an error final",
@@ -2389,7 +2398,8 @@ mod tests {
                     c.clear("k", None);
                 }),
             ),
-        ] {
+        ];
+        for (name, finish) in finishes {
             let live = LiveStatusKeys::default();
             live.register("k");
             let mut c = KeyedStatusController::emitting_finals().with_live_keys(live.clone());
@@ -2430,7 +2440,7 @@ mod tests {
         // Just under the ceiling it is still a spinner, however many heartbeats
         // have gone by.
         let mut now = t0;
-        while now.duration_since(t0) < BUSY_LIVE_CEILING - BUSY_TIMEOUT {
+        while now.duration_since(t0) < BUSY_LIVE_CEILING.checked_sub(BUSY_TIMEOUT).unwrap() {
             now += BUSY_TIMEOUT;
             let _ = c.tick(now, BUSY_TIMEOUT);
         }
@@ -2518,7 +2528,9 @@ mod tests {
             c.set(t0, None, tone, "unkeyed final");
             // One tick just before the boundary leaves both in place...
             let _ = c.tick(
-                t0 + FINAL_REPLAY_WINDOW - Duration::from_millis(1),
+                (t0 + FINAL_REPLAY_WINDOW)
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
                 BUSY_TIMEOUT,
             );
             assert_eq!(
@@ -3080,12 +3092,15 @@ mod tests {
         c.set(t0, None, StatusTone::Info, "third");
 
         assert_eq!(line(&c).as_deref(), Some("first"));
-        assert_eq!(run(&mut c, t0 + WINDOW - TICK).as_deref(), Some("first"));
+        assert_eq!(
+            run(&mut c, (t0 + WINDOW).checked_sub(TICK).unwrap()).as_deref(),
+            Some("first")
+        );
         // The second Info's own window starts when it is SHOWN, not when it was
         // posted, so it is still up a whole window later.
         assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("second"));
         assert_eq!(
-            run(&mut c, t0 + WINDOW * 2 - TICK).as_deref(),
+            run(&mut c, (t0 + WINDOW * 2).checked_sub(TICK).unwrap()).as_deref(),
             Some("second")
         );
         assert_eq!(run(&mut c, t0 + WINDOW * 2).as_deref(), Some("third"));
@@ -3103,7 +3118,13 @@ mod tests {
         assert_eq!(line(&c).as_deref(), Some("careful"));
         // A warning keeps its three windows, and nothing stale follows it.
         assert_eq!(
-            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            run(
+                &mut c,
+                (t0 + WINDOW * WARNING_CLEAR_FACTOR)
+                    .checked_sub(TICK)
+                    .unwrap()
+            )
+            .as_deref(),
             Some("careful")
         );
         assert_eq!(
@@ -3152,7 +3173,13 @@ mod tests {
             Some("older")
         );
         assert_eq!(
-            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            run(
+                &mut c,
+                (t0 + WINDOW * WARNING_CLEAR_FACTOR)
+                    .checked_sub(TICK)
+                    .unwrap()
+            )
+            .as_deref(),
             Some("older")
         );
         assert_eq!(
@@ -3231,14 +3258,24 @@ mod tests {
 
         let mut seen = vec![line(&c).expect("a line")];
         for step in 1..=MAX_QUEUED_STATUSES {
-            seen.push(run(&mut c, t0 + WINDOW * step as u32).expect("a line"));
+            seen.push(
+                run(
+                    &mut c,
+                    t0 + WINDOW * u32::try_from(step).expect("a small step count"),
+                )
+                .expect("a line"),
+            );
         }
         let mut expected = vec!["showing".to_string()];
         expected.extend((1..MAX_QUEUED_STATUSES).map(|i| format!("q{i}")));
         expected.push("newest".to_string());
         assert_eq!(seen, expected);
         assert_eq!(
-            run(&mut c, t0 + WINDOW * (MAX_QUEUED_STATUSES as u32 + 1)),
+            run(
+                &mut c,
+                t0 + WINDOW
+                    * (u32::try_from(MAX_QUEUED_STATUSES).expect("a small queue bound") + 1)
+            ),
             None
         );
     }
@@ -3270,12 +3307,21 @@ mod tests {
         c.set(t0, None, StatusTone::Info, "second");
         assert_eq!(c.showing_seconds_left(t0), Some(6));
         // Rounded up, so the last second on screen reads 1s and never 0s.
-        assert_eq!(c.showing_seconds_left(t0 + WINDOW - TICK), Some(1));
-        assert_eq!(run(&mut c, t0 + WINDOW - TICK).as_deref(), Some("first"));
+        assert_eq!(
+            c.showing_seconds_left((t0 + WINDOW).checked_sub(TICK).unwrap()),
+            Some(1)
+        );
+        assert_eq!(
+            run(&mut c, (t0 + WINDOW).checked_sub(TICK).unwrap()).as_deref(),
+            Some("first")
+        );
         // The info that waited counts its full window from when it is shown.
         assert_eq!(run(&mut c, t0 + WINDOW).as_deref(), Some("second"));
         assert_eq!(c.showing_seconds_left(t0 + WINDOW), Some(6));
-        assert_eq!(c.showing_seconds_left(t0 + WINDOW * 2 - TICK), Some(1));
+        assert_eq!(
+            c.showing_seconds_left((t0 + WINDOW * 2).checked_sub(TICK).unwrap()),
+            Some(1)
+        );
         assert_eq!(run(&mut c, t0 + WINDOW * 2), None);
         assert_eq!(c.showing_seconds_left(t0 + WINDOW * 2), None);
     }
@@ -3290,13 +3336,21 @@ mod tests {
         assert!(c.clear("b", None));
         let back = t0 + WINDOW * 2;
         assert_eq!(run(&mut c, back).as_deref(), Some("warning"));
-        let left = WINDOW * WARNING_CLEAR_FACTOR - WINDOW * 2;
+        let left = (WINDOW * WARNING_CLEAR_FACTOR)
+            .checked_sub(WINDOW * 2)
+            .unwrap();
         let countdown = c.showing_countdown(back).expect("a warning counts down");
         assert_eq!(countdown.left, left.as_secs());
         // The widest it can read is the whole retention, however late it is shown.
         assert_eq!(countdown.longest, (WINDOW * WARNING_CLEAR_FACTOR).as_secs());
         assert_eq!(
-            run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR - TICK).as_deref(),
+            run(
+                &mut c,
+                (t0 + WINDOW * WARNING_CLEAR_FACTOR)
+                    .checked_sub(TICK)
+                    .unwrap()
+            )
+            .as_deref(),
             Some("warning")
         );
         assert_eq!(run(&mut c, t0 + WINDOW * WARNING_CLEAR_FACTOR), None);
@@ -3352,7 +3406,10 @@ mod tests {
         assert!(c.clear_shown(&shown, at));
         assert_eq!(line(&c).as_deref(), Some("waiting"));
         assert_eq!(c.showing_seconds_left(at), Some(6));
-        assert_eq!(run(&mut c, at + WINDOW - TICK).as_deref(), Some("waiting"));
+        assert_eq!(
+            run(&mut c, (at + WINDOW).checked_sub(TICK).unwrap()).as_deref(),
+            Some("waiting")
+        );
         assert_eq!(run(&mut c, at + WINDOW), None);
         assert_eq!(c.showing(), None, "an empty line has nothing to clear");
         assert!(
@@ -3616,7 +3673,9 @@ mod tests {
         );
         c.set(t0, None, StatusTone::Info, "still worth reading");
         // A newer busy takes the line, so the timing-out one is not on it.
-        let later = t0 + BUSY_TIMEOUT - Duration::from_secs(1);
+        let later = (t0 + BUSY_TIMEOUT)
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
         c.set(
             later,
             Some("foreground".into()),

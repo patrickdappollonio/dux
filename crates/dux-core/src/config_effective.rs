@@ -78,13 +78,23 @@ impl LogLevel {
         }
     }
 
-    /// The inverse of the `as u8` cast the logger stores the level as.
-    /// Anything else means a corrupted store, which reads as the default.
+    /// The byte the logger stores the level as, which is its discriminant.
+    pub(crate) const fn as_u8(self) -> u8 {
+        match self {
+            Self::Error => 0,
+            Self::Warn => 1,
+            Self::Info => 2,
+            Self::Debug => 3,
+        }
+    }
+
+    /// The inverse of [`Self::as_u8`]. Anything else means a corrupted store,
+    /// which reads as the default.
     pub(crate) fn from_u8(value: u8) -> Self {
         match value {
-            v if v == Self::Error as u8 => Self::Error,
-            v if v == Self::Warn as u8 => Self::Warn,
-            v if v == Self::Debug as u8 => Self::Debug,
+            0 => Self::Error,
+            1 => Self::Warn,
+            3 => Self::Debug,
             _ => Self::Info,
         }
     }

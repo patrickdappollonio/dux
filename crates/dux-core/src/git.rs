@@ -1750,7 +1750,7 @@ pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duratio
         if std::time::Instant::now() >= deadline {
             // The group, not just git: `bounded_command` stops only its child,
             // and a fetch's transport helper is exactly what hangs.
-            if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+            if let Some(group) = rustix::process::Pid::from_raw(child.id().cast_signed()) {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
             }
             let _ = child.kill();
@@ -3542,8 +3542,8 @@ fn classify_uncommitted_record(record: &[u8], plan: &mut UncommittedCopyPlan) ->
     if record.len() < 4 {
         return Ok(());
     }
-    let index_status = record[0] as char;
-    let worktree_status = record[1] as char;
+    let index_status = char::from(record[0]);
+    let worktree_status = char::from(record[1]);
     if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
         return Err(anyhow!(
             "rename/copy detection produced a two-path record despite `-c status.renames=false`; this needs git >= 2.18"
@@ -4898,7 +4898,7 @@ fn file_prefix_on_disk(path: &Path) -> Option<Vec<u8>> {
 
     let file = fs::File::open(path).ok()?;
     let mut prefix = Vec::new();
-    file.take(BINARY_SNIFF_BYTES as u64)
+    file.take(crate::numeric::usize_to_u64(BINARY_SNIFF_BYTES))
         .read_to_end(&mut prefix)
         .ok()?;
     Some(prefix)
@@ -4928,7 +4928,7 @@ fn index_blob_prefix(worktree_path: &Path, rel_path: &str) -> Option<Vec<u8>> {
     let mut prefix = Vec::new();
     if let Some(stdout) = child.stdout.as_mut() {
         stdout
-            .take(BINARY_SNIFF_BYTES as u64)
+            .take(crate::numeric::usize_to_u64(BINARY_SNIFF_BYTES))
             .read_to_end(&mut prefix)
             .ok()?;
     }
@@ -5304,8 +5304,8 @@ fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
             continue;
         }
 
-        let index_status = record[0] as char;
-        let worktree_status = record[1] as char;
+        let index_status = char::from(record[0]);
+        let worktree_status = char::from(record[1]);
         // Renames consume an extra NUL-delimited "old path" record. Advance
         // past it unconditionally so the next record is not misparsed as a
         // top-level status, even when we end up dropping this entry below.
@@ -6550,7 +6550,9 @@ pub(crate) fn file_prefix_at_head(
         .spawn()?;
     let mut prefix = Vec::new();
     if let Some(stdout) = child.stdout.as_mut() {
-        stdout.take(limit as u64).read_to_end(&mut prefix)?;
+        stdout
+            .take(crate::numeric::usize_to_u64(limit))
+            .read_to_end(&mut prefix)?;
     }
     // Drop the pipe so a blob larger than the limit gets EPIPE and exits
     // instead of blocking forever on a reader that stopped.

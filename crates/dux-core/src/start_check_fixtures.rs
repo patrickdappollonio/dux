@@ -442,7 +442,7 @@ pub fn name_tokens() -> Vec<String> {
                     state = state
                         .wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1_442_695_040_888_963_407);
-                    ALPHABET[(state >> 33) as usize % ALPHABET.len()] as char
+                    char::from(ALPHABET[crate::numeric::u64_to_usize(state >> 33) % ALPHABET.len()])
                 })
                 .collect();
             format!("zzTOKEN{}.{} x", &body[..10], &body[10..])

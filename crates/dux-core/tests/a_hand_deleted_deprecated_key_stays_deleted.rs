@@ -3,7 +3,7 @@
 use dux_core::config_queue::ConfigWriteQueue;
 
 fn read(p: &std::path::Path) -> String {
-    std::fs::read_to_string(p).unwrap()
+    std::fs::read_to_string(p).expect("read the config file")
 }
 
 #[test]

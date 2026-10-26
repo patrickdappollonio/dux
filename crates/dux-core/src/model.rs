@@ -126,7 +126,10 @@ impl ProviderKind {
     }
 
     /// A provider of that name; any text is accepted.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         Self(value.to_string())
     }
@@ -200,7 +203,10 @@ impl SessionStatus {
     }
 
     /// Parses the stored spelling; anything unrecognized reads as `Detached`.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "active" => Self::Active,
@@ -273,7 +279,10 @@ impl BranchProvenance {
     /// distinct from the MIGRATION default (`'created'`, which preserves
     /// today's behavior for rows written before the column existed and whose
     /// true provenance is unknowable).
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "created" => Self::CreatedByDux,
@@ -494,7 +503,10 @@ impl AgentWorkspaceKind {
     /// whatever is there rather than anything trustworthy; that is the accepted
     /// cost. The arm is reachable only from a row written by a newer dux, or one
     /// edited by hand.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "folder" => Self::Folder,
@@ -1403,7 +1415,6 @@ impl TerminalOwner {
 
     /// Presentation: borrow the owner for naming/projection. Exhaustive, so a
     /// new kind must decide how it is presented before this compiles.
-    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> TerminalOwnerRef<'_> {
         match self {
             Self::Session(id) => TerminalOwnerRef::Session(id),

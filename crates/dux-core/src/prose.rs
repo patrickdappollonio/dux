@@ -329,7 +329,8 @@ mod tests {
             "detach_confirm" => {
                 let label = s("label");
                 let grace = args["grace_seconds"].as_u64().expect("grace_seconds");
-                let tabs = args["live_tabs"].as_u64().expect("live_tabs") as usize;
+                let tabs =
+                    crate::numeric::u64_to_usize(args["live_tabs"].as_u64().expect("live_tabs"));
                 crate::engine::detach_confirm_prose(&label, grace, tabs)
             }
             "recreate_confirm" => {
@@ -372,11 +373,11 @@ mod tests {
             "add_project_heuristic_note" => crate::add_project_prose::heuristic_branch_note_prose(),
             "delete_project_confirm" => crate::project_prose::delete_project_confirm_prose(
                 args["project_name"].as_str(),
-                args["agent_count"].as_u64().expect("agent_count") as usize,
+                crate::numeric::u64_to_usize(args["agent_count"].as_u64().expect("agent_count")),
             ),
             "remove_project_confirm" => crate::project_prose::remove_project_confirm_prose(
                 args["project_name"].as_str(),
-                args["agent_count"].as_u64().expect("agent_count") as usize,
+                crate::numeric::u64_to_usize(args["agent_count"].as_u64().expect("agent_count")),
             ),
             "rename_branch_note" => rename_branch_note(args),
             "pr_clone_offer" => crate::pr_reference::pr_clone_offer_prose(

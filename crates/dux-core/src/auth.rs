@@ -444,7 +444,7 @@ pub fn check_minimums(
     let strength = strength(password, user_inputs);
     let mut failures = Vec::new();
     let length = password.char_len();
-    if length < policy.minimum_length as usize {
+    if length < crate::numeric::u32_to_usize(policy.minimum_length) {
         failures.push(MinimumFailure::TooShort {
             length,
             minimum: policy.minimum_length,
@@ -457,7 +457,7 @@ pub fn check_minimums(
         });
     }
     let bytes = password.byte_len();
-    if bytes > policy.maximum_bytes as usize {
+    if bytes > crate::numeric::u32_to_usize(policy.maximum_bytes) {
         failures.push(MinimumFailure::TooLong {
             bytes,
             maximum: policy.maximum_bytes,

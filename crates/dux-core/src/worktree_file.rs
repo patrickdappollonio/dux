@@ -835,9 +835,9 @@ pub fn write_file_encoded(
         .into(),
         None => content.as_bytes().into(),
     };
-    if bytes.len() as u64 > MAX_SAVED_BYTES {
+    if crate::numeric::usize_to_u64(bytes.len()) > MAX_SAVED_BYTES {
         return Err(anyhow::Error::new(SaveTooLarge {
-            size: bytes.len() as u64,
+            size: crate::numeric::usize_to_u64(bytes.len()),
         }));
     }
     let path = resolve_worktree_path(worktree, rel_path)?;
@@ -1596,7 +1596,7 @@ mod tests {
         assert_eq!(f.encoding.as_deref(), Some("windows-1252"));
         assert!(f.encoding_fallback);
         assert!(!f.bom);
-        assert_eq!(f.size, Some(latin1.len() as u64));
+        assert_eq!(f.size, Some(crate::numeric::usize_to_u64(latin1.len())));
     }
 
     #[test]
@@ -1732,7 +1732,7 @@ mod tests {
     #[test]
     fn oversized_file_is_refused() {
         let dir = worktree();
-        let big = vec![b'a'; (MAX_EDITABLE_BYTES + 1) as usize];
+        let big = vec![b'a'; crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES + 1)];
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let err = read_file(dir.path(), "big.txt").unwrap_err().to_string();
         assert!(err.contains("too large"), "unexpected error: {err}");
@@ -2868,7 +2868,7 @@ mod tests {
             use rustix::fs::{AtFlags, CWD, Timestamps, utimensat};
             let dur = to.duration_since(std::time::UNIX_EPOCH).unwrap();
             let ts = rustix::fs::Timespec {
-                tv_sec: dur.as_secs() as _,
+                tv_sec: i64::try_from(dur.as_secs()).expect("a test time fits in i64"),
                 tv_nsec: dur.subsec_nanos().into(),
             };
             utimensat(
@@ -2887,7 +2887,10 @@ mod tests {
         fn read_reports_the_stamp_of_what_it_read() {
             let dir = worktree();
             let f = read_file(dir.path(), "hello.txt").unwrap();
-            assert_eq!(f.size, Some("hi\nthere\n".len() as u64));
+            assert_eq!(
+                f.size,
+                Some(crate::numeric::usize_to_u64("hi\nthere\n".len()))
+            );
             let modified = f.modified.expect("a real filesystem reports an mtime");
             let on_disk = std::fs::metadata(dir.path().join("hello.txt")).unwrap();
             assert_eq!(modified, format_mtime(on_disk.modified().unwrap()));
@@ -2921,7 +2924,10 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "rewritten\n"
             );
-            assert_eq!(fresh.size, "rewritten\n".len() as u64);
+            assert_eq!(
+                fresh.size,
+                crate::numeric::usize_to_u64("rewritten\n".len())
+            );
             // The returned stamp is the one the client must re-baseline on, so
             // an immediate second save with it must be accepted.
             write_file_checked(dir.path(), "hello.txt", "again\n", Some(&fresh)).unwrap();
@@ -2945,7 +2951,10 @@ mod tests {
                 .expect("a stale stamp must surface as a WriteConflict, not a generic error");
             assert!(!conflict.deleted);
             let current = conflict.current.as_ref().unwrap();
-            assert_eq!(current.size, "the agent's work\n".len() as u64);
+            assert_eq!(
+                current.size,
+                crate::numeric::usize_to_u64("the agent's work\n".len())
+            );
             assert_eq!(
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "the agent's work\n",
@@ -2964,7 +2973,7 @@ mod tests {
                 modified: read.modified.clone(),
                 size: read.size.unwrap(),
             };
-            let big = "a".repeat(MAX_EDITABLE_BYTES as usize + 1);
+            let big = "a".repeat(crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES) + 1);
             let grown = write_file_checked(dir.path(), "hello.txt", &big, Some(&expected)).unwrap();
             assert!(grown.size > MAX_EDITABLE_BYTES);
             write_file_checked(dir.path(), "hello.txt", "smaller again\n", Some(&grown)).unwrap();
@@ -3379,7 +3388,7 @@ mod tests {
                 4 * 1024 * 1024
             );
             // Past the limit on disk it is refused, typed, and writes nothing.
-            let over = "a".repeat(MAX_SAVED_BYTES as usize + 1);
+            let over = "a".repeat(crate::numeric::u64_to_usize(MAX_SAVED_BYTES) + 1);
             let err = write_file_encoded(
                 dir.path(),
                 "big.txt",
@@ -3574,7 +3583,7 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("brand-new.txt")).unwrap(),
                 "hello\n"
             );
-            assert_eq!(fresh.size, "hello\n".len() as u64);
+            assert_eq!(fresh.size, crate::numeric::usize_to_u64("hello\n".len()));
         }
 
         /// A guarded write shortens the file: the guard must ftruncate, not
@@ -3669,7 +3678,10 @@ mod tests {
                 .unwrap();
             let read_only = read_file(dir.path(), "link.txt").unwrap();
             assert!(read_only.read_only);
-            assert_eq!(read_only.size, Some("hi\nthere\n".len() as u64));
+            assert_eq!(
+                read_only.size,
+                Some(crate::numeric::usize_to_u64("hi\nthere\n".len()))
+            );
             assert!(read_only.modified.is_some());
         }
 

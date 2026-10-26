@@ -42,7 +42,10 @@ struct DeprecatedConfigKey {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "today's rules only replace keys; Remove and Fail are the other actions a rule can take, and their handling stays ready for the next rule"
+)]
 enum DeprecatedConfigKeyAction {
     Replace {
         migrate: fn(&mut DocumentMut, DeprecatedConfigKey, &Item) -> Result<()>,

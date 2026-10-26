@@ -200,7 +200,8 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
         uid: 0,
         gid: 0,
     };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
+        .expect("ucred's size fits in a socklen_t");
     // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
     // the descriptor is open for as long as `stream` is borrowed.
     let read = unsafe {
@@ -366,7 +367,8 @@ impl Transport for UnixTransport {
                 let mut left = length;
                 let mut buffer = [0u8; STREAM_PIECE];
                 while left > 0 {
-                    let want = left.min(STREAM_PIECE as u64) as usize;
+                    let want =
+                        usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
                     let read = reader
                         .read(&mut buffer[..want])
                         .map_err(|e| TransportError::Dropped(e.to_string()))?;
@@ -375,7 +377,7 @@ impl Transport for UnixTransport {
                             "the connection closed inside the reply's body".to_string(),
                         ));
                     }
-                    left -= read as u64;
+                    left -= crate::numeric::usize_to_u64(read);
                     if piece(&buffer[..read]).is_break() {
                         return Ok(());
                     }
@@ -479,12 +481,12 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
             if length > BODY_LIMIT {
                 return Err(dropped("the reply was larger than the client reads"));
             }
-            let mut body = Vec::with_capacity(length as usize);
+            let mut body = Vec::with_capacity(crate::numeric::u64_to_usize(length));
             (&mut reader)
                 .take(length)
                 .read_to_end(&mut body)
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
-            if body.len() as u64 != length {
+            if crate::numeric::usize_to_u64(body.len()) != length {
                 return Err(dropped("the connection closed inside the reply's body"));
             }
             body
@@ -496,7 +498,7 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
                 .take(BODY_LIMIT + 1)
                 .read_to_end(&mut body)
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
-            if body.len() as u64 > BODY_LIMIT {
+            if crate::numeric::usize_to_u64(body.len()) > BODY_LIMIT {
                 return Err(dropped("the reply was larger than the client reads"));
             }
             body
@@ -529,7 +531,10 @@ fn read_chunks(reader: &mut impl BufRead) -> Result<Vec<u8>, TransportError> {
     let mut body = Vec::new();
     let mut too_large = false;
     each_chunk_piece(reader, &mut |piece| {
-        if (body.len() as u64).saturating_add(piece.len() as u64) > BODY_LIMIT {
+        if crate::numeric::usize_to_u64(body.len())
+            .saturating_add(crate::numeric::usize_to_u64(piece.len()))
+            > BODY_LIMIT
+        {
             too_large = true;
             return ControlFlow::Break(());
         }
@@ -571,14 +576,14 @@ fn each_chunk_piece(
         let mut left = size;
         let mut buffer = [0u8; STREAM_PIECE];
         while left > 0 {
-            let want = left.min(STREAM_PIECE as u64) as usize;
+            let want = usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
             let read = reader
                 .read(&mut buffer[..want])
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
             if read == 0 {
                 return Err(dropped("the connection closed inside a chunk"));
             }
-            left -= read as u64;
+            left -= crate::numeric::usize_to_u64(read);
             if on_piece(&buffer[..read]).is_break() {
                 return Ok(());
             }

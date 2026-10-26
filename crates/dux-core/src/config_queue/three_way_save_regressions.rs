@@ -1144,7 +1144,10 @@ fn an_inline_server_auth_keeps_its_password_and_bans() {
 
 /// The full patch (no base) keeps a file of inline sections readable.
 #[test]
-#[allow(deprecated)] // the full patch, the path a sync-direct writer takes
+#[expect(
+    deprecated,
+    reason = "the full patch is the path a sync-direct writer takes"
+)]
 fn the_full_patch_handles_inline_sections() {
     let text = "ui = { left_width_pct = 25 } # trailing\nproviders = { claude = { command = \"claude\" } }\nkeys = { quit = [\"q\"] }\nmacros = { hi = { text = \"hello\", surface = \"both\" } }\n";
     let dir = tempfile::TempDir::new().unwrap();
@@ -2296,9 +2299,9 @@ mod randomized_model {
     }
     fn mem_set(c: &mut Config, i: usize, rng: &mut Rng) {
         match i {
-            0 => c.ui.left_width_pct = 15 + rng.below(20) as u16,
-            1 => c.ui.right_width_pct = 15 + rng.below(20) as u16,
-            2 => c.server.port = 3000 + rng.below(900) as u16,
+            0 => c.ui.left_width_pct = 15 + u16::try_from(rng.below(20)).expect("below 20"),
+            1 => c.ui.right_width_pct = 15 + u16::try_from(rng.below(20)).expect("below 20"),
+            2 => c.server.port = 3000 + u16::try_from(rng.below(900)).expect("below 900"),
             _ => c.ui.copy_on_select = !c.ui.copy_on_select,
         }
     }
@@ -2367,7 +2370,7 @@ mod randomized_model {
             for step in 0..25 {
                 match rng.below(6) {
                     0 => {
-                        let i = rng.below(4) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(4));
                         let (s, k) = KEYS[i];
                         if rng.below(3) == 0 {
                             hand_set(&path, s, k, None);
@@ -2381,7 +2384,7 @@ mod randomized_model {
                         }
                     }
                     1 => {
-                        let i = rng.below(3) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(3));
                         if rng.below(3) == 0 {
                             hand_set(&path, "env", ENV[i], None);
                             expect_env[i] = None;
@@ -2394,12 +2397,12 @@ mod randomized_model {
                         }
                     }
                     2 => {
-                        let i = rng.below(4) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(4));
                         mem_set(&mut memory, i, &mut rng);
                         log.push(format!("mem set {}={}", KEYS[i].1, mem_get(&memory, i)));
                     }
                     3 => {
-                        let i = rng.below(3) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(3));
                         if rng.below(3) == 0 {
                             memory.env.remove(ENV[i]);
                             log.push(format!("mem remove env.{}", ENV[i]));
@@ -2531,8 +2534,8 @@ mod randomized_model {
                 .collect();
             let mut log = Vec::new();
             for step in 0..25 {
-                let p = rng.below(2) as usize;
-                let f = rng.below(3) as usize;
+                let p = crate::numeric::u64_to_usize(rng.below(2));
+                let f = crate::numeric::u64_to_usize(rng.below(3));
                 match rng.below(4) {
                     0 => {
                         let v = if rng.below(3) == 0 {

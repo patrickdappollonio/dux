@@ -2070,7 +2070,10 @@ pub(crate) fn parse_pull_request_lookup(
 /// `custom_name` carries a caller-supplied display name through to the resolved
 /// PR (`None` for the TUI, which prompts for a name after resolution; `Some` for
 /// the web, which sends the name upfront).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the lookup job, handed over once by the surface that starts it"
+)]
 pub fn run_pull_request_lookup_job(
     project: Project,
     raw_input: &str,

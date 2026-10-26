@@ -815,7 +815,7 @@ static RESIZE_TEST_GATE: Mutex<Option<Arc<ResizeTestGate>>> = Mutex::new(None);
 fn resize_test_gate_for(terminal: &Arc<Mutex<TerminalState>>) -> Option<Arc<ResizeTestGate>> {
     let armed = RESIZE_TEST_GATE.lock().ok()?;
     let gate = armed.as_ref()?;
-    (gate.terminal == Arc::as_ptr(terminal) as usize).then(|| Arc::clone(gate))
+    (gate.terminal == Arc::as_ptr(terminal).addr()).then(|| Arc::clone(gate))
 }
 
 /// Called from inside the resize critical section, after the ioctl. Blocks until
@@ -857,7 +857,6 @@ impl Drop for ReaderWaiting {
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
-    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     /// Dedicated writer thread for the PTY master, fed over a bounded queue so a
     /// child that stops reading its input can never block the engine thread.
@@ -1174,7 +1173,6 @@ impl PtyClient {
     /// # Errors
     ///
     /// Fails as [`Self::spawn_with_env`] does.
-    #[allow(dead_code)]
     pub fn spawn(
         command: &str,
         args: &[String],
@@ -1413,7 +1411,7 @@ impl PtyClient {
         if self.reaped.is_some() {
             return None;
         }
-        rustix::process::Pid::from_raw(self.child.process_id()? as i32)
+        rustix::process::Pid::from_raw(self.child.process_id()?.cast_signed())
     }
 
     /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
@@ -1422,7 +1420,7 @@ impl PtyClient {
     /// question cannot be asked (no pid, already reaped elsewhere, an error):
     /// the caller then reaps as before.
     fn child_exit_unreaped(&self, wait: ExitWait) -> Option<bool> {
-        let pid = rustix::process::Pid::from_raw(self.child.process_id()? as i32)?;
+        let pid = rustix::process::Pid::from_raw(self.child.process_id()?.cast_signed())?;
         let mut options =
             rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
         if wait == ExitWait::NoHang {
@@ -1566,7 +1564,6 @@ impl PtyClient {
     /// # Panics
     ///
     /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot()
@@ -2214,7 +2211,7 @@ fn foreground_pgid_of_fd(raw_fd: std::os::unix::io::RawFd) -> Option<u32> {
 /// and negatives (error returns) are not, and must never reach a
 /// `Pid`/`NonZero` construction.
 fn valid_pgid(raw: libc::pid_t) -> Option<u32> {
-    (raw > 0).then_some(raw as u32)
+    (raw > 0).then_some(raw.cast_unsigned())
 }
 
 /// What a batch of bytes written to a PTY represents, as far as the engine's
@@ -2480,7 +2477,7 @@ impl SignalTargets {
     /// group already went) is benign.
     pub(crate) fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
         let signal_group = |pgid: u32| {
-            rustix::process::Pid::from_raw(pgid as i32).map_or(Ok(()), |group| {
+            rustix::process::Pid::from_raw(pgid.cast_signed()).map_or(Ok(()), |group| {
                 rustix::process::kill_process_group(group, sig)
             })
         };
@@ -2578,7 +2575,7 @@ fn run_deferred_group_signal(job: &DeferredGroupSignal) {
             &crate::process_sessions::member_state,
         )
     });
-    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group as i32) {
+    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group.cast_signed()) {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
 }
@@ -2748,7 +2745,7 @@ impl TerminalState {
         // sequence, while a cursor-only move or an OSC status write leave it
         // identical.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let screen_lines = self.term.screen_lines() as i32;
+        let screen_lines = crate::numeric::grid_i32(self.term.screen_lines());
         for line in 0..screen_lines {
             for cell in &self.term.grid()[Line(line)] {
                 cell.c.hash(&mut hasher);
@@ -2964,8 +2961,8 @@ impl TerminalState {
         } else {
             term::point_to_viewport(display_offset, renderable.cursor.point).map(|point| {
                 SnapshotCursor {
-                    row: point.line as u16,
-                    col: point.column.0 as u16,
+                    row: crate::numeric::grid_u16(point.line),
+                    col: crate::numeric::grid_u16(point.column.0),
                 }
             })
         };
@@ -3030,8 +3027,8 @@ impl TerminalState {
             };
 
             target.cells.push(SnapshotCell {
-                row: point.line as u16,
-                col: point.column.0 as u16,
+                row: crate::numeric::grid_u16(point.line),
+                col: crate::numeric::grid_u16(point.column.0),
                 symbol,
                 fg: convert_terminal_color(cell.fg, colors),
                 bg: convert_terminal_color(cell.bg, colors),
@@ -3128,7 +3125,7 @@ impl TerminalState {
 
         // Pre-size to history+screen rows so a large scrollback doesn't reallocate
         // repeatedly while we hold the terminal lock.
-        let est_rows = (bottom - top + 1).max(0) as usize;
+        let est_rows = usize::try_from(bottom - top + 1).unwrap_or(0);
         let mut out = String::with_capacity(est_rows * (cols + 2) + 32);
         // Ensure the primary buffer and autowrap-on (so soft-wrapped rows can be
         // rebuilt by the client), widen the scrolling region back to the whole
@@ -3214,8 +3211,8 @@ impl TerminalState {
 
     fn scroll(&mut self, direction: ScrollDirection, amount: usize) {
         let delta = match direction {
-            ScrollDirection::Up => amount as i32,
-            ScrollDirection::Down => -(amount as i32),
+            ScrollDirection::Up => crate::numeric::grid_i32(amount),
+            ScrollDirection::Down => -crate::numeric::grid_i32(amount),
         };
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -3223,7 +3220,7 @@ impl TerminalState {
     fn set_scrollback(&mut self, rows: usize) {
         let current = self.term.grid().display_offset();
         let target = rows.min(self.term.grid().history_size());
-        let delta = target as i32 - current as i32;
+        let delta = crate::numeric::grid_i32(target) - crate::numeric::grid_i32(current);
         self.term.scroll_display(Scroll::Delta(delta));
     }
 
@@ -3435,7 +3432,7 @@ fn convert_terminal_color(
 ) -> CellColor {
     match color {
         TermColor::Spec(Rgb { r, g, b }) => CellColor::Rgb(r, g, b),
-        TermColor::Indexed(index) => palette[index as usize]
+        TermColor::Indexed(index) => palette[usize::from(index)]
             .map_or(CellColor::Indexed(index), |rgb| {
                 CellColor::Rgb(rgb.r, rgb.g, rgb.b)
             }),
@@ -3622,21 +3619,30 @@ fn default_palette_rgb(index: usize) -> Option<Rgb> {
         15 => Some(rgb(0xff, 0xff, 0xff)),
         16..=231 => Some(xterm_color_cube(index)),
         232..=255 => Some(xterm_grayscale(index)),
-        x if x == NamedColor::Foreground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::Background as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::Cursor as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimBlack as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::DimRed as usize => Some(rgb(0x80, 0x00, 0x00)),
-        x if x == NamedColor::DimGreen as usize => Some(rgb(0x00, 0x80, 0x00)),
-        x if x == NamedColor::DimYellow as usize => Some(rgb(0x80, 0x80, 0x00)),
-        x if x == NamedColor::DimBlue as usize => Some(rgb(0x00, 0x00, 0x80)),
-        x if x == NamedColor::DimMagenta as usize => Some(rgb(0x80, 0x00, 0x80)),
-        x if x == NamedColor::DimCyan as usize => Some(rgb(0x00, 0x80, 0x80)),
-        x if x == NamedColor::DimWhite as usize => Some(rgb(0x80, 0x80, 0x80)),
-        x if x == NamedColor::BrightForeground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimForeground as usize => Some(rgb(0x80, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::Foreground) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::Background) => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::Cursor) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::DimBlack) => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::DimRed) => Some(rgb(0x80, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::DimGreen) => Some(rgb(0x00, 0x80, 0x00)),
+        x if x == named_color_index(NamedColor::DimYellow) => Some(rgb(0x80, 0x80, 0x00)),
+        x if x == named_color_index(NamedColor::DimBlue) => Some(rgb(0x00, 0x00, 0x80)),
+        x if x == named_color_index(NamedColor::DimMagenta) => Some(rgb(0x80, 0x00, 0x80)),
+        x if x == named_color_index(NamedColor::DimCyan) => Some(rgb(0x00, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::DimWhite) => Some(rgb(0x80, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::BrightForeground) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::DimForeground) => Some(rgb(0x80, 0x80, 0x80)),
         _ => None,
     }
+}
+
+/// The palette index alacritty gives a named color, which is its discriminant.
+#[expect(
+    clippy::as_conversions,
+    reason = "NamedColor's discriminants are its palette indices, and an enum has no From to read them"
+)]
+fn named_color_index(color: NamedColor) -> usize {
+    color as usize
 }
 
 fn xterm_color_cube(index: usize) -> Rgb {
@@ -3650,7 +3656,7 @@ fn xterm_color_cube(index: usize) -> Rgb {
 }
 
 fn xterm_grayscale(index: usize) -> Rgb {
-    let level = 8 + ((index - 232) as u8 * 10);
+    let level = 8 + u8::try_from(index - 232).expect("a grayscale index is 232..=255") * 10;
     rgb(level, level, level)
 }
 
@@ -3883,7 +3889,7 @@ mod tests {
         );
 
         let gate = Arc::new(ResizeTestGate {
-            terminal: Arc::as_ptr(&client.terminal) as usize,
+            terminal: Arc::as_ptr(&client.terminal).addr(),
             waiting: AtomicUsize::new(0),
             entered: AtomicBool::new(false),
             release: Mutex::new(false),
@@ -5949,13 +5955,15 @@ mod tests {
 
     /// Build a reader-loop state around fresh flags, and hand back the flags the
     /// loop is expected to publish.
-    #[allow(clippy::type_complexity)]
-    fn reader_loop_probe() -> (
+    /// A probed reader-loop state and the flags and writer queue it publishes to.
+    type ReaderLoopProbe = (
         ReaderLoopState,
         Arc<AtomicBool>,
         Arc<OnceLock<String>>,
         std::sync::mpsc::Receiver<PtyWriteMsg>,
-    ) {
+    );
+
+    fn reader_loop_probe() -> ReaderLoopProbe {
         let exited = Arc::new(AtomicBool::new(false));
         let read_error: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
@@ -6455,7 +6463,7 @@ mod tests {
         client.set_leader_exit_hook(Box::new(move || {
             // A child not yet reaped is still this process's to wait for; a
             // reaped one answers "no such child".
-            let unreaped = rustix::process::Pid::from_raw(pid as i32).is_some_and(|pid| {
+            let unreaped = rustix::process::Pid::from_raw(pid.cast_signed()).is_some_and(|pid| {
                 !matches!(
                     rustix::process::waitid(
                         rustix::process::WaitId::Pid(pid),
@@ -6525,7 +6533,7 @@ mod tests {
             Some(group),
             "a recorded member alive in the group holds its id"
         );
-        if let Some(pid) = rustix::process::Pid::from_raw(job as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(job.cast_signed()) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -6574,7 +6582,7 @@ mod tests {
             client
                 .child_to_signal()
                 .map(rustix::process::Pid::as_raw_pid),
-            Some(pid as i32),
+            Some(pid.cast_signed()),
             "an unreaped child is signalled at its pid"
         );
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -6866,10 +6874,12 @@ mod tests {
     /// that needs to prove nothing fell out of history has to read the grid.
     fn all_grid_lines(client: &PtyClient) -> Vec<String> {
         let terminal = client.terminal.lock().expect("terminal mutex poisoned");
-        let history = terminal.term.grid().history_size() as i32;
+        let history = crate::numeric::grid_i32(terminal.term.grid().history_size());
         let rows = i32::from(terminal.rows);
         let cols = usize::from(terminal.cols);
-        let mut out = Vec::with_capacity((history + rows) as usize);
+        let mut out = Vec::with_capacity(
+            usize::try_from(history + rows).expect("a grid has no negative size"),
+        );
         for line in -history..rows {
             let row = &terminal.term.grid()[Line(line)];
             let mut text = String::with_capacity(cols);

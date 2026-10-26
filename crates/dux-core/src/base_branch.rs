@@ -429,7 +429,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(bounds.len(), 2);
         assert_eq!(bounds[0], Duration::from_secs(10));
-        assert!(bounds[1] <= Duration::from_secs(10) - pause);
+        assert!(bounds[1] <= Duration::from_secs(10).checked_sub(pause).unwrap());
         assert!(bounds[1] >= min, "a retry always gets at least the minimum");
 
         let mut calls = 0;

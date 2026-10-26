@@ -145,13 +145,15 @@ impl Handler for RegionObserver {
         // means the last row, an inverted pair is refused outright, and both
         // margins are clamped to the screen height (to the height itself, not to
         // the last row, which is how a region can come out empty).
-        let bottom = bottom.unwrap_or(self.region.screen_lines as usize);
+        let bottom = bottom.unwrap_or_else(|| {
+            usize::try_from(self.region.screen_lines).expect("a screen has a non-negative height")
+        });
         if top >= bottom {
             return;
         }
         let screen_lines = self.region.screen_lines;
-        self.region.start = (top as i32 - 1).min(screen_lines);
-        self.region.end = (bottom as i32).min(screen_lines);
+        self.region.start = (crate::numeric::grid_i32(top) - 1).min(screen_lines);
+        self.region.end = crate::numeric::grid_i32(bottom).min(screen_lines);
     }
 
     /// A full reset (RIS) widens the region back to the whole screen. Nothing

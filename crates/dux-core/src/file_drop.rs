@@ -788,7 +788,7 @@ impl DropDir {
         // the duration of the call.
         let raw = unsafe { libc::fpathconf(self.fd.as_raw_fd(), libc::_PC_NAME_MAX) };
         if raw > 0 {
-            raw as usize
+            usize::try_from(raw).expect("a positive c_long fits in a usize")
         } else {
             FALLBACK_NAME_MAX_BYTES
         }
@@ -823,7 +823,7 @@ impl DropDir {
     fn entry_is_symlink(&self, name: &str) -> rustix::io::Result<bool> {
         let stat = rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW)?;
         Ok(
-            rustix::fs::FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode)
+            rustix::fs::FileType::from_raw_mode(rustix::fs::RawMode::from(stat.st_mode))
                 == rustix::fs::FileType::Symlink,
         )
     }
@@ -3115,7 +3115,7 @@ mod tests {
             .current_dir(dir.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .process_group(child.id() as i32)
+            .process_group(child.id().cast_signed())
             .spawn()
             .expect("spawn a second member of the same group");
         let mut inner_out = inner.stdout.take().expect("stdout");
