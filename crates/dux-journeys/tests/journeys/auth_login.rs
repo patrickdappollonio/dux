@@ -141,7 +141,7 @@ async fn journey_01_sign_in_list_projects_sign_out_and_be_refused() {
         );
         assert_eq!(client.auth_status().await["signed_in"], json!(true));
 
-        assert!(projects(&client).await.is_empty());
+        assert_eq!(projects(&client).await, Vec::<serde_json::Value>::new());
 
         let logout = client.logout().await;
         assert_eq!(logout.status, 204, "{}", logout.describe());
@@ -365,7 +365,7 @@ async fn the_owner_lifts_the_block(dux: &Dux, client: &Client) {
         || async { (client.login(STRONG_PASSWORD).await.status == 204).then_some(()) },
     )
     .await;
-    assert!(projects(client).await.is_empty());
+    assert_eq!(projects(client).await, Vec::<serde_json::Value>::new());
 }
 
 /// From this machine, failures past the limit are slowed and never blocked, and

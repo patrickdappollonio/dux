@@ -481,7 +481,7 @@ async fn cli_server_logs_follow_and_connections() {
             },
         )
         .await;
-        assert!(!row.is_empty());
+        assert_ne!(row, "");
 
         let follower = dux
             .exec_ok("setsid dux server logs -f > /tmp/follow.out 2>&1 < /dev/null & echo $!")
