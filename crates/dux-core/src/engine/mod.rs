@@ -199,7 +199,7 @@ impl Default for GhProbeState {
     fn default() -> Self {
         Self {
             policy: Arc::new(Mutex::new(crate::gh::GithubHostPolicy::DenyAll)),
-            protocols: Arc::new(Mutex::new(Default::default())),
+            protocols: Arc::new(Mutex::new(std::collections::BTreeMap::default())),
             generation: 0,
             program: std::ffi::OsString::from("gh"),
             last_probe_at: None,
@@ -7621,14 +7621,14 @@ mod tests {
                 tab_id: session.slot_tab_id().to_owned(),
                 provider: session.provider.clone(),
                 session,
-                provider_config: Default::default(),
+                provider_config: crate::config::ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 100,
                 kind: crate::worker::AgentLaunchKind::Create {
-                    status_message: Default::default(),
+                    status_message: StatusText::default(),
                     status_warns: false,
                     status_notes: None,
                     pull_request_pin: None,
@@ -9148,7 +9148,7 @@ mod tests {
             outcome: GhProbe::Decided {
                 available: true,
                 policy: hosts(&["github.com"]),
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         });
 
@@ -9170,8 +9170,8 @@ mod tests {
             generation: 1,
             outcome: GhProbe::Decided {
                 available: false,
-                policy: GithubHostPolicy::Hosts(Default::default()),
-                protocols: Default::default(),
+                policy: GithubHostPolicy::Hosts(std::collections::BTreeSet::default()),
+                protocols: std::collections::BTreeMap::default(),
             },
         });
         assert_eq!(
@@ -9416,7 +9416,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         assert!(
@@ -9440,7 +9440,7 @@ mod tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         assert!(repeat.is_empty(), "a repeat answer says nothing");
@@ -9550,7 +9550,7 @@ mod tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::DenyAll,
-                protocols: Default::default(),
+                protocols: std::collections::BTreeMap::default(),
             },
         );
         let status = reactions

@@ -127,7 +127,7 @@ fn review10_a_project_added_between_the_discard_check_and_the_delete_is_not_dele
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
         })
         .unwrap();
 

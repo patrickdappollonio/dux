@@ -3733,7 +3733,7 @@ impl Engine {
         match outcome {
             crate::gh::GhProbe::NotInstalled => {
                 self.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
-                self.set_github_git_protocols(Default::default());
+                self.set_github_git_protocols(std::collections::BTreeMap::default());
                 (GhStatus::NotInstalled, None)
             }
             crate::gh::GhProbe::Transient(reason) => {
@@ -6990,7 +6990,7 @@ mod tests {
         let (status, reason) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: true,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-            protocols: Default::default(),
+            protocols: BTreeMap::default(),
         });
         assert_eq!(status, GhStatus::Available);
         assert_eq!(reason, None);
@@ -7002,7 +7002,7 @@ mod tests {
         let (status, _) = engine.adopt_gh_probe(crate::gh::GhProbe::Decided {
             available: false,
             policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-            protocols: Default::default(),
+            protocols: BTreeMap::default(),
         });
         assert_eq!(status, GhStatus::NotAuthenticated);
     }
@@ -7044,7 +7044,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7066,7 +7066,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7087,7 +7087,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: false,
                 policy: crate::gh::GithubHostPolicy::DenyAll,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7120,7 +7120,7 @@ mod tests {
             outcome: crate::gh::GhProbe::Decided {
                 available: true,
                 policy: crate::gh::GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
 
@@ -7551,7 +7551,7 @@ mod tests {
                 state: "OPEN".into(),
                 head_ref_name: "feat".into(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
@@ -8704,7 +8704,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 1000,
@@ -8792,7 +8792,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 // The launch this drop is about is the one kind that arms a
                 // candidate; without it the test would pass on any code.
                 resume: true,
@@ -9025,7 +9025,7 @@ mod tests {
                 session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
-                identity: Default::default(),
+                identity: crate::term_identity::TerminalIdentity::default(),
                 resume: false,
                 pty_size: (24, 80),
                 scrollback_lines: 1000,
@@ -9903,7 +9903,7 @@ mod tests {
             session,
             provider_config: ProviderCommandConfig::default(),
             env: Vec::new(),
-            identity: Default::default(),
+            identity: crate::term_identity::TerminalIdentity::default(),
             resume: false,
             pty_size: (24, 80),
             scrollback_lines: 1000,

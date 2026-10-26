@@ -381,14 +381,14 @@ mod tests {
             (
                 "a macro save",
                 Command::UpdateMacros {
-                    macros: Default::default(),
+                    macros: crate::config::MacrosConfig::default(),
                 },
                 Some(held),
             ),
             (
                 "an environment save",
                 Command::PersistGlobalEnv {
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::default(),
                 },
                 Some(held),
             ),

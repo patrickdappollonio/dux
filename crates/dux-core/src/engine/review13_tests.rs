@@ -228,7 +228,7 @@ fn a_resumed_removal_that_never_starts_gives_its_busy_a_final() {
             delete_branch: None,
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .unwrap();
     crate::engine::fail_next_worker_spawn();

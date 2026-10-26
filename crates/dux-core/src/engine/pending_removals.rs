@@ -114,7 +114,7 @@ impl Engine {
             process_snapshot: known,
             // Filled in below, and kept current from then on, by the registry's
             // one write path.
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         };
         if let Err(err) = self.session_store.insert_pending_worktree_removal(&row) {
             crate::logger::error(&format!(

@@ -135,7 +135,7 @@ impl Engine {
     pub fn pty_scope(pty_id: &str) -> Scope {
         Scope {
             ptys: [pty_id.to_string()].into(),
-            agents: Default::default(),
+            agents: std::collections::BTreeSet::default(),
         }
     }
 
@@ -261,7 +261,7 @@ impl Engine {
                 .into_iter()
                 .map(|(tab, _)| tab.as_str().to_string())
                 .collect(),
-            agents: Default::default(),
+            agents: std::collections::BTreeSet::default(),
         }
     }
 

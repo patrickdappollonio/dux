@@ -3109,7 +3109,7 @@ mod tests {
                     leading_branch: Some("main".to_string()),
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::default(),
                 })
                 .unwrap();
         }

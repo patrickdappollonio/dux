@@ -256,7 +256,7 @@ fn every_removal_path_keeps_a_folder_a_dormant_agents_worktree_lives_in() {
             delete_branch: Some(true),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: crate::process_sessions::RegistrySnapshot::default(),
         })
         .unwrap();
     engine.resume_pending_worktree_removals();
