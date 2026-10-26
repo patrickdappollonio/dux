@@ -1083,8 +1083,12 @@ mod tests {
 
     #[test]
     fn startup_command_shell_expands_config_env_vars() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_STARTUP_SHELL", "/bin/sh") };
         assert_eq!(startup_shell_command("$DUX_TEST_STARTUP_SHELL"), "/bin/sh");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_STARTUP_SHELL") };
     }
 

@@ -207,8 +207,7 @@ pub(crate) fn resolve_identity(
 
     match effective {
         // Resolved above; `Auto` cannot reach here.
-        TerminalIdentityMode::Auto => TerminalIdentity::empty(),
-        TerminalIdentityMode::None => TerminalIdentity::empty(),
+        TerminalIdentityMode::Auto | TerminalIdentityMode::None => TerminalIdentity::empty(),
         TerminalIdentityMode::Mirror => resolve_mirror(host_env),
         TerminalIdentityMode::Ghostty => forced_ghostty(host_env),
         TerminalIdentityMode::Kitty => forced_kitty(),

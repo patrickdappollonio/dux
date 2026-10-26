@@ -359,8 +359,7 @@ fn shape_of_json(value: &serde_json::Value) -> Shape {
 fn shape_of(segments: &[String]) -> Option<Shape> {
     let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
     match parts.as_slice() {
-        ["providers" | "env"] => return Some(Shape::Table),
-        ["providers", _] => return Some(Shape::Table),
+        ["providers" | "env"] | ["providers", _] => return Some(Shape::Table),
         ["providers", _, field] => {
             return provider_template().get(*field).map(shape_of_json);
         }

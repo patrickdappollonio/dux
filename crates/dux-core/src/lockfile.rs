@@ -430,11 +430,11 @@ mod tests {
             std::io::Error::last_os_error()
         );
         if child == 0 {
-            // SAFETY: see above.
-            unsafe {
-                let code = i32::from(libc::listen(fd, 128) != 0);
-                libc::_exit(code);
-            }
+            // SAFETY: see above; `fd` is the bound socket this test opened.
+            let code = i32::from(unsafe { libc::listen(fd, 128) } != 0);
+            // SAFETY: see above; the child leaves without running any Rust
+            // teardown in a process that may hold another thread's locks.
+            unsafe { libc::_exit(code) };
         }
         let mut status = 0;
         // SAFETY: `child` is this process's own child and `status` is writable.

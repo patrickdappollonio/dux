@@ -4709,15 +4709,15 @@ mod tests {
             "stand-in gh should have run, got {outcome:?}",
         );
 
-        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+        let recorded_args: Vec<String> = std::fs::read_to_string(&recorded)
             .expect("stand-in recorded its argv")
             .lines()
             .map(str::to_string)
             .collect();
-        let repo = argv
+        let repo = recorded_args
             .iter()
             .position(|a| a == "--repo")
-            .and_then(|i| argv.get(i + 1))
+            .and_then(|i| recorded_args.get(i + 1))
             .expect("--repo argument");
         assert_eq!(
             repo, "github.com/owner/repo",

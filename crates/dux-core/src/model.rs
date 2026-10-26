@@ -1365,8 +1365,8 @@ impl TerminalOwner {
     /// forced through the answer rather than quietly rejecting the new kind.
     pub fn is_at_route(&self, route: TerminalRoute<'_>) -> bool {
         match (self, route) {
-            (Self::Session(owner), TerminalRoute::Session(id)) => owner == id,
-            (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
+            (Self::Session(owner), TerminalRoute::Session(id))
+            | (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
             // A standalone terminal lives at the un-nested address and nowhere
             // else, and no owned terminal is reachable there: the un-nested
             // address names no owner, so serving an owned terminal from it would

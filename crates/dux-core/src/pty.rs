@@ -3445,14 +3445,13 @@ fn convert_terminal_color(
 
 fn named_color_to_tui(color: NamedColor) -> CellColor {
     match color {
-        NamedColor::Black => CellColor::Indexed(0),
-        NamedColor::Red => CellColor::Indexed(1),
-        NamedColor::Green => CellColor::Indexed(2),
-        NamedColor::Yellow => CellColor::Indexed(3),
-        NamedColor::Blue => CellColor::Indexed(4),
-        NamedColor::Magenta => CellColor::Indexed(5),
-        NamedColor::Cyan => CellColor::Indexed(6),
-        NamedColor::White => CellColor::Indexed(7),
+        NamedColor::Red | NamedColor::DimRed => CellColor::Indexed(1),
+        NamedColor::Green | NamedColor::DimGreen => CellColor::Indexed(2),
+        NamedColor::Yellow | NamedColor::DimYellow => CellColor::Indexed(3),
+        NamedColor::Blue | NamedColor::DimBlue => CellColor::Indexed(4),
+        NamedColor::Magenta | NamedColor::DimMagenta => CellColor::Indexed(5),
+        NamedColor::Cyan | NamedColor::DimCyan => CellColor::Indexed(6),
+        NamedColor::White | NamedColor::DimWhite => CellColor::Indexed(7),
         NamedColor::BrightBlack => CellColor::Indexed(8),
         NamedColor::BrightRed => CellColor::Indexed(9),
         NamedColor::BrightGreen => CellColor::Indexed(10),
@@ -3461,14 +3460,7 @@ fn named_color_to_tui(color: NamedColor) -> CellColor {
         NamedColor::BrightMagenta => CellColor::Indexed(13),
         NamedColor::BrightCyan => CellColor::Indexed(14),
         NamedColor::BrightWhite => CellColor::Indexed(15),
-        NamedColor::DimBlack => CellColor::Indexed(0),
-        NamedColor::DimRed => CellColor::Indexed(1),
-        NamedColor::DimGreen => CellColor::Indexed(2),
-        NamedColor::DimYellow => CellColor::Indexed(3),
-        NamedColor::DimBlue => CellColor::Indexed(4),
-        NamedColor::DimMagenta => CellColor::Indexed(5),
-        NamedColor::DimCyan => CellColor::Indexed(6),
-        NamedColor::DimWhite => CellColor::Indexed(7),
+        NamedColor::Black | NamedColor::DimBlack => CellColor::Indexed(0),
         NamedColor::Foreground
         | NamedColor::Background
         | NamedColor::Cursor
@@ -8284,7 +8276,7 @@ mod tests {
         let writer = PtyWriter::spawn(Box::new(NullWriter));
         // Clone the sender, simulating the reader thread's hold on it. Keep
         // this clone alive across the drop so it cannot cause a disconnect.
-        let _clone = writer.sender();
+        let sender = writer.sender();
 
         let start = std::time::Instant::now();
         drop(writer);
@@ -8299,8 +8291,8 @@ mod tests {
              remaining sender clones (no channel-disconnect deadlock)"
         );
         // Verify the clone is still alive (i.e. this was a real test of the hazard,
-        // not one where Rust happened to drop `_clone` before `writer`).
-        drop(_clone);
+        // not one where Rust happened to drop `sender` before `writer`).
+        drop(sender);
     }
 
     /// Dropping the guard removes the subscriber immediately, before any PTY

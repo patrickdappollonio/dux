@@ -1454,6 +1454,10 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
 /// The two are read differently by the caller, because "the group has gone" and
 /// "dux could not look properly" are different facts and only the first may
 /// fall through to the shell.
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 fn process_group_members(pgid: u32) -> ProcessGroup {
     // Group 0 is not a group. Every kernel thread reports a process group of 0,
     // so scanning for it would sweep them all in and then refuse the drop the
@@ -3390,6 +3394,10 @@ mod tests {
     /// Classify one live process the way the production scan does, straight
     /// from its own `/proc` entry rather than through a walk of the machine.
     #[cfg(target_os = "linux")]
+    #[expect(
+        clippy::similar_names,
+        reason = "pid, ppid and pgid are the process table's own names for these ids"
+    )]
     fn scan_entry(pid: u32, pgid: u32) -> ScanEntry {
         group_scan_step(std::fs::read(format!("/proc/{pid}/stat")), pgid)
     }

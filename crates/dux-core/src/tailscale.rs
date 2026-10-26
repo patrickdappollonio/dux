@@ -178,40 +178,41 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
     let mut cursor = list;
     while !cursor.is_null() {
         // SAFETY: `cursor` is a node of the list `getifaddrs` returned and has
-        // not been freed; `ifa_name` is a NUL-terminated string it owns, and
-        // `ifa_addr` is null or points at a sockaddr whose family field says
-        // which concrete type it is.
-        unsafe {
-            let entry = &*cursor;
-            let sockaddr = entry.ifa_addr;
-            let name = if entry.ifa_name.is_null() {
-                String::new()
-            } else {
-                std::ffi::CStr::from_ptr(entry.ifa_name)
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            if !sockaddr.is_null() {
-                match i32::from((*sockaddr).sa_family) {
-                    libc::AF_INET => {
-                        let v4 = &*sockaddr.cast::<libc::sockaddr_in>();
-                        found.push((
-                            name,
-                            IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))),
-                        ));
-                    }
-                    libc::AF_INET6 => {
-                        let v6 = &*sockaddr.cast::<libc::sockaddr_in6>();
-                        found.push((
-                            name,
-                            IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr)),
-                        ));
-                    }
-                    _ => {}
+        // not been freed.
+        let entry = unsafe { &*cursor };
+        let sockaddr = entry.ifa_addr;
+        let name = if entry.ifa_name.is_null() {
+            String::new()
+        } else {
+            // SAFETY: a non-null `ifa_name` is a NUL-terminated string the list owns.
+            unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if !sockaddr.is_null() {
+            // SAFETY: a non-null `ifa_addr` points at a sockaddr the list owns.
+            let family = unsafe { (*sockaddr).sa_family };
+            match i32::from(family) {
+                libc::AF_INET => {
+                    // SAFETY: an `AF_INET` sockaddr is laid out as a `sockaddr_in`.
+                    let v4 = unsafe { &*sockaddr.cast::<libc::sockaddr_in>() };
+                    found.push((
+                        name,
+                        IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))),
+                    ));
                 }
+                libc::AF_INET6 => {
+                    // SAFETY: an `AF_INET6` sockaddr is laid out as a `sockaddr_in6`.
+                    let v6 = unsafe { &*sockaddr.cast::<libc::sockaddr_in6>() };
+                    found.push((
+                        name,
+                        IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr)),
+                    ));
+                }
+                _ => {}
             }
-            cursor = entry.ifa_next;
         }
+        cursor = entry.ifa_next;
     }
     // SAFETY: `list` came from a successful `getifaddrs` and is freed once.
     unsafe { libc::freeifaddrs(list) };
@@ -512,11 +513,10 @@ pub(crate) fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
         };
         match ip {
             IpAddr::V4(v4) if is_tailscale_cgnat(v4) => return Some(ip),
-            IpAddr::V4(_) => {}
             IpAddr::V6(v6) if ipv6_fallback.is_none() && is_tailscale_ipv6(v6) => {
                 ipv6_fallback = Some(ip);
             }
-            IpAddr::V6(_) => {}
+            IpAddr::V4(_) | IpAddr::V6(_) => {}
         }
     }
 

@@ -90,9 +90,8 @@ fn pty_read_output_into_alacritty_terminal() {
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(n) => parser.advance(&mut term, &buf[..n]),
-            Err(_) => break,
         }
     }
 

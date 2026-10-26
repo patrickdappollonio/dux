@@ -786,7 +786,7 @@ mod tests {
 
         // Another dux, with a password, where the signed-in one was: said
         // before the password is asked about.
-        let (_other, other_addr) = serve(200, "application/json", dux_status("b"));
+        let (other, other_addr) = serve(200, "application/json", dux_status("b"));
         let error = connect(&remote(other_addr, Some("a")), &lock).unwrap_err();
         assert_eq!(
             error.message,
@@ -828,10 +828,10 @@ mod tests {
 
         // The saved sign-in is not shown to a different dux: only once the
         // status says it is the same one does the token go out.
-        let before = _other.seen().len();
+        let before = other.seen().len();
         let _ = connect(&remote(other_addr, Some("a")), &lock);
         assert!(
-            _other.seen()[before..]
+            other.seen()[before..]
                 .iter()
                 .all(|seen| seen.header("authorization").is_none())
         );
@@ -865,7 +865,7 @@ mod tests {
     fn a_dux_speaking_another_api_or_run_by_another_user_is_refused() {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
-        let _fake = FakeDux::unix(&socket, |_| {
+        let fake = FakeDux::unix(&socket, |_| {
             Reply::json(200, r#"{"version":"v9.0.0","process":"p","api":2}"#)
         });
         let _lock =
@@ -890,7 +890,7 @@ mod tests {
         );
 
         // A socket whose other end is not this user is sent nothing at all.
-        let before = _fake.seen().len();
+        let before = fake.seen().len();
         let other = crate::control_socket::current_uid() + 1;
         super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(Some(other)));
         let error = connect(&Target::Local, &dir.path().join("dux.lock")).unwrap_err();
@@ -901,7 +901,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert_eq!(_fake.seen().len(), before, "nothing was sent");
+        assert_eq!(fake.seen().len(), before, "nothing was sent");
     }
 
     #[test]

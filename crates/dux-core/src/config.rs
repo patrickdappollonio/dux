@@ -7443,14 +7443,20 @@ mod tests {
         unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
         let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
         assert_eq!(result, "/test/value/subdir");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_1") };
     }
 
     #[test]
     fn expand_path_braced_var() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
         let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
         assert_eq!(result, "/braced/sub");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_2") };
     }
 
@@ -7477,8 +7483,12 @@ mod tests {
 
     #[test]
     fn expand_path_rejects_traversal() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
         assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_3") };
     }
 
@@ -8086,6 +8096,8 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn expand_variable_reads_both_forms_and_stops_at_the_name() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_4", "/value") };
         let mut plain = "DUX_TEST_VAR_4/rest".chars().peekable();
         assert_eq!(expand_variable(&mut plain).as_deref(), Some("/value"));
@@ -8094,6 +8106,8 @@ auth = { minimum_password_score = 9 }
         let mut braced = "{DUX_TEST_VAR_4}/rest".chars().peekable();
         assert_eq!(expand_variable(&mut braced).as_deref(), Some("/value"));
         assert_eq!(braced.collect::<String>(), "/rest");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_4") };
 
         let mut unset = "NONEXISTENT_DUX_VAR_998/rest".chars().peekable();
@@ -8124,12 +8138,16 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn project_env_lines_parse_and_expand() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_PROJECT_ENV_SOURCE", "secret") };
         let env = parse_project_env_lines("EDITOR=true\nAPI_KEY=${DUX_TEST_PROJECT_ENV_SOURCE}")
             .expect("parse env");
         let resolved = resolve_project_env(&env).expect("resolve env");
         assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
         assert!(resolved.contains(&("API_KEY".to_string(), "secret".to_string())));
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_PROJECT_ENV_SOURCE") };
     }
 

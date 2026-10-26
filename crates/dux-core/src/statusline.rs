@@ -2511,10 +2511,10 @@ mod tests {
 
         let _ = c.tick(t0 + BUSY_TIMEOUT + Duration::from_secs(1), BUSY_TIMEOUT);
 
-        let line = c.most_recent().expect("a status is open");
+        let newest = c.most_recent().expect("a status is open");
         assert_eq!(
-            line.message, "Pushing\u{2026}",
-            "the heartbeat must not reorder the line, got {line:?}"
+            newest.message, "Pushing\u{2026}",
+            "the heartbeat must not reorder the line, got {newest:?}"
         );
     }
 

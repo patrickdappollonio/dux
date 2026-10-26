@@ -821,7 +821,67 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
-            Action::NewAgentFromPr | Action::ManageProjects | Action::ManageWorktrees => None,
+            Action::NewAgentFromPr
+            | Action::ManageProjects
+            | Action::ManageWorktrees
+            | Action::KillRunning
+            | Action::ClearStatusLine
+            | Action::DetachAgent
+            | Action::RecreateWorkingCopy
+            | Action::EditConfig
+            | Action::RenameWebInstance
+            | Action::NewTerminal
+            | Action::NewProjectTerminal
+            | Action::NewStandaloneTerminal
+            | Action::RenameSession
+            | Action::DeleteProject
+            | Action::RemoveProject
+            | Action::SortAgents
+            | Action::EditMacros
+            | Action::DebugInput
+            | Action::ToggleDiffLineNumbers
+            | Action::ResourceMonitor
+            | Action::ToggleGithubIntegration
+            | Action::RecheckGithub
+            | Action::ToggleCopyOnSelect
+            | Action::ToggleProjectAutoReopenAgents
+            | Action::ToggleAgentAutoReopen
+            | Action::ConfigureStartupCommand
+            | Action::ConfigureGlobalEnv
+            | Action::ConfigureProjectEnv
+            | Action::RerunStartupCommandOnAgent
+            | Action::ReadStartupCommandLogs
+            | Action::ToggleRandomizedPetNameDefault
+            | Action::TogglePrBannerPosition
+            | Action::ForceReconnectAgent
+            | Action::AttachPullRequest
+            | Action::DetachPullRequest
+            | Action::ResumePullRequestAutodetection
+            | Action::RefreshChanges
+            | Action::ChangeDefaultProvider
+            | Action::ChangeProjectDefaultProvider
+            | Action::ChangeTheme
+            | Action::ReloadConfig
+            | Action::StartWebServer
+            | Action::StartBackgroundServer
+            | Action::StopBackgroundServer
+            | Action::ViewServerLog
+            | Action::SetTailscaleMode
+            | Action::CloneProject
+            | Action::ToggleAlwaysShowTabs
+            | Action::ToggleTabReachesAgent
+            | Action::ToggleNerdFontIcons
+            | Action::OpenAgentInfo
+            | Action::ShowWelcomeScreen
+            | Action::ShowReleaseNotes
+            | Action::MoveAgentUp
+            | Action::MoveAgentDown
+            | Action::MoveAgentTop
+            | Action::MoveAgentBottom
+            | Action::MoveTerminalUp
+            | Action::MoveTerminalDown
+            | Action::MoveTerminalTop
+            | Action::MoveTerminalBottom => None,
             Action::OpenMacroBar
             | Action::OpenCurrentPullRequest
             | Action::ToggleFullscreen
@@ -881,64 +941,6 @@ impl Action {
             | Action::NewMacro
             | Action::DeleteMacro
             | Action::ClearTextField => Some("Overlays"),
-            Action::KillRunning
-            | Action::ClearStatusLine
-            | Action::DetachAgent
-            | Action::RecreateWorkingCopy
-            | Action::EditConfig
-            | Action::RenameWebInstance
-            | Action::NewTerminal
-            | Action::NewProjectTerminal
-            | Action::NewStandaloneTerminal
-            | Action::RenameSession
-            | Action::DeleteProject
-            | Action::RemoveProject
-            | Action::SortAgents
-            | Action::EditMacros
-            | Action::DebugInput
-            | Action::ToggleDiffLineNumbers
-            | Action::ResourceMonitor
-            | Action::ToggleGithubIntegration
-            | Action::RecheckGithub
-            | Action::ToggleCopyOnSelect
-            | Action::ToggleProjectAutoReopenAgents
-            | Action::ToggleAgentAutoReopen
-            | Action::ConfigureStartupCommand
-            | Action::ConfigureGlobalEnv
-            | Action::ConfigureProjectEnv
-            | Action::RerunStartupCommandOnAgent
-            | Action::ReadStartupCommandLogs
-            | Action::ToggleRandomizedPetNameDefault
-            | Action::TogglePrBannerPosition
-            | Action::ForceReconnectAgent
-            | Action::AttachPullRequest
-            | Action::DetachPullRequest
-            | Action::ResumePullRequestAutodetection
-            | Action::RefreshChanges
-            | Action::ChangeDefaultProvider
-            | Action::ChangeProjectDefaultProvider
-            | Action::ChangeTheme
-            | Action::ReloadConfig
-            | Action::StartWebServer
-            | Action::StartBackgroundServer
-            | Action::StopBackgroundServer
-            | Action::ViewServerLog
-            | Action::SetTailscaleMode
-            | Action::CloneProject
-            | Action::ToggleAlwaysShowTabs
-            | Action::ToggleTabReachesAgent
-            | Action::ToggleNerdFontIcons
-            | Action::OpenAgentInfo
-            | Action::ShowWelcomeScreen
-            | Action::ShowReleaseNotes
-            | Action::MoveAgentUp
-            | Action::MoveAgentDown
-            | Action::MoveAgentTop
-            | Action::MoveAgentBottom
-            | Action::MoveTerminalUp
-            | Action::MoveTerminalDown
-            | Action::MoveTerminalTop
-            | Action::MoveTerminalBottom => None,
         }
     }
 }

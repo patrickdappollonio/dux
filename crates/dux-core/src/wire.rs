@@ -1582,6 +1582,10 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         // resume-fallback and startup-auto-reopen finals are resolved per-surface
         // in `drive_web_launch_followup`. So both launch View reactions emit
         // nothing here, avoiding a double status.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "named apart from the catch-all so the reason they emit nothing stays with them"
+        )]
         EventReaction::AgentLaunchFailedView(_) | EventReaction::AgentLaunchReadyView(_) => vec![],
         // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
         // unkeyed (anonymous slot). Loud for the same reason as its sibling in

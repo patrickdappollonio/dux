@@ -231,9 +231,8 @@ pub fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKin
         Some(default) if default != branch => Some(BranchWarningKind::Known {
             default_branch: default,
         }),
-        Some(_) => None,
         None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
-        None => None,
+        Some(_) | None => None,
     }
 }
 
@@ -6372,8 +6371,7 @@ pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
         // the same characters, and shortening it would invent one that does not
         // exist.
         let at_boundary = match next {
-            None => true,
-            Some('/') => true,
+            None | Some('/') => true,
             Some(c) => Some(c) == opening_quote,
         };
         if at_boundary {

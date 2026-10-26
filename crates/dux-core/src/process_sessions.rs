@@ -253,6 +253,10 @@ pub(crate) struct MemberState {
 
 /// [`MemberState`] for `pid`, read now. `None` when it is gone or cannot be
 /// read.
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 pub(crate) fn member_state(pid: u32) -> Option<MemberState> {
     #[cfg(target_os = "linux")]
     {
@@ -444,6 +448,10 @@ fn clock_ticks_per_second() -> u64 {
 /// parentheses and may itself contain spaces and parentheses, so the fields
 /// after it are read from after the LAST closing parenthesis.
 #[cfg(any(target_os = "linux", test))]
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 fn parse_linux_stat_with(pid: u32, stat: &str, ticks_per_second: u64) -> Option<ProcRow> {
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;
@@ -1040,7 +1048,10 @@ pub struct SpawnTicket {
 
 impl std::fmt::Debug for SpawnTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnTicket").field("id", &self.id).finish()
+        f.debug_struct("SpawnTicket")
+            .field("registry", &self.registry)
+            .field("id", &self.id)
+            .finish()
     }
 }
 
@@ -2573,6 +2584,10 @@ mod tests {
     /// One second on the boot-relative clock start times are kept in.
     const SEC: u64 = 1_000_000_000;
 
+    #[expect(
+        clippy::similar_names,
+        reason = "pid, ppid and pgid are the process table's own names for these ids"
+    )]
     fn row(pid: u32, ppid: u32, sid: u32) -> ProcRow {
         ProcRow {
             pid,
@@ -3415,6 +3430,8 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let mut command = std::process::Command::new("sleep");
         command.arg("30").current_dir(&folder);
+        // SAFETY: the hook only calls `setsid`, which is async-signal-safe and
+        // allocates nothing, as a pre-exec hook must.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;

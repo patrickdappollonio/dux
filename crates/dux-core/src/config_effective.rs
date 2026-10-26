@@ -660,11 +660,30 @@ fn numbered(configured: u64, used: u64, ceiling: u64, floor_reason: &str) -> Str
     }
 }
 
+/// Whether a setting's parser read its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Parse {
+    /// The parser read it.
+    Read,
+    /// The parser did not.
+    NotRead,
+}
+
+impl<T> From<Option<T>> for Parse {
+    fn from(parsed: Option<T>) -> Self {
+        if parsed.is_some() {
+            Self::Read
+        } else {
+            Self::NotRead
+        }
+    }
+}
+
 /// Why a worded value is not used as written, from its parser's answer: one
 /// it reads (only the spelling differs from the config comment's), or one it
 /// does not.
-fn worded<T>(parsed: Option<T>, known: &str, fallback: &str) -> String {
-    if parsed.is_some() {
+fn worded(parsed: Parse, known: &str, fallback: &str) -> String {
+    if parsed == Parse::Read {
         "dux reads this setting without regard to case or surrounding spaces".to_string()
     } else {
         format!("dux knows {known}, and uses {fallback} for anything else")
@@ -806,7 +825,7 @@ fn ui_display_corrections(
         json(&effective_pr_banner_position(position).as_str()),
         &|| {
             worded(
-                PrBannerPosition::parse(position),
+                PrBannerPosition::parse(position).into(),
                 "top and bottom",
                 "bottom",
             )
@@ -819,7 +838,7 @@ fn ui_display_corrections(
         json(&effective_compose_bar(compose).as_str()),
         &|| {
             worded(
-                ComposeBarMode::parse(compose),
+                ComposeBarMode::parse(compose).into(),
                 "auto, always and never",
                 "auto",
             )
@@ -873,7 +892,7 @@ fn capability_provider_and_editor_corrections(found: &mut Corrections, config: &
         json(&effective_terminal_identity(identity).as_str()),
         &|| {
             worded(
-                TerminalIdentityMode::parse(identity),
+                TerminalIdentityMode::parse(identity).into(),
                 "auto, mirror, ghostty, kitty, iterm2 and none",
                 "auto",
             )
@@ -887,7 +906,7 @@ fn capability_provider_and_editor_corrections(found: &mut Corrections, config: &
         &|| {
             if capabilities.passthrough {
                 worded(
-                    ClipboardPassthroughMode::parse(clipboard),
+                    ClipboardPassthroughMode::parse(clipboard).into(),
                     "focused, always and off",
                     "focused",
                 )
@@ -909,7 +928,7 @@ fn capability_provider_and_editor_corrections(found: &mut Corrections, config: &
             json(&effective_web_dragdrop_paste(Some(form)).as_str()),
             &|| {
                 worded(
-                    WebDragDropPaste::parse(form),
+                    WebDragDropPaste::parse(form).into(),
                     "bare, single_quoted, double_quoted and backslash_escaped",
                     "bare",
                 )
@@ -936,7 +955,7 @@ fn server_corrections(found: &mut Corrections, config: &Config) {
         json(&effective_tailscale(&server.tailscale).as_str()),
         &|| {
             worded(
-                TailscaleMode::parse(&server.tailscale),
+                TailscaleMode::parse(&server.tailscale).into(),
                 "auto, yes and no",
                 "auto",
             )
@@ -1060,7 +1079,7 @@ fn server_timing_and_identity_corrections(found: &mut Corrections, config: &Conf
         json(&effective_server_favicon(&server.favicon)),
         &|| {
             worded(
-                parse_server_favicon(&server.favicon),
+                parse_server_favicon(&server.favicon).into(),
                 "the tints violet, blue, sky, cyan, teal, green, amber, orange, red, pink and \
                  rose",
                 "the default duck",
