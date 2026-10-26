@@ -134,16 +134,18 @@ async fn boot_with(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     if !config.is_empty() {
-        std::fs::write(&paths.config_path, config).unwrap();
+        std::fs::write(&paths.config_path, config).expect("write the test file");
     }
     if let Some(version) = seed_last_seen {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
-        store.set_last_seen_version(version).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
+        store
+            .set_last_seen_version(version)
+            .expect("save the last seen version");
     }
 
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -151,8 +153,10 @@ async fn boot_with(
         Router::new(),
         tune(RouterParams::plain_http().with_release_notes_api_base(api_base)),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         let _ = axum::serve(
             listener,

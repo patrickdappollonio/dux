@@ -23,7 +23,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .expect("run git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -50,11 +50,11 @@ impl Fixture {
 /// with one commit of its own, pushed so the pre-create pull has an upstream.
 fn repo_on_a_feature_branch(root: &Path) -> (PathBuf, String) {
     let seed = root.join("seed");
-    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::create_dir_all(&seed).expect("create the test directory");
     git(&seed, &["init", "-q", "-b", "main"]);
     git(&seed, &["config", "user.email", "t@example.com"]);
     git(&seed, &["config", "user.name", "Test"]);
-    std::fs::write(seed.join("README.md"), "base\n").unwrap();
+    std::fs::write(seed.join("README.md"), "base\n").expect("write the test file");
     git(&seed, &["add", "README.md"]);
     git(&seed, &["commit", "-q", "-m", "base"]);
 
@@ -88,7 +88,7 @@ fn repo_on_a_feature_branch(root: &Path) -> (PathBuf, String) {
         "refs/remotes/origin/main"
     );
     git(&repo, &["switch", "-q", "-c", "feature"]);
-    std::fs::write(repo.join("feature.txt"), "only on feature\n").unwrap();
+    std::fs::write(repo.join("feature.txt"), "only on feature\n").expect("write the test file");
     git(&repo, &["add", "feature.txt"]);
     git(&repo, &["commit", "-q", "-m", "feature work"]);
     git(&repo, &["push", "-q", "-u", "origin", "feature"]);
@@ -109,8 +109,8 @@ async fn boot() -> Fixture {
         lock_path: state.join("dux.lock"),
         socket_path: state.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     // The agent CLI is the one thing that cannot run here; `cat` stands in for
     // it so the create journey spawns a real PTY.
@@ -125,15 +125,17 @@ async fn boot() -> Fixture {
     );
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     Fixture {
         addr,
@@ -164,7 +166,7 @@ async fn add_project(f: &Fixture, checkout: Checkout) -> String {
         }))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status();
     assert!(status.is_success(), "add must succeed, got {status}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -172,12 +174,15 @@ async fn add_project(f: &Fixture, checkout: Checkout) -> String {
         let projects: serde_json::Value =
             reqwest::get(format!("http://{}/api/v1/projects", f.addr))
                 .await
-                .unwrap()
+                .expect("send the request")
                 .json()
                 .await
-                .unwrap();
+                .expect("the response body is JSON");
         if let Some(project) = projects.as_array().and_then(|list| list.first()) {
-            return project["id"].as_str().unwrap().to_string();
+            return project["id"]
+                .as_str()
+                .expect("the project has an id")
+                .to_string();
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -195,7 +200,7 @@ async fn create_agent(f: &Fixture, project_id: &str) -> PathBuf {
         .json(&serde_json::json!({"kind": "new", "project_id": project_id, "name": "agent-one"}))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status();
     assert!(
         status.is_success(),
@@ -207,10 +212,10 @@ async fn create_agent(f: &Fixture, project_id: &str) -> PathBuf {
         let sessions: serde_json::Value =
             reqwest::get(format!("http://{}/api/v1/sessions", f.addr))
                 .await
-                .unwrap()
+                .expect("send the request")
                 .json()
                 .await
-                .unwrap();
+                .expect("the response body is JSON");
         let worktree = sessions.as_array().and_then(|list| {
             list.iter().find_map(|s| {
                 s["workspace"]["worktree_path"]
@@ -235,15 +240,15 @@ fn contains_commit(worktree: &Path, commit: &str) -> bool {
         .args(["merge-base", "--is-ancestor", commit, "HEAD"])
         .current_dir(worktree)
         .status()
-        .unwrap()
+        .expect("run git")
         .success()
 }
 
 fn stored_base(f: &Fixture, project_id: &str) -> Option<String> {
     SessionStore::open(&f.db_path())
-        .unwrap()
+        .expect("open the session store")
         .load_projects()
-        .unwrap()
+        .expect("open the session store")
         .into_iter()
         .find(|p| p.id == project_id)
         .and_then(|p| p.leading_branch)
@@ -402,7 +407,7 @@ async fn the_checkout_confirmation_reaches_the_browser_with_its_names_as_parts()
 /// `file`, leaving the folder on `feature`. Returns that commit.
 fn local_branch_off_main(repo: &Path, branch: &str, file: &str) -> String {
     git(repo, &["switch", "-q", "-c", branch, "main"]);
-    std::fs::write(repo.join(file), format!("only on {branch}\n")).unwrap();
+    std::fs::write(repo.join(file), format!("only on {branch}\n")).expect("write the test file");
     git(repo, &["add", file]);
     git(repo, &["commit", "-q", "-m", &format!("{branch} work")]);
     let commit = git(repo, &["rev-parse", "HEAD"]);
@@ -416,9 +421,9 @@ async fn list_branches(f: &Fixture, project_id: &str) -> (reqwest::StatusCode, s
         f.addr
     ))
     .await
-    .unwrap();
+    .expect("send the request");
     let status = resp.status();
-    let text = resp.text().await.unwrap();
+    let text = resp.text().await.expect("read the response body");
     let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
     (status, body)
 }
@@ -441,7 +446,7 @@ async fn change_base(f: &Fixture, project_id: &str, branch: &str) -> reqwest::Re
         .json(&serde_json::json!({ "branch": branch }))
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
 }
 
 async fn wait_for_base(f: &Fixture, project_id: &str, branch: &str) {
@@ -462,7 +467,7 @@ type EventsSocket =
 async fn events_socket(f: &Fixture) -> EventsSocket {
     tokio_tungstenite::connect_async(format!("ws://{}/ws/events", f.addr))
         .await
-        .unwrap()
+        .expect("open the websocket")
         .0
 }
 
@@ -759,19 +764,22 @@ async fn both_base_branch_routes_refuse_a_project_whose_folder_is_gone() {
 async fn sessions(f: &Fixture) -> serde_json::Value {
     reqwest::get(format!("http://{}/api/v1/sessions", f.addr))
         .await
-        .unwrap()
+        .expect("send the request")
         .json()
         .await
-        .unwrap()
+        .expect("the response body is JSON")
 }
 
 async fn delete_agent_and_wait(f: &Fixture, query: &str) {
-    let id = sessions(f).await[0]["id"].as_str().unwrap().to_string();
+    let id = sessions(f).await[0]["id"]
+        .as_str()
+        .expect("the agent has an id")
+        .to_string();
     let resp = reqwest::Client::new()
         .delete(format!("http://{}/api/v1/sessions/{id}{query}", f.addr))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert!(resp.status().is_success(), "delete got {}", resp.status());
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while !sessions(f)
@@ -796,7 +804,7 @@ fn local_branch_exists(repo: &Path, branch: &str) -> bool {
             &format!("refs/heads/{branch}"),
         ])
         .status()
-        .unwrap()
+        .expect("run git")
         .success()
 }
 

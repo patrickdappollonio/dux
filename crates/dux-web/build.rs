@@ -344,7 +344,10 @@ fn skip_frontend_build(dist: &Path, dist_index: &Path) {
     std::fs::create_dir_all(dist)
         .and_then(|()| std::fs::write(dist_index, NOT_BUILT_PAGE))
         .unwrap_or_else(|err| {
-            panic!("dux-web: could not write the notice page to {dist_index:?}: {err}")
+            panic!(
+                "dux-web: could not write the notice page to \"{}\": {err}",
+                dist_index.display()
+            )
         });
     mark_state("not_built");
     println!(
@@ -426,7 +429,10 @@ fn stage_dist(dist: &Path, staged: &Path) {
     if let Err(err) = std::fs::remove_dir_all(staged)
         && err.kind() != std::io::ErrorKind::NotFound
     {
-        panic!("dux-web: could not clear the staging directory {staged:?}: {err}");
+        panic!(
+            "dux-web: could not clear the staging directory \"{}\": {err}",
+            staged.display()
+        );
     }
     copy_tree(dist, staged);
 }
@@ -456,11 +462,12 @@ fn stage_dist(dist: &Path, staged: &Path) {
 /// loud failure is the point.
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to)
-        .unwrap_or_else(|err| panic!("dux-web: could not create {to:?}: {err}"));
+        .unwrap_or_else(|err| panic!("dux-web: could not create \"{}\": {err}", to.display()));
     let entries = std::fs::read_dir(from)
-        .unwrap_or_else(|err| panic!("dux-web: could not read {from:?}: {err}"));
+        .unwrap_or_else(|err| panic!("dux-web: could not read \"{}\": {err}", from.display()));
     for entry in entries {
-        let entry = entry.unwrap_or_else(|err| panic!("dux-web: could not read {from:?}: {err}"));
+        let entry = entry
+            .unwrap_or_else(|err| panic!("dux-web: could not read \"{}\": {err}", from.display()));
         let path = entry.path();
         let dest = to.join(entry.file_name());
         if path.is_dir() {
@@ -473,13 +480,14 @@ fn copy_tree(from: &Path, to: &Path) {
         // function allows (see the doc comment).
         if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) && !path.exists() {
             println!(
-                "cargo:warning=dux-web: skipping the dangling symlink {path:?} while staging \
-                 web/dist; it points at nothing, so there are no bytes to embed."
+                "cargo:warning=dux-web: skipping the dangling symlink \"{}\" while staging \
+                 web/dist; it points at nothing, so there are no bytes to embed.",
+                path.display()
             );
             continue;
         }
         let bytes = std::fs::read(&path)
-            .unwrap_or_else(|err| panic!("dux-web: could not read {path:?}: {err}"));
+            .unwrap_or_else(|err| panic!("dux-web: could not read \"{}\": {err}", path.display()));
         let compressible = path
             .extension()
             .and_then(|e| e.to_str())
@@ -501,7 +509,10 @@ fn copy_tree(from: &Path, to: &Path) {
                 GzDecoder::new(&bytes[..])
                     .read_to_end(&mut out)
                     .unwrap_or_else(|err| {
-                        panic!("dux-web: could not inflate the in-place-gzipped {path:?}: {err}")
+                        panic!(
+                            "dux-web: could not inflate the in-place-gzipped \"{}\": {err}",
+                            path.display()
+                        )
                     });
                 out
             } else {
@@ -512,14 +523,15 @@ fn copy_tree(from: &Path, to: &Path) {
                 ..Default::default()
             };
             let mut compressed = Vec::new();
-            brotli::BrotliCompress(&mut raw.as_slice(), &mut compressed, &params)
-                .unwrap_or_else(|err| panic!("dux-web: could not brotli {path:?}: {err}"));
+            brotli::BrotliCompress(&mut raw.as_slice(), &mut compressed, &params).unwrap_or_else(
+                |err| panic!("dux-web: could not brotli \"{}\": {err}", path.display()),
+            );
             compressed
         } else {
             bytes
         };
         std::fs::write(&dest, out)
-            .unwrap_or_else(|err| panic!("dux-web: could not write {dest:?}: {err}"));
+            .unwrap_or_else(|err| panic!("dux-web: could not write \"{}\": {err}", dest.display()));
     }
 }
 

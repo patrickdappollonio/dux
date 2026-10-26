@@ -56,7 +56,7 @@ impl Drop for FollowCount {
     }
 }
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/server/connections", get(get_connections))
         .route("/api/v1/server/log", get(get_log))
@@ -206,6 +206,7 @@ async fn follow(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::time::Duration;
 
     use axum::http::Request;
@@ -355,7 +356,10 @@ mod tests {
         assert!(sentence.contains("<generation>:<line>"), "{sentence}");
 
         // One answer is one bounded document, and says when it was cut.
-        let many: String = (0..10_001).map(|n| format!("line {n}\n")).collect();
+        let many = (0..10_001).fold(String::new(), |mut many, n| {
+            writeln!(many, "line {n}").expect("writing to a String cannot fail");
+            many
+        });
         std::fs::write(tmp.path().join("server.log"), many).unwrap();
         let (_, body) = get_json(app, "/api/v1/server/log?lines=20000").await;
         let lines = body["lines"].as_array().unwrap();
@@ -433,7 +437,10 @@ mod tests {
         );
 
         // A follow starts from at most as many lines as one answer holds.
-        let many: String = (0..10_001).map(|n| format!("line {n}\n")).collect();
+        let many = (0..10_001).fold(String::new(), |mut many, n| {
+            writeln!(many, "line {n}").expect("writing to a String cannot fail");
+            many
+        });
         std::fs::write(&log, many).unwrap();
         let resp = app
             .oneshot(

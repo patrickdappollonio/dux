@@ -24,35 +24,36 @@ const LOGO_SLOT: &str = "{{LOGO_DATA_URI}}";
 /// Standard base64 with padding, in a `const fn` so the page's logo is built
 /// at compile time from the bytes above.
 const fn base64_encode<const N: usize>(input: &[u8]) -> [u8; N] {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = [b'='; N];
     let mut i = 0;
     let mut o = 0;
     while i < input.len() {
-        let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() {
-            input[i + 1] as u32
-        } else {
-            0
-        };
-        let b2 = if i + 2 < input.len() {
-            input[i + 2] as u32
-        } else {
-            0
-        };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out[o] = ALPHABET[((triple >> 18) & 63) as usize];
-        out[o + 1] = ALPHABET[((triple >> 12) & 63) as usize];
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        out[o] = base64_digit(b0 >> 2);
+        out[o + 1] = base64_digit(((b0 & 0b11) << 4) | (b1 >> 4));
         if i + 1 < input.len() {
-            out[o + 2] = ALPHABET[((triple >> 6) & 63) as usize];
+            out[o + 2] = base64_digit(((b1 & 0b1111) << 2) | (b2 >> 6));
         }
         if i + 2 < input.len() {
-            out[o + 3] = ALPHABET[(triple & 63) as usize];
+            out[o + 3] = base64_digit(b2 & 0b11_1111);
         }
         i += 3;
         o += 4;
     }
     out
+}
+
+/// The standard base64 alphabet's character for a six-bit value.
+const fn base64_digit(sextet: u8) -> u8 {
+    match sextet {
+        0..=25 => b'A' + sextet,
+        26..=51 => b'a' + (sextet - 26),
+        52..=61 => b'0' + (sextet - 52),
+        62 => b'+',
+        _ => b'/',
+    }
 }
 
 static LOGO_BASE64_STR: &str = match std::str::from_utf8(&LOGO_BASE64) {

@@ -32,7 +32,7 @@ const OTHER_PASSWORD: &str = "harbor cinnamon glacier tundra mosaic";
 
 fn hash_of(password: &str) -> String {
     static HASHES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-    let mut hashes = HASHES.lock().unwrap();
+    let mut hashes = HASHES.lock().expect("the hash cache lock is not poisoned");
     if let Some((_, hash)) = hashes.iter().find(|(p, _)| p == password) {
         return hash.clone();
     }
@@ -104,7 +104,12 @@ impl dux_core::engine::ConfigSurface for TerminalUiSurface {
 
 /// This machine's Tailscale address, as a successful look reports it.
 fn own_tailscale_ips() -> Vec<std::net::IpAddr> {
-    vec![TAILNET.local().unwrap().ip()]
+    vec![
+        TAILNET
+            .local()
+            .expect("the Tailscale arrival has a local address")
+            .ip(),
+    ]
 }
 
 /// What every router here starts with unless a test says otherwise: a
@@ -159,13 +164,13 @@ impl Dux {
             lock_path: root.join("dux.lock"),
             socket_path: root.join("dux.sock"),
         };
-        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
         std::fs::write(
             &paths.config_path,
             format!("# a comment that must survive\n\n[server.auth]\n{auth}\n"),
         )
-        .unwrap();
-        let mut engine = bootstrap_engine(&paths).unwrap();
+        .expect("write the test file");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
         dux_core::test_provider::defuse_config(&mut engine.config);
         if surface == EngineSurface::TerminalUi {
             engine.surface = Box::new(TerminalUiSurface);
@@ -178,7 +183,7 @@ impl Dux {
             &dux_core::config::ServerConfig::default(),
             &handle.paths(),
         )
-        .unwrap();
+        .expect("open the server log");
         let app = build_app(
             handle.clone(),
             Router::<AppState>::new(),
@@ -210,7 +215,7 @@ impl Dux {
     }
 
     fn config(&self) -> String {
-        std::fs::read_to_string(self.tmp.path().join("config.toml")).unwrap()
+        std::fs::read_to_string(self.tmp.path().join("config.toml")).expect("read the test file")
     }
 
     async fn send(&self, from: Arrival, request: Req) -> Answer {
@@ -244,7 +249,7 @@ impl Dux {
             }
             None => Body::empty(),
         };
-        let mut built = builder.body(body).unwrap();
+        let mut built = builder.body(body).expect("build the request");
         built
             .extensions_mut()
             .insert(axum::extract::ConnectInfo(from));
@@ -253,7 +258,7 @@ impl Dux {
         let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
-            .unwrap();
+            .expect("read the response body");
         Answer {
             status,
             headers,
@@ -286,7 +291,10 @@ impl Dux {
     async fn cli_token(&self, from: Arrival) -> String {
         let login = self.cli_login(from, PASSWORD).await;
         assert_eq!(login.status, StatusCode::OK, "{}", login.body);
-        login.json()["token"].as_str().unwrap().to_string()
+        login.json()["token"]
+            .as_str()
+            .expect("the login response carries a token")
+            .to_string()
     }
 
     /// Sign in and answer the `Cookie` header value the session rides on.
@@ -363,7 +371,11 @@ impl Answer {
     fn set_cookie(&self) -> String {
         self.headers
             .get("set-cookie")
-            .map(|v| v.to_str().unwrap().to_string())
+            .map(|v| {
+                v.to_str()
+                    .expect("the set-cookie header is ASCII")
+                    .to_string()
+            })
             .unwrap_or_default()
     }
 
@@ -372,7 +384,7 @@ impl Answer {
         self.set_cookie()
             .split(';')
             .next()
-            .unwrap()
+            .expect("split always yields a first part")
             .trim()
             .to_string()
     }
@@ -914,13 +926,15 @@ async fn blocked_addresses_apply_with_no_password_and_close_sockets_with_4403() 
 /// The router on a real loopback listener, served the way every leg is.
 struct Serve {
     addr: SocketAddr,
-    _dux: Dux,
+    dux: Dux,
 }
 
 impl Serve {
     async fn start(dux: Dux) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("read the bound address");
         let app = dux.app.clone();
         tokio::spawn(async move {
             let _ = axum::serve(
@@ -929,7 +943,7 @@ impl Serve {
             )
             .await;
         });
-        Self { addr, _dux: dux }
+        Self { addr, dux }
     }
 
     async fn connect(
@@ -942,18 +956,18 @@ impl Serve {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = format!("ws://{}{path}", self.addr)
             .into_client_request()
-            .unwrap();
+            .expect("build the websocket request");
         for (name, value) in headers {
             request.headers_mut().insert(
                 tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
-                    .unwrap(),
-                value.parse().unwrap(),
+                    .expect("a valid header name"),
+                value.parse().expect("a valid header value"),
             );
         }
         if let Some(cookie) = cookie {
             request
                 .headers_mut()
-                .insert("cookie", cookie.parse().unwrap());
+                .insert("cookie", cookie.parse().expect("a valid cookie header"));
         }
         tokio_tungstenite::connect_async(request)
             .await
@@ -983,14 +997,14 @@ impl Serve {
             .json(&json!({ "password": PASSWORD }))
             .send()
             .await
-            .unwrap();
+            .expect("send the request");
         assert_eq!(response.status(), 204);
         response.headers()["set-cookie"]
             .to_str()
-            .unwrap()
+            .expect("the set-cookie header is ASCII")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split always yields a first part")
             .to_string()
     }
 }
@@ -1012,7 +1026,7 @@ where
                 return Some(frame.map_or(1005, |f| u16::from(f.code)));
             }
             Ok(None | Some(Err(_))) => return Some(1006),
-            _ => continue,
+            _ => {}
         }
     }
     None
@@ -1020,6 +1034,8 @@ where
 
 #[tokio::test]
 async fn every_socket_family_is_accepted_then_closed_with_4401_without_a_session() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
     let server = Serve::start(Dux::with_password("")).await;
     let forwarded = [("x-forwarded-for", "198.51.100.9")];
     for path in [
@@ -1039,7 +1055,6 @@ async fn every_socket_family_is_accepted_then_closed_with_4401_without_a_session
     // From this machine under `network`, the events socket opens and stays.
     assert_eq!(server.ws_close_code("/ws/events", &[], None).await, None);
     // A cross-site page cannot even open one to be told why.
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = format!("ws://{}/ws/events", server.addr)
         .into_client_request()
         .unwrap();
@@ -1066,7 +1081,7 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
     );
 
     // A followed server log holds its session the way a socket does.
-    std::fs::write(server._dux.tmp.path().join("server.log"), "hello\n").unwrap();
+    std::fs::write(server.dux.tmp.path().join("server.log"), "hello\n").unwrap();
     let client = reqwest::Client::new();
     let follow = |cookie: String| {
         let client = client.clone();
@@ -1091,7 +1106,7 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
         let deadline = tokio::time::Instant::now() + within;
         loop {
             match tokio::time::timeout_at(deadline, reply.chunk()).await {
-                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(Some(_))) => {}
                 Ok(Ok(None)) => return true,
                 _ => return false,
             }
@@ -1155,60 +1170,11 @@ async fn signing_out_and_a_password_change_close_the_sockets_that_held_the_sessi
     );
 }
 
-#[tokio::test]
-async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
-    let dux = Dux::start("");
-    let refused = dux
-        .send(
-            NETWORK,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
-        )
-        .await;
-    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
-    assert!(refused.json()["message"].is_string());
-    assert!(!dux.config().contains("$argon2id$"));
-
-    let weak = dux
-        .send(
-            THIS_MACHINE,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "password1234" })),
-        )
-        .await;
-    assert_eq!(
-        weak.error().as_deref(),
-        Some("weak_password"),
-        "{}",
-        weak.body
-    );
-    let body = weak.json();
-    assert!(
-        body["score"].is_number() && body["message"].is_string(),
-        "{body}"
-    );
-    assert!(body["feedback"]["suggestions"].is_array(), "{body}");
-    let short = dux
-        .send(
-            THIS_MACHINE,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "Qz7#vL9p" })),
-        )
-        .await;
-    assert_eq!(short.error().as_deref(), Some("password_too_short"));
-    assert_eq!(short.json()["minimum"], json!(12));
-
-    let set = dux
-        .send(
-            TAILNET,
-            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
-        )
-        .await;
-    assert_eq!(set.status, StatusCode::NO_CONTENT, "{}", set.body);
-    let config = dux.config();
-    assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
-    assert!(!config.contains(PASSWORD));
-    assert!(config.contains("# a comment that must survive"));
-    assert_eq!(dux.status(NETWORK, None).await["password_set"], json!(true));
-    assert_eq!(dux.reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
-
+/// Changing the password needs the current one: missing is not "signed out",
+/// wrong is its own refusal accounted like a failed login, and neither changes
+/// anything; the right one, once the slow-down is waited out, changes it and ends
+/// every session from before.
+async fn changing_it_needs_the_current_one(dux: &Dux) {
     // Changing it needs the current one: missing is not "signed out", wrong
     // is its own refusal, and neither changes anything.
     let cookie = dux.signed_in(NETWORK).await;
@@ -1272,6 +1238,63 @@ async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
         dux.login(NETWORK, PASSWORD).await.status,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
+    let dux = Dux::start("");
+    let refused = dux
+        .send(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert!(refused.json()["message"].is_string());
+    assert!(!dux.config().contains("$argon2id$"));
+
+    let weak = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "password1234" })),
+        )
+        .await;
+    assert_eq!(
+        weak.error().as_deref(),
+        Some("weak_password"),
+        "{}",
+        weak.body
+    );
+    let body = weak.json();
+    assert!(
+        body["score"].is_number() && body["message"].is_string(),
+        "{body}"
+    );
+    assert!(body["feedback"]["suggestions"].is_array(), "{body}");
+    let short = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": "Qz7#vL9p" })),
+        )
+        .await;
+    assert_eq!(short.error().as_deref(), Some("password_too_short"));
+    assert_eq!(short.json()["minimum"], json!(12));
+
+    let set = dux
+        .send(
+            TAILNET,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(set.status, StatusCode::NO_CONTENT, "{}", set.body);
+    let config = dux.config();
+    assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
+    assert!(!config.contains(PASSWORD));
+    assert!(config.contains("# a comment that must survive"));
+    assert_eq!(dux.status(NETWORK, None).await["password_set"], json!(true));
+    assert_eq!(dux.reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    changing_it_needs_the_current_one(&dux).await;
 }
 
 /// Wrong current passwords are guesses too: they count toward the block like
@@ -1448,13 +1471,13 @@ async fn a_login_flood_leaves_ordinary_requests_answering() {
          failed_login_delay_seconds = 0\nmax_failed_logins = 0\nmax_failed_logins_per_minute = 0",
     ));
     let cookie = dux.signed_in(NETWORK).await;
-    let flood: Vec<_> = (0..60)
+    let flood: Vec<_> = (0u8..60)
         .map(|n| {
             let dux = Arc::clone(&dux);
             tokio::spawn(async move {
                 let from = Arrival::Tcp {
                     peer: SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, n as u8)),
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, n)),
                         40000,
                     ),
                     local: NETWORK.local().unwrap(),
@@ -2263,7 +2286,9 @@ fn network_peer(last: u8) -> Arrival {
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, last)),
             50000,
         ),
-        local: NETWORK.local().unwrap(),
+        local: NETWORK
+            .local()
+            .expect("the network arrival has a local address"),
     }
 }
 
@@ -2866,8 +2891,10 @@ async fn a_right_password_racing_a_block_gets_no_session() {
 
 fn v6(peer: &str) -> Arrival {
     Arrival::Tcp {
-        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
-        local: "[2001:db8:ffff::10]:3890".parse().unwrap(),
+        peer: SocketAddr::new(peer.parse().expect("a valid IPv6 address"), 50000),
+        local: "[2001:db8:ffff::10]:3890"
+            .parse()
+            .expect("a valid socket address"),
     }
 }
 
@@ -3354,7 +3381,7 @@ async fn a_pty_socket_signed_out_while_subscribing_gets_no_bytes() {
         panic!("the socket never reached its opening check: {first:?}");
     }
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
@@ -3386,7 +3413,7 @@ async fn send_raw(dux: &Dux, from: Arrival, path: &str, headers: &[(&str, &[u8])
             axum::http::HeaderValue::from_bytes(value).expect("legal obs-text header value"),
         );
     }
-    let mut built = builder.body(Body::empty()).unwrap();
+    let mut built = builder.body(Body::empty()).expect("build the request");
     built
         .extensions_mut()
         .insert(axum::extract::ConnectInfo(from));
@@ -3395,7 +3422,7 @@ async fn send_raw(dux: &Dux, from: Arrival, path: &str, headers: &[(&str, &[u8])
     let headers = response.headers().clone();
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await
-        .unwrap();
+        .expect("read the response body");
     Answer {
         status,
         headers,
@@ -3614,7 +3641,7 @@ async fn an_events_socket_signed_out_while_opening_gets_nothing() {
         .expect("the socket reached its opening check")
         .unwrap();
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
@@ -3684,7 +3711,7 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
     // The terminal goes away and the session ends: a subscribe now would fail
     // and answer 4001, so 4401 proves the session was judged first.
     let gone = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::DELETE, &format!("/api/v1/terminals/{tid}")).cookie(&cookie),
@@ -3692,7 +3719,7 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
         .await;
     assert!(gone.status.is_success(), "{} {}", gone.status, gone.body);
     let out = server
-        ._dux
+        .dux
         .send(
             THIS_MACHINE,
             Req::new(Method::POST, "/api/v1/auth/logout").cookie(&cookie),
@@ -3715,8 +3742,10 @@ async fn a_pty_socket_signed_out_before_subscribing_never_subscribes() {
 /// same /64 dux itself is on.
 fn lan(peer: &str) -> Arrival {
     Arrival::Tcp {
-        peer: SocketAddr::new(peer.parse().unwrap(), 50000),
-        local: "[2001:db8:1:1::10]:3890".parse().unwrap(),
+        peer: SocketAddr::new(peer.parse().expect("a valid IPv6 address"), 50000),
+        local: "[2001:db8:1:1::10]:3890"
+            .parse()
+            .expect("a valid socket address"),
     }
 }
 

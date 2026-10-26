@@ -23,8 +23,12 @@ fn dux_server_starts_exactly_as_the_start_corpus_says() {
         let starts = match dux_core::config::load_config(&paths) {
             Err(_) => false,
             Ok(config) => {
-                dux_core::config::resolve_server_plan(&config.server, &Default::default(), None)
-                    .is_ok()
+                dux_core::config::resolve_server_plan(
+                    &config.server,
+                    &dux_core::config::ServerCliOverrides::default(),
+                    None,
+                )
+                .is_ok()
                     && dux_web::bootstrap::bootstrap_engine(&paths).is_ok()
             }
         };

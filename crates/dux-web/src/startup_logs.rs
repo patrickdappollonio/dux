@@ -615,9 +615,8 @@ mod tests {
         let dir = dux_core::startup::agent_log_dir(&paths, "p1", "s1");
         std::fs::create_dir_all(dir.join("20260101T000000Z-feat.log")).unwrap();
 
-        let err = match collect_logs(&paths, agent_scope("s1")) {
-            Err(e) => e,
-            Ok(_) => panic!("reading a directory as a log file must fail"),
+        let Err(err) = collect_logs(&paths, agent_scope("s1")) else {
+            panic!("reading a directory as a log file must fail");
         };
         let root = tmp.path().to_string_lossy().into_owned();
         assert!(

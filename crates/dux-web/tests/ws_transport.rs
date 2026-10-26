@@ -66,9 +66,9 @@ async fn boot_with_extra_sessions(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         // Seed the owning project so session-delete (which looks up the project)
         // can take the inline path.
         store
@@ -80,9 +80,9 @@ async fn boot_with_extra_sessions(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
@@ -90,10 +90,10 @@ async fn boot_with_extra_sessions(
                 "feat",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
         for id in extra {
             let worktree = root.join(id);
-            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(&worktree).expect("create the test directory");
             store
                 .create_session(&sample_session(
                     id,
@@ -101,10 +101,10 @@ async fn boot_with_extra_sessions(
                     id,
                     worktree.to_string_lossy().as_ref(),
                 ))
-                .unwrap();
+                .expect("save the test agent");
         }
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     // The sample session's provider is "claude", which isn't on PATH in CI. Override
     // it with `cat`, a runnable program that echoes stdin so the real launch flow
@@ -124,15 +124,17 @@ async fn boot_with_extra_sessions(
     engine.config.terminal.args = vec![];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -171,9 +173,9 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -183,9 +185,9 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
@@ -193,9 +195,9 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
                 "feat",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -210,15 +212,17 @@ async fn boot_with_repo() -> (SocketAddr, dux_core::test_scratch::ScratchDir) {
     engine.config.terminal.args = vec![];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -273,12 +277,21 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
 /// A version past the editor's size ceiling answers 200 with the head of git's
 /// own patch rather than the 400 it used to, so the browser has something to
 /// show for a file it cannot hold.
+/// `count` lines reading `<word> 0` up to `<word> <count - 1>`, each ending in a newline.
+fn numbered_lines(word: &str, count: usize) -> String {
+    use std::fmt::Write as _;
+    (0..count).fold(String::new(), |mut lines, i| {
+        writeln!(lines, "{word} {i}").expect("writing to a String cannot fail");
+        lines
+    })
+}
+
 #[tokio::test]
 async fn http_file_diff_answers_a_huge_file_with_the_diff_head() {
     let (addr, tmp) = boot_with_repo().await;
     // Comfortably past the 5 MiB working-copy ceiling, in lines short enough
     // that the patch is far longer than the head cap.
-    let huge: String = (0..600_000).map(|i| format!("line {i}\n")).collect();
+    let huge = numbered_lines("line", 600_000);
     assert!(
         huge.len() > 5 * 1024 * 1024,
         "the fixture must be past the ceiling"
@@ -332,12 +345,12 @@ async fn http_file_diff_answers_a_huge_tracked_file_with_the_diff_head() {
     };
     // Committed over the ceiling, then rewritten line for line so the patch is
     // far longer than the head cap.
-    let committed: String = (0..600_000).map(|i| format!("old {i}\n")).collect();
+    let committed = numbered_lines("old", 600_000);
     assert!(committed.len() > 5 * 1024 * 1024);
     std::fs::write(root.join("tracked-big.txt"), &committed).expect("write");
     run(&["add", "--", "tracked-big.txt"]);
     run(&["commit", "-q", "-m", "big"]);
-    let rewritten: String = (0..600_000).map(|i| format!("new {i}\n")).collect();
+    let rewritten = numbered_lines("new", 600_000);
     std::fs::write(root.join("tracked-big.txt"), &rewritten).expect("rewrite");
 
     let client = reqwest::Client::new();
@@ -457,9 +470,9 @@ async fn boot_for_create_agent_window(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -469,11 +482,11 @@ async fn boot_for_create_agent_window(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     // The spawned agent provider defaults to "claude"; override with `cat` so the
     // launch flow spawns a runnable PTY in CI.
@@ -498,15 +511,17 @@ async fn boot_for_create_agent_window(
         ),
         None => router(handle),
     };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -571,7 +586,7 @@ type ClientWs =
 async fn connect_events(addr: SocketAddr) -> (ClientWs, String) {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
-        .unwrap();
+        .expect("open the websocket");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(500), ws.next()).await
@@ -579,7 +594,13 @@ async fn connect_events(addr: SocketAddr) -> (ClientWs, String) {
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&t)
             && v["event"] == "connected"
         {
-            return (ws, v["id"].as_str().unwrap().to_string());
+            return (
+                ws,
+                v["id"]
+                    .as_str()
+                    .expect("the hello frame carries a connection id")
+                    .to_string(),
+            );
         }
     }
     panic!("never received the connected frame");
@@ -734,9 +755,9 @@ async fn boot_with_gated_startup_command() -> (
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -747,9 +768,9 @@ async fn boot_with_gated_startup_command() -> (
                 auto_reopen_agents: None,
                 // Blocks until the test opens the FIFO for writing.
                 startup_command: Some(format!("cat {}", gate.display())),
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
@@ -757,9 +778,9 @@ async fn boot_with_gated_startup_command() -> (
                 "feat",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     // Pin the shell so the gate command is interpreted identically everywhere,
     // rather than depending on whatever login shell the host defaults to.
@@ -767,15 +788,17 @@ async fn boot_with_gated_startup_command() -> (
     engine.config.startup_command_terminal.args = vec!["-c".to_string()];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, gate, tmp)
 }
@@ -1055,10 +1078,13 @@ async fn a_half_done_delete_reports_a_sticky_error_to_the_watching_connection() 
 /// `user_agent`, and wait for its handshake, by which time it is attached.
 async fn connect_pty_as(addr: SocketAddr, path: &str, user_agent: &str) -> ClientWs {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
-    request
-        .headers_mut()
-        .insert("user-agent", user_agent.parse().unwrap());
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("build the websocket request");
+    request.headers_mut().insert(
+        "user-agent",
+        user_agent.parse().expect("a valid user agent header"),
+    );
     let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("connect the pty socket");
@@ -1329,15 +1355,77 @@ async fn a_phone_that_parked_its_terminal_while_looking_at_it_still_blocks_a_del
 /// `user_agent`, with its connection id.
 async fn connect_events_at(addr: SocketAddr, path: &str, user_agent: &str) -> (ClientWs, String) {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut request = format!("ws://{addr}{path}").into_client_request().unwrap();
-    request
-        .headers_mut()
-        .insert("user-agent", user_agent.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("build the websocket request");
+    request.headers_mut().insert(
+        "user-agent",
+        user_agent.parse().expect("a valid user agent header"),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("open the websocket");
     let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(5))
         .await
         .expect("the connected frame");
-    (ws, hello["id"].as_str().unwrap().to_string())
+    (
+        ws,
+        hello["id"]
+            .as_str()
+            .expect("the hello frame carries a connection id")
+            .to_string(),
+    )
+}
+
+/// A created standalone agent's wire shape: a folder workspace at `folder_path`
+/// with none of the git fields a screen could mistake for a branch.
+fn assert_a_folder_workspace(body: &serde_json::Value, folder_path: &str) {
+    assert_eq!(body["workspace"]["kind"].as_str(), Some("folder"));
+    assert_eq!(body["workspace"]["folder_path"].as_str(), Some(folder_path));
+    for absent in [
+        "branch_name",
+        "initial_branch",
+        "source_branch",
+        "project_id",
+    ] {
+        assert!(
+            body["workspace"][absent].is_null(),
+            "{absent} must not exist on a folder workspace, got {body}"
+        );
+    }
+    assert_eq!(body["title"].as_str(), Some("notes"));
+}
+
+/// Every branch-identity route refuses the standalone agent `id`, saying what
+/// the agent is.
+async fn every_branch_route_refuses_a_standalone_agent(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    id: &str,
+) {
+    for (method, path) in [
+        ("POST", format!("/api/v1/sessions/{id}/git/push")),
+        ("POST", format!("/api/v1/sessions/{id}/git/pull")),
+    ] {
+        let resp = client
+            .request(
+                method.parse().expect("a valid HTTP method"),
+                format!("http://{addr}{path}"),
+            )
+            .send()
+            .await
+            .expect("git route");
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(
+            (400..500).contains(&status),
+            "{path} must refuse a standalone agent, got {status}: {text}"
+        );
+        assert!(
+            text.contains("standalone agent"),
+            "{path} must say what this agent is, got {text}"
+        );
+    }
 }
 
 /// THE WHOLE JOURNEY for a standalone agent, over the real HTTP surface: create
@@ -1380,23 +1468,7 @@ async fn a_standalone_agent_runs_in_a_plain_folder_and_survives_delete_untouched
 
     // THE WIRE SHAPE: a folder workspace, and NO git fields to be mistaken for
     // a branch. This is the guarantee the tagged union exists for.
-    assert_eq!(body["workspace"]["kind"].as_str(), Some("folder"));
-    assert_eq!(
-        body["workspace"]["folder_path"].as_str(),
-        Some(folder_path.as_str())
-    );
-    for absent in [
-        "branch_name",
-        "initial_branch",
-        "source_branch",
-        "project_id",
-    ] {
-        assert!(
-            body["workspace"][absent].is_null(),
-            "{absent} must not exist on a folder workspace, got {body}"
-        );
-    }
-    assert_eq!(body["title"].as_str(), Some("notes"));
+    assert_a_folder_workspace(&body, &folder_path);
 
     // It joins the ordinary flat agent list, and no sidebar group claims it.
     assert!(
@@ -1419,26 +1491,7 @@ async fn a_standalone_agent_runs_in_a_plain_folder_and_survives_delete_untouched
 
     // EVERY branch-identity route refuses it on the server. Hiding the buttons
     // is not an answer when each of these is reachable from a command line.
-    for (method, path) in [
-        ("POST", format!("/api/v1/sessions/{id}/git/push")),
-        ("POST", format!("/api/v1/sessions/{id}/git/pull")),
-    ] {
-        let resp = client
-            .request(method.parse().unwrap(), format!("http://{addr}{path}"))
-            .send()
-            .await
-            .expect("git route");
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        assert!(
-            (400..500).contains(&status),
-            "{path} must refuse a standalone agent, got {status}: {text}"
-        );
-        assert!(
-            text.contains("standalone agent"),
-            "{path} must say what this agent is, got {text}"
-        );
-    }
+    every_branch_route_refuses_a_standalone_agent(&client, addr, &id).await;
 
     // A worktree-removing delete is refused OUT LOUD rather than quietly
     // downgraded: silent success theater about a destructive request is how a
@@ -2074,9 +2127,9 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -2086,9 +2139,9 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
@@ -2096,7 +2149,7 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
                 "feat",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&sample_session(
                 "s2",
@@ -2104,9 +2157,9 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
                 "feat2",
                 root.to_string_lossy().as_ref(),
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -2121,15 +2174,17 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
     engine.config.terminal.args = vec![];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -2143,9 +2198,9 @@ async fn create_terminal_via_rest(addr: SocketAddr, session_id: &str) -> String 
         ))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status().as_u16(), 201, "terminal create should be 201");
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
     body["terminal_id"]
         .as_str()
         .expect("terminal_id in create response")
@@ -2702,18 +2757,6 @@ async fn a_grid_change_is_forwarded_only_to_sockets_for_that_pty() {
 /// discard it as a stale duplicate.
 #[tokio::test]
 async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
-    let (addr, _tmp) = boot().await;
-
-    // A watcher on the events socket, subscribed to the coarse `sessions` topic
-    // that carries `pty.owner`.
-    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
-        .await
-        .expect("connect the events socket");
-    events
-        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
-        .await
-        .unwrap();
-
     /// Drain events until a `pty.owner` for `s1` arrives, or give up.
     async fn next_pty_owner(
         ws: &mut tokio_tungstenite::WebSocketStream<
@@ -2731,6 +2774,18 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
         }
         None
     }
+
+    let (addr, _tmp) = boot().await;
+
+    // A watcher on the events socket, subscribed to the coarse `sessions` topic
+    // that carries `pty.owner`.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
 
     // The driver attaches and claims the unowned pty with an ordinary resize.
     let url = format!("ws://{addr}/ws/sessions/s1/pty");
@@ -2783,21 +2838,6 @@ async fn an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner() {
 /// must see the first connection's id.
 #[tokio::test]
 async fn the_connected_handshake_names_the_ptys_current_owner() {
-    let (addr, _tmp) = boot().await;
-    let url = format!("ws://{addr}/ws/sessions/s1/pty");
-
-    // A watcher on the events socket, to capture the epoch the claim's own
-    // `pty.owner` broadcast carries. The handshake's `owner_epoch` must be read
-    // from the SAME counter in the same lock acquisition as the owner, so the
-    // two values must agree.
-    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
-        .await
-        .expect("connect the events socket");
-    events
-        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
-        .await
-        .unwrap();
-
     /// The first Text frame on a PTY socket is the `connected` handshake; the
     /// Binary frames around it are the scrollback replay and live output.
     async fn first_text(
@@ -2815,6 +2855,21 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
         }
         panic!("no connected frame arrived");
     }
+
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // A watcher on the events socket, to capture the epoch the claim's own
+    // `pty.owner` broadcast carries. The handshake's `owner_epoch` must be read
+    // from the SAME counter in the same lock acquisition as the owner, so the
+    // two values must agree.
+    let (mut events, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
+        .await
+        .expect("connect the events socket");
+    events
+        .send(Message::Text(r#"{"subscribe":["sessions"]}"#.into()))
+        .await
+        .unwrap();
 
     let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -2894,9 +2949,6 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
 /// to what an older client already parses.
 #[tokio::test]
 async fn the_connected_handshake_names_the_owners_device() {
-    let (addr, _tmp) = boot().await;
-    let url = format!("ws://{addr}/ws/sessions/s1/pty");
-
     /// The first Text frame on a PTY socket is the `connected` handshake; the
     /// Binary frames around it are the scrollback replay and live output.
     async fn first_text(
@@ -2915,8 +2967,12 @@ async fn the_connected_handshake_names_the_owners_device() {
         panic!("no connected frame arrived");
     }
 
-    // The driver connects with a `User-Agent`, as every real browser does.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+
+    // The driver connects with a `User-Agent`, as every real browser does.
     let mut request = url.clone().into_client_request().expect("a client request");
     request.headers_mut().insert(
         axum::http::header::USER_AGENT,
@@ -3094,6 +3150,17 @@ async fn an_oversized_frame_is_refused_and_never_reaches_the_pty() {
 /// 64 MiB default lets the same message through, failing the same way.
 #[tokio::test]
 async fn a_fragmented_message_past_the_message_cap_is_refused() {
+    // One byte over the MESSAGE cap in total, chopped into fragments far below
+    // the frame cap. The fragment size is fixed rather than "half the payload"
+    // so every frame stays under the frame cap regardless of the total.
+    //
+    // The marker leads the payload rather than trailing it: it therefore rides
+    // the FIRST fragment, so an accepted message starts echoing immediately
+    // instead of after 16 MiB have travelled. A trailing marker made the failure
+    // path take 8.4s against an 8s deadline under mutation, one slow machine away
+    // from an accepted payload being scored as a refusal.
+    const FRAGMENT: usize = 4 * 1024 * 1024;
+
     use tokio_tungstenite::tungstenite::protocol::frame::Frame;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
 
@@ -3108,16 +3175,6 @@ async fn a_fragmented_message_past_the_message_cap_is_refused() {
         .await
         .unwrap();
 
-    // One byte over the MESSAGE cap in total, chopped into fragments far below
-    // the frame cap. The fragment size is fixed rather than "half the payload"
-    // so every frame stays under the frame cap regardless of the total.
-    //
-    // The marker leads the payload rather than trailing it: it therefore rides
-    // the FIRST fragment, so an accepted message starts echoing immediately
-    // instead of after 16 MiB have travelled. A trailing marker made the failure
-    // path take 8.4s against an 8s deadline under mutation, one slow machine away
-    // from an accepted payload being scored as a refusal.
-    const FRAGMENT: usize = 4 * 1024 * 1024;
     let marker = b"dux-fragmented-oversize-marker\n";
     let mut payload = marker.to_vec();
     payload.resize(OVER_MESSAGE_CAP_BYTES, b'x');
@@ -3420,7 +3477,7 @@ async fn create_project_terminal_via_rest(addr: SocketAddr, project_id: &str) ->
         ))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(
         resp.status().as_u16(),
         201,
@@ -3430,7 +3487,7 @@ async fn create_project_terminal_via_rest(addr: SocketAddr, project_id: &str) ->
         resp.headers().contains_key("location"),
         "201 must carry a Location header"
     );
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
     body["terminal_id"]
         .as_str()
         .expect("terminal_id in create response")
@@ -3552,7 +3609,7 @@ async fn create_standalone_terminal_via_rest(addr: SocketAddr) -> String {
         .post(format!("http://{addr}/api/v1/terminals"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(
         resp.status().as_u16(),
         201,
@@ -3562,7 +3619,7 @@ async fn create_standalone_terminal_via_rest(addr: SocketAddr) -> String {
         resp.headers().contains_key("location"),
         "201 must carry a Location header"
     );
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
     body["terminal_id"]
         .as_str()
         .expect("terminal_id in create response")
@@ -3925,12 +3982,11 @@ async fn tearing_down_agent_pty_closes_its_attached_socket() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                closed = true;
-                break;
-            }
-            _ => continue,
+        if let Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            closed = true;
+            break;
         }
     }
     assert!(

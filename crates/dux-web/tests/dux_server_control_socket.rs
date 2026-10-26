@@ -14,12 +14,12 @@ fn get_over_socket(path: &std::path::Path, uri: &str) -> String {
     let mut stream = std::os::unix::net::UnixStream::connect(path).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
-        .unwrap();
+        .expect("set the read timeout");
     write!(
         stream,
         "GET {uri} HTTP/1.1\r\nHost: dux\r\nConnection: close\r\n\r\n"
     )
-    .unwrap();
+    .expect("write the request");
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("an answer");
     response

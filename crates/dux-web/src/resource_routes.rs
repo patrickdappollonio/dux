@@ -59,7 +59,9 @@ struct Cached {
     rows: Vec<ResourceStatsView>,
 }
 
-pub struct ResourceService {
+/// The resource-monitor sampler behind `GET /api/v1/resources`, with a
+/// single-flight walk and a short cache.
+pub(crate) struct ResourceService {
     engine: EngineHandle,
     /// The sampler. Held across samples because sysinfo derives per-process CPU
     /// from the delta between two refreshes; see [`dux_core::resource_stats`].
@@ -75,7 +77,7 @@ pub struct ResourceService {
 }
 
 impl ResourceService {
-    pub fn new(engine: EngineHandle) -> Arc<Self> {
+    pub(crate) fn new(engine: EngineHandle) -> Arc<Self> {
         Arc::new(Self {
             engine,
             collector: Arc::new(Mutex::new(ResourceCollector::new())),
@@ -89,7 +91,7 @@ impl ResourceService {
     /// cache is cold or stale. `None` means the engine actor is gone (the handler
     /// maps that to 503), which is distinct from a real "nothing is running"
     /// result: the dux and total rows are always present in a successful sample.
-    pub async fn get(self: &Arc<Self>) -> Option<Vec<ResourceStatsView>> {
+    pub(crate) async fn get(self: &Arc<Self>) -> Option<Vec<ResourceStatsView>> {
         if let Some(rows) = self.read_fresh() {
             return Some(rows);
         }
@@ -145,7 +147,6 @@ impl ResourceService {
                     if self.read_fresh().is_some() {
                         return;
                     }
-                    continue;
                 }
             }
         }
@@ -211,7 +212,7 @@ impl ResourceService {
 
     /// Total sysinfo walks run (test instrumentation).
     #[cfg(test)]
-    pub fn collect_count(&self) -> usize {
+    pub(crate) fn collect_count(&self) -> usize {
         self.collect_count.load(Ordering::SeqCst)
     }
 }

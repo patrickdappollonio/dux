@@ -1244,8 +1244,14 @@ mod tests {
         let (status, _) = answer(&app, json_req("DELETE", "/api/v1/macros/Review%20it", "")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
+        global_env_routes_change_one_variable(&app).await;
+    }
+
+    /// Set and remove one global variable through its per-entry routes, and check
+    /// that no refusal echoes the name or value it refused.
+    async fn global_env_routes_change_one_variable(app: &Router) {
         let (status, record) = answer(
-            &app,
+            app,
             json_req(
                 "PUT",
                 "/api/v1/global-env/API_KEY?operation=1",
@@ -1261,7 +1267,7 @@ mod tests {
             "a value is never echoed: {record}"
         );
         let (status, refusal) = answer(
-            &app,
+            app,
             json_req("PUT", "/api/v1/global-env/1BAD", r#"{"value":"x"}"#),
         )
         .await;
@@ -1271,13 +1277,13 @@ mod tests {
             "a name that is no variable name is never echoed: {refusal}"
         );
         let (status, refusal) =
-            answer(&app, json_req("DELETE", "/api/v1/global-env/zz%20LEAK", "")).await;
+            answer(app, json_req("DELETE", "/api/v1/global-env/zz%20LEAK", "")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(!refusal.to_string().contains("LEAK"), "{refusal}");
         for bad in ["nul\u{0}inside", "${1UNCLOSED}"] {
             let body = serde_json::json!({ "value": bad }).to_string();
             let (status, refusal) =
-                answer(&app, json_req("PUT", "/api/v1/global-env/BAD_VALUE", &body)).await;
+                answer(app, json_req("PUT", "/api/v1/global-env/BAD_VALUE", &body)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {refusal}");
             assert!(
                 !refusal.to_string().contains("inside")
@@ -1286,20 +1292,20 @@ mod tests {
             );
         }
         assert!(
-            bootstrap(&app).await["global_env"]
+            bootstrap(app).await["global_env"]
                 .get("BAD_VALUE")
                 .is_none(),
             "a refused value is not kept"
         );
         let (status, record) = answer(
-            &app,
+            app,
             json_req("DELETE", "/api/v1/global-env/API_KEY?operation=1", ""),
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(record["kind"], "env.remove");
-        assert_eq!(bootstrap(&app).await["global_env"], serde_json::json!({}));
-        let (status, _) = answer(&app, json_req("DELETE", "/api/v1/global-env/API_KEY", "")).await;
+        assert_eq!(bootstrap(app).await["global_env"], serde_json::json!({}));
+        let (status, _) = answer(app, json_req("DELETE", "/api/v1/global-env/API_KEY", "")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

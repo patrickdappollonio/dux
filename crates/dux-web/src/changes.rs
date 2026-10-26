@@ -77,13 +77,11 @@ enum Cached {
     },
     /// A failed compute, served as `409 + Retry-After` until [`ERROR_TTL`] elapses.
     Err {
-        #[allow(dead_code)]
         rev: u64,
         /// The invalidation generation observed when this compute started (mirrors
         /// `Ok::generation` so the waiter freshness check is uniform across variants).
         generation: u64,
         at: Instant,
-        message: String,
     },
 }
 
@@ -91,29 +89,30 @@ impl Cached {
     /// The invalidation generation this entry's compute observed at start.
     fn generation(&self) -> u64 {
         match self {
-            Cached::Ok { generation, .. } => *generation,
-            Cached::Err { generation, .. } => *generation,
+            Cached::Ok { generation, .. } | Cached::Err { generation, .. } => *generation,
         }
     }
 }
 
 /// The result of [`ChangesService::get`] before HTTP projection.
-pub struct ChangesResponse {
-    pub rev: u64,
-    pub staged: Vec<ChangedFileView>,
-    pub unstaged: Vec<ChangedFileView>,
+pub(crate) struct ChangesResponse {
+    pub(crate) rev: u64,
+    pub(crate) staged: Vec<ChangedFileView>,
+    pub(crate) unstaged: Vec<ChangedFileView>,
 }
 
 /// Why a changed-files read could not be served.
-pub enum GitError {
+pub(crate) enum GitError {
     /// The session id is unknown (no worktree). The handler maps this to 404.
     SessionNotFound,
     /// A git lock/rebase or other git failure. The handler maps this to
-    /// `409 + Retry-After`.
-    Git(String),
+    /// `409 + Retry-After`. The failure's text is logged where it happens.
+    Git,
 }
 
-pub struct ChangesService {
+/// The per-session changed-files cache, its single-flight compute and the
+/// poller that pushes a `session.changes` signal when a listing moves.
+pub(crate) struct ChangesService {
     engine: EngineHandle,
     bus: Arc<EventBus>,
     cache: Mutex<HashMap<String, Cached>>,
@@ -150,7 +149,7 @@ impl ChangesService {
     /// Build the service and spawn the supervised poll loop. MUST be called from
     /// within a tokio runtime context (the serve paths call it inside their
     /// runtime; the flip wraps its `build_app` in `runtime.enter()`).
-    pub fn new(engine: EngineHandle, bus: Arc<EventBus>) -> Arc<Self> {
+    pub(crate) fn new(engine: EngineHandle, bus: Arc<EventBus>) -> Arc<Self> {
         let svc = Arc::new(Self {
             engine,
             bus,
@@ -171,11 +170,9 @@ impl ChangesService {
     fn spawn_poller(weak: Weak<Self>) {
         tokio::spawn(async move {
             loop {
-                let weak_inner = weak.clone();
+                let weak_inner = Weak::clone(&weak);
                 let handle = tokio::spawn(async move { Self::poll_loop(weak_inner).await });
                 match handle.await {
-                    // Clean exit: the service was dropped, so stop supervising.
-                    Ok(()) => break,
                     Err(join_err) if join_err.is_panic() => {
                         dux_core::logger::error(&format!(
                             "changed-files poller panicked; restarting after backoff: {join_err}"
@@ -195,8 +192,9 @@ impl ChangesService {
                         ));
                         tokio::time::sleep(POLL_RESTART_BACKOFF).await;
                     }
-                    // Cancelled (runtime shutdown): nothing to restart.
-                    Err(_) => break,
+                    // A clean exit (the service was dropped, so stop supervising)
+                    // or a cancel (runtime shutdown): nothing to restart.
+                    Ok(()) | Err(_) => break,
                 }
             }
         });
@@ -308,7 +306,10 @@ impl ChangesService {
     /// A compute stores nothing for a vanished session, so an absent entry after one
     /// means either an unknown session ([`GitError::SessionNotFound`]) or an eviction
     /// racing this call, which is retried exactly once rather than returning a 409.
-    pub async fn get(self: &Arc<Self>, session_id: &str) -> Result<ChangesResponse, GitError> {
+    pub(crate) async fn get(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<ChangesResponse, GitError> {
         if let Some(result) = self.read_fresh(session_id) {
             return result;
         }
@@ -348,7 +349,7 @@ impl ChangesService {
                 staged: prev.0.clone(),
                 unstaged: prev.1.clone(),
             })),
-            Some(Cached::Err { message, .. }) => Some(Err(GitError::Git(message.clone()))),
+            Some(Cached::Err { .. }) => Some(Err(GitError::Git)),
             None => None,
         }
     }
@@ -363,9 +364,7 @@ impl ChangesService {
                 staged: prev.0.clone(),
                 unstaged: prev.1.clone(),
             })),
-            Some(Cached::Err { at, message, .. }) if at.elapsed() < ERROR_TTL => {
-                Some(Err(GitError::Git(message.clone())))
-            }
+            Some(Cached::Err { at, .. }) if at.elapsed() < ERROR_TTL => Some(Err(GitError::Git)),
             _ => None,
         }
     }
@@ -412,7 +411,7 @@ impl ChangesService {
     /// Drop a session's cached lists and trigger a fresh compute and emit, so the
     /// pane refreshes right after a git or file mutation rather than at the next
     /// poll. With no `prev`, the next compute always detects a change.
-    pub fn invalidate(self: &Arc<Self>, session_id: String) {
+    pub(crate) fn invalidate(self: &Arc<Self>, session_id: String) {
         // Bumped before the entry is cleared: an in-flight compute that already read
         // the pre-mutation filesystem still stores its stale snapshot, and requiring
         // this newer stamp is what makes the recompute below re-elect as owner
@@ -431,11 +430,10 @@ impl ChangesService {
     /// The cached `rev` for a session, used to stamp the synthetic `session.changes`
     /// frame the `/ws/events` catch-ups send. `None` for a cold cache, which the
     /// caller serialises as an absent `rev` and the client reads as a force-refetch.
-    pub fn peek_rev(&self, session_id: &str) -> Option<u64> {
+    pub(crate) fn peek_rev(&self, session_id: &str) -> Option<u64> {
         let cache = lock(&self.cache);
         match cache.get(session_id) {
-            Some(Cached::Ok { rev, .. }) => Some(*rev),
-            Some(Cached::Err { rev, .. }) => Some(*rev),
+            Some(Cached::Ok { rev, .. } | Cached::Err { rev, .. }) => Some(*rev),
             None => None,
         }
     }
@@ -452,7 +450,7 @@ impl ChangesService {
     /// server-level unit tests assert subscribe catch-up behaviour without
     /// spinning up a git repo or a real poller compute.
     #[cfg(test)]
-    pub fn seed_rev_for_test(&self, session_id: &str, rev: u64) {
+    pub(crate) fn seed_rev_for_test(&self, session_id: &str, rev: u64) {
         let mut cache = lock(&self.cache);
         cache.insert(
             session_id.to_string(),
@@ -511,8 +509,8 @@ impl ChangesService {
                         return;
                     }
                     // The owner was cancelled before storing, or stored a snapshot
-                    // older than our required generation, so re-elect a new owner.
-                    continue;
+                    // older than our required generation, so the loop goes round
+                    // again and re-elects a new owner.
                 }
             }
         }
@@ -632,8 +630,7 @@ impl ChangesService {
             match cache.get(session_id) {
                 Some(Cached::Ok { prev, .. }) => prev != &next,
                 // Recovering from a cached error always counts as a change.
-                Some(Cached::Err { .. }) => true,
-                None => true,
+                Some(Cached::Err { .. }) | None => true,
             }
         };
 
@@ -660,8 +657,9 @@ impl ChangesService {
         let stored = {
             let mut cache = lock(&self.cache);
             let should_store = match cache.get(session_id) {
-                Some(Cached::Ok { rev: existing, .. }) => rev >= *existing,
-                Some(Cached::Err { rev: existing, .. }) => rev >= *existing,
+                Some(Cached::Ok { rev: existing, .. } | Cached::Err { rev: existing, .. }) => {
+                    rev >= *existing
+                }
                 None => true,
             };
             if should_store {
@@ -728,7 +726,6 @@ impl ChangesService {
                         rev,
                         generation,
                         at: Instant::now(),
-                        message: message.clone(),
                     },
                 );
             }
@@ -770,7 +767,7 @@ impl ChangesService {
 
     /// Total git computes run (test instrumentation for the single-flight test).
     #[cfg(test)]
-    pub fn compute_count(&self) -> usize {
+    pub(crate) fn compute_count(&self) -> usize {
         self.compute_count.load(Ordering::SeqCst)
     }
 }
@@ -1055,7 +1052,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store
@@ -1102,7 +1099,7 @@ mod tests {
                     leading_branch: None,
                     auto_reopen_agents: None,
                     startup_command: None,
-                    env: Default::default(),
+                    env: std::collections::BTreeMap::new(),
                 })
                 .unwrap();
             store
@@ -1345,7 +1342,7 @@ mod tests {
         // A real session whose worktree is not a git repo yields a git error (409),
         // distinct from the unknown-session 404 above.
         match svc.get("s_err").await {
-            Err(GitError::Git(_)) => {}
+            Err(GitError::Git) => {}
             _ => panic!("expected a git error for a non-repo worktree"),
         }
     }

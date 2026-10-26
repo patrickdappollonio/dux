@@ -56,7 +56,7 @@ fn git(repo: &Path, args: &[&str]) {
         .args(args)
         .current_dir(repo)
         .output()
-        .unwrap();
+        .expect("run git");
     assert!(
         out.status.success(),
         "git {:?} failed: {}",
@@ -76,11 +76,11 @@ async fn boot() -> (
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt = root.join("wt1");
-    std::fs::create_dir_all(&wt).unwrap();
-    std::fs::create_dir(wt.join("src")).unwrap();
-    std::fs::create_dir(wt.join("dest")).unwrap();
-    std::fs::write(wt.join("src/moveme.txt"), "contents\n").unwrap();
-    std::fs::write(wt.join("src/файл.txt"), "текст\n").unwrap();
+    std::fs::create_dir_all(&wt).expect("create the test directory");
+    std::fs::create_dir(wt.join("src")).expect("create the test directory");
+    std::fs::create_dir(wt.join("dest")).expect("create the test directory");
+    std::fs::write(wt.join("src/moveme.txt"), "contents\n").expect("write the test file");
+    std::fs::write(wt.join("src/файл.txt"), "текст\n").expect("write the test file");
     git(&wt, &["init", "-b", "main"]);
     git(&wt, &["config", "user.name", "test"]);
     git(&wt, &["config", "user.email", "t@t"]);
@@ -95,9 +95,9 @@ async fn boot() -> (
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -107,14 +107,14 @@ async fn boot() -> (
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -122,15 +122,17 @@ async fn boot() -> (
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp, wt)
 }
@@ -148,7 +150,7 @@ async fn post(
         .json(&body)
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
 }
 
 async fn do_move(addr: SocketAddr, from: &str, to: &str) -> reqwest::Response {

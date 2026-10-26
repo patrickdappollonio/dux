@@ -97,8 +97,8 @@ pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// stopped being the operation to watch, but not the create's verdict; the
 /// hand-off is the engine's design and this type only reports it honestly.
 #[derive(serde::Serialize)]
-pub struct Accepted {
-    pub op_id: Option<String>,
+pub(crate) struct Accepted {
+    pub(crate) op_id: Option<String>,
 }
 
 /// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].
@@ -126,7 +126,7 @@ pub enum ConnClass {
 /// every operation releases the lock without awaiting, so no guard crosses an
 /// `.await`.
 #[derive(Default)]
-pub struct ConnectionRegistry {
+pub(crate) struct ConnectionRegistry {
     entries: Mutex<HashMap<String, Entry>>,
     /// How many distinct browsers have an Events connection open, set on every
     /// insert and remove so it can be read without the lock and from a crate that
@@ -145,14 +145,14 @@ struct Entry {
 }
 
 impl ConnectionRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// A registry that reports its live browser count into `gauge`, so a reader
     /// outside this crate can see it. One registry per gauge: two sharing one
     /// would each overwrite a total the other is also keeping.
-    pub fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
+    pub(crate) fn with_events_gauge(gauge: Arc<AtomicUsize>) -> Self {
         debug_assert_eq!(
             gauge.load(Ordering::Relaxed),
             0,
@@ -168,7 +168,7 @@ impl ConnectionRegistry {
 
     /// Register a live connection id with its class (called on socket upgrade).
     /// An Events connection registered this way counts as a browser of its own.
-    pub fn insert(&self, id: String, class: ConnClass) {
+    pub(crate) fn insert(&self, id: String, class: ConnClass) {
         let browser = (class == ConnClass::Events).then(|| format!("connection:{id}"));
         self.put(id, Entry { class, browser });
     }
@@ -178,13 +178,16 @@ impl ConnectionRegistry {
     /// (`after`) is counted under, so a reconnect is not a second browser while
     /// the lost socket waits to be reaped. The id is display-only and decides
     /// nothing else (see [`dux_core::attachments::BrowserId`]).
-    pub fn insert_events(
+    pub(crate) fn insert_events(
         &self,
         id: String,
         browser: Option<&dux_core::attachments::BrowserId>,
         after: Option<&str>,
     ) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         let key = match browser {
             Some(browser) => format!("browser:{}", browser.as_str()),
             None => after
@@ -203,14 +206,20 @@ impl ConnectionRegistry {
     }
 
     fn put(&self, id: String, entry: Entry) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         entries.insert(id, entry);
         self.recount(&entries);
     }
 
     /// Deregister a connection id (called on socket disconnect), freeing its slot.
-    pub fn remove(&self, id: &str) {
-        let mut entries = self.entries.lock().unwrap();
+    pub(crate) fn remove(&self, id: &str) {
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         entries.remove(id);
         self.recount(&entries);
     }
@@ -230,23 +239,24 @@ impl ConnectionRegistry {
 
     /// How many browsers are connected right now: every tab of one browser
     /// profile counted once.
-    pub fn browsers_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn browsers_count(&self) -> usize {
         self.browsers_live.load(Ordering::Relaxed)
     }
 
     /// Whether `id` is a currently-live connection.
     #[cfg(test)]
-    pub fn contains(&self, id: &str) -> bool {
+    pub(crate) fn contains(&self, id: &str) -> bool {
         self.entries.lock().unwrap().contains_key(id)
     }
 
     /// The [`ConnClass`] of a currently-live connection, or `None` if absent.
     /// Used by [`scope_from_headers`] to require that a scoped header carries
     /// a live EVENTS-class id rather than any registered id.
-    pub fn class_of(&self, id: &str) -> Option<ConnClass> {
+    pub(crate) fn class_of(&self, id: &str) -> Option<ConnClass> {
         self.entries
             .lock()
-            .unwrap()
+            .expect("the entries lock is not poisoned")
             .get(id)
             .map(|entry| entry.class)
     }
@@ -254,8 +264,11 @@ impl ConnectionRegistry {
     /// Whether `id` names a connection that is still up, whatever its class.
     /// Asked by the status forwarder, which needs to know only whether the
     /// address a scoped status carries still has anybody at it.
-    pub fn is_live(&self, id: &str) -> bool {
-        self.entries.lock().unwrap().contains_key(id)
+    pub(crate) fn is_live(&self, id: &str) -> bool {
+        self.entries
+            .lock()
+            .expect("the entries lock is not poisoned")
+            .contains_key(id)
     }
 }
 
@@ -280,7 +293,10 @@ impl ConnectionRegistry {
 /// `connection.ts`/`socket.onConn`). Broadcasting in those windows is the safe
 /// default for this single-tenant tool: the initiating client still sees its toast
 /// (it shares the one workspace), and there is no per-user scoping to leak across.
-pub fn scope_from_headers(headers: &HeaderMap, registry: &ConnectionRegistry) -> StatusScope {
+pub(crate) fn scope_from_headers(
+    headers: &HeaderMap,
+    registry: &ConnectionRegistry,
+) -> StatusScope {
     headers
         .get(CONNECTION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -564,6 +580,7 @@ impl Guarded {
 /// `Err` variant, so this newtype boxes it to shrink the `Result` by
 /// construction rather than suppressing the lint, following the same choice
 /// documented on `acquire_ws_permit` in `server.rs`.
+#[derive(Debug)]
 pub struct RouteRejection(Box<Response>);
 
 impl From<Response> for RouteRejection {
@@ -756,35 +773,50 @@ pub(crate) async fn await_new_project(
     }
 }
 
+/// A `u32` count or limit from the config as a `usize`, exactly: every target
+/// dux builds for has a `usize` at least 32 bits wide.
+pub(crate) fn usize_from_u32(n: u32) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// A `usize` as a `u64`, exactly: no target dux builds for has a `usize` wider
+/// than 64 bits.
+pub(crate) fn u64_from_usize(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
 /// Records `Idempotency-Key -> created resource id` for a TTL so a retried create
 /// returns the same resource instead of creating a duplicate. Cheap `Arc`-cloned
 /// into [`crate::server::AppState`]; entries past the TTL are pruned lazily on read.
 #[derive(Default)]
-pub struct IdempotencyCache {
+pub(crate) struct IdempotencyCache {
     entries: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl IdempotencyCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// The recorded resource id for `key` if present and still within the TTL.
     /// Prunes expired entries while holding the lock so the map cannot grow
     /// unbounded from one-shot keys.
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub(crate) fn get(&self, key: &str) -> Option<String> {
         let now = Instant::now();
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self
+            .entries
+            .lock()
+            .expect("the entries lock is not poisoned");
         map.retain(|_, (_, at)| now.saturating_duration_since(*at) < IDEMPOTENCY_TTL);
         map.get(key).map(|(id, _)| id.clone())
     }
 
     /// Record `key -> id` (stamped now). A second create with the same key within
     /// the TTL replays this id.
-    pub fn record(&self, key: String, id: String) {
+    pub(crate) fn record(&self, key: String, id: String) {
         self.entries
             .lock()
-            .unwrap()
+            .expect("the entries lock is not poisoned")
             .insert(key, (id, Instant::now()));
     }
 }
@@ -792,6 +824,12 @@ impl IdempotencyCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_counts_and_sizes_convert_without_losing_their_top_values() {
+        assert_eq!(usize_from_u32(u32::MAX), 4_294_967_295);
+        assert_eq!(u64_from_usize(usize::MAX), u64::MAX);
+    }
 
     /// A request names its browser tab's events connection to be exempt from
     /// that tab's own attachments, and it is only when that connection came

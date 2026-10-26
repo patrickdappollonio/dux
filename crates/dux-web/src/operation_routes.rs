@@ -27,7 +27,7 @@ pub const MAX_WAIT: Duration = Duration::from_secs(25);
 /// How often a waiting read looks at the record again.
 const POLL: Duration = Duration::from_millis(100);
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new().route("/api/v1/operations/{id}", get(get_operation))
 }
 

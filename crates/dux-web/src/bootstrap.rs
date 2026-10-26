@@ -22,6 +22,7 @@ use dux_core::worker::WorkerEvent;
 /// Config surface for the web server: a read-only reload of `config.toml`, and
 /// recover rendering as plain comment-free TOML, since the canonical commented
 /// renderer needs the TUI's `RuntimeBindings`. The engine owns the write path.
+#[derive(Debug)]
 pub struct WebConfigSurface;
 
 impl ConfigSurface for WebConfigSurface {
@@ -120,6 +121,16 @@ impl ConfigSurface for WebConfigSurface {
 /// Persisted session statuses are normalized before returning, since nothing is
 /// running yet: a session whose worktree still exists becomes `Detached`, one
 /// whose worktree vanished becomes `Exited`.
+///
+/// # Errors
+///
+/// When another dux holds the lock, the config cannot be read or a start check
+/// refuses it, the reconciled projects cannot be saved back, or the session store
+/// cannot be opened or read.
+#[expect(
+    clippy::too_many_lines,
+    reason = "most of the body is the one Engine literal, which names each engine field once and cannot be split"
+)]
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
     // config write, matching the TUI's invariant.
@@ -189,7 +200,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         github_integration_enabled,
         single_instance_lock,
         surface_kind: dux_core::term_identity::SurfaceKind::WebHeadless,
-        resource_collector: Default::default(),
+        resource_collector: Arc::default(),
         host_env: dux_core::term_identity::HostEnvProbe::from_env(),
         worker_tx,
         worker_rx,
@@ -199,72 +210,80 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         command_applies: 0,
         deferred_commands: Vec::new(),
         reload_guard: None,
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the field's type lives in a private dux-core module, so this crate cannot name it"
+        )]
         reload_origin: Default::default(),
         pending_web_checkout_ops: HashMap::new(),
         pending_change_base_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
-        clones: Default::default(),
+        clones: dux_core::clone_project::Clones::default(),
         pending_pr_attach_ops: HashMap::new(),
         pending_recreate_ops: HashMap::new(),
         pending_delete_ops_web: HashMap::new(),
         pending_delete_reports_web: HashMap::new(),
         pending_create_ops: HashMap::new(),
         pending_web_launch_ops: HashMap::new(),
-        live_status_keys: Default::default(),
+        live_status_keys: dux_core::statusline::LiveStatusKeys::default(),
         last_created_op_id: None,
-        operations: Default::default(),
+        operations: dux_core::operations::Operations::default(),
         operation_in_dispatch: None,
-        attachments: Default::default(),
+        attachments: dux_core::attachments::Attachments::default(),
         dispatch_policy: None,
         deferred_operations: Vec::new(),
         deferred_policies: Vec::new(),
         created_session_by_op: HashMap::new(),
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the field's type lives in a private dux-core module, so this crate cannot name it"
+        )]
         removal_coordination: Default::default(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
-        launched_drop_paste: Default::default(),
+        launched_drop_paste: HashMap::new(),
         companion_terminals: HashMap::new(),
         agent_tabs: agent_tabs
             .into_iter()
             .map(|t| (TabId::new(t.id.clone()), t))
             .collect(),
         terminating_ptys: Vec::new(),
-        process_registry: Default::default(),
+        process_registry: dux_core::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
         gh_status: GhStatus::Unknown,
-        gh_probe: Default::default(),
+        gh_probe: dux_core::engine::GhProbeState::default(),
         pr_statuses: HashMap::new(),
         pr_overrides: HashMap::new(),
         pr_suppressions: HashSet::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-        pr_sync: Arc::new(Default::default()),
+        pr_sync: Arc::new(dux_core::engine::PrSyncControl::default()),
         pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        pr_inactive_sessions: Default::default(),
-        pr_inactive_sweep_at: Default::default(),
-        pr_return_checks_owed: Default::default(),
-        pr_branch_generations: Default::default(),
-        pr_branch_checks_owed: Default::default(),
+        pr_inactive_sessions: HashSet::new(),
+        pr_inactive_sweep_at: Arc::default(),
+        pr_return_checks_owed: HashSet::new(),
+        pr_branch_generations: HashMap::new(),
+        pr_branch_checks_owed: HashSet::new(),
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        branch_sync_wait: Arc::new(Default::default()),
+        branch_sync_wait: Arc::new(dux_core::engine::BranchSyncWait::default()),
         pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         resume_fallback_candidates: HashMap::new(),
         resumed_tab_runs: HashSet::new(),
         pending_deletions: HashSet::new(),
         folder_repo_statuses: HashMap::new(),
-        changed_files_failures: Default::default(),
+        changed_files_failures: dux_core::changes_status::ChangedFilesFailures::default(),
         closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-        changed_files_refresh: Default::default(),
+        changed_files_refresh: Arc::default(),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
-        serve_memory: Default::default(),
+        serve_memory: Arc::default(),
         current_origin: dux_core::statusline::StatusScope::All,
         in_flight: InFlightSet::new(),
         rename_expected: std::collections::HashMap::new(),
@@ -376,7 +395,7 @@ mod tests {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
             .expect("upsert project");
         drop(store);

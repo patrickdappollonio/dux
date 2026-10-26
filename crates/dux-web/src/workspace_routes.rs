@@ -60,7 +60,7 @@ use crate::server::AppState;
 /// served. `flatten` keeps every session field exactly where it was, so this
 /// adds the array back and changes nothing else.
 #[derive(Serialize)]
-pub struct SessionWithTerminals {
+pub(crate) struct SessionWithTerminals {
     #[serde(flatten)]
     session: SessionView,
     terminals: Vec<TerminalView>,
@@ -74,7 +74,7 @@ pub struct SessionWithTerminals {
 }
 
 impl SessionWithTerminals {
-    pub fn new(session: SessionView, terminals: Vec<TerminalView>) -> Self {
+    pub(crate) fn new(session: SessionView, terminals: Vec<TerminalView>) -> Self {
         Self {
             session,
             terminals,

@@ -54,6 +54,15 @@ pub struct BackgroundServer {
     log_path: Option<std::path::PathBuf>,
 }
 
+impl std::fmt::Debug for BackgroundServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackgroundServer")
+            .field("urls", &self.urls)
+            .field("log_path", &self.log_path)
+            .finish_non_exhaustive()
+    }
+}
+
 /// How long a hand-over waits for the control socket's accepted requests to be
 /// answered before the core stops anyway.
 const HAND_OVER_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
@@ -74,6 +83,11 @@ impl BackgroundServer {
     /// claimed for the terminal UI before any listener accepts a connection, and
     /// the claims are announced once the serve is up. See
     /// [`dux_core::background_serve::BackgroundServeCompanion::start`].
+    ///
+    /// # Errors
+    ///
+    /// When the serve's runtime cannot be built or a listener cannot be adopted
+    /// into it; nothing is left serving then.
     pub fn start(
         engine: &mut Engine,
         listeners: Vec<std::net::TcpListener>,
@@ -175,6 +189,10 @@ impl BackgroundServer {
 
     /// Serve only the control socket `engine`'s lock holds, `None` when dux runs
     /// without one. Claims no terminal and serves nothing a browser could open.
+    ///
+    /// # Errors
+    ///
+    /// When the serve's runtime cannot be built.
     pub fn start_control_only(engine: &mut Engine) -> Result<Option<Self>> {
         let Some(control) = crate::control_socket::listener_of(engine) else {
             return Ok(None);
@@ -606,7 +624,7 @@ mod tests {
             vec![listener],
             vec![format!("http://{addr}")],
             dux_core::background_serve::ServeClaims::Nothing,
-            &Default::default(),
+            &dux_core::serve_log::StartupNotes::default(),
         )
         .expect("the serve starts");
         assert!(!engine.config.server.auth.has_password());
@@ -699,35 +717,7 @@ mod tests {
         );
         let bound = socket_inode(&socket);
 
-        let mut plain = BackgroundServer::start_control_only(&mut engine)
-            .expect("the socket core starts")
-            .expect("dux holds a control socket");
-        assert!(!plain.serves_web());
-        assert!(plain.ownership().is_none(), "the socket core claims no pty");
-        let answer = serviced_until_answered(
-            &mut plain,
-            &mut engine,
-            request_over_socket(&socket, "/api/v1/workspace"),
-        );
-        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-        assert!(answer.contains("\"projects\""), "{answer}");
-        // A change the command line makes raises its status on the terminal UI
-        // too: the turn that answered it hands the final over.
-        engine
-            .sessions
-            .push(crate::test_support::sample_agent("s-cli"));
-        let (answer, statuses) = serviced_collecting_statuses(
-            &mut plain,
-            &mut engine,
-            request_over_socket_as(&socket, "DELETE", "/api/v1/sessions/s-cli"),
-        );
-        assert!(answer.starts_with("HTTP/1.1 204"), "{answer}");
-        assert!(
-            statuses
-                .iter()
-                .any(|status| status.message.contains("Deleted")),
-            "{statuses:?}"
-        );
+        let plain = the_socket_core_answers_and_raises_statuses(&mut engine, &socket);
         // The command line's own wait rides the hand-over: its read is answered
         // with the record still running, it reads again by the same id, and
         // the next core answers that read with the outcome.
@@ -796,18 +786,7 @@ mod tests {
             dux_core::client::wait::RecordState::Succeeded
         );
         assert_eq!(finished.message, "Closed the tab.");
-        assert_eq!(socket_inode(&socket), bound, "the same bound socket");
-        let status = healthz(first_addr).expect("the first serve answers");
-        assert!(
-            status.contains("200"),
-            "a started background server must answer on its own address, got {status:?}"
-        );
-        get(first_addr, "/api/v1/build").expect("the first serve answers a page request");
-        assert_eq!(
-            server.server_log_path(),
-            Some(tmp.path().join("server.log")),
-            "the serve says which file it opened"
-        );
+        the_first_serve_answers(&server, first_addr, &socket, bound, tmp.path());
         let wait = waiting_on_an_operation(&engine, &socket, "op-to-plain");
         let (took, answer) = handed_over_with_a_wait_in_flight(server, &mut engine, wait);
         assert!(answer.contains("\"running\""), "{answer}");
@@ -816,24 +795,104 @@ mod tests {
             healthz(first_addr).is_err(),
             "the stopped serve must not still be accepting on {first_addr}"
         );
-        let waiting = request_over_socket(&socket, "/api/v1/workspace");
-        let mut plain = BackgroundServer::start_control_only(&mut engine)
-            .expect("the socket core starts again")
-            .expect("dux still holds its control socket");
-        let answer = serviced_until_answered(&mut plain, &mut engine, waiting);
-        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-        assert_eq!(socket_inode(&socket), bound, "the same bound socket");
+        let plain = the_socket_core_comes_back(&mut engine, &socket, bound);
         // The terminal UI's run ending hands its core over the same way.
         let wait = waiting_on_an_operation(&engine, &socket, "op-at-the-end");
         let (took, answer) = handed_over_with_a_wait_in_flight(plain, &mut engine, wait);
         assert!(answer.contains("\"running\""), "{answer}");
         assert!(took < std::time::Duration::from_secs(1), "{took:?}");
 
+        toggling_back_on_serves_a_fresh_app(&mut engine);
+
+        the_log_keeps_the_access_logged_serve(tmp.path(), first_addr);
+    }
+
+    /// The plain terminal UI's core serves the control socket alone, and a change
+    /// the command line makes there raises its status on the terminal UI too.
+    fn the_socket_core_answers_and_raises_statuses(
+        engine: &mut dux_core::engine::Engine,
+        socket: &std::path::Path,
+    ) -> BackgroundServer {
+        let mut plain = BackgroundServer::start_control_only(engine)
+            .expect("the socket core starts")
+            .expect("dux holds a control socket");
+        assert!(!plain.serves_web());
+        assert!(plain.ownership().is_none(), "the socket core claims no pty");
+        let answer = serviced_until_answered(
+            &mut plain,
+            engine,
+            request_over_socket(socket, "/api/v1/workspace"),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert!(answer.contains("\"projects\""), "{answer}");
+        // A change the command line makes raises its status on the terminal UI
+        // too: the turn that answered it hands the final over.
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s-cli"));
+        let (answer, statuses) = serviced_collecting_statuses(
+            &mut plain,
+            engine,
+            request_over_socket_as(socket, "DELETE", "/api/v1/sessions/s-cli"),
+        );
+        assert!(answer.starts_with("HTTP/1.1 204"), "{answer}");
+        assert!(
+            statuses
+                .iter()
+                .any(|status| status.message.contains("Deleted")),
+            "{statuses:?}"
+        );
+        plain
+    }
+
+    /// The first background serve answers on its own address, over the same bound
+    /// control socket, and says which log file it opened.
+    fn the_first_serve_answers(
+        server: &BackgroundServer,
+        first_addr: std::net::SocketAddr,
+        socket: &std::path::Path,
+        bound: u64,
+        root: &std::path::Path,
+    ) {
+        assert_eq!(socket_inode(socket), bound, "the same bound socket");
+        let status = healthz(first_addr).expect("the first serve answers");
+        assert!(
+            status.contains("200"),
+            "a started background server must answer on its own address, got {status:?}"
+        );
+        get(first_addr, "/api/v1/build").expect("the first serve answers a page request");
+        assert_eq!(
+            server.server_log_path(),
+            Some(root.join("server.log")),
+            "the serve says which file it opened"
+        );
+    }
+
+    /// A request sent while nothing serves the socket is answered by the plain
+    /// core that starts next, on the same bound socket.
+    fn the_socket_core_comes_back(
+        engine: &mut dux_core::engine::Engine,
+        socket: &std::path::Path,
+        bound: u64,
+    ) -> BackgroundServer {
+        let waiting = request_over_socket(socket, "/api/v1/workspace");
+        let mut plain = BackgroundServer::start_control_only(engine)
+            .expect("the socket core starts again")
+            .expect("dux still holds its control socket");
+        let answer = serviced_until_answered(&mut plain, engine, waiting);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert_eq!(socket_inode(socket), bound, "the same bound socket");
+        plain
+    }
+
+    /// Toggling the background serve back on builds a fresh app rather than
+    /// reviving the old one.
+    fn toggling_back_on_serves_a_fresh_app(engine: &mut dux_core::engine::Engine) {
         // Toggling back on builds a fresh app rather than reviving the old one.
         engine.config.server.access_log = false;
         let (listener, second_addr) = loopback_listener();
         let server = BackgroundServer::start(
-            &mut engine,
+            engine,
             vec![listener],
             vec![format!("http://{second_addr}")],
             dux_core::background_serve::ServeClaims::Nothing,
@@ -847,11 +906,19 @@ mod tests {
         );
         get(second_addr, "/api/v1/build").expect("the second serve answers a page request");
         assert!(server.stop().is_none());
+    }
 
+    /// The background serves' `server.log`: the request lines of the serve that had
+    /// `access_log` on and none of the other's, never the health probe's, and the
+    /// opening `dux server` writes.
+    fn the_log_keeps_the_access_logged_serve(
+        root: &std::path::Path,
+        first_addr: std::net::SocketAddr,
+    ) {
         // Serving in the background prints nothing over the terminal UI, but the
         // file keeps the request lines of the serve that had `access_log` on, and
         // none of the one that had it off, and never the health probe's.
-        let log = std::fs::read_to_string(tmp.path().join("server.log")).expect("server.log");
+        let log = std::fs::read_to_string(root.join("server.log")).expect("server.log");
         let page_requests: Vec<&str> = log
             .lines()
             .filter(|line| {

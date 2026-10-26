@@ -73,8 +73,8 @@ async fn boot_full(
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
     let wt2 = root.join("wt2");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
+    std::fs::create_dir_all(&wt2).expect("create the test directory");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -84,9 +84,9 @@ async fn boot_full(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -96,17 +96,17 @@ async fn boot_full(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
         store
             .create_session(&sample_session("s2", wt2.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -120,7 +120,7 @@ async fn boot_full(
     if let Some(password) = password {
         engine.config.server.auth.password_hash =
             dux_core::auth::hash_password(&dux_core::auth::Password::new(password.to_string()))
-                .unwrap();
+                .expect("hash the test password");
     }
     let (handle, _join) = spawn_engine_thread(engine);
     let params = RouterParams::plain_http().with_max_websocket_connections(
@@ -131,8 +131,10 @@ async fn boot_full(
         tab_per_agent,
     );
     let app = build_app(handle, Router::<AppState>::new(), tune(params));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     // Served the way every serve leg is, with both ends of each connection
     // recorded for the auth layer.
     tokio::spawn(async move {
@@ -141,7 +143,7 @@ async fn boot_full(
             app.into_make_service_with_connect_info::<dux_web::auth::Arrival>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -162,7 +164,7 @@ async fn boot_with_broken_provider_and_claude(
     let tmp = dux_core::test_scratch::ScratchDir::new();
     let root = tmp.path().to_path_buf();
     let wt1 = root.join("wt1");
-    std::fs::create_dir_all(&wt1).unwrap();
+    std::fs::create_dir_all(&wt1).expect("create the test directory");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -172,9 +174,9 @@ async fn boot_with_broken_provider_and_claude(
         lock_path: root.join("dux.lock"),
         socket_path: root.join("dux.sock"),
     };
-    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    std::fs::create_dir_all(&paths.worktrees_root).expect("create the test directory");
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -184,14 +186,14 @@ async fn boot_with_broken_provider_and_claude(
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     engine.config.providers.commands.insert(
         "claude".to_string(),
@@ -220,15 +222,17 @@ async fn boot_with_broken_provider_and_claude(
         dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
     );
     let app = build_app(handle, Router::<AppState>::new(), params);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp)
 }
@@ -238,10 +242,13 @@ async fn create_extra_tab(client: &reqwest::Client, addr: SocketAddr, session: &
         .post(format!("http://{addr}/api/v1/sessions/{session}/tabs"))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     assert_eq!(resp.status(), 201, "create tab should 201");
-    let body: serde_json::Value = resp.json().await.unwrap();
-    body["tab_id"].as_str().unwrap().to_string()
+    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    body["tab_id"]
+        .as_str()
+        .expect("the response names the tab")
+        .to_string()
 }
 
 #[tokio::test]
@@ -307,10 +314,10 @@ where
             .get(format!("http://{addr}/api/v1/sessions/{id}"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         if pred(&session) || tokio::time::Instant::now() >= deadline {
             return session;
         }
@@ -333,20 +340,25 @@ async fn followed_outcome(
         .and_then(|v| v.to_str().ok())
         .expect("a Location header")
         .to_string();
-    let accepted: serde_json::Value = resp.json().await.unwrap();
+    let accepted: serde_json::Value = resp.json().await.expect("the response body is JSON");
     assert_eq!(
         location,
-        format!("/api/v1/operations/{}", accepted["id"].as_str().unwrap())
+        format!(
+            "/api/v1/operations/{}",
+            accepted["id"]
+                .as_str()
+                .expect("the accepted operation has an id")
+        )
     );
     for _ in 0..15 {
         let record: serde_json::Value = client
             .get(format!("http://{addr}{location}?wait_seconds=2"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         if record["state"] != "running" {
             return record;
         }
@@ -362,10 +374,10 @@ async fn slot_tab_id(client: &reqwest::Client, addr: SocketAddr, id: &str) -> St
         .get(format!("http://{addr}/api/v1/sessions/{id}"))
         .send()
         .await
-        .unwrap()
+        .expect("send the request")
         .json()
         .await
-        .unwrap();
+        .expect("the response body is JSON");
     session["slot_tab_id"]
         .as_str()
         .expect("the spine names the slot tab")
@@ -375,7 +387,7 @@ async fn slot_tab_id(client: &reqwest::Client, addr: SocketAddr, id: &str) -> St
 fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
     session["tabs"]
         .as_array()
-        .unwrap()
+        .expect("the agent lists its tabs")
         .iter()
         .any(|t| t["id"].as_str() == Some(tab_id) && t["has_live_process"] == true)
 }
@@ -1058,12 +1070,11 @@ async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => {
-                closed = true;
-                break;
-            }
-            _ => continue,
+        if let Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await
+        {
+            closed = true;
+            break;
         }
     }
     assert!(
@@ -1118,7 +1129,7 @@ async fn every_established_socket_closes_when_its_client_stops_being_allowed() {
                 Ok(Some(Ok(Message::Close(None)) | Err(_)) | None) => {
                     panic!("the {what} socket ended without the auth close code")
                 }
-                _ => continue,
+                _ => {}
             }
         }
         panic!("the {what} socket stayed open after its client stopped being allowed");
@@ -1321,30 +1332,6 @@ async fn start_and_stop_refuse_a_tab_that_is_not_the_sessions() {
 /// written to the child come back out of it and reach every attached subscriber.
 #[tokio::test]
 async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
-    use futures_util::{SinkExt, StreamExt};
-
-    let (addr, _tmp) = boot().await;
-    let client = reqwest::Client::new();
-    // Launch the session-slot tab so both forms have a live child to talk to.
-    let launch = client
-        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
-        .json(&serde_json::json!({ "force": false }))
-        .send()
-        .await
-        .unwrap();
-    assert!(launch.status().is_success(), "reconnect should launch s1");
-    let slot = slot_tab_id(&client, addr, "s1").await;
-    assert_ne!(
-        slot, "s1",
-        "the slot tab is a generated id the session points at, not the session id"
-    );
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
-
-    let bare = format!("ws://{addr}/ws/sessions/s1/pty");
-    // The slot tab's own stable address. The bare form has to resolve it through
-    // the session's pointer, which is the whole point of the round trip below.
-    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/{slot}/pty");
-
     /// Write `line` on `writer` and wait for it to come back on `reader`,
     /// retrying the write: input is gated on pty ownership, and a previous
     /// socket's ownership is released asynchronously when it drops.
@@ -1376,6 +1363,30 @@ async fn both_address_forms_of_the_slot_tab_reach_the_same_pty() {
         }
         false
     }
+
+    use futures_util::{SinkExt, StreamExt};
+
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    // Launch the session-slot tab so both forms have a live child to talk to.
+    let launch = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
+        .json(&serde_json::json!({ "force": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(launch.status().is_success(), "reconnect should launch s1");
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    assert_ne!(
+        slot, "s1",
+        "the slot tab is a generated id the session points at, not the session id"
+    );
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
+
+    let bare = format!("ws://{addr}/ws/sessions/s1/pty");
+    // The slot tab's own stable address. The bare form has to resolve it through
+    // the session's pointer, which is the whole point of the round trip below.
+    let per_tab = format!("ws://{addr}/ws/sessions/s1/tabs/{slot}/pty");
 
     assert!(
         write_here_read_there(&per_tab, &bare, "alphaslot").await,

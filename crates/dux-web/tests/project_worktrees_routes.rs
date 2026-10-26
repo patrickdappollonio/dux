@@ -26,7 +26,7 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .expect("run git");
     assert!(
         out.status.success(),
         "git {args:?} failed: {}",
@@ -62,7 +62,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
 
 struct Fixture {
     addr: SocketAddr,
-    _tmp: dux_core::test_scratch::ScratchDir,
+    tmp: dux_core::test_scratch::ScratchDir,
     /// An adoptable, clean managed worktree.
     free: PathBuf,
     /// An adoptable managed worktree holding an untracked file.
@@ -80,7 +80,7 @@ async fn boot() -> Fixture {
     let root = tmp.path().to_path_buf();
 
     let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&repo).expect("create the test directory");
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.email", "t@example.com"]);
     git(&repo, &["config", "user.name", "Test"]);
@@ -89,7 +89,7 @@ async fn boot() -> Fixture {
     // Managed worktrees live under `<worktrees_root>/<project name>/`, which is
     // exactly what `classify_project_worktrees` keys "managed" off.
     let managed = root.join("worktrees").join("repo");
-    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::create_dir_all(&managed).expect("create the test directory");
     let free = managed.join("free");
     let dirty = managed.join("dirty");
     let held = managed.join("held");
@@ -112,7 +112,7 @@ async fn boot() -> Fixture {
             ],
         );
     }
-    std::fs::write(dirty.join("scratch.txt"), "unsaved work").unwrap();
+    std::fs::write(dirty.join("scratch.txt"), "unsaved work").expect("write the test file");
 
     let paths = DuxPaths {
         root: root.clone(),
@@ -123,7 +123,7 @@ async fn boot() -> Fixture {
         socket_path: root.join("dux.sock"),
     };
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -133,14 +133,14 @@ async fn boot() -> Fixture {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session("s1", held.to_string_lossy().as_ref()))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(
@@ -148,20 +148,22 @@ async fn boot() -> Fixture {
         Router::<AppState>::new(),
         RouterParams::plain_http(),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
 
     Fixture {
         addr,
-        _tmp: tmp,
+        tmp,
         free,
         dirty,
         held,
@@ -172,7 +174,7 @@ async fn boot() -> Fixture {
 async fn list(addr: SocketAddr, project: &str) -> (u16, serde_json::Value) {
     let resp = reqwest::get(format!("http://{addr}/api/v1/projects/{project}/worktrees"))
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     let body = resp.json().await.unwrap_or(serde_json::Value::Null);
     (status, body)
@@ -199,7 +201,7 @@ async fn delete_with(addr: SocketAddr, project: &str, path: &Path, extra: &str) 
         ))
         .send()
         .await
-        .unwrap();
+        .expect("send the request");
     let status = resp.status().as_u16();
     (status, resp.text().await.unwrap_or_default())
 }
@@ -210,7 +212,7 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
         .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
         .current_dir(repo)
         .output()
-        .unwrap();
+        .expect("run git");
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .any(|line| line == branch)
@@ -285,7 +287,7 @@ async fn deleting_a_worktree_does_not_delete_its_branch() {
     assert_eq!(status, 200, "got {body}");
     let out = dux_core::test_git::fixture_git()
         .args(["branch", "--list", "free"])
-        .current_dir(f._tmp.path().join("repo"))
+        .current_dir(f.tmp.path().join("repo"))
         .output()
         .unwrap();
     assert!(
@@ -301,7 +303,7 @@ async fn deleting_a_worktree_with_delete_branch_removes_the_branch_too() {
     // worktree. Without this a deleted worktree leaves its branch behind, and
     // recreating an agent under that name fails with "branch already exists".
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     assert!(branch_exists(&repo, "free"));
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
@@ -332,7 +334,7 @@ async fn deleting_a_worktree_reports_a_branch_git_refused_to_delete() {
     // checkout's HEAD at `free` is what makes git refuse, and it is the same
     // refusal a user reaches by having the branch checked out elsewhere.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     git(&repo, &["symbolic-ref", "HEAD", "refs/heads/free"]);
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
@@ -363,7 +365,7 @@ async fn deleting_a_worktree_with_delete_branch_false_keeps_the_branch() {
     // An explicit `false` must behave exactly like the absent parameter, or the
     // checkbox has no off position.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
 
     let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=false").await;
 
@@ -382,11 +384,11 @@ async fn deleting_a_detached_worktree_with_delete_branch_still_works() {
     // anyway (a hand-written one, a stale tab) must not be an error: there is
     // simply no branch to delete, so the worktree goes and nothing else does.
     let f = boot().await;
-    let repo = f._tmp.path().join("repo");
+    let repo = f.tmp.path().join("repo");
     // The real path, the one git lists the worktree by (macOS reaches the temp
     // folder through a symlink).
     let loose = f
-        ._tmp
+        .tmp
         .path()
         .canonicalize()
         .unwrap()

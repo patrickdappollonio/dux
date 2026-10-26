@@ -47,7 +47,7 @@ use crate::rest_common::{
 use crate::server::AppState;
 use std::sync::Arc;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions/{id}/tabs", post(create_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", delete(delete_tab))

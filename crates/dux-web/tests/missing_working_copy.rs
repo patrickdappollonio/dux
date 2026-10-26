@@ -79,16 +79,17 @@ async fn boot_with_repo() -> (
     let root = tmp.path().to_path_buf();
 
     let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&repo).expect("create the test directory");
     run_git(&repo, &["init", "-q", "-b", "main", "."]);
     run_git(&repo, &["config", "user.email", "t@example.com"]);
     run_git(&repo, &["config", "user.name", "t"]);
-    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    std::fs::write(repo.join("seed.txt"), "seed\n").expect("write the test file");
     run_git(&repo, &["add", "seed.txt"]);
     run_git(&repo, &["commit", "-qm", "init"]);
 
     let worktree = root.join("worktrees").join("repo").join("feat");
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(worktree.parent().expect("the worktree path has a parent"))
+        .expect("create the test directory");
     dux_core::git::add_worktree_new_branch_at(&repo, &worktree, "feat", Some("main"))
         .expect("the agent's working copy");
 
@@ -101,7 +102,7 @@ async fn boot_with_repo() -> (
         socket_path: root.join("dux.sock"),
     };
     {
-        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open the session store");
         store
             .upsert_project(&ProjectConfig {
                 id: "p1".to_string(),
@@ -111,30 +112,32 @@ async fn boot_with_repo() -> (
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::new(),
             })
-            .unwrap();
+            .expect("save the test project");
         store
             .create_session(&sample_session(
                 "s1",
                 worktree.to_string_lossy().as_ref(),
                 "feat",
             ))
-            .unwrap();
+            .expect("save the test agent");
     }
-    let mut engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).expect("bootstrap the test engine");
     dux_core::test_provider::defuse_config(&mut engine.config);
     let (handle, _join) = spawn_engine_thread(engine);
     let app = build_app(handle, axum::Router::new(), RouterParams::plain_http());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("read the bound address");
     tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
-        .unwrap();
+        .expect("serve the test router");
     });
     (addr, tmp, worktree, repo)
 }
@@ -165,10 +168,10 @@ async fn wait_for_missing(addr: SocketAddr, copy: WorkingCopy) -> serde_json::Va
             .get(format!("http://{addr}/api/v1/sessions"))
             .send()
             .await
-            .unwrap()
+            .expect("send the request")
             .json()
             .await
-            .unwrap();
+            .expect("the response body is JSON");
         let workspace = body[0]["workspace"].clone();
         if workspace["worktree_missing"] == serde_json::Value::Bool(missing) {
             return workspace;
@@ -319,7 +322,9 @@ where
                 continue;
             };
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                sink.lock().unwrap().push(value);
+                sink.lock()
+                    .expect("the frames lock is not poisoned")
+                    .push(value);
             }
         }
     });

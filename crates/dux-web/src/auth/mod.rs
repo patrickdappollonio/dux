@@ -62,6 +62,7 @@ pub(crate) use socket::SocketAuth;
 /// from it worked out once.
 #[derive(Debug)]
 pub struct AuthSnapshot {
+    /// The section as it was read.
     pub config: ServerAuthConfig,
     /// The credential generation of `config.password_hash` (empty for none).
     pub generation: String,
@@ -142,6 +143,7 @@ impl Default for LiveAuth {
 }
 
 impl LiveAuth {
+    /// The live section, starting from `config` with nothing written yet.
     pub fn new(config: &ServerAuthConfig) -> Self {
         Self {
             inner: std::sync::RwLock::new(Live {
@@ -309,22 +311,22 @@ impl Reach {
 }
 
 /// What [`AuthState::start`] needs from the serve that builds it.
-pub struct AuthSetup {
-    pub live: Arc<LiveAuth>,
-    pub exposure: Option<ExposureCell>,
-    pub bound_ips: Vec<IpAddr>,
-    pub tailscale_leg: Option<Arc<std::sync::Mutex<Option<SocketAddr>>>>,
+pub(crate) struct AuthSetup {
+    pub(crate) live: Arc<LiveAuth>,
+    pub(crate) exposure: Option<ExposureCell>,
+    pub(crate) bound_ips: Vec<IpAddr>,
+    pub(crate) tailscale_leg: Option<Arc<std::sync::Mutex<Option<SocketAddr>>>>,
     /// Where dux writes a password, a ban and the warning's dismissal. `None`
     /// for a router with no config behind it, which then writes nothing.
-    pub config_path: Option<PathBuf>,
+    pub(crate) config_path: Option<PathBuf>,
     /// The session database. `None` keeps sessions in memory only.
-    pub sessions_db: Option<PathBuf>,
-    pub console: crate::console::Console,
-    pub engine: Option<crate::engine_actor::EngineHandle>,
+    pub(crate) sessions_db: Option<PathBuf>,
+    pub(crate) console: crate::console::Console,
+    pub(crate) engine: Option<crate::engine_actor::EngineHandle>,
     /// Asks the running dux to reload its config after dux wrote to it.
-    pub reload: Arc<dyn Fn() + Send + Sync>,
+    pub(crate) reload: Arc<dyn Fn() + Send + Sync>,
     /// Test seam: see [`crate::server::RouterParams::socket_opening_hook`].
-    pub opening_hook: Option<OpeningHook>,
+    pub(crate) opening_hook: Option<OpeningHook>,
 }
 
 /// A test seam awaited at a socket's opening check.
@@ -356,6 +358,15 @@ pub struct AuthState {
     pub(crate) speaker: warnings::Speaker,
     /// See [`AuthSetup::opening_hook`].
     pub(crate) opening_hook: Option<OpeningHook>,
+}
+
+impl std::fmt::Debug for AuthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthState")
+            .field("live", &self.live)
+            .field("config_path", &self.config_path)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Everything the auth layer worked out about one request. Handlers read it
@@ -429,7 +440,7 @@ impl AuthState {
     /// Build the state and start its background work: loading the stored
     /// sessions, writing their last use, following config changes, and the
     /// no-password warning. Needs a tokio runtime context.
-    pub fn start(setup: AuthSetup) -> Arc<Self> {
+    pub(crate) fn start(setup: AuthSetup) -> Arc<Self> {
         let clock = sessions::system_clock();
         Self::start_with_clock(setup, clock)
     }
@@ -1036,7 +1047,8 @@ pub(crate) fn idle_windows(config: &ServerAuthConfig) -> sessions::Idle {
 /// between one and fifteen seconds.
 fn flush_period(config: &ServerAuthConfig) -> std::time::Duration {
     std::time::Duration::from_millis(
-        (idle_windows(config).browser_ms / 3).clamp(1_000, 15_000) as u64
+        u64::try_from((idle_windows(config).browser_ms / 3).clamp(1_000, 15_000))
+            .expect("the period is clamped to between one and fifteen seconds"),
     )
 }
 
@@ -1088,7 +1100,7 @@ async fn maintain(state: Arc<AuthState>) {
     warning.check(&state);
     // Each entry covering loopback or an own address is said once per run,
     // at load, at the reload that adds it, or when the address appears.
-    let mut own_said: std::collections::HashSet<String> = Default::default();
+    let mut own_said: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut say_own_entries = |state: &AuthState| {
         let own = own_addresses(&state.exposure(), &state.interfaces(), None);
         for (entry, ip) in warnings::own_entries(&state.snapshot().config.blocked_addresses, &own) {
@@ -1129,7 +1141,7 @@ async fn maintain(state: Arc<AuthState>) {
                 }
                 let snapshot = state.snapshot();
                 if snapshot.generation != generation {
-                    generation = snapshot.generation.clone();
+                    generation.clone_from(&snapshot.generation);
                     state.sessions.retain_generation(&generation);
                 }
                 let next = flush_period(&snapshot.config);
