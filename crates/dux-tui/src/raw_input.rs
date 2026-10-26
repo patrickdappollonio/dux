@@ -1,14 +1,14 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Bracket paste mode start marker: `ESC [ 200 ~`
-pub const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
+pub(crate) const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracket paste mode end marker: `ESC [ 201 ~`
-pub const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
+pub(crate) const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 
 /// Focus-in report (DEC private mode 1004): `ESC [ I`.
-pub const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
+pub(crate) const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
 /// Focus-out report (DEC private mode 1004): `ESC [ O`.
-pub const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
+pub(crate) const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
 
 /// Recognize a terminal focus report emitted while DEC mode 1004 is enabled.
 ///
@@ -18,7 +18,7 @@ pub const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
 /// parameterized sequences; the CSI splitter always delivers them whole, so the
 /// interactive input path can intercept and drop them instead of forwarding the
 /// host's report into the child PTY.
-pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
+pub(crate) fn parse_focus_event(seq: &[u8]) -> Option<bool> {
     if seq == FOCUS_GAINED_SEQ {
         Some(true)
     } else if seq == FOCUS_LOST_SEQ {
@@ -53,7 +53,7 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
 ///
 /// Bracketed-paste content is exempt at the CALL SITE, not here: pasted text
 /// really can contain these bytes, and a paste is user data.
-pub fn is_device_report(seq: &[u8]) -> bool {
+pub(crate) fn is_device_report(seq: &[u8]) -> bool {
     if let Some(body) = seq.strip_prefix(b"\x1b]") {
         return body.ends_with(b"\x07") || body.ends_with(b"\x1b\\");
     }
@@ -77,7 +77,7 @@ pub fn is_device_report(seq: &[u8]) -> bool {
 /// chunks, because a pair can straddle two reads; the returned bool is the
 /// value to thread into the next chunk. Mirrors the string-side
 /// normalization in `App::paste_to_center_pty`.
-pub fn normalize_paste_newlines(bytes: &[u8], mut prev_cr: bool) -> (Vec<u8>, bool) {
+pub(crate) fn normalize_paste_newlines(bytes: &[u8], mut prev_cr: bool) -> (Vec<u8>, bool) {
     let mut out = Vec::with_capacity(bytes.len());
     for &b in bytes {
         if b == b'\n' {
@@ -95,7 +95,7 @@ pub fn normalize_paste_newlines(bytes: &[u8], mut prev_cr: bool) -> (Vec<u8>, bo
 
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
 /// `\x1b[<…m`).
-pub fn is_sgr_mouse(seq: &[u8]) -> bool {
+pub(crate) fn is_sgr_mouse(seq: &[u8]) -> bool {
     seq.len() >= 6
         && seq[0] == 0x1b
         && seq[1] == b'['
@@ -136,7 +136,7 @@ fn sgr_button(button_bits: u16) -> Option<MouseButton> {
 ///   - Cx = column (1-based)
 ///   - Cy = row (1-based)
 ///   - M = press/motion, m = release
-pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
+pub(crate) fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
     if !is_sgr_mouse(seq) {
         return None;
     }
@@ -195,7 +195,7 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
 /// a click at column `origin_col + 1` maps to translated column 1. Returns
 /// `None` if the sequence is not a valid SGR mouse event or the click falls on
 /// or before the origin.
-pub fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
+pub(crate) fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
     if !is_sgr_mouse(seq) {
         return None;
     }
@@ -230,19 +230,19 @@ enum SequenceStatus {
 /// UTF-8 and SGR mouse reports share one byte stream; the parser holds
 /// incomplete trailing bytes so callers need not splice buffers themselves.
 #[derive(Debug, Clone, Default)]
-pub struct RawInputParser {
+pub(crate) struct RawInputParser {
     pending: Vec<u8>,
     in_bracket_paste: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedSequence {
+pub(crate) struct ParsedSequence {
     pub bytes: Vec<u8>,
     pub in_bracket_paste: bool,
 }
 
 impl RawInputParser {
-    pub fn feed_sequences(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
+    pub(crate) fn feed_sequences(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
         self.pending.extend_from_slice(bytes);
         let mut sequences = Vec::new();
 
@@ -271,7 +271,7 @@ impl RawInputParser {
         sequences
     }
 
-    pub fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
         if self.pending == [0x1b] {
             self.pending.clear();
             Some(vec![0x1b])
@@ -280,20 +280,20 @@ impl RawInputParser {
         }
     }
 
-    pub fn in_bracket_paste(&self) -> bool {
+    pub(crate) fn in_bracket_paste(&self) -> bool {
         self.in_bracket_paste
     }
 
-    pub fn pending(&self) -> &[u8] {
+    pub(crate) fn pending(&self) -> &[u8] {
         &self.pending
     }
 
-    pub fn replace_pending(&mut self, bytes: &[u8]) {
+    pub(crate) fn replace_pending(&mut self, bytes: &[u8]) {
         self.pending.clear();
         self.pending.extend_from_slice(bytes);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.pending.clear();
         self.in_bracket_paste = false;
     }
@@ -394,7 +394,7 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
 /// Returns `(complete, remainder)`: fully received sequences, and the trailing
 /// bytes that could start an incomplete one (a partial CSI or UTF-8 character).
 /// Boundaries only; the splitter does not interpret what a sequence means.
-pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
+pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut sequences: Vec<&[u8]> = Vec::new();
     let mut i = 0;
 

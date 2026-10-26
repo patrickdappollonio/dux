@@ -243,7 +243,7 @@ struct PruneViewContext {
     tab_providers: HashMap<String, String>,
 }
 
-pub struct App {
+pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
     pub(crate) selected_left: usize,
@@ -897,7 +897,7 @@ pub struct App {
 /// [`App::pending_server_flip_op`]). The plain-success case never resolves the op
 /// (it re-emits `progress` and lets the spinner ride until the flip), so only the
 /// two terminal-with-message cases are represented here.
-pub enum TuiServerFlipOutcome {
+pub(crate) enum TuiServerFlipOutcome {
     /// Pre-flight succeeded but carried a non-fatal warning (e.g. Tailscale not
     /// detected, serving loopback-only). Resolves to a warning final whose text is
     /// byte-identical to the legacy `set_warning`.
@@ -926,7 +926,7 @@ pub(crate) struct PendingBackgroundServerStart {
 /// Every arm is terminal, unlike the flip's: the flip's busy rides on until the
 /// process changes surface, while this one has an answer either way and the TUI
 /// stays exactly where it was.
-pub enum BackgroundServerOutcome {
+pub(crate) enum BackgroundServerOutcome {
     /// Serving, on these addresses.
     Serving {
         urls: Vec<String>,
@@ -948,7 +948,7 @@ pub enum BackgroundServerOutcome {
 /// [`App::pending_config_reload_op`]). The two apply outcomes are answered on
 /// the worker lane so both surfaces read one sentence; a validation failure is
 /// this surface's alone and carries its own line.
-pub enum TuiConfigReloadOutcome {
+pub(crate) enum TuiConfigReloadOutcome {
     /// The reloaded config applied cleanly. Dismisses the spinner; the sentence
     /// comes from [`dux_core::config_reload_status::applied`].
     Applied,
@@ -965,7 +965,7 @@ pub enum TuiConfigReloadOutcome {
 /// clear: every visible final message is authored elsewhere (the engine's unkeyed
 /// `Status`, or a TUI `set_info`/`set_error` in the view handler), so the op's only
 /// job is to dismiss its keyed busy once that final is in place.
-pub enum TuiCheckoutInspectOutcome {
+pub(crate) enum TuiCheckoutInspectOutcome {
     Done,
 }
 
@@ -974,7 +974,7 @@ pub enum TuiCheckoutInspectOutcome {
 /// needs, and the `worktree` the read was asked for, which is both what tells
 /// this refresh's answer apart from any other `ChangedFilesReady` and what has
 /// to still be watched for the answer to have been applied at all.
-pub struct PendingChangedFilesRefresh {
+pub(crate) struct PendingChangedFilesRefresh {
     pub key: String,
     pub label: String,
     pub worktree: PathBuf,
@@ -985,7 +985,7 @@ pub struct PendingChangedFilesRefresh {
 }
 
 /// How a changed-files read announces itself on the TUI's one status line.
-pub enum ChangedFilesReadVoice {
+pub(crate) enum ChangedFilesReadVoice {
     /// The `refresh-changes` command. It was asked for in words, so it answers
     /// in words: a busy straight away and the counts when the read lands.
     Spoken,
@@ -1007,12 +1007,12 @@ fn changed_files_read_busy(label: &str) -> String {
 /// line explains the empty pane. Below this the read is not a wait anyone needs
 /// narrated; above it the user is looking at an empty Changes pane and deserves
 /// to know why.
-pub const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
+pub(crate) const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
 
 /// The in-flight diff computation: the request it is for, the channel its
 /// answer arrives on, and whether the status line still owes the user a
 /// spinner.
-pub struct PendingDiff {
+pub(crate) struct PendingDiff {
     pub key: crate::diff::DiffRequestKey,
     pub rx: mpsc::Receiver<crate::diff::DiffAnswer>,
     /// The file the diff is for, for the status messages.
@@ -1029,7 +1029,7 @@ pub struct PendingDiff {
 /// The status key every diff computation shares. One slot in the app means one
 /// key: a new request retires the previous one's spinner rather than leaving
 /// two open at once.
-pub const DIFF_STATUS_KEY: &str = "diff-file";
+pub(crate) const DIFF_STATUS_KEY: &str = "diff-file";
 
 /// Which folded folders the changes pane has expanded, and the work in flight
 /// for them. See `changes_tree` for the behavior.
@@ -1134,7 +1134,7 @@ pub(crate) struct FolderOpDone {
 /// How long a diff may take before the status line explains the empty pane.
 /// The same judgement as [`SLOW_CHANGED_FILES_READ`], and deliberately the same
 /// number: both are "the pane is blank and the user is looking at it".
-pub const SLOW_DIFF_READ: Duration = Duration::from_millis(300);
+pub(crate) const SLOW_DIFF_READ: Duration = Duration::from_millis(300);
 
 /// The one busy wording for a diff computation.
 fn diff_read_busy(label: &str) -> String {
@@ -1153,7 +1153,7 @@ fn diff_read_busy(label: &str) -> String {
 /// handler additionally observes whether the session record is still present.
 /// The resolver (declared at dispatch, where the session was in scope) maps this
 /// to the final user message.
-pub enum TuiDeleteOutcome {
+pub(crate) enum TuiDeleteOutcome {
     /// Git removal succeeded and the session record is still present (the normal
     /// case, where cleanup runs now). `branches` selects the message, and carries
     /// the birth branch's fate as well when the agent had drifted.
@@ -1177,7 +1177,7 @@ pub enum TuiDeleteOutcome {
 /// Both variants resolve to a clear: the user-visible message is produced by the
 /// downstream path (the name prompt's `set_info` on success, the engine's error
 /// `Status` on failure), so the op's only job is to dismiss its keyed busy.
-pub enum PrLookupFinalOutcome {
+pub(crate) enum PrLookupFinalOutcome {
     /// The lookup resolved; the TUI opens the name prompt (whose `set_info` is the
     /// visible final), so this op's busy is dismissed with no replacement message.
     HandedOff,
@@ -1191,7 +1191,7 @@ pub enum PrLookupFinalOutcome {
 /// picker is still open and matching when the worktrees arrive, a fact the
 /// worker never sees. The op's resolver (declared at dispatch) maps this to the
 /// final user message.
-pub enum WorktreesFinalOutcome {
+pub(crate) enum WorktreesFinalOutcome {
     /// The picker is still open and the worktrees loaded successfully.
     Loaded,
     /// The picker is still open but the load failed; carries the error.
@@ -1206,7 +1206,7 @@ pub enum WorktreesFinalOutcome {
 /// then runs the fallible config write, producing one of three results the
 /// worker never sees. The op's resolver (declared at dispatch) maps this to the
 /// final user message.
-pub enum PersistFinalOutcome {
+pub(crate) enum PersistFinalOutcome {
     /// SQLite write succeeded and the post-worker config.toml write succeeded.
     Saved,
     /// The SQLite write itself failed; carries the formatted error.
@@ -1227,7 +1227,7 @@ pub(crate) struct PendingServerFlip {
 
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
 /// process into the web server while keeping the live agents running.
-pub enum RunExit {
+pub(crate) enum RunExit {
     Quit,
     FlipToServer {
         listeners: Vec<std::net::TcpListener>,
@@ -3577,7 +3577,7 @@ pub(crate) struct TerminalSelection {
 
 impl TerminalSelection {
     /// Returns (start, end) in reading order (top-left to bottom-right).
-    pub fn ordered(&self) -> (TermGridPos, TermGridPos) {
+    pub(crate) fn ordered(&self) -> (TermGridPos, TermGridPos) {
         if self.anchor.row < self.end.row
             || (self.anchor.row == self.end.row && self.anchor.col <= self.end.col)
         {
@@ -3589,7 +3589,7 @@ impl TerminalSelection {
 
     /// Returns true if the given (row, col) is within the selection.
     /// Uses line-based (not rectangular) selection semantics.
-    pub fn contains(&self, row: u16, col: u16) -> bool {
+    pub(crate) fn contains(&self, row: u16, col: u16) -> bool {
         let (start, end) = self.ordered();
         if row < start.row || row > end.row {
             return false;
@@ -3629,7 +3629,7 @@ impl TerminalSelection {
     /// appearing among the snapshot's cells, so it leaves the highlight and the
     /// copy on its own. Copying it back is out of scope; the snapshot carries no
     /// scrollback.
-    pub fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
+    pub(crate) fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
         let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
         let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
         let origin_row = live_row as i64 - offset_delta + total_delta;
@@ -3640,7 +3640,7 @@ impl TerminalSelection {
     /// cell's row into the selection's own frame first. Every PTY-grid caller
     /// must use this rather than `contains`, or the highlight and the copied
     /// text stay pinned to screen coordinates while the text underneath moves.
-    pub fn contains_live(&self, live_row: u16, col: u16, now: SelectionOrigin) -> bool {
+    pub(crate) fn contains_live(&self, live_row: u16, col: u16, now: SelectionOrigin) -> bool {
         match self.to_origin_row(live_row, now) {
             Some(row) => self.contains(row, col),
             None => false,
@@ -4411,7 +4411,7 @@ impl App {
     /// created its directories, and acquired the single-instance lock.
     /// This ensures the lock covers every entrypoint (TUI + config
     /// subcommands) and that a losing process never touches shared state.
-    pub fn bootstrap_with_lock(
+    pub(crate) fn bootstrap_with_lock(
         paths: DuxPaths,
         mut single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
@@ -4815,7 +4815,7 @@ impl App {
     /// from `engine.config` exactly as bootstrap does, and a fresh SIGWINCH
     /// handler is registered; the previous App's registration was removed in
     /// `into_engine`, so flip cycles don't accumulate handlers.
-    pub fn resume(engine: Engine) -> Result<Self> {
+    pub(crate) fn resume(engine: Engine) -> Result<Self> {
         logger::info("resuming dux TUI after the web server stopped");
         let bindings = RuntimeBindings::from_keys_config(&engine.config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
@@ -4849,7 +4849,7 @@ impl App {
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
     /// PTY-activity tracking lives on the engine (`pty_activity`), so the
     /// streaming/"working" state carries across the flip with it.
-    pub fn into_engine(self) -> Engine {
+    pub(crate) fn into_engine(self) -> Engine {
         // Unregister this App's signal handlers so repeated flip cycles don't
         // pile up orphaned registrations (each resume registers fresh flags;
         // without this, every signal would fire one stale setter per cycle) and
@@ -4864,7 +4864,7 @@ impl App {
         self.engine
     }
 
-    pub fn run(&mut self) -> Result<RunExit> {
+    pub(crate) fn run(&mut self) -> Result<RunExit> {
         self.start_run_services();
         let mut terminal = ratatui::init();
         execute!(

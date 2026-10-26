@@ -13,13 +13,13 @@ use crate::theme::Theme as AppTheme;
 use dux_core::text::count_of;
 
 /// Cached syntax highlighting resources to avoid reloading on every diff.
-pub struct SyntaxCache {
+pub(crate) struct SyntaxCache {
     pub syntax_set: SyntaxSet,
     pub theme_set: ThemeSet,
 }
 
 impl SyntaxCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -28,7 +28,7 @@ impl SyntaxCache {
 }
 
 /// Pre-rendered diff ready for display.
-pub struct DiffOutput {
+pub(crate) struct DiffOutput {
     pub lines: Vec<Line<'static>>,
     /// Display-column width of the gutter (line numbers + separator + prefix).
     /// Zero when line numbers are disabled.
@@ -749,7 +749,7 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
 /// width with no indent. The diff pane draws only the rows in the viewport, so
 /// it needs the wrapped extent for every setting, and having one wrapper answer
 /// for both is what keeps the scroll extent and the drawn rows agreeing.
-pub fn wrap_diff_lines(
+pub(crate) fn wrap_diff_lines(
     lines: &[Line<'static>],
     total_width: usize,
     gutter_width: usize,

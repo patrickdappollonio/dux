@@ -9,14 +9,14 @@ use ratatui::text::Span;
 
 use crate::config::DuxPaths;
 use dux_core::theme::DEFAULT_THEME_NAME;
-pub use dux_core::theme::{ThemeListing, discover_available};
+pub(crate) use dux_core::theme::{ThemeListing, discover_available};
 
 /// Broken-circle frames for spinner animations. Shared by the loading card,
 /// status line, and left-pane streaming indicator.
-pub const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
+pub(crate) const SPINNER_FRAMES: &[char] = &['◜', '◠', '◝', '◞', '◡', '◟'];
 /// Wall-clock milliseconds each spinner frame stays on screen. The event loop
 /// polls every 33ms while anything animates, which keeps this cadence honest.
-pub const SPINNER_FRAME_MS: u128 = 75;
+pub(crate) const SPINNER_FRAME_MS: u128 = 75;
 
 /// The RGB `into_ratatui` folded a color down from, for the nine canonical
 /// values it remaps to named ANSI colors. Those names exist so the terminal's
@@ -52,7 +52,7 @@ fn blendable_rgb(color: Color) -> Option<(u8, u8, u8)> {
 /// the word spends most of its cycle at. Only the dimmed cells become RGB,
 /// because a blend cannot be named. A color with no RGB behind it at all cannot
 /// be blended, so it rests rather than being guessed at.
-pub fn working_word_color(working: Color, muted: Color, step: usize) -> Color {
+pub(crate) fn working_word_color(working: Color, muted: Color, step: usize) -> Color {
     let blend = dux_core::working_cue::mute_blend(step);
     if blend <= f32::EPSILON {
         return working;
@@ -67,17 +67,17 @@ pub fn working_word_color(working: Color, muted: Color, step: usize) -> Color {
 
 /// The one solid round dot dux paints, reused by name so the glyph cannot
 /// drift between call sites.
-pub const DOT_GLYPH: &str = "●";
+pub(crate) const DOT_GLYPH: &str = "●";
 
 /// Glyph shown (blinking, in `session_attention`) in the sidebar when an agent
 /// needs attention. The same dot the status states use: the blink and the color
 /// are what read as "needs you", not a distinct shape.
-pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
+pub(crate) const ATTENTION_GLYPH: &str = DOT_GLYPH;
 
 /// Glyph shown (in `session_typing`) on an agent or terminal row while the user
 /// is typing into that PTY. A slim left-half block reads as a caret, distinct
 /// from the round status and attention dots and from the arc spinner.
-pub const TYPING_GLYPH: &str = "▍";
+pub(crate) const TYPING_GLYPH: &str = "▍";
 
 /// The terminal UI's icon set: every icon that has a sensible Nerd Font
 /// counterpart, in one place, so a row never names a literal glyph.
@@ -101,7 +101,7 @@ pub const TYPING_GLYPH: &str = "▍";
 /// markers, the ellipsis and box drawing. Those are state cues whose shape
 /// the working-cue and attention tenets pin, not icons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Glyphs {
+pub(crate) struct Glyphs {
     /// Ahead of the project name on a managed agent row's second line.
     pub project: &'static str,
     /// The standalone identity mark, worn (in `standalone_location_fg`) by
@@ -135,7 +135,7 @@ pub struct Glyphs {
 
 impl Glyphs {
     /// The default set: plain Unicode a stock terminal font carries.
-    pub const PLAIN: Glyphs = Glyphs {
+    pub(crate) const PLAIN: Glyphs = Glyphs {
         // U+203B REFERENCE MARK. The folder emoji (U+1F5C0) it replaced is
         // missing from the stock macOS terminal fonts.
         project: "\u{203B}",
@@ -163,7 +163,7 @@ impl Glyphs {
     /// The opt-in Nerd Font set (Nerd Fonts v3). Each codepoint is named after
     /// its entry in the official `glyphnames.json`; none sits in the
     /// U+F500-U+FD46 range v3 retired.
-    pub const NERD: Glyphs = Glyphs {
+    pub(crate) const NERD: Glyphs = Glyphs {
         // nf-fa-folder
         project: "\u{F07B}",
         // nf-fa-star
@@ -189,7 +189,7 @@ impl Glyphs {
     };
 
     /// The set the live `[ui] nerd_font_icons` value selects.
-    pub fn for_config(nerd_font_icons: bool) -> &'static Glyphs {
+    pub(crate) fn for_config(nerd_font_icons: bool) -> &'static Glyphs {
         if nerd_font_icons {
             &Self::NERD
         } else {
@@ -198,7 +198,7 @@ impl Glyphs {
     }
 
     /// Every glyph in the set, labelled, for tests that must cover them all.
-    pub fn all(&self) -> [(&'static str, &'static str); 12] {
+    pub(crate) fn all(&self) -> [(&'static str, &'static str); 12] {
         [
             ("project", self.project),
             ("standalone", self.standalone),
@@ -231,7 +231,7 @@ const GITHUB_PR_CLOSED_LABEL: OpalineColor = OpalineColor::new(140, 80, 80);
 /// is what lets a background worker be handed the theme it must render with
 /// instead of borrowing the app's.
 #[derive(Clone, Copy)]
-pub struct Theme {
+pub(crate) struct Theme {
     /// Base surface color, pre-filled frame-wide so every cell no widget paints
     /// inherits the theme's background instead of the terminal default.
     pub app_bg: Color,
@@ -381,7 +381,7 @@ pub struct Theme {
 ///
 /// Returns an error if none of the above match. The caller is expected to fall
 /// back to [`Theme::fallback`] in that case.
-pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
+pub(crate) fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
     let user_path = paths.root.join("themes").join(format!("{name}.toml"));
     if user_path.exists() {
         return load_from_file(&user_path)
@@ -417,7 +417,7 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
 /// Load a theme by name and fall back to the bundled `dux-dark` if the lookup
 /// fails. Returns the theme and an optional human-readable warning message
 /// suitable for the status line (`Some` only when a fallback occurred).
-pub fn load_or_fallback(name: &str, paths: &DuxPaths) -> (Theme, Option<String>) {
+pub(crate) fn load_or_fallback(name: &str, paths: &DuxPaths) -> (Theme, Option<String>) {
     match load(name, paths) {
         Ok(theme) => (theme, None),
         Err(err) => {
@@ -635,7 +635,7 @@ impl Theme {
     /// of them must be the code's dark modules. A color with no RGB behind it
     /// (the terminal's own default) cannot be measured, and counts as the dark
     /// background most terminals have.
-    pub fn background_is_lighter_than_text(&self) -> bool {
+    pub(crate) fn background_is_lighter_than_text(&self) -> bool {
         let luma = |color: Color| {
             blendable_rgb(color).map(|(r, g, b)| {
                 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
@@ -652,7 +652,7 @@ impl Theme {
     /// [`register_dux_defaults`] before this is called, so missing tokens fall
     /// back to standard Opaline semantic colors rather than the `FALLBACK`
     /// gray.
-    pub fn from_opaline(theme: &OpalineTheme) -> Self {
+    pub(crate) fn from_opaline(theme: &OpalineTheme) -> Self {
         let pick = |token: &str| into_ratatui(theme.color(token));
         Self {
             app_bg: pick("dux.app_bg"),
@@ -747,22 +747,22 @@ impl Theme {
     /// Last-resort theme used when `theme::load` fails. Loads the bundled
     /// `dux-dark.toml` which is embedded at compile time, so this never fails
     /// in a correctly-built binary.
-    pub fn fallback() -> Self {
+    pub(crate) fn fallback() -> Self {
         load_from_str(DUX_DARK_TOML).expect("bundled dux-dark theme must always parse")
     }
 
     /// The original dux dark palette. Kept for tests, snapshots, and any
     /// future caller that wants the exact pre-Opaline default without
     /// going through the loader. Equivalent to [`Self::fallback`].
-    pub fn default_dark() -> Self {
+    pub(crate) fn default_dark() -> Self {
         Self::fallback()
     }
 
-    pub fn header_style(&self) -> Style {
+    pub(crate) fn header_style(&self) -> Style {
         Style::default().fg(self.header_fg).bg(self.header_bg)
     }
 
-    pub fn border_style(&self, focused: bool) -> Style {
+    pub(crate) fn border_style(&self, focused: bool) -> Style {
         if focused {
             Style::default().fg(self.border_focused)
         } else {
@@ -770,7 +770,7 @@ impl Theme {
         }
     }
 
-    pub fn title_style(&self, focused: bool) -> Style {
+    pub(crate) fn title_style(&self, focused: bool) -> Style {
         if focused {
             Style::default()
                 .fg(self.title_focused)
@@ -791,7 +791,7 @@ impl Theme {
     /// so the two states differ in colour and weight even if a theme maps the
     /// colours together;
     /// `the_overlay_field_focus_is_visible_in_every_loadable_theme` pins it.
-    pub fn overlay_field_border_style(&self, focused: bool) -> Style {
+    pub(crate) fn overlay_field_border_style(&self, focused: bool) -> Style {
         if focused {
             Style::default()
                 .fg(self.button_active_fg)
@@ -805,7 +805,7 @@ impl Theme {
     /// modal background (`overlay_bg`). Every dialog surface is painted in it,
     /// so body prose that sets no color of its own reads in the theme's text
     /// color rather than the host terminal's default foreground.
-    pub fn overlay_surface_style(&self) -> Style {
+    pub(crate) fn overlay_surface_style(&self) -> Style {
         Style::default().fg(self.text_fg).bg(self.overlay_bg)
     }
 
@@ -813,7 +813,7 @@ impl Theme {
     /// `pane_card_bg`. The card shares a modal's ring and title, but it is part
     /// of the pane it sits in, so it is filled with the pane's surface rather
     /// than the modal one.
-    pub fn pane_card_surface_style(&self) -> Style {
+    pub(crate) fn pane_card_surface_style(&self) -> Style {
         Style::default().fg(self.text_fg).bg(self.pane_card_bg)
     }
 
@@ -833,14 +833,14 @@ impl Theme {
     /// may share. Do not reuse this style for other text, or that text will
     /// refuse to wrap; a look that merely resembles a chip needs a style of its
     /// own.
-    pub fn name_style(&self) -> Style {
+    pub(crate) fn name_style(&self) -> Style {
         Style::default()
             .fg(self.overlay_bg)
             .bg(self.text_fg)
             .remove_modifier(NAME_CHIP_MARKER)
     }
 
-    pub fn selection_style(&self) -> Style {
+    pub(crate) fn selection_style(&self) -> Style {
         Style::default()
             .fg(self.selection_fg)
             .bg(self.selection_bg)
@@ -852,11 +852,11 @@ impl Theme {
     /// always tracks whatever accent the active theme uses (no hardcoded tint).
     /// Falls back to the plain app background when either color is not RGB (a
     /// named ANSI color can't be blended predictably).
-    pub fn selection_bar_tint(&self) -> Color {
+    pub(crate) fn selection_bar_tint(&self) -> Color {
         blend_over(self.selection_bg, self.app_bg, 0.16)
     }
 
-    pub fn status_dot(&self, tone: crate::statusline::StatusTone) -> (&'static str, Color) {
+    pub(crate) fn status_dot(&self, tone: crate::statusline::StatusTone) -> (&'static str, Color) {
         match tone {
             crate::statusline::StatusTone::Info => ("●", self.session_active),
             crate::statusline::StatusTone::Busy => ("●", self.session_detached),
@@ -865,7 +865,10 @@ impl Theme {
         }
     }
 
-    pub fn session_dot(&self, status: &crate::model::SessionStatus) -> (&'static str, Color) {
+    pub(crate) fn session_dot(
+        &self,
+        status: &crate::model::SessionStatus,
+    ) -> (&'static str, Color) {
         match status {
             crate::model::SessionStatus::Active => ("●", self.session_active),
             crate::model::SessionStatus::Detached => ("◎", self.session_detached),
@@ -878,13 +881,13 @@ impl Theme {
     /// as the description beside it does. Naming a background here would be
     /// wrong on every surface but that one; `Color::Reset` would be wrong on
     /// all of them, since it falls through to the terminal default.
-    pub fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
+    pub(crate) fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
         badge_spans(key, self.hint_bracket_fg, self.hint_key_fg)
     }
 
     /// [`Self::key_badge_default`] in the dimmed hint colors a pane's hint row
     /// uses.
-    pub fn dim_key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
+    pub(crate) fn dim_key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
         badge_spans(key, self.hint_dim_bracket_fg, self.hint_dim_key_fg)
     }
 }
@@ -911,10 +914,10 @@ fn badge_spans(key: &str, bracket: Color, key_fg: Color) -> Vec<Span<'_>> {
 /// as it would without the marker, and nothing else in dux removes it. The
 /// marker survives `Style::patch`, so a caller that restyles a chip (dims it
 /// for a disabled row) still has a chip.
-pub const NAME_CHIP_MARKER: Modifier = Modifier::HIDDEN;
+pub(crate) const NAME_CHIP_MARKER: Modifier = Modifier::HIDDEN;
 
 /// Whether `style` is a name chip's: whether it carries [`NAME_CHIP_MARKER`].
-pub fn is_name_chip(style: Style) -> bool {
+pub(crate) fn is_name_chip(style: Style) -> bool {
     style.sub_modifier.contains(NAME_CHIP_MARKER)
 }
 
