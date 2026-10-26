@@ -419,7 +419,6 @@ impl Engine {
 }
 
 /// What a discard of `path` says once it is done, given how many files went.
-
 fn discard_message(
     path: &str,
     tracking: FileTracking,

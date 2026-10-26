@@ -1904,6 +1904,7 @@ impl Engine {
         for dispatch in [
             Self::dispatch_project_command,
             Self::dispatch_agent_command,
+            Self::dispatch_agent_tab_command,
             Self::dispatch_preference_command,
             Self::dispatch_pull_request_command,
         ] {
@@ -2001,8 +2002,7 @@ impl Engine {
         }
     }
 
-    /// Answer the commands that create, reshape or stop an agent session
-    /// or one of its tabs.
+    /// Answer the commands that create, reshape or stop an agent session.
     fn dispatch_agent_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
             WireCommand::RenameSession {
@@ -2099,6 +2099,14 @@ impl Engine {
                     status,
                 )))
             }
+            other => Ok(WireDispatch::Unhandled(other)),
+        }
+    }
+
+    /// Answer the commands that close, stop, retarget or focus one tab of an
+    /// agent.
+    fn dispatch_agent_tab_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
+        match command {
             WireCommand::CloseAgentTab { session_id, tab_id } => {
                 let (status, outcome) = self.close_agent_tab_wire(&session_id, &tab_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_close_tab(
