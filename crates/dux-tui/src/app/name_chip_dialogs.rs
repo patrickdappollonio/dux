@@ -360,7 +360,7 @@ fn the_delete_terminal_dialog_chips_the_terminal() {
 fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor() {
     let mut app = test_app(default_bindings());
     let session_id = app.engine.sessions[0].id.clone();
-    let agent = app.session_label(&app.engine.sessions[0]);
+    let agent = app.engine.sessions[0].display_label();
     let close = PromptState::ConfirmCloseTab {
         attached: Vec::new(),
         session_id: session_id.clone(),

@@ -243,6 +243,25 @@ struct PruneViewContext {
     tab_providers: HashMap<String, String>,
 }
 
+/// What the status line showed when the command palette last opened.
+#[derive(Default)]
+pub(crate) enum PaletteOpenedOver {
+    /// The palette has not opened since the line was last cleared from it.
+    #[default]
+    NotRecorded,
+    /// The line was empty when the palette opened.
+    EmptyLine,
+    /// The line was showing this status when the palette opened.
+    Status(dux_core::statusline::ShownStatus),
+}
+
+impl PaletteOpenedOver {
+    /// Record what the line is showing as the palette opens.
+    fn from_line(shown: Option<dux_core::statusline::ShownStatus>) -> Self {
+        shown.map_or(Self::EmptyLine, Self::Status)
+    }
+}
+
 pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -347,9 +366,9 @@ pub(crate) struct App {
     /// the status line from the palette clears what was on screen before it
     /// opened rather than the palette's own hint about itself.
     pub(crate) palette_hint_gen: Option<dux_core::statusline::Generation>,
-    /// What was on the status line when the palette last opened (`Some(None)`
-    /// for an empty line), which is what clearing the line from it clears.
-    pub(crate) palette_opened_over: Option<Option<dux_core::statusline::ShownStatus>>,
+    /// What was on the status line when the palette last opened, which is what
+    /// clearing the line from it clears.
+    pub(crate) palette_opened_over: PaletteOpenedOver,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -4679,7 +4698,7 @@ impl App {
             status,
             missing_project_warning_gen: None,
             palette_hint_gen: None,
-            palette_opened_over: None,
+            palette_opened_over: PaletteOpenedOver::NotRecorded,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -5475,9 +5494,10 @@ impl App {
     /// nobody has read it yet. A spinner goes from the line while its operation
     /// keeps running, and the operation's outcome still shows when it lands.
     pub(crate) fn clear_status_line(&mut self) {
-        let target = match self.palette_opened_over.take() {
-            Some(before_palette) => before_palette,
-            None => self.status.showing(),
+        let target = match std::mem::take(&mut self.palette_opened_over) {
+            PaletteOpenedOver::Status(shown) => Some(shown),
+            PaletteOpenedOver::EmptyLine => None,
+            PaletteOpenedOver::NotRecorded => self.status.showing(),
         };
         if let Some(generation) = self.palette_hint_gen.take() {
             self.status.clear(UI_HINT_KEY, Some(generation));
@@ -6858,7 +6878,7 @@ impl App {
                 let label = session_id
                     .as_deref()
                     .and_then(|id| self.engine.sessions.iter().find(|s| s.id == id))
-                    .map_or_else(|| "this agent".to_string(), |s| self.session_label(s));
+                    .map_or_else(|| "this agent".to_string(), AgentSession::display_label);
                 let key = format!("refresh-changes:{}", session_id.as_deref().unwrap_or(""));
                 self.begin_changed_files_refresh(
                     key,
@@ -6909,7 +6929,7 @@ impl App {
         };
         let session_id = session.id.clone();
         let key = format!("refresh-changes:{session_id}");
-        let name = self.session_label(session);
+        let name = session.display_label();
         // The cheap half: point the watch at the session and empty the lists. No
         // git runs here.
         self.changes_tree.lists_for = None;

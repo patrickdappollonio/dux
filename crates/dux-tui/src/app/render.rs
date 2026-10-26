@@ -8162,7 +8162,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
+            .map_or_else(|| session_id.clone(), AgentSession::display_label);
 
         let tail = confirm_close_tab_tail_prose(will_detach, promoted_label.as_deref());
         let mut lines = vec![
@@ -8232,7 +8232,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
+            .map_or_else(|| session_id.clone(), AgentSession::display_label);
         let tail = Prose::new()
             .text(" This ends the tab's session, interrupting whatever it is doing. The tab stays in the strip, ready to start again.")
             .text(if *last_running {
@@ -18559,10 +18559,7 @@ mod tests {
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
 
-        let sidebar_tone = app
-            .theme
-            .session_dot(crate::model::SessionStatus::Active)
-            .1;
+        let sidebar_tone = app.theme.session_dot(crate::model::SessionStatus::Active).1;
         // The premise this test exists for: on a focused pill the title color
         // collides with the attention accent.
         assert_eq!(

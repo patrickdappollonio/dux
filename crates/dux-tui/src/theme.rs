@@ -865,10 +865,7 @@ impl Theme {
         }
     }
 
-    pub(crate) fn session_dot(
-        &self,
-        status: crate::model::SessionStatus,
-    ) -> (&'static str, Color) {
+    pub(crate) fn session_dot(&self, status: crate::model::SessionStatus) -> (&'static str, Color) {
         match status {
             crate::model::SessionStatus::Active => ("●", self.session_active),
             crate::model::SessionStatus::Detached => ("◎", self.session_detached),

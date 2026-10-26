@@ -2713,7 +2713,7 @@ impl App {
             input: TextInput::new(),
             selected: 0,
         };
-        self.palette_opened_over = Some(self.status.showing());
+        self.palette_opened_over = PaletteOpenedOver::from_line(self.status.showing());
         self.palette_hint_gen = Some(self.status.set(
             Instant::now(),
             Some(UI_HINT_KEY.to_string()),
@@ -9595,11 +9595,7 @@ impl App {
         Some(false)
     }
 
-    fn handle_debug_input_mouse(
-        &mut self,
-        mouse: MouseEvent,
-        outside_press: bool,
-    ) -> Option<bool> {
+    fn handle_debug_input_mouse(&mut self, mouse: MouseEvent, outside_press: bool) -> Option<bool> {
         let PromptState::DebugInput {
             lines,
             scroll_offset,

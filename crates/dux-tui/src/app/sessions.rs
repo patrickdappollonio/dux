@@ -615,7 +615,7 @@ impl App {
             self.set_error("Select an agent session first to fork.");
             return Ok(());
         };
-        let source_label = self.session_label(&source_session);
+        let source_label = source_session.display_label();
 
         self.open_name_new_agent_prompt(CreateAgentRequest::ForkSession {
             project,
@@ -1646,7 +1646,7 @@ impl App {
         self.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
             session_id: session.id.clone(),
             tab_id: session.id.clone(),
-            session_label: self.session_label(&session),
+            session_label: session.display_label(),
             worktree_path: session.directory().to_string(),
             options,
             selected,
@@ -1794,7 +1794,6 @@ impl App {
     /// resolver reads the terminal message straight off the launch reaction's
     /// [`dux_core::engine::LaunchOutcome`], so it captures no dispatch-time state.
     pub(super) fn build_reconnect_status_op(
-        &self,
         busy_message: String,
     ) -> dux_core::engine::HandlerStatusOp<dux_core::engine::LaunchOutcome> {
         dux_core::engine::status_op(busy_message).resolve_in_handler(
@@ -2640,7 +2639,7 @@ impl App {
         self.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
             session_id: session.id.clone(),
             tab_id,
-            session_label: self.session_label(&session),
+            session_label: session.display_label(),
             worktree_path: session.directory().to_string(),
             options: self.change_agent_provider_options(&session),
             selected: 0,
@@ -4131,7 +4130,7 @@ impl App {
                     // Route the busy through a keyed reconnect op so its final
                     // (resolved in the shared launch-ready/failed view handlers)
                     // replaces exactly this spinner instead of most-recent-wins.
-                    let op = self.build_reconnect_status_op(busy_message.to_string());
+                    let op = Self::build_reconnect_status_op(busy_message.to_string());
                     let pending = self.engine.begin_status_op(&op);
                     self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
                     self.pending_reconnect_ops
@@ -4383,7 +4382,7 @@ impl App {
             return Ok(());
         };
 
-        let session_label = self.session_label(&session);
+        let session_label = session.display_label();
         let configured_default = self.engine.config.editor.default.trim().to_string();
         self.open_worktree_in_editor(session.directory(), &session_label, &selected_editor)?;
 
@@ -4419,7 +4418,7 @@ impl App {
                     .position(|editor| editor.command == preferred.command)
             })
             .unwrap_or(0);
-        let session_label = self.session_label(&session);
+        let session_label = session.display_label();
         self.prompt = PromptState::PickEditor {
             session_label,
             worktree_path: session.directory().to_string(),
@@ -4590,7 +4589,7 @@ impl App {
                 continue;
             }
             let project_name = self.engine.project_name_for_session(session);
-            let agent_name = self.session_label(session);
+            let agent_name = session.display_label();
             if main_running {
                 let provider_name = session.provider.as_str();
                 let label = Self::title_case_word(provider_name);
@@ -4660,7 +4659,7 @@ impl App {
                             |session| {
                                 (
                                     self.engine.project_name_for_session(session),
-                                    self.session_label(session),
+                                    session.display_label(),
                                 )
                             },
                         );
@@ -4877,10 +4876,6 @@ impl App {
         self.engine.sync_has_active_processes();
 
         (killed_agents, killed_terminals)
-    }
-
-    pub(crate) fn session_label(&self, session: &AgentSession) -> String {
-        session.display_label()
     }
 
     /// Palette action: tear down the TUI and serve the web UI in the same
@@ -5172,7 +5167,7 @@ mod tests {
             bindings,
             missing_project_warning_gen: None,
             palette_hint_gen: None,
-            palette_opened_over: None,
+            palette_opened_over: PaletteOpenedOver::NotRecorded,
             selected_left: 0,
             left_section: crate::app::LeftSection::Projects,
             selected_terminal_index: 0,

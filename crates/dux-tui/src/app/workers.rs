@@ -1684,13 +1684,21 @@ impl App {
                 project_name,
                 auto_reopen_agents,
             } => {
-                self.apply_auto_reopen_update(project_name, auto_reopen_agents, status_op_id.as_deref());
+                self.apply_auto_reopen_update(
+                    project_name,
+                    auto_reopen_agents,
+                    status_op_id.as_deref(),
+                );
             }
             ProjectPersistenceView::StartupCommandUpdated {
                 project_name,
                 startup_command,
             } => {
-                self.apply_startup_command_update(project_name, startup_command, status_op_id.as_deref());
+                self.apply_startup_command_update(
+                    project_name,
+                    startup_command,
+                    status_op_id.as_deref(),
+                );
             }
             ProjectPersistenceView::EnvUpdated {
                 project_name,
@@ -3347,7 +3355,7 @@ mod tests {
         let session = app.engine.sessions[0].clone();
 
         // Mirror the dispatch site: mint the op, show its pending busy, stash it.
-        let op = app.build_reconnect_status_op(format!(
+        let op = App::build_reconnect_status_op(format!(
             "Launching agent \"{}\"...",
             session.branch_name().expect("managed test session")
         ));
@@ -3408,7 +3416,7 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
 
-        let op = app.build_reconnect_status_op("Launching agent...".to_string());
+        let op = App::build_reconnect_status_op("Launching agent...".to_string());
         let op_key = op.id().to_string();
         app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
         app.pending_reconnect_ops.insert(session.id.clone(), op);
@@ -3479,7 +3487,7 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
 
-        let op = app.build_reconnect_status_op(format!(
+        let op = App::build_reconnect_status_op(format!(
             "Launching agent \"{}\"...",
             session.branch_name().expect("managed test session")
         ));

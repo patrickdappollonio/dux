@@ -235,7 +235,7 @@ impl App {
         };
         let allowed = seat.owners.is_owner(pty_id, seat.conn_id);
         if !allowed {
-            self.log_refused_pty_write(pty_id, &seat);
+            Self::log_refused_pty_write(pty_id, &seat);
         }
         allowed
     }
@@ -281,7 +281,7 @@ impl App {
         if wrote {
             self.engine.note_pty_used(&pty_id, bytes);
         } else {
-            self.log_refused_pty_write(&pty_id, &seat);
+            Self::log_refused_pty_write(&pty_id, &seat);
         }
         wrote
     }
@@ -289,7 +289,7 @@ impl App {
     /// Say at debug why a write was dropped. The two refusals are one rung with
     /// two stories, and the card over the pane is already telling whichever is
     /// true.
-    fn log_refused_pty_write(&self, pty_id: &str, seat: &TuiOwnership) {
+    fn log_refused_pty_write(pty_id: &str, seat: &TuiOwnership) {
         let (owner, _, _) = seat.owners.current_owner(pty_id);
         let reason = if owner.is_some() {
             "another device currently owns its input"
