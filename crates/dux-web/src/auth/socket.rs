@@ -128,13 +128,13 @@ impl SocketAuth {
 impl FromRequestParts<crate::server::AppState> for SocketAuth {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         state: &crate::server::AppState,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(match parts.extensions.get::<RequestAuth>() {
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(match parts.extensions.get::<RequestAuth>() {
             Some(auth) => Self::new(std::sync::Arc::clone(&state.auth), auth),
             None => Self::none(),
-        })
+        }))
     }
 }

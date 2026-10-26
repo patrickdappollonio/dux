@@ -453,7 +453,12 @@ impl Admission {
         if cfg.max_failed_logins_per_minute > 0 && level.has_global_limit() {
             let pending = inner.pending_minutes.get(&level).copied().unwrap_or(0);
             let (count, left) = match inner.minutes.get(&level).copied() {
-                Some((start, count)) => (count, MINUTE - now.saturating_duration_since(start)),
+                // `prune_minutes` above kept only windows younger than a
+                // minute, so the subtraction cannot reach below zero.
+                Some((start, count)) => (
+                    count,
+                    MINUTE.saturating_sub(now.saturating_duration_since(start)),
+                ),
                 None => (0, MINUTE),
             };
             if count.saturating_add(pending) >= cfg.max_failed_logins_per_minute {
@@ -592,7 +597,7 @@ impl Inner {
         now: Instant,
     ) -> u32 {
         if !self.tracked.contains_key(&key) {
-            let cap = cfg.max_tracked_addresses.max(1) as usize;
+            let cap = crate::rest_common::usize_from_u32(cfg.max_tracked_addresses.max(1));
             while self.tracked.len() >= cap {
                 let oldest = self
                     .tracked
@@ -1217,14 +1222,11 @@ mod tests {
             Strike::Block(Ban { entry, .. }) if entry == "2001:db8:1:2::/64"
         ));
 
-        let own = |ip: &str| Classification {
+        let own: fn(&str) -> Classification = |ip| Classification {
             own_network: true,
             ..net(ip)
         };
-        for (what, at) in [
-            ("dux's own network", own as fn(&str) -> Classification),
-            ("link-local", net),
-        ] {
+        for (what, at) in [("dux's own network", own), ("link-local", net)] {
             let a = Admission::default();
             let base = if what == "link-local" {
                 "fe80::"
