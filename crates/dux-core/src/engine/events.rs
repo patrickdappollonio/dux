@@ -3003,24 +3003,7 @@ impl Engine {
 
         let outcome = match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
-                self.clear_in_flight(&InFlightKey::CreateAgent);
-                self.note_create_finished(&status_op_id);
-                // Resolve the shared create op to its keyed error final so both
-                // surfaces replace the create busy in place with the same message.
-                let create_final = self.resolve_create_op(
-                    &status_op_id,
-                    &CreateLaunchOutcome::Failed {
-                        message: message.clone().into(),
-                        attempted_name: Some(session.display_label()),
-                    },
-                );
-                (
-                    AgentLaunchFailedOutcome::Create {
-                        project_id: session.project_id().map(str::to_string),
-                        message,
-                    },
-                    create_final,
-                )
+                self.create_launch_failed(&status_op_id, &session, message)
             }
             AgentLaunchKind::Reconnect { .. } => (
                 AgentLaunchFailedOutcome::Reconnect {
@@ -3039,26 +3022,7 @@ impl Engine {
                 None,
             ),
             AgentLaunchKind::ResumeFallback { .. } => {
-                logger::error(&format!(
-                    "fallback PTY spawn failed for {}: {}",
-                    session.id, message,
-                ));
-                if self.mark_session_status(&session.id, SessionStatus::Detached) {
-                    self.update_pr_sync_sessions();
-                }
-                // Nothing reaches the screen, but a client following this
-                // tab is told its launch did not come up.
-                self.finish_launch_operations(
-                    &crate::operations::launch_binding_key(tab_id.as_str()),
-                    Some(tab_id.as_str()),
-                    crate::operations::LaunchEnded::Failed,
-                    &format!(
-                        "Agent {} could not resume its conversation, and starting it fresh \
-                         failed too: {message}",
-                        session.display_label()
-                    ),
-                    None,
-                );
+                self.resume_fallback_launch_failed(&session, &tab_id, &message);
                 (AgentLaunchFailedOutcome::ResumeFallback, None)
             }
             AgentLaunchKind::StartupAutoReopen => {
@@ -3087,19 +3051,7 @@ impl Engine {
                 // this launch raced.
                 let is_slot_tab = self.is_slot_tab_of(SessionIdRef::new(&session.id), &tab_id);
                 if !is_slot_tab && !self.agent_tabs.contains_key(&tab_id) {
-                    logger::info(&format!(
-                        "dropping launch-failed event for closed extra tab {tab_id} of session {}",
-                        session.id,
-                    ));
-                    // Nothing reaches the screen, but a client following this
-                    // tab is told its launch did not come up.
-                    self.finish_launch_operations(
-                        &crate::operations::launch_binding_key(tab_id.as_str()),
-                        Some(tab_id.as_str()),
-                        crate::operations::LaunchEnded::Failed,
-                        "",
-                        None,
-                    );
+                    self.drop_launch_failure_of_closed_tab(&session.id, &tab_id);
                     return (AgentLaunchFailedOutcome::Silent, None);
                 }
                 logger::error(&format!(
@@ -3175,6 +3127,78 @@ impl Engine {
             );
         }
         outcome
+    }
+
+    /// A launch failure for an extra tab closed while it was launching is not a
+    /// real failure: nothing reaches the screen, but a client following the
+    /// tab is told its launch did not come up.
+    fn drop_launch_failure_of_closed_tab(&mut self, session_id: &str, tab_id: &TabId) {
+        logger::info(&format!(
+            "dropping launch-failed event for closed extra tab {tab_id} of session {session_id}",
+        ));
+        self.finish_launch_operations(
+            &crate::operations::launch_binding_key(tab_id.as_str()),
+            Some(tab_id.as_str()),
+            crate::operations::LaunchEnded::Failed,
+            "",
+            None,
+        );
+    }
+
+    /// A create whose launch failed: the create op resolves to its keyed error
+    /// final, so both surfaces replace the create busy in place with the same
+    /// message.
+    fn create_launch_failed(
+        &mut self,
+        status_op_id: &str,
+        session: &AgentSession,
+        message: String,
+    ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
+        self.clear_in_flight(&InFlightKey::CreateAgent);
+        self.note_create_finished(status_op_id);
+        let create_final = self.resolve_create_op(
+            status_op_id,
+            &CreateLaunchOutcome::Failed {
+                message: message.clone().into(),
+                attempted_name: Some(session.display_label()),
+            },
+        );
+        (
+            AgentLaunchFailedOutcome::Create {
+                project_id: session.project_id().map(str::to_string),
+                message,
+            },
+            create_final,
+        )
+    }
+
+    /// A resume fallback's fresh launch failed too: the agent is left detached
+    /// and a client following the tab is told its launch did not come up,
+    /// while nothing reaches the screen.
+    fn resume_fallback_launch_failed(
+        &mut self,
+        session: &AgentSession,
+        tab_id: &TabId,
+        message: &str,
+    ) {
+        logger::error(&format!(
+            "fallback PTY spawn failed for {}: {}",
+            session.id, message,
+        ));
+        if self.mark_session_status(&session.id, SessionStatus::Detached) {
+            self.update_pr_sync_sessions();
+        }
+        self.finish_launch_operations(
+            &crate::operations::launch_binding_key(tab_id.as_str()),
+            Some(tab_id.as_str()),
+            crate::operations::LaunchEnded::Failed,
+            &format!(
+                "Agent {} could not resume its conversation, and starting it fresh \
+                 failed too: {message}",
+                session.display_label()
+            ),
+            None,
+        );
     }
 
     /// Log a pull-request badge move for one session, if it moved.
