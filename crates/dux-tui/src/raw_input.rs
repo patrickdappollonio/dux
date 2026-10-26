@@ -1,14 +1,14 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Bracket paste mode start marker: `ESC [ 200 ~`
-pub const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
+pub(crate) const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracket paste mode end marker: `ESC [ 201 ~`
-pub const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
+pub(crate) const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 
 /// Focus-in report (DEC private mode 1004): `ESC [ I`.
-pub const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
+pub(crate) const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
 /// Focus-out report (DEC private mode 1004): `ESC [ O`.
-pub const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
+pub(crate) const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
 
 /// Recognize a terminal focus report emitted while DEC mode 1004 is enabled.
 ///
@@ -18,7 +18,7 @@ pub const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
 /// parameterized sequences; the CSI splitter always delivers them whole, so the
 /// interactive input path can intercept and drop them instead of forwarding the
 /// host's report into the child PTY.
-pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
+pub(crate) fn parse_focus_event(seq: &[u8]) -> Option<bool> {
     if seq == FOCUS_GAINED_SEQ {
         Some(true)
     } else if seq == FOCUS_LOST_SEQ {
@@ -53,7 +53,7 @@ pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
 ///
 /// Bracketed-paste content is exempt at the CALL SITE, not here: pasted text
 /// really can contain these bytes, and a paste is user data.
-pub fn is_device_report(seq: &[u8]) -> bool {
+pub(crate) fn is_device_report(seq: &[u8]) -> bool {
     if let Some(body) = seq.strip_prefix(b"\x1b]") {
         return body.ends_with(b"\x07") || body.ends_with(b"\x1b\\");
     }
@@ -70,32 +70,45 @@ pub fn is_device_report(seq: &[u8]) -> bool {
     }
 }
 
-/// Normalize the newlines of a bracketed-paste BODY chunk for a child that
-/// never enabled DECSET 2004: every LF becomes CR (a classic terminal paste
-/// sends CR per line break), and a CR-LF pair collapses to one CR rather
-/// than doubling. `prev_cr` threads the "last byte was CR" fact across
-/// chunks, because a pair can straddle two reads; the returned bool is the
-/// value to thread into the next chunk. Mirrors the string-side
+/// The newline normalizer for the bracketed-paste BODY chunks of one paste,
+/// for a child that never enabled DECSET 2004: every LF becomes CR (a classic
+/// terminal paste sends CR per line break), and a CR-LF pair collapses to one
+/// CR rather than doubling. It carries the "last byte was CR" fact from chunk
+/// to chunk, because a pair can straddle two reads. Mirrors the string-side
 /// normalization in `App::paste_to_center_pty`.
-pub fn normalize_paste_newlines(bytes: &[u8], mut prev_cr: bool) -> (Vec<u8>, bool) {
-    let mut out = Vec::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'\n' {
-            if !prev_cr {
-                out.push(b'\r');
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PasteNewlines {
+    prev_cr: bool,
+}
+
+impl PasteNewlines {
+    /// Normalize one chunk, carrying its trailing CR into the next one.
+    pub(crate) fn normalize(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            if b == b'\n' {
+                if !self.prev_cr {
+                    out.push(b'\r');
+                }
+                self.prev_cr = false;
+            } else {
+                out.push(b);
+                self.prev_cr = b == b'\r';
             }
-            prev_cr = false;
-        } else {
-            out.push(b);
-            prev_cr = b == b'\r';
         }
+        out
     }
-    (out, prev_cr)
+
+    /// Whether the last chunk ended in a CR.
+    #[cfg(test)]
+    fn after_cr(self) -> bool {
+        self.prev_cr
+    }
 }
 
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
 /// `\x1b[<…m`).
-pub fn is_sgr_mouse(seq: &[u8]) -> bool {
+pub(crate) fn is_sgr_mouse(seq: &[u8]) -> bool {
     seq.len() >= 6
         && seq[0] == 0x1b
         && seq[1] == b'['
@@ -136,7 +149,7 @@ fn sgr_button(button_bits: u16) -> Option<MouseButton> {
 ///   - Cx = column (1-based)
 ///   - Cy = row (1-based)
 ///   - M = press/motion, m = release
-pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
+pub(crate) fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
     if !is_sgr_mouse(seq) {
         return None;
     }
@@ -195,7 +208,7 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
 /// a click at column `origin_col + 1` maps to translated column 1. Returns
 /// `None` if the sequence is not a valid SGR mouse event or the click falls on
 /// or before the origin.
-pub fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
+pub(crate) fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
     if !is_sgr_mouse(seq) {
         return None;
     }
@@ -230,19 +243,19 @@ enum SequenceStatus {
 /// UTF-8 and SGR mouse reports share one byte stream; the parser holds
 /// incomplete trailing bytes so callers need not splice buffers themselves.
 #[derive(Debug, Clone, Default)]
-pub struct RawInputParser {
+pub(crate) struct RawInputParser {
     pending: Vec<u8>,
     in_bracket_paste: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedSequence {
+pub(crate) struct ParsedSequence {
     pub bytes: Vec<u8>,
     pub in_bracket_paste: bool,
 }
 
 impl RawInputParser {
-    pub fn feed_sequences(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
+    pub(crate) fn feed_sequences(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
         self.pending.extend_from_slice(bytes);
         let mut sequences = Vec::new();
 
@@ -271,7 +284,7 @@ impl RawInputParser {
         sequences
     }
 
-    pub fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
+    pub(crate) fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
         if self.pending == [0x1b] {
             self.pending.clear();
             Some(vec![0x1b])
@@ -280,20 +293,20 @@ impl RawInputParser {
         }
     }
 
-    pub fn in_bracket_paste(&self) -> bool {
+    pub(crate) fn in_bracket_paste(&self) -> bool {
         self.in_bracket_paste
     }
 
-    pub fn pending(&self) -> &[u8] {
+    pub(crate) fn pending(&self) -> &[u8] {
         &self.pending
     }
 
-    pub fn replace_pending(&mut self, bytes: &[u8]) {
+    pub(crate) fn replace_pending(&mut self, bytes: &[u8]) {
         self.pending.clear();
         self.pending.extend_from_slice(bytes);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.pending.clear();
         self.in_bracket_paste = false;
     }
@@ -394,7 +407,7 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
 /// Returns `(complete, remainder)`: fully received sequences, and the trailing
 /// bytes that could start an incomplete one (a partial CSI or UTF-8 character).
 /// Boundaries only; the splitter does not interpret what a sequence means.
-pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
+pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut sequences: Vec<&[u8]> = Vec::new();
     let mut i = 0;
 
@@ -1192,21 +1205,27 @@ mod tests {
 
     #[test]
     fn normalize_paste_newlines_turns_lf_into_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\nb\n", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\nb\n");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\rb\r");
         assert!(!prev_cr);
     }
 
     #[test]
     fn normalize_paste_newlines_collapses_crlf_to_one_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\r\nb", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\r\nb");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\rb", "CR-LF must not double into CR-CR");
         assert!(!prev_cr);
     }
 
     #[test]
     fn normalize_paste_newlines_keeps_a_bare_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\r", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\r");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\r");
         assert!(prev_cr, "a trailing CR must be reported for the next chunk");
     }
@@ -1215,8 +1234,10 @@ mod tests {
     fn normalize_paste_newlines_threads_a_crlf_pair_across_chunks() {
         // "a\r" then "\nb" split over two reads: the LF opening the second
         // chunk belongs to the CR closing the first and must be dropped.
-        let (first, prev_cr) = normalize_paste_newlines(b"a\r", false);
-        let (second, prev_cr) = normalize_paste_newlines(b"\nb", prev_cr);
+        let mut paste = PasteNewlines::default();
+        let first = paste.normalize(b"a\r");
+        let second = paste.normalize(b"\nb");
+        let prev_cr = paste.after_cr();
         assert_eq!(first, b"a\r");
         assert_eq!(second, b"b");
         assert!(!prev_cr);
@@ -1224,7 +1245,7 @@ mod tests {
 
     #[test]
     fn normalize_paste_newlines_only_the_lf_directly_after_a_cr_is_dropped() {
-        let (out, _) = normalize_paste_newlines(b"\r\r\n\n", false);
+        let out = PasteNewlines::default().normalize(b"\r\r\n\n");
         // \r stays, \r stays, the \n after it is dropped, the lone \n becomes \r.
         assert_eq!(out, b"\r\r\r");
     }

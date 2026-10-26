@@ -235,7 +235,7 @@ impl App {
         };
         let allowed = seat.owners.is_owner(pty_id, seat.conn_id);
         if !allowed {
-            self.log_refused_pty_write(pty_id, &seat);
+            Self::log_refused_pty_write(pty_id, &seat);
         }
         allowed
     }
@@ -281,7 +281,7 @@ impl App {
         if wrote {
             self.engine.note_pty_used(&pty_id, bytes);
         } else {
-            self.log_refused_pty_write(&pty_id, &seat);
+            Self::log_refused_pty_write(&pty_id, &seat);
         }
         wrote
     }
@@ -289,7 +289,7 @@ impl App {
     /// Say at debug why a write was dropped. The two refusals are one rung with
     /// two stories, and the card over the pane is already telling whichever is
     /// true.
-    fn log_refused_pty_write(&self, pty_id: &str, seat: &TuiOwnership) {
+    fn log_refused_pty_write(pty_id: &str, seat: &TuiOwnership) {
         let (owner, _, _) = seat.owners.current_owner(pty_id);
         let reason = if owner.is_some() {
             "another device currently owns its input"
@@ -1555,8 +1555,7 @@ mod tests {
         // The palette chord is matched the same way and has the same hole.
         bytes.extend_from_slice(b"\x10");
         bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&bytes)
-            .expect("the paste is handled");
+        app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
             app.pending_pty_takeover, None,
@@ -1583,8 +1582,7 @@ mod tests {
         // Driving it, so there is an uncovered pane to start the drag on.
         app.claim_launched_pty("session-1-slot");
 
-        app.process_raw_input_bytes(b"\x1b[<0;6;6M")
-            .expect("the press is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;6;6M");
         assert!(
             app.terminal_selection
                 .as_ref()
@@ -1605,8 +1603,7 @@ mod tests {
             )
             .epoch
             .expect("the browser takes the pty over mid-drag");
-        app.process_raw_input_bytes(b"\x1b[<0;20;6m")
-            .expect("the release is handled");
+        app.process_raw_input_bytes(b"\x1b[<0;20;6m");
 
         assert!(
             app.terminal_selection.is_none(),
@@ -1911,8 +1908,7 @@ mod tests {
             .cloned()
             .expect("the FocusAgent binding has a byte form");
 
-        app.process_raw_input_bytes(&bytes)
-            .expect("the key is handled");
+        app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
@@ -1950,8 +1946,7 @@ mod tests {
                     .expect("claimed");
             }
 
-            app.process_raw_input_bytes(b" ")
-                .expect("the key is handled");
+            app.process_raw_input_bytes(b" ");
 
             assert_eq!(
                 app.pending_pty_takeover.as_deref(),
@@ -1978,8 +1973,7 @@ mod tests {
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.claim_launched_pty("session-1-slot");
 
-        app.process_raw_input_bytes(b" ")
-            .expect("the key is handled");
+        app.process_raw_input_bytes(b" ");
 
         assert_eq!(app.pending_pty_takeover, None);
         assert!(
@@ -2001,8 +1995,7 @@ mod tests {
         bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
         bytes.extend_from_slice(b"a b");
         bytes.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
-        app.process_raw_input_bytes(&bytes)
-            .expect("the paste is handled");
+        app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
             app.pending_pty_takeover, None,
@@ -2228,8 +2221,7 @@ mod tests {
             }
 
             // An SGR left press at column 6, row 6 (the wire is 1-based).
-            app.process_raw_input_bytes(b"\x1b[<0;6;6M")
-                .expect("the press is handled");
+            app.process_raw_input_bytes(b"\x1b[<0;6;6M");
 
             assert_eq!(
                 app.terminal_selection.is_some(),
@@ -2486,8 +2478,7 @@ mod tests {
         let (mut app, recorded, seat) = app_with_a_live_pty();
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(TOGGLE_FULLSCREEN_BYTES)
-            .expect("the toggle is handled");
+        app.process_raw_input_bytes(TOGGLE_FULLSCREEN_BYTES);
 
         assert!(
             !seat.owners.is_owner("session-1-slot", seat.conn_id),
@@ -2508,8 +2499,7 @@ mod tests {
         // The local scroll needs a page height to scroll by.
         app.last_pty_size = (10, 10);
 
-        app.process_raw_input_bytes(PAGE_UP_BYTES)
-            .expect("the page key is handled");
+        app.process_raw_input_bytes(PAGE_UP_BYTES);
 
         assert!(
             !seat.owners.is_owner("session-1-slot", seat.conn_id),
@@ -2530,8 +2520,7 @@ mod tests {
         let (mut app, recorded, seat) = app_with_a_live_pty();
         app.input_target = InputTarget::Agent;
 
-        app.process_raw_input_bytes(b"x")
-            .expect("the keystroke is handled");
+        app.process_raw_input_bytes(b"x");
 
         assert!(
             !seat.owners.is_owner("session-1-slot", seat.conn_id),
@@ -2577,8 +2566,7 @@ mod tests {
                 "test setup: the default palette chord"
             );
 
-            app.process_raw_input_bytes(b"\x10")
-                .expect("the chord is handled");
+            app.process_raw_input_bytes(b"\x10");
 
             assert_eq!(
                 matches!(app.prompt, PromptState::Command { .. }),
@@ -2626,8 +2614,7 @@ mod tests {
                 app.claim_launched_pty("session-1-slot");
             }
 
-            app.process_raw_input_bytes(PAGE_UP_BYTES)
-                .expect("the page key is handled");
+            app.process_raw_input_bytes(PAGE_UP_BYTES);
 
             assert_eq!(
                 app.engine.is_typing("session-1-slot"),
@@ -2992,8 +2979,7 @@ mod tests {
             .cloned()
             .expect("the FocusAgent binding has a byte form");
 
-        app.process_raw_input_bytes(&bytes)
-            .expect("the key is handled");
+        app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
             app.pending_pty_takeover.as_deref(),
@@ -3163,7 +3149,7 @@ mod tests {
         )
         .expect("a refused create comes back as a status, not an error");
         assert!(
-            !app.create_agent_started_here,
+            !app.notes.create_agent_started_here,
             "a create the engine refused must arm nothing"
         );
 
@@ -3371,7 +3357,7 @@ mod tests {
     fn switching_serving_on_here_claims_every_running_agent_tab_and_terminal() {
         let (mut app, _recorded, seat) = app_running_everything_with_nothing_serving();
 
-        app.execute_command("start-background-server".to_string())
+        app.execute_command("start-background-server")
             .expect("the command runs");
         finish_a_start(&mut app, None);
 
@@ -3437,7 +3423,7 @@ mod tests {
     fn a_reload_that_turns_serving_on_claims_like_the_palette_command() {
         let (mut app, recorded, _seat) = app_running_everything_with_nothing_serving();
 
-        app.apply_serve_while_tui_setting(true);
+        app.apply_serve_while_tui_setting(crate::app::background_server::ServeWanted::On);
         finish_a_start(&mut app, None);
 
         for pty_id in EVERYTHING_RUNNING {
@@ -3558,7 +3544,7 @@ mod tests {
         app.input_target = InputTarget::Agent;
         app.stop_background_server_quietly();
 
-        app.execute_command("start-background-server".to_string())
+        app.execute_command("start-background-server")
             .expect("the command runs");
         finish_a_start(&mut app, None);
         let flat = flowed(&render_rows(&mut app, 160, 40));

@@ -49,6 +49,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
+use super::components::FocusStep;
 use super::input::contains_point;
 use super::text_input::TextInput;
 use super::{App, OverlayMouseLayout, PromptState};
@@ -98,14 +99,6 @@ pub(crate) struct ModalSpec {
 
 #[allow(dead_code)]
 impl ModalSpec {
-    const fn new(family: ModalFamily, multiline_field: bool, confirm_button: bool) -> Self {
-        Self {
-            family,
-            multiline_field,
-            confirm_button,
-        }
-    }
-
     /// The dual-mode rule: **a modal containing a multi-line text field must
     /// have a confirm button.**
     ///
@@ -147,20 +140,20 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::FirstLoad(_)
         | PromptState::DebugInput { .. }
         // The Project info screen: facts and a Close, which dismisses.
-        | PromptState::ProjectInfo(_) => ModalSpec::new(Report, false, false),
+        | PromptState::ProjectInfo(_) => ModalSpec { family: Report, multiline_field: false, confirm_button: false },
 
         // A Picker despite reading like a report: a `ListState` cursor over the
         // runs, vertical keys that move that selection (the output pane scrolls
         // on the paging keys), a filter, and a confirm key that promotes the
         // selected run to the fullscreen viewer. Its one button is a Close, a way
         // out and not a commit, so the confirm-button claim stays false.
-        PromptState::StartupCommandLogs(_) => ModalSpec::new(Picker, false, false),
+        PromptState::StartupCommandLogs(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // A Picker despite reading like a report: a `ListState` selection cursor,
         // vertical keys that move that cursor (a value, not a scroll offset and
         // not focus), and a confirm key that acts on the selected row by
         // expanding it rather than choosing it and closing.
-        PromptState::ResourceMonitor { .. } => ModalSpec::new(Picker, false, false),
+        PromptState::ResourceMonitor { .. } => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // ── Confirm ─────────────────────────────────────────────────────
         PromptState::ConfirmDeleteAgent { .. }
@@ -186,7 +179,7 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // Prose, a conditional checkbox and a Cancel/Delete pair; horizontal
         // keys move focus and Space acts on what has it.
         | PromptState::ConfirmDeleteWorktree(_)
-        | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
+        | PromptState::ConfigReloadFailed { .. } => ModalSpec { family: Confirm, multiline_field: false, confirm_button: true },
 
         // ── Picker ──────────────────────────────────────────────────────
         // A selection cursor over rows; Enter picks. The palette types into
@@ -218,13 +211,13 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ChangeProjectDefaultProvider(_)
         // Three modes, the saved one marked, and picking one applies it. Rows and
         // nothing else, so no buttons and no focus concept.
-        | PromptState::SetTailscaleMode(_) => ModalSpec::new(Picker, false, false),
+        | PromptState::SetTailscaleMode(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // The one picker that keeps its buttons: they are distinct actions (kill
         // the hovered runtime, kill the marked ones, kill everything the filter
         // shows), not a confirm/cancel pair restating what Enter does. Do not
         // remove them for consistency.
-        PromptState::KillRunning(_) => ModalSpec::new(Picker, false, true),
+        PromptState::KillRunning(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: true },
 
         // ── Form ────────────────────────────────────────────────────────
         // Single-line field plus (for two of them) checkboxes. Enter submits,
@@ -238,14 +231,14 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::AttachPullRequestInput { .. }
         // The standalone-agent name field: one single-line control, so Enter
         // submits and the rule asks no button of it either.
-        | PromptState::NameStandaloneAgent { .. } => ModalSpec::new(Form, false, false),
+        | PromptState::NameStandaloneAgent { .. } => ModalSpec { family: Form, multiline_field: false, confirm_button: false },
 
         // The three configure modals: one full-text field plus Cancel/Save.
         // They were the dual-mode rule's only violators and are now compliant,
         // so `KNOWN_DUAL_MODE_VIOLATIONS` is empty.
         PromptState::ConfigureStartupCommand { .. }
         | PromptState::ConfigureProjectEnv { .. }
-        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec::new(Form, true, true),
+        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec { family: Form, multiline_field: true, confirm_button: true },
 
         // ── The one variant that is two modals ──────────────────────────
         // `EditMacros` serves two families depending on its own state, so the
@@ -254,16 +247,16 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::EditMacros {
             pending_delete: Some(_),
             ..
-        } => ModalSpec::new(Confirm, false, true),
+        } => ModalSpec { family: Confirm, multiline_field: false, confirm_button: true },
         // The editor: a name field, a multiline body, a surface selector, and
         // Cancel/Save. Compliant with the dual-mode rule, and the reference for
         // what compliance looks like.
         PromptState::EditMacros {
             editing: Some(_), ..
-        } => ModalSpec::new(Form, true, true),
+        } => ModalSpec { family: Form, multiline_field: true, confirm_button: true },
         // The list underneath: rows with a selection cursor, no buttons,
         // publishing its rows as `OverlayMouseLayout::EditMacroList`.
-        PromptState::EditMacros { .. } => ModalSpec::new(Picker, false, false),
+        PromptState::EditMacros { .. } => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
     };
     Some(spec)
 }
@@ -497,7 +490,7 @@ pub(crate) enum ModalKeyStep {
     /// `prompt = None`; see [`super::overlay_dismiss`]).
     Close,
     /// Move focus. `true` is forwards.
-    MoveFocus(bool),
+    MoveFocus(FocusStep),
     /// The confirm key. What it means is the family's business: a `Confirm` or
     /// `Picker` acts on whatever has focus, while a `Form` whose fields are all
     /// single-line submits whichever control has focus. Collapsing this into
@@ -511,6 +504,15 @@ pub(crate) enum ModalKeyStep {
     FallThroughToField,
 }
 
+/// Whether a dialog's focus rests on a text field, which owns the keys a caret needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFieldFocus {
+    /// A text field has focus.
+    Field,
+    /// A button, checkbox or list has it.
+    Elsewhere,
+}
+
 /// Whether the binding lookup must be skipped for this key.
 ///
 /// True exactly when a text field has focus and the field owns the key, which
@@ -522,27 +524,29 @@ pub(crate) enum ModalKeyStep {
 /// The renderer must ask the same question when it picks the footer's key
 /// (`RuntimeBindings::label_for_text_field_dialog`), so the hint can never name
 /// a key the field swallows.
-pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, text_field_focused: bool) -> bool {
-    text_field_focused && text_field_owns_key(key)
+pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, focus: TextFieldFocus) -> bool {
+    focus == TextFieldFocus::Field && text_field_owns_key(key)
 }
 
 /// Classify a key into its rung, given the action the bindings resolved it to
 /// (or `None`, whether because nothing is bound or because
 /// [`binding_lookup_is_suppressed`] said not to look).
 ///
-/// `text_field_focused` only affects Space: Space is content in both kinds of
+/// `focus` only affects Space: Space is content in both kinds of
 /// text field, so it may only act on focus when focus is sitting on a button or
 /// a checkbox.
 pub(crate) fn modal_key_step(
     action: Option<Action>,
     key: KeyEvent,
-    text_field_focused: bool,
+    focus: TextFieldFocus,
 ) -> ModalKeyStep {
     match action {
         Some(Action::CloseOverlay) => ModalKeyStep::Close,
-        Some(Action::ToggleSelection) => ModalKeyStep::MoveFocus(!focus_move_is_reverse(key)),
+        Some(Action::ToggleSelection) => ModalKeyStep::MoveFocus(focus_move_step(key)),
         Some(Action::Confirm) => ModalKeyStep::Confirm,
-        _ if key.code == KeyCode::Char(' ') && !text_field_focused => ModalKeyStep::ActivateFocus,
+        _ if key.code == KeyCode::Char(' ') && focus == TextFieldFocus::Elsewhere => {
+            ModalKeyStep::ActivateFocus
+        }
         _ => ModalKeyStep::FallThroughToField,
     }
 }
@@ -556,6 +560,15 @@ fn focus_move_is_reverse(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::BackTab)
         || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
         || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+}
+
+/// Which way a focus-moving key travels.
+fn focus_move_step(key: KeyEvent) -> FocusStep {
+    if focus_move_is_reverse(key) {
+        FocusStep::Backward
+    } else {
+        FocusStep::Forward
+    }
 }
 
 #[cfg(test)]
@@ -575,9 +588,21 @@ pub(super) mod tests {
 
     #[test]
     fn the_dual_mode_rule_only_bites_multiline_modals() {
-        let single_line_no_button = ModalSpec::new(ModalFamily::Form, false, false);
-        let multiline_no_button = ModalSpec::new(ModalFamily::Form, true, false);
-        let multiline_with_button = ModalSpec::new(ModalFamily::Form, true, true);
+        let single_line_no_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: false,
+            confirm_button: false,
+        };
+        let multiline_no_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: true,
+            confirm_button: false,
+        };
+        let multiline_with_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: true,
+            confirm_button: true,
+        };
         assert!(single_line_no_button.satisfies_dual_mode_rule());
         assert!(!multiline_no_button.satisfies_dual_mode_rule());
         assert!(multiline_with_button.satisfies_dual_mode_rule());
@@ -595,7 +620,7 @@ pub(super) mod tests {
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         assert_eq!(
             modal_spec(&monitor).map(|spec| spec.family),
@@ -865,7 +890,7 @@ pub(super) mod tests {
                     focus: FirstLoadButton::Primary,
                     ..FirstLoadPrompt::welcome(
                         dux_core::welcome_screen::welcome_screen(&app.engine.paths.config_path),
-                        false,
+                        crate::app::first_load::SeenNote::Skip,
                     )
                 }),
             ),
@@ -1331,7 +1356,7 @@ pub(super) mod tests {
                     selected_row: 0,
                     expanded: HashSet::new(),
                     last_refresh: Instant::now(),
-                    short_window_sample: false,
+                    cpu_window: crate::app::CpuWindow::Full,
                 },
             ),
         ]
@@ -1840,27 +1865,51 @@ pub(super) mod tests {
     #[test]
     fn the_ladder_runs_close_then_move_then_act_then_fall_through() {
         assert_eq!(
-            modal_key_step(Some(Action::CloseOverlay), key(KeyCode::Esc), false),
+            modal_key_step(
+                Some(Action::CloseOverlay),
+                key(KeyCode::Esc),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::Close
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Tab), false),
-            ModalKeyStep::MoveFocus(true)
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::Tab),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
+            ModalKeyStep::MoveFocus(FocusStep::Forward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::BackTab), false),
-            ModalKeyStep::MoveFocus(false)
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::BackTab),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
+            ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::ToggleSelection), key(KeyCode::Left), false),
-            ModalKeyStep::MoveFocus(false)
+            modal_key_step(
+                Some(Action::ToggleSelection),
+                key(KeyCode::Left),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
+            ModalKeyStep::MoveFocus(FocusStep::Backward)
         );
         assert_eq!(
-            modal_key_step(Some(Action::Confirm), key(KeyCode::Enter), false),
+            modal_key_step(
+                Some(Action::Confirm),
+                key(KeyCode::Enter),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::Confirm
         );
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char('x')), true),
+            modal_key_step(
+                None,
+                key(KeyCode::Char('x')),
+                crate::app::modal::TextFieldFocus::Field
+            ),
             ModalKeyStep::FallThroughToField
         );
     }
@@ -1868,11 +1917,19 @@ pub(super) mod tests {
     #[test]
     fn space_acts_on_a_focused_button_and_types_into_a_focused_field() {
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char(' ')), false),
+            modal_key_step(
+                None,
+                key(KeyCode::Char(' ')),
+                crate::app::modal::TextFieldFocus::Elsewhere
+            ),
             ModalKeyStep::ActivateFocus
         );
         assert_eq!(
-            modal_key_step(None, key(KeyCode::Char(' ')), true),
+            modal_key_step(
+                None,
+                key(KeyCode::Char(' ')),
+                crate::app::modal::TextFieldFocus::Field
+            ),
             ModalKeyStep::FallThroughToField
         );
     }
@@ -1880,11 +1937,23 @@ pub(super) mod tests {
     #[test]
     fn the_field_gate_only_closes_while_a_field_has_focus() {
         // The shipped bug: Left is in the movement action's default key set.
-        assert!(binding_lookup_is_suppressed(key(KeyCode::Left), true));
-        assert!(binding_lookup_is_suppressed(key(KeyCode::Char('a')), true));
+        assert!(binding_lookup_is_suppressed(
+            key(KeyCode::Left),
+            crate::app::modal::TextFieldFocus::Field
+        ));
+        assert!(binding_lookup_is_suppressed(
+            key(KeyCode::Char('a')),
+            crate::app::modal::TextFieldFocus::Field
+        ));
         // With focus on a checkbox the field owns nothing, so movement works.
-        assert!(!binding_lookup_is_suppressed(key(KeyCode::Left), false));
+        assert!(!binding_lookup_is_suppressed(
+            key(KeyCode::Left),
+            crate::app::modal::TextFieldFocus::Elsewhere
+        ));
         // Tab is never owned by the field, so it stays a focus key in both.
-        assert!(!binding_lookup_is_suppressed(key(KeyCode::Tab), true));
+        assert!(!binding_lookup_is_suppressed(
+            key(KeyCode::Tab),
+            crate::app::modal::TextFieldFocus::Field
+        ));
     }
 }

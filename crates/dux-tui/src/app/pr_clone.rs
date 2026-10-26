@@ -9,7 +9,7 @@
 //! will actually happen. When the agent would need a review copy of the pull
 //! request, the form says so up front and holds the button until it is ticked.
 
-use super::components::next_focus;
+use super::components::{FocusStep, next_focus};
 use super::*;
 use crate::git::{agent_name_char_map, is_valid_agent_name};
 use dux_core::clone_project::{
@@ -59,8 +59,9 @@ pub(crate) struct PullRequestClone {
     pub(crate) edits: u64,
     /// A folder check is out; a press waits for it.
     pub(crate) checking: bool,
-    /// That check was asked for by a press, which goes ahead when it agrees.
-    pub(crate) submit_pending: bool,
+    /// Why the latest folder check was asked for: `Submit` while a press
+    /// waits on it, and goes ahead when it agrees.
+    pub(crate) check_purpose: PrFolderCheck,
     /// The folder check's refusal, shown in the form.
     pub(crate) error: Option<String>,
 }
@@ -291,7 +292,7 @@ impl App {
             review_copy_agreed: false,
             checked_review: None,
             edits: 0,
-            submit_pending: false,
+            check_purpose: PrFolderCheck::Open,
             checking: false,
             error: None,
         };
@@ -322,7 +323,7 @@ impl App {
             return;
         };
         form.checking = true;
-        form.submit_pending = purpose == PrFolderCheck::Submit;
+        form.check_purpose = purpose;
         form.error = None;
         let raw = destination.text.trim().to_string();
         let name = agent_name.text.trim().to_string();
@@ -422,7 +423,8 @@ impl App {
             return;
         };
         form.checking = false;
-        let was_pressed = std::mem::take(&mut form.submit_pending);
+        let was_pressed = std::mem::replace(&mut form.check_purpose, PrFolderCheck::Open)
+            == PrFolderCheck::Submit;
         if destination.text.trim() != answer.destination {
             return;
         }
@@ -533,7 +535,11 @@ impl App {
                 PrReviewQuestion::Needed(_)
             )
         {
-            *focus = next_focus(&form.focus_ring(&agent_name.text), *focus, true);
+            *focus = next_focus(
+                &form.focus_ring(&agent_name.text),
+                *focus,
+                FocusStep::Forward,
+            );
         }
     }
 
@@ -553,7 +559,7 @@ impl App {
                 PrEdit::Folder => form.destination_edited(),
                 PrEdit::Box => form.edits += 1,
             }
-            if form.submit_pending {
+            if form.check_purpose == PrFolderCheck::Submit {
                 form.error = Some(match edit {
                     PrEdit::Folder => format!(
                         "The folder changed, so nothing will be sent. Press {confirm_key} to \
@@ -753,11 +759,7 @@ impl App {
         };
         self.pending_pr_reference = Some(form.reference.clone());
         self.pr_clone_check_rx = None;
-        if let Err(err) =
-            self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None)
-        {
-            self.set_error(format!("{err:#}"));
-        }
+        self.open_project_chooser_over(ProjectChooserIntent::FromPrReference, None);
     }
 
     /// The remembered clone this surface started, when `asked` is its pull
@@ -871,7 +873,7 @@ impl App {
         }
         form.review_copy_agreed = false;
         form.checking = false;
-        form.submit_pending = false;
+        form.check_purpose = PrFolderCheck::Open;
         form.error = None;
         let mut agent_name = TextInput::new().with_char_map(agent_name_char_map);
         agent_name.set_text(draft.agent_name);

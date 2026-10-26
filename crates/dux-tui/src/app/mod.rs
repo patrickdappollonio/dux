@@ -44,6 +44,8 @@ use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
     SessionSurface,
 };
+use crate::theme::FocusState;
+use components::FocusStep;
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
 // (the rename optimistic-title write and the exit-loop detach marking) moved
@@ -133,8 +135,19 @@ pub(crate) struct PendingLinkClick {
     pub(crate) row: u16,
 }
 
+/// Whether an intercepted scroll key in raw input scrolls dux's own
+/// scrollback or always reaches the child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawScroll {
+    /// It scrolls only while the pane is already scrolled back; otherwise the
+    /// child gets the key.
+    WhenScrolledBack,
+    /// It never scrolls dux's scrollback here.
+    Never,
+}
+
 enum RawSeqAction {
-    Intercept(Action, bool, Vec<u8>),
+    Intercept(Action, RawScroll, Vec<u8>),
     Mouse(MouseEvent, Vec<u8>),
     Forward(Vec<u8>),
 }
@@ -143,6 +156,16 @@ enum RawSeqAction {
 struct DemotedInputPatterns {
     palette: Vec<Vec<u8>>,
     takeover: Vec<Vec<u8>>,
+}
+
+/// Whether a batch of raw input forwarded a bracketed paste whose line endings
+/// were normalized on the way, which counts as typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NormalizedPaste {
+    /// It did.
+    Forwarded,
+    /// It did not.
+    None,
 }
 
 struct RawInputPlan {
@@ -203,11 +226,11 @@ struct SidebarListGeometry {
 
 #[derive(Clone, Copy)]
 struct AgentRowCues {
-    needs_attention: bool,
+    /// What the state word is decided from; its `needs_attention` is not gated
+    /// on the agent being active.
+    facts: dux_core::row_state::AgentRowFacts,
     /// Animation is Active-only; the static state word still uses the ungated flag.
     attention_cue: bool,
-    working: bool,
-    typing: bool,
     deleting: bool,
 }
 
@@ -243,7 +266,212 @@ struct PruneViewContext {
     tab_providers: HashMap<String, String>,
 }
 
-pub struct App {
+/// Whether an agent's working copy is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingCopy {
+    /// Its directory is gone.
+    Missing,
+    /// It is there.
+    Present,
+}
+
+/// Whether a multiline field is engaged for typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldEngagement {
+    /// Every key goes to the text.
+    Engaged,
+    /// The modal owns the keys.
+    Unengaged,
+}
+
+/// Whether the changes pane lists any staged files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StagedFiles {
+    /// It does, so the staged list and the commit box are reachable.
+    Present,
+    /// It does not.
+    Absent,
+}
+
+/// Whether a worker-fed list has its answer yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Listing {
+    /// The worker has not answered.
+    Loading,
+    /// It has.
+    Loaded,
+}
+
+/// Whether a changes-tree folder listing puts a busy status on the line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListingStatus {
+    /// It does, keyed to the folder.
+    Announced,
+    /// It does not (a background refresh).
+    Silent,
+}
+
+/// Whether a click on a list row was the second of a double-click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClickCount {
+    /// It was, so the row is also picked.
+    Double,
+    /// It only places the cursor.
+    Single,
+}
+
+/// Whether the agent list folds its inactive agents behind the Inactive toggle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InactiveTail {
+    /// They are hidden behind the toggle.
+    Collapsed,
+    /// They are listed.
+    Expanded,
+}
+/// What the status line showed when the command palette last opened.
+#[derive(Default)]
+pub(crate) enum PaletteOpenedOver {
+    /// The palette has not opened since the line was last cleared from it.
+    #[default]
+    NotRecorded,
+    /// The line was empty when the palette opened.
+    EmptyLine,
+    /// The line was showing this status when the palette opened.
+    Status(dux_core::statusline::ShownStatus),
+}
+
+impl PaletteOpenedOver {
+    /// Record what the line is showing as the palette opens.
+    fn from_line(shown: Option<dux_core::statusline::ShownStatus>) -> Self {
+        shown.map_or(Self::EmptyLine, Self::Status)
+    }
+}
+
+/// Which side panes are collapsed or hidden.
+#[derive(Default)]
+pub(crate) struct PaneFlags {
+    pub(crate) left_collapsed: bool,
+    pub(crate) right_collapsed: bool,
+    pub(crate) right_hidden: bool,
+}
+
+/// How the agent list's Inactive tail is folded.
+#[derive(Default)]
+pub(crate) struct InactiveTailState {
+    /// Whether the flat list's "Inactive" tail (detached/exited agents) is
+    /// collapsed. Starts collapsed, matching the web. Replaces the old
+    /// per-project collapse now that there are no project headers.
+    pub(crate) collapsed: bool,
+    /// Once the user toggles the Inactive section by hand, stop auto-managing its
+    /// collapsed state. Until then it auto-expands when every agent is inactive
+    /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
+    /// is active. See `rebuild_left_items`.
+    pub(crate) overridden: bool,
+}
+
+/// The bracketed paste being read from raw input, if any.
+#[derive(Default)]
+pub(crate) struct RawPaste {
+    /// True while processing bytes between bracket-paste markers
+    /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
+    /// skipped so pasted text doesn't trigger keybindings.
+    pub(crate) in_bracket: bool,
+    /// True while the current raw-path bracketed paste is being UNWRAPPED
+    /// for a child that never enabled DECSET 2004: dux enables host
+    /// bracketed paste globally, so every host paste arrives wrapped, and a
+    /// non-2004 child would otherwise get the literal `ESC[200~`/`ESC[201~`
+    /// markers typed at it plus LF line endings. While set, the markers are
+    /// stripped and the paste body's newlines are normalized to carriage
+    /// returns, mirroring `paste_to_center_pty`'s non-2004 arm. Decided
+    /// once, at the opening marker, from the focused surface's
+    /// `has_bracketed_paste()`.
+    pub(crate) normalize: bool,
+    /// The open paste's newline normalizer, which carries a trailing CR
+    /// across read chunks so a CR-LF pair split over two reads still
+    /// collapses to one CR instead of doubling.
+    pub(crate) newlines: crate::raw_input::PasteNewlines,
+}
+
+/// The tips screen's logo, as last drawn.
+#[derive(Default)]
+pub(crate) struct WelcomeLogo {
+    /// Whether the ASCII logo was rendered in the previous frame.
+    pub(crate) visible: bool,
+    /// When true, show the alternate (duck) logo instead of the text logo.
+    pub(crate) alt: bool,
+}
+
+/// Display settings read from config at startup and on reload.
+#[derive(Default)]
+pub(crate) struct ViewPrefs {
+    pub(crate) show_diff_line_numbers: bool,
+    pub(crate) pr_banner_at_bottom: bool,
+}
+
+/// In-flight guards and intent for the web server this surface starts.
+#[derive(Default)]
+pub(crate) struct ServingFlags {
+    /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
+    /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
+    /// would both spawn workers and the second would hit a confusing EADDRINUSE.
+    /// Set true when a worker is dispatched, cleared when its
+    /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
+    /// set, or while `pending_server_flip` is already stashed, a repeat
+    /// invocation is refused with an actionable status instead of spawning a
+    /// second worker.
+    pub(crate) flip_preflight_pending: bool,
+    /// In-flight guard for the background server's bind pre-flight, the same
+    /// shape and for the same reason as `flip_preflight_pending`: the
+    /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
+    /// would have the second report a confusing EADDRINUSE.
+    pub(crate) background_preflight_pending: bool,
+    /// Whether a background listener is currently WANTED.
+    ///
+    /// Distinct from `background_server_is_serving`, which cannot answer for the
+    /// window while the bind pre-flight is still on its worker thread. In that
+    /// window a stop command, or a reload that turns the setting off, would
+    /// otherwise be a no-op; the pre-flight would then land, start serving anyway,
+    /// and persist `serve_while_tui = true` over the value the user just chose.
+    /// The stop paths clear this and the pre-flight's apply consults it.
+    pub(crate) background_wanted: bool,
+}
+
+/// Where the agent list's cursor stands relative to its rows.
+#[derive(Default)]
+pub(crate) struct LeftRowsState {
+    /// Whether the list has been built at least once: before that, the cursor
+    /// takes the first row as it always has, and after it an empty list is a
+    /// cursor on nothing.
+    pub(crate) built: bool,
+    /// The cursor is on no row: the row it was on was deleted or went away, or
+    /// the list was empty, and only this surface moves it onto a row. Held as
+    /// an index one past the end; this surface's next move puts it on a row.
+    pub(crate) cursor_parked: bool,
+}
+
+/// One-shot facts this surface records for itself and spends later.
+#[derive(Default)]
+pub(crate) struct OneShotNotes {
+    pub(crate) force_redraw: bool,
+    /// Set when a reaction drained this iteration was the COMPANION's to follow up
+    /// on, so this surface skipped its own arm for it.
+    ///
+    /// A web-owned follow-up mutates shared state this surface renders (the
+    /// inline project add writes `engine.projects` during the fanout), and the
+    /// change did not arrive through this surface's own event stream, so nothing
+    /// here would otherwise rebuild. Folded into the per-iteration mutated answer
+    /// and cleared there.
+    pub(crate) companion_followup_ran: bool,
+    /// Whether the agent create currently in flight was started HERE.
+    ///
+    /// A create mints its session id in a worker, so unlike every other launch
+    /// there is no id to record at dispatch. A boolean is enough because the
+    /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
+    /// and it is spent by the create's own outcome, success or failure.
+    pub(crate) create_agent_started_here: bool,
+}
+
+pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
     pub(crate) selected_left: usize,
@@ -266,9 +494,6 @@ pub struct App {
     pub(crate) commit_pane_height_pct: u16,
     pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
-    pub(crate) left_collapsed: bool,
-    pub(crate) right_collapsed: bool,
-    pub(crate) right_hidden: bool,
     pub(crate) resize_mode: bool,
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
@@ -347,9 +572,9 @@ pub struct App {
     /// the status line from the palette clears what was on screen before it
     /// opened rather than the palette's own hint about itself.
     pub(crate) palette_hint_gen: Option<dux_core::statusline::Generation>,
-    /// What was on the status line when the palette last opened (`Some(None)`
-    /// for an empty line), which is what clearing the line from it clears.
-    pub(crate) palette_opened_over: Option<Option<dux_core::statusline::ShownStatus>>,
+    /// What was on the status line when the palette last opened, which is what
+    /// clearing the line from it clears.
+    pub(crate) palette_opened_over: PaletteOpenedOver,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -420,13 +645,6 @@ pub struct App {
     /// Populated only by this surface's own launch paths, which is what leaves a
     /// pty a browser asked for free for that browser's own attach.
     pub(crate) tui_launched_ptys: std::collections::HashSet<String>,
-    /// Whether the agent create currently in flight was started HERE.
-    ///
-    /// A create mints its session id in a worker, so unlike every other launch
-    /// there is no id to record at dispatch. A boolean is enough because the
-    /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
-    /// and it is spent by the create's own outcome, success or failure.
-    pub(crate) create_agent_started_here: bool,
     /// The pull-request create this surface dispatched, until it succeeds or
     /// fails for a reason other than a question. A refusal that asks for the
     /// user's agreement to a review copy reopens the name prompt on this
@@ -470,7 +688,6 @@ pub struct App {
     /// scrolled-back grid, which would hand keystrokes back to the child while
     /// the user believed they were still reading history.
     pub(crate) scroll_mode: std::collections::HashSet<String>,
-    pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
     /// The diff's wrapped rows, kept so a frame draws its viewport instead of
@@ -488,15 +705,6 @@ pub struct App {
     /// running; see [`RefusalBlink`] for why it also remembers which modal
     /// armed it.
     pub(crate) refusal_blink: Option<RefusalBlink>,
-    /// Whether the flat list's "Inactive" tail (detached/exited agents) is
-    /// collapsed. Starts collapsed, matching the web. Replaces the old
-    /// per-project collapse now that there are no project headers.
-    pub(crate) inactive_collapsed: bool,
-    /// Once the user toggles the Inactive section by hand, stop auto-managing its
-    /// collapsed state. Until then it auto-expands when every agent is inactive
-    /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
-    /// is active. See `rebuild_left_items`.
-    pub(crate) inactive_collapse_overridden: bool,
     /// The normalized filter query under which the user explicitly collapsed a
     /// search-expanded Inactive tail. While the agent filter has a hit inside
     /// the tail, the tail renders open as DERIVED state (the collapse
@@ -546,24 +754,6 @@ pub struct App {
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
-    /// True while processing bytes between bracket-paste markers
-    /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
-    /// skipped so pasted text doesn't trigger keybindings.
-    pub(crate) in_bracket_paste: bool,
-    /// True while the current raw-path bracketed paste is being UNWRAPPED
-    /// for a child that never enabled DECSET 2004: dux enables host
-    /// bracketed paste globally, so every host paste arrives wrapped, and a
-    /// non-2004 child would otherwise get the literal `ESC[200~`/`ESC[201~`
-    /// markers typed at it plus LF line endings. While set, the markers are
-    /// stripped and the paste body's newlines are normalized to carriage
-    /// returns, mirroring `paste_to_center_pty`'s non-2004 arm. Decided
-    /// once, at the opening marker, from the focused surface's
-    /// `has_bracketed_paste()`.
-    pub(crate) raw_paste_normalize: bool,
-    /// Whether the last normalized paste byte forwarded was a CR, threaded
-    /// across read chunks so a CR-LF pair split over two reads still
-    /// collapses to one CR instead of doubling.
-    pub(crate) raw_paste_prev_cr: bool,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -586,18 +776,12 @@ pub struct App {
     /// firing alongside the server's own. Empty only in tests that build the App
     /// directly without registering real handlers.
     pub(crate) shutdown_sig_ids: Vec<signal_hook::SigId>,
-    pub(crate) force_redraw: bool,
     /// The run loop's draw gate: poll cadence and draw cadence are separate
     /// questions (see [`redraw`]).
     pub(crate) redraw: RedrawGate,
     pub(crate) welcome_tip_index: usize,
-    /// Whether the ASCII logo was rendered in the previous frame.
-    pub(crate) welcome_logo_visible: bool,
     /// The left-pane selection index when the logo last rendered a tip.
     pub(crate) welcome_tip_selection: usize,
-    /// When true, show the alternate (duck) logo instead of the text logo.
-    pub(crate) welcome_logo_alt: bool,
-    pub(crate) pr_banner_at_bottom: bool,
     /// Cached syntax highlighting resources shared across diff computations.
     /// Shared by `Arc` because every computation runs on a worker thread.
     pub(crate) syntax_cache: Arc<SyntaxCache>,
@@ -653,15 +837,6 @@ pub struct App {
     /// What this surface last published to the attachment registry, with its
     /// ownership seat then, so an unchanged frame publishes nothing.
     pub(crate) published_ptys: Option<(Vec<dux_core::attachments::Target>, Option<u64>)>,
-    /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
-    /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
-    /// would both spawn workers and the second would hit a confusing EADDRINUSE.
-    /// Set true when a worker is dispatched, cleared when its
-    /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
-    /// set, or while `pending_server_flip` is already stashed, a repeat
-    /// invocation is refused with an actionable status instead of spawning a
-    /// second worker.
-    pub(crate) server_flip_preflight_pending: bool,
     /// The web server serving in this TUI's background, when one is installed.
     ///
     /// A trait object, and deliberately opaque: this crate depends only on
@@ -675,43 +850,12 @@ pub struct App {
     /// installed and serving are different states, because the mode is toggled at
     /// runtime.
     pub(crate) companion: Option<Box<dyn dux_core::background_serve::BackgroundServeCompanion>>,
-    /// In-flight guard for the background server's bind pre-flight, the same
-    /// shape and for the same reason as `server_flip_preflight_pending`: the
-    /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
-    /// would have the second report a confusing EADDRINUSE.
-    pub(crate) background_server_preflight_pending: bool,
-    /// Whether a background listener is currently WANTED.
-    ///
-    /// Distinct from `background_server_is_serving`, which cannot answer for the
-    /// window while the bind pre-flight is still on its worker thread. In that
-    /// window a stop command, or a reload that turns the setting off, would
-    /// otherwise be a no-op; the pre-flight would then land, start serving anyway,
-    /// and persist `serve_while_tui = true` over the value the user just chose.
-    /// The stop paths clear this and the pre-flight's apply consults it.
-    pub(crate) background_server_wanted: bool,
-    /// Set when a reaction drained this iteration was the COMPANION's to follow up
-    /// on, so this surface skipped its own arm for it.
-    ///
-    /// A web-owned follow-up mutates shared state this surface renders (the
-    /// inline project add writes `engine.projects` during the fanout), and the
-    /// change did not arrive through this surface's own event stream, so nothing
-    /// here would otherwise rebuild. Folded into the per-iteration mutated answer
-    /// and cleared there.
-    pub(crate) companion_followup_ran: bool,
     /// What each row of `left_items_cache` is, by identity, built with it. The
     /// cursor is an index into the list as this surface last built it, so the
     /// row it names here is what this surface is on, whatever a browser, the
     /// command line or a reloaded config has since done to the sessions the
     /// cached indexes point into. Every rebuild finds that row again by id.
     pub(crate) left_rows: Vec<LeftRow>,
-    /// Whether the list has been built at least once: before that, the cursor
-    /// takes the first row as it always has, and after it an empty list is a
-    /// cursor on nothing.
-    pub(crate) left_rows_built: bool,
-    /// The cursor is on no row: the row it was on was deleted or went away, or
-    /// the list was empty, and only this surface moves it onto a row. Held as
-    /// an index one past the end; this surface's next move puts it on a row.
-    pub(crate) left_cursor_parked: bool,
     /// The terminal row the terminal cursor is on, by id, with the index it was
     /// on when this surface put it there. A rebuild follows the id; an index
     /// set by hand since (it no longer matches) is taken as it is.
@@ -891,13 +1035,29 @@ pub struct App {
     /// so it drops after every field that may still hold a file inside it open.
     #[cfg(test)]
     pub(crate) test_scratch_dirs: dux_core::test_scratch::ScratchDirs,
+    /// Which side panes are collapsed or hidden.
+    pub(crate) panes: PaneFlags,
+    /// How the agent list's Inactive tail is folded.
+    pub(crate) inactive_tail: InactiveTailState,
+    /// The bracketed paste being read from raw input, if any.
+    pub(crate) raw_paste: RawPaste,
+    /// The tips screen's logo, as last drawn.
+    pub(crate) welcome_logo: WelcomeLogo,
+    /// Display settings read from config at startup and on reload.
+    pub(crate) view_prefs: ViewPrefs,
+    /// In-flight guards and intent for the web server this surface starts.
+    pub(crate) serving: ServingFlags,
+    /// Where the agent list's cursor stands relative to its rows.
+    pub(crate) left_list: LeftRowsState,
+    /// One-shot facts this surface records for itself and spends later.
+    pub(crate) notes: OneShotNotes,
 }
 
 /// Handler-resolved outcome for the server-flip op (see
 /// [`App::pending_server_flip_op`]). The plain-success case never resolves the op
 /// (it re-emits `progress` and lets the spinner ride until the flip), so only the
 /// two terminal-with-message cases are represented here.
-pub enum TuiServerFlipOutcome {
+pub(crate) enum TuiServerFlipOutcome {
     /// Pre-flight succeeded but carried a non-fatal warning (e.g. Tailscale not
     /// detected, serving loopback-only). Resolves to a warning final whose text is
     /// byte-identical to the legacy `set_warning`.
@@ -926,7 +1086,7 @@ pub(crate) struct PendingBackgroundServerStart {
 /// Every arm is terminal, unlike the flip's: the flip's busy rides on until the
 /// process changes surface, while this one has an answer either way and the TUI
 /// stays exactly where it was.
-pub enum BackgroundServerOutcome {
+pub(crate) enum BackgroundServerOutcome {
     /// Serving, on these addresses.
     Serving {
         urls: Vec<String>,
@@ -948,7 +1108,7 @@ pub enum BackgroundServerOutcome {
 /// [`App::pending_config_reload_op`]). The two apply outcomes are answered on
 /// the worker lane so both surfaces read one sentence; a validation failure is
 /// this surface's alone and carries its own line.
-pub enum TuiConfigReloadOutcome {
+pub(crate) enum TuiConfigReloadOutcome {
     /// The reloaded config applied cleanly. Dismisses the spinner; the sentence
     /// comes from [`dux_core::config_reload_status::applied`].
     Applied,
@@ -965,7 +1125,7 @@ pub enum TuiConfigReloadOutcome {
 /// clear: every visible final message is authored elsewhere (the engine's unkeyed
 /// `Status`, or a TUI `set_info`/`set_error` in the view handler), so the op's only
 /// job is to dismiss its keyed busy once that final is in place.
-pub enum TuiCheckoutInspectOutcome {
+pub(crate) enum TuiCheckoutInspectOutcome {
     Done,
 }
 
@@ -974,7 +1134,7 @@ pub enum TuiCheckoutInspectOutcome {
 /// needs, and the `worktree` the read was asked for, which is both what tells
 /// this refresh's answer apart from any other `ChangedFilesReady` and what has
 /// to still be watched for the answer to have been applied at all.
-pub struct PendingChangedFilesRefresh {
+pub(crate) struct PendingChangedFilesRefresh {
     pub key: String,
     pub label: String,
     pub worktree: PathBuf,
@@ -985,7 +1145,7 @@ pub struct PendingChangedFilesRefresh {
 }
 
 /// How a changed-files read announces itself on the TUI's one status line.
-pub enum ChangedFilesReadVoice {
+pub(crate) enum ChangedFilesReadVoice {
     /// The `refresh-changes` command. It was asked for in words, so it answers
     /// in words: a busy straight away and the counts when the read lands.
     Spoken,
@@ -1007,12 +1167,12 @@ fn changed_files_read_busy(label: &str) -> String {
 /// line explains the empty pane. Below this the read is not a wait anyone needs
 /// narrated; above it the user is looking at an empty Changes pane and deserves
 /// to know why.
-pub const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
+pub(crate) const SLOW_CHANGED_FILES_READ: Duration = Duration::from_millis(300);
 
 /// The in-flight diff computation: the request it is for, the channel its
 /// answer arrives on, and whether the status line still owes the user a
 /// spinner.
-pub struct PendingDiff {
+pub(crate) struct PendingDiff {
     pub key: crate::diff::DiffRequestKey,
     pub rx: mpsc::Receiver<crate::diff::DiffAnswer>,
     /// The file the diff is for, for the status messages.
@@ -1029,7 +1189,7 @@ pub struct PendingDiff {
 /// The status key every diff computation shares. One slot in the app means one
 /// key: a new request retires the previous one's spinner rather than leaving
 /// two open at once.
-pub const DIFF_STATUS_KEY: &str = "diff-file";
+pub(crate) const DIFF_STATUS_KEY: &str = "diff-file";
 
 /// Which folded folders the changes pane has expanded, and the work in flight
 /// for them. See `changes_tree` for the behavior.
@@ -1134,7 +1294,7 @@ pub(crate) struct FolderOpDone {
 /// How long a diff may take before the status line explains the empty pane.
 /// The same judgement as [`SLOW_CHANGED_FILES_READ`], and deliberately the same
 /// number: both are "the pane is blank and the user is looking at it".
-pub const SLOW_DIFF_READ: Duration = Duration::from_millis(300);
+pub(crate) const SLOW_DIFF_READ: Duration = Duration::from_millis(300);
 
 /// The one busy wording for a diff computation.
 fn diff_read_busy(label: &str) -> String {
@@ -1153,7 +1313,7 @@ fn diff_read_busy(label: &str) -> String {
 /// handler additionally observes whether the session record is still present.
 /// The resolver (declared at dispatch, where the session was in scope) maps this
 /// to the final user message.
-pub enum TuiDeleteOutcome {
+pub(crate) enum TuiDeleteOutcome {
     /// Git removal succeeded and the session record is still present (the normal
     /// case, where cleanup runs now). `branches` selects the message, and carries
     /// the birth branch's fate as well when the agent had drifted.
@@ -1177,7 +1337,7 @@ pub enum TuiDeleteOutcome {
 /// Both variants resolve to a clear: the user-visible message is produced by the
 /// downstream path (the name prompt's `set_info` on success, the engine's error
 /// `Status` on failure), so the op's only job is to dismiss its keyed busy.
-pub enum PrLookupFinalOutcome {
+pub(crate) enum PrLookupFinalOutcome {
     /// The lookup resolved; the TUI opens the name prompt (whose `set_info` is the
     /// visible final), so this op's busy is dismissed with no replacement message.
     HandedOff,
@@ -1191,7 +1351,7 @@ pub enum PrLookupFinalOutcome {
 /// picker is still open and matching when the worktrees arrive, a fact the
 /// worker never sees. The op's resolver (declared at dispatch) maps this to the
 /// final user message.
-pub enum WorktreesFinalOutcome {
+pub(crate) enum WorktreesFinalOutcome {
     /// The picker is still open and the worktrees loaded successfully.
     Loaded,
     /// The picker is still open but the load failed; carries the error.
@@ -1206,7 +1366,7 @@ pub enum WorktreesFinalOutcome {
 /// then runs the fallible config write, producing one of three results the
 /// worker never sees. The op's resolver (declared at dispatch) maps this to the
 /// final user message.
-pub enum PersistFinalOutcome {
+pub(crate) enum PersistFinalOutcome {
     /// SQLite write succeeded and the post-worker config.toml write succeeded.
     Saved,
     /// The SQLite write itself failed; carries the formatted error.
@@ -1227,7 +1387,7 @@ pub(crate) struct PendingServerFlip {
 
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
 /// process into the web server while keeping the live agents running.
-pub enum RunExit {
+pub(crate) enum RunExit {
     Quit,
     FlipToServer {
         listeners: Vec<std::net::TcpListener>,
@@ -1328,9 +1488,9 @@ pub(crate) enum RightSection {
 impl RightSection {
     /// Returns the next section, or `None` to exit the pane.
     /// Order: Unstaged → Staged → `CommitInput`.
-    pub(crate) fn next(self, has_staged: bool) -> Option<Self> {
+    pub(crate) fn next(self, staged: StagedFiles) -> Option<Self> {
         match self {
-            Self::Unstaged if has_staged => Some(Self::Staged),
+            Self::Unstaged if (staged == StagedFiles::Present) => Some(Self::Staged),
             Self::Unstaged => None,
             Self::Staged => Some(Self::CommitInput),
             Self::CommitInput => None,
@@ -1351,13 +1511,40 @@ impl RightSection {
         Self::Unstaged
     }
 
-    pub(crate) fn last(has_staged: bool) -> Self {
-        if has_staged {
+    pub(crate) fn last(staged: StagedFiles) -> Self {
+        if staged == StagedFiles::Present {
             Self::CommitInput
         } else {
             Self::Unstaged
         }
     }
+}
+
+/// Whether finishing an agent delete puts its outcome on the status line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteReport {
+    /// Say what the delete did.
+    Announce,
+    /// Say nothing; whoever asked reports the outcome itself.
+    Quiet,
+}
+
+/// How a launched agent's pane should land once its child is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchView {
+    /// Fullscreen, with keys going to the agent.
+    Fullscreen,
+    /// The windowed (minimized) typeable pane.
+    Minimized,
+}
+
+/// What activating an agent does when the tab it lands on is not running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnDormant {
+    /// Start the tab.
+    Launch,
+    /// Leave it stopped and only leave interactive mode.
+    Leave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1675,7 +1862,7 @@ pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
     pr: Option<(&crate::model::PrInfo, bool)>,
-    directory_missing: bool,
+    working_copy: WorkingCopy,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session.display_label();
     // Mirror the header's "current provider" note: when the agent runs a provider
@@ -1722,7 +1909,7 @@ pub(crate) fn agent_info_lines(
                 format!("Worktree:     {}", managed.worktree_path),
                 AgentInfoTone::Neutral,
             ));
-            if directory_missing {
+            if working_copy == WorkingCopy::Missing {
                 lines.push((
                     dux_core::working_copy::MISSING_WORKING_COPY_INFO_LINE.to_string(),
                     AgentInfoTone::Warning,
@@ -1741,7 +1928,7 @@ pub(crate) fn agent_info_lines(
                 ),
                 AgentInfoTone::Neutral,
             ));
-            if directory_missing {
+            if working_copy == WorkingCopy::Missing {
                 lines.push((
                     dux_core::working_copy::MISSING_FOLDER_INFO_LINE.to_string(),
                     AgentInfoTone::Warning,
@@ -2492,8 +2679,11 @@ impl DeleteAgentTarget {
     /// with the worktree staying there is genuinely nothing on offer, and a
     /// permanently disabled box that happens to look ticked would promise
     /// exactly the deletion it cannot do.
-    pub(crate) fn offers_branch_checkbox(&self, delete_worktree: bool) -> bool {
-        delete_worktree && self.offers_worktree_checkbox()
+    pub(crate) fn offers_branch_checkbox(
+        &self,
+        worktree: dux_core::engine::WorktreeOnDelete,
+    ) -> bool {
+        worktree == dux_core::engine::WorktreeOnDelete::Remove && self.offers_worktree_checkbox()
     }
 
     /// The branch answer this dialog sends with its delete request, given the
@@ -2506,9 +2696,13 @@ impl DeleteAgentTarget {
     /// override it with. So the answer travels only where the box was actually
     /// on screen, which is the same question the renderer and the focus ring
     /// ask.
-    pub(crate) fn branch_answer(&self, delete_worktree: bool, delete_branch: bool) -> Option<bool> {
-        self.offers_branch_checkbox(delete_worktree)
-            .then_some(delete_branch)
+    pub(crate) fn branch_answer(
+        &self,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch: dux_core::worktree_manager::BranchRemoval,
+    ) -> Option<bool> {
+        self.offers_branch_checkbox(worktree)
+            .then_some(branch == dux_core::worktree_manager::BranchRemoval::Delete)
     }
 
     /// Every branch the box names and the unpushed count is about: the one the
@@ -3173,10 +3367,19 @@ pub(crate) enum PromptState {
         /// "first sample since the overlay opened" guess: reopening the
         /// overlay within `STALE_BASELINE` of the collector's last refresh
         /// does not re-baseline, so it must not show `~` either. Starts
-        /// `true` on open, since the very first sample of the app's lifetime
+        /// `Short` on open, since the very first sample of the app's lifetime
         /// (or after any real gap) always re-baselines.
-        short_window_sample: bool,
+        cpu_window: CpuWindow,
     },
+}
+
+/// How long the window behind a resource sample's CPU figures was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CpuWindow {
+    /// The collector re-baselined, so the figures cover a short window.
+    Short,
+    /// The figures cover the normal poll interval.
+    Full,
 }
 
 pub(crate) use dux_core::project_browser::leading_branch_for_project;
@@ -3206,10 +3409,10 @@ pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>)
 
 pub(crate) fn project_worktree_visual_rows(
     entries: &[ProjectWorktreeEntry],
-    loading: bool,
+    listing: Listing,
     error: Option<&str>,
 ) -> Vec<ProjectWorktreeVisualRow> {
-    if loading {
+    if listing == Listing::Loading {
         return vec![ProjectWorktreeVisualRow::Empty(
             "Loading project worktrees...".to_string(),
         )];
@@ -3270,10 +3473,10 @@ pub(crate) fn project_worktree_visual_rows(
 /// they are not selectable, so the cursor cannot land on one.
 pub(crate) fn manage_worktree_visual_rows(
     entries: &[dux_core::worktree_manager::ManagedWorktree],
-    loading: bool,
+    listing: Listing,
     error: Option<&str>,
 ) -> Vec<ManageWorktreeVisualRow> {
-    if loading {
+    if listing == Listing::Loading {
         return vec![ManageWorktreeVisualRow::Empty(
             "Listing the worktrees dux manages...".to_string(),
         )];
@@ -3398,14 +3601,14 @@ impl MacroEditFocus {
         MacroEditFocus::Save,
     ];
 
-    /// The next focus stop in `forward` direction, wrapping at both ends.
-    pub(crate) fn step(self, forward: bool) -> Self {
+    /// The next focus stop in `direction`, wrapping at both ends.
+    pub(crate) fn step(self, direction: FocusStep) -> Self {
         let order = Self::ORDER;
         let index = order
             .iter()
             .position(|f| *f == self)
             .expect("every variant is in ORDER");
-        let next = if forward {
+        let next = if direction == FocusStep::Forward {
             (index + 1) % order.len()
         } else {
             (index + order.len() - 1) % order.len()
@@ -3420,10 +3623,10 @@ impl MacroEditFocus {
     /// owns nothing, so the movement keys keep working while focus is parked on
     /// it. That distinction is what [`MacroEditFocus::is_text_field`] cannot
     /// make on its own.
-    pub(crate) fn owns_keys(self, body_engaged: bool) -> bool {
+    pub(crate) fn owns_keys(self, body: FieldEngagement) -> bool {
         match self {
             MacroEditFocus::Name => true,
-            MacroEditFocus::Text => body_engaged,
+            MacroEditFocus::Text => body == FieldEngagement::Engaged,
             MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => false,
         }
     }
@@ -3450,16 +3653,16 @@ pub(crate) enum ConfigureFieldFocus {
 }
 
 impl ConfigureFieldFocus {
-    /// The next focus stop in `forward` direction, wrapping at both ends.
+    /// The next focus stop in `direction`, wrapping at both ends.
     /// Every stop is unconditional here, but the shared ring is used anyway so
     /// this modal's focus order is declared as data like everyone else's.
-    pub(crate) fn step(self, forward: bool) -> Self {
+    pub(crate) fn step(self, direction: FocusStep) -> Self {
         let ring: [(ConfigureFieldFocus, bool); 3] = [
             (ConfigureFieldFocus::Input, true),
             (ConfigureFieldFocus::Cancel, true),
             (ConfigureFieldFocus::Save, true),
         ];
-        components::focus_ring::next_focus(&ring, self, forward)
+        components::focus_ring::next_focus(&ring, self, direction)
     }
 }
 
@@ -3492,6 +3695,24 @@ impl ConfirmFocus {
     pub(crate) fn is_confirm(self) -> bool {
         matches!(self, Self::Confirm)
     }
+
+    /// The answer activating the focused button gives.
+    pub(crate) fn answer(self) -> ConfirmAnswer {
+        match self {
+            Self::Cancel => ConfirmAnswer::Cancel,
+            Self::Confirm => ConfirmAnswer::Confirm,
+        }
+    }
+}
+
+/// How the user answered a confirmation: with its committing button, or by
+/// cancelling it (its Cancel button, Escape, or a click outside).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmAnswer {
+    /// The committing button (Delete, Quit, Discard, Apply, …).
+    Confirm,
+    /// Anything that abandons the confirmation.
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
@@ -3577,7 +3798,7 @@ pub(crate) struct TerminalSelection {
 
 impl TerminalSelection {
     /// Returns (start, end) in reading order (top-left to bottom-right).
-    pub fn ordered(&self) -> (TermGridPos, TermGridPos) {
+    pub(crate) fn ordered(&self) -> (TermGridPos, TermGridPos) {
         if self.anchor.row < self.end.row
             || (self.anchor.row == self.end.row && self.anchor.col <= self.end.col)
         {
@@ -3589,7 +3810,7 @@ impl TerminalSelection {
 
     /// Returns true if the given (row, col) is within the selection.
     /// Uses line-based (not rectangular) selection semantics.
-    pub fn contains(&self, row: u16, col: u16) -> bool {
+    pub(crate) fn contains(&self, row: u16, col: u16) -> bool {
         let (start, end) = self.ordered();
         if row < start.row || row > end.row {
             return false;
@@ -3629,7 +3850,7 @@ impl TerminalSelection {
     /// appearing among the snapshot's cells, so it leaves the highlight and the
     /// copy on its own. Copying it back is out of scope; the snapshot carries no
     /// scrollback.
-    pub fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
+    pub(crate) fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
         let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
         let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
         let origin_row = live_row as i64 - offset_delta + total_delta;
@@ -3640,7 +3861,7 @@ impl TerminalSelection {
     /// cell's row into the selection's own frame first. Every PTY-grid caller
     /// must use this rather than `contains`, or the highlight and the copied
     /// text stay pinned to screen coordinates while the text underneath moves.
-    pub fn contains_live(&self, live_row: u16, col: u16, now: SelectionOrigin) -> bool {
+    pub(crate) fn contains_live(&self, live_row: u16, col: u16, now: SelectionOrigin) -> bool {
         match self.to_origin_row(live_row, now) {
             Some(row) => self.contains(row, col),
             None => false,
@@ -4236,7 +4457,7 @@ impl AgentSortMode {
     }
 
     /// The `config.ui.agent_sort` string for this mode (the shared wire value).
-    pub(crate) fn as_config_str(&self) -> &'static str {
+    pub(crate) fn as_config_str(self) -> &'static str {
         match self {
             AgentSortMode::Active => "active",
             AgentSortMode::Updated => "updated",
@@ -4249,8 +4470,8 @@ impl AgentSortMode {
 
     /// The next mode in the TUI cycle. If the current mode is not in the cycle
     /// (i.e. `Manual`, which the TUI never offers), start the cycle at `Active`.
-    pub(crate) fn next_in_tui_cycle(&self) -> AgentSortMode {
-        match Self::TUI_CYCLE.iter().position(|m| m == self) {
+    pub(crate) fn next_in_tui_cycle(self) -> AgentSortMode {
+        match Self::TUI_CYCLE.iter().position(|m| *m == self) {
             Some(i) => Self::TUI_CYCLE[(i + 1) % Self::TUI_CYCLE.len()],
             None => AgentSortMode::Active,
         }
@@ -4267,7 +4488,11 @@ pub(crate) fn tab_reaches_agent_trap_warning(
     config: &Config,
 ) -> Option<String> {
     bindings
-        .typeable_center_traps_focus(config.ui.tab_reaches_agent)
+        .typeable_center_traps_focus(if config.ui.tab_reaches_agent {
+            crate::keybindings::TabKey::ReachesAgent
+        } else {
+            crate::keybindings::TabKey::MovesPanes
+        })
         .then(|| {
             format!(
                 "Tab reaches the agent in the center pane, but {}",
@@ -4295,7 +4520,7 @@ pub(crate) fn tab_reaches_agent_trap_warning(
 /// filter pass `&|_| true`.
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
-    inactive_collapsed: bool,
+    tail: InactiveTail,
     sort_mode: AgentSortMode,
     is_hot: &dyn Fn(usize) -> bool,
     is_visible: &dyn Fn(usize) -> bool,
@@ -4314,7 +4539,7 @@ pub(crate) fn build_left_items(
     let mut items: Vec<LeftItem> = order.active.into_iter().map(LeftItem::Session).collect();
     if !order.inactive.is_empty() {
         items.push(LeftItem::InactiveToggle);
-        if !inactive_collapsed {
+        if tail == InactiveTail::Expanded {
             items.extend(order.inactive.into_iter().map(LeftItem::Session));
         }
     }
@@ -4411,7 +4636,7 @@ impl App {
     /// created its directories, and acquired the single-instance lock.
     /// This ensures the lock covers every entrypoint (TUI + config
     /// subcommands) and that a losing process never touches shared state.
-    pub fn bootstrap_with_lock(
+    pub(crate) fn bootstrap_with_lock(
         paths: DuxPaths,
         mut single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
@@ -4592,15 +4817,15 @@ impl App {
             created_session_by_op: HashMap::new(),
             removal_coordination: Default::default(),
         };
-        Self::assemble(
+        Ok(Self::assemble(
             engine,
             bindings,
             interactive_patterns,
             signals,
             status,
             theme,
-            SessionRestore::Restore,
-        )
+            &SessionRestore::Restore,
+        ))
     }
 
     /// Shared App-struct construction used by both first-boot bootstrap and the
@@ -4618,8 +4843,8 @@ impl App {
         signals: SignalHandles,
         status: KeyedStatusController,
         theme: Theme,
-        restore: SessionRestore,
-    ) -> Result<Self> {
+        restore: &SessionRestore,
+    ) -> App {
         let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
             &engine.config.ui.pr_banner_position,
         ) == dux_core::config_effective::PrBannerPosition::Bottom;
@@ -4633,7 +4858,6 @@ impl App {
         let staged_pane_height_pct = engine.config.ui.staged_pane_height_pct;
         let commit_pane_height_pct = engine.config.ui.commit_pane_height_pct;
         let mut app = Self {
-            show_diff_line_numbers,
             left_width_pct,
             right_width_pct,
             terminal_pane_height_pct,
@@ -4652,9 +4876,6 @@ impl App {
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
             pending_commit: None,
-            left_collapsed: false,
-            right_collapsed: false,
-            right_hidden,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,
@@ -4679,7 +4900,7 @@ impl App {
             status,
             missing_project_warning_gen: None,
             palette_hint_gen: None,
-            palette_opened_over: None,
+            palette_opened_over: PaletteOpenedOver::NotRecorded,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -4693,7 +4914,6 @@ impl App {
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
-            create_agent_started_here: false,
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -4708,9 +4928,7 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             refusal_blink: None,
-            inactive_collapsed: true,
             inactive_search_dismissed: None,
-            inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -4725,24 +4943,17 @@ impl App {
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
-            in_bracket_paste: false,
-            raw_paste_normalize: false,
-            raw_paste_prev_cr: false,
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
             sigwinch_sig_id: signals.sigwinch_sig_id,
             shutdown_flag: signals.shutdown_flag,
             shutdown_sig_ids: signals.shutdown_sig_ids,
-            force_redraw: false,
             redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as usize),
-            welcome_logo_visible: false,
-            welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            pr_banner_at_bottom,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
             changes_tree: Default::default(),
@@ -4759,18 +4970,12 @@ impl App {
             drawn_ptys: Vec::new(),
             published_ptys: None,
             companion: None,
-            background_server_preflight_pending: false,
-            background_server_wanted: false,
-            companion_followup_ran: false,
             left_rows: Vec::new(),
-            left_rows_built: false,
-            left_cursor_parked: false,
             terminal_cursor: None,
             tui_fallback_tabs: Default::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
-            server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
@@ -4788,6 +4993,42 @@ impl App {
             agent_filter: None,
             #[cfg(test)]
             test_scratch_dirs: dux_core::test_scratch::ScratchDirs::new(),
+            panes: PaneFlags {
+                left_collapsed: false,
+                right_collapsed: false,
+                right_hidden,
+            },
+            inactive_tail: InactiveTailState {
+                collapsed: true,
+                overridden: false,
+            },
+            raw_paste: RawPaste {
+                in_bracket: false,
+                normalize: false,
+                newlines: crate::raw_input::PasteNewlines::default(),
+            },
+            welcome_logo: WelcomeLogo {
+                visible: false,
+                alt: false,
+            },
+            view_prefs: ViewPrefs {
+                show_diff_line_numbers,
+                pr_banner_at_bottom,
+            },
+            serving: ServingFlags {
+                flip_preflight_pending: false,
+                background_preflight_pending: false,
+                background_wanted: false,
+            },
+            left_list: LeftRowsState {
+                built: false,
+                cursor_parked: false,
+            },
+            notes: OneShotNotes {
+                force_redraw: false,
+                companion_followup_ran: false,
+                create_agent_started_here: false,
+            },
         };
         // First boot relaunches prior sessions; a resume must not, because the
         // engine handed back from the web server already owns the live providers, and
@@ -4805,7 +5046,7 @@ impl App {
         app.rebuild_left_items();
         app.reload_changed_files();
         app.engine.update_branch_sync_sessions();
-        Ok(app)
+        app
     }
 
     /// Rebuild an App around an EXISTING engine after the web server hands it
@@ -4815,7 +5056,7 @@ impl App {
     /// from `engine.config` exactly as bootstrap does, and a fresh SIGWINCH
     /// handler is registered; the previous App's registration was removed in
     /// `into_engine`, so flip cycles don't accumulate handlers.
-    pub fn resume(engine: Engine) -> Result<Self> {
+    pub(crate) fn resume(engine: Engine) -> Result<Self> {
         logger::info("resuming dux TUI after the web server stopped");
         let bindings = RuntimeBindings::from_keys_config(&engine.config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
@@ -4832,15 +5073,15 @@ impl App {
             theme_warning,
             None,
         );
-        Self::assemble(
+        Ok(Self::assemble(
             engine,
             bindings,
             interactive_patterns,
             signals,
             status,
             theme,
-            SessionRestore::Skip,
-        )
+            &SessionRestore::Skip,
+        ))
     }
 
     /// Consume the App and hand back its engine. Used by the TUI→server flip:
@@ -4849,7 +5090,7 @@ impl App {
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
     /// PTY-activity tracking lives on the engine (`pty_activity`), so the
     /// streaming/"working" state carries across the flip with it.
-    pub fn into_engine(self) -> Engine {
+    pub(crate) fn into_engine(self) -> Engine {
         // Unregister this App's signal handlers so repeated flip cycles don't
         // pile up orphaned registrations (each resume registers fresh flags;
         // without this, every signal would fire one stale setter per cycle) and
@@ -4864,7 +5105,7 @@ impl App {
         self.engine
     }
 
-    pub fn run(&mut self) -> Result<RunExit> {
+    pub(crate) fn run(&mut self) -> Result<RunExit> {
         self.start_run_services();
         let mut terminal = ratatui::init();
         execute!(
@@ -4978,10 +5219,10 @@ impl App {
             }
         }
 
-        if !self.force_redraw {
+        if !self.notes.force_redraw {
             return;
         }
-        self.force_redraw = false;
+        self.notes.force_redraw = false;
         self.mark_frame_dirty();
         if let Err(err) = terminal.clear() {
             self.report_runtime_error("force redraw failed", &err);
@@ -5182,8 +5423,11 @@ impl App {
     /// server's startup pass); only the TUI-side launch dispatch lives here.
     fn auto_reopen_eligible_sessions(&mut self) {
         for session in self.engine.auto_reopen_candidates() {
-            let request =
-                self.agent_launch_request(session, true, AgentLaunchKind::StartupAutoReopen);
+            let request = self.agent_launch_request(
+                session,
+                dux_core::model::ConversationStart::Resume,
+                AgentLaunchKind::StartupAutoReopen,
+            );
             self.dispatch_agent_launch(request);
         }
     }
@@ -5475,9 +5719,10 @@ impl App {
     /// nobody has read it yet. A spinner goes from the line while its operation
     /// keeps running, and the operation's outcome still shows when it lands.
     pub(crate) fn clear_status_line(&mut self) {
-        let target = match self.palette_opened_over.take() {
-            Some(before_palette) => before_palette,
-            None => self.status.showing(),
+        let target = match std::mem::take(&mut self.palette_opened_over) {
+            PaletteOpenedOver::Status(shown) => Some(shown),
+            PaletteOpenedOver::EmptyLine => None,
+            PaletteOpenedOver::NotRecorded => self.status.showing(),
         };
         if let Some(generation) = self.palette_hint_gen.take() {
             self.status.clear(UI_HINT_KEY, Some(generation));
@@ -5670,7 +5915,7 @@ impl App {
             selected_row: 0,
             expanded: HashSet::new(),
             last_refresh: Instant::now(),
-            short_window_sample: true,
+            cpu_window: CpuWindow::Short,
         };
         self.engine.spawn_resource_stats_worker();
     }
@@ -5820,17 +6065,41 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn execute_command(&mut self, command: String) -> Result<()> {
+    pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
         match command {
-            "new-agent" => self.create_agent_for_selected_project(),
-            "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
-            "clone-project" => self.open_clone_project_prompt(),
-            "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
-            "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
-            "manage-worktrees" => self.manage_project_worktrees(),
-            "fork-agent" => self.fork_selected_session(),
-            "change-agent-provider" => self.open_change_agent_provider_prompt(),
+            "new-agent" => {
+                self.create_agent_for_selected_project();
+                Ok(())
+            }
+            "new-agent-from-pr" => {
+                self.open_new_agent_from_pr_prompt();
+                Ok(())
+            }
+            "clone-project" => {
+                self.open_clone_project_prompt();
+                Ok(())
+            }
+            "new-agent-from-worktree" => {
+                self.create_agent_from_existing_worktree();
+                Ok(())
+            }
+            "manage-projects" => {
+                self.open_project_chooser(ProjectChooserIntent::Manage);
+                Ok(())
+            }
+            "manage-worktrees" => {
+                self.manage_project_worktrees();
+                Ok(())
+            }
+            "fork-agent" => {
+                self.fork_selected_session();
+                Ok(())
+            }
+            "change-agent-provider" => {
+                self.open_change_agent_provider_prompt();
+                Ok(())
+            }
             "new-agent-tab" => self.open_new_tab_provider_prompt(),
             "close-tab" => {
                 self.close_focused_tab_prompt();
@@ -5840,9 +6109,15 @@ impl App {
                 self.stop_focused_tab_prompt();
                 Ok(())
             }
-            "change-default-provider" => self.open_change_default_provider_prompt(),
+            "change-default-provider" => {
+                self.open_change_default_provider_prompt();
+                Ok(())
+            }
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
-            "change-theme" => self.open_change_theme_prompt(),
+            "change-theme" => {
+                self.open_change_theme_prompt();
+                Ok(())
+            }
             "reload-config" => self.reload_config_from_disk(),
             "start-web-server" => {
                 self.start_web_server();
@@ -5867,28 +6142,58 @@ impl App {
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "configure-startup-command" => self.open_configure_startup_command(),
-            "configure-global-env" => self.open_configure_global_env(),
+            "configure-global-env" => {
+                self.open_configure_global_env();
+                Ok(())
+            }
             "configure-project-env" => self.open_configure_project_env(),
-            "rerun-startup-command-on-agent" => self.rerun_startup_command_on_agent(),
+            "rerun-startup-command-on-agent" => {
+                self.rerun_startup_command_on_agent();
+                Ok(())
+            }
             "read-startup-command-logs" => self.open_startup_command_logs(),
             "pull-project" => self.refresh_selected_project(),
             "checkout-project-default-branch" => self.checkout_selected_project_default_branch(),
             "change-project-base-branch" => self.change_selected_project_base_branch(),
             "delete-project" => self.delete_selected_project(),
-            "remove-project" => self.remove_selected_project(),
-            "delete-agent" => self.confirm_delete_selected_session(),
-            "rename-agent" => self.open_rename_session(),
-            "agent-info" => self.open_agent_info(),
-            "kill-running" => self.open_kill_running(),
+            "remove-project" => {
+                self.remove_selected_project();
+                Ok(())
+            }
+            "delete-agent" => {
+                self.confirm_delete_selected_session();
+                Ok(())
+            }
+            "rename-agent" => {
+                self.open_rename_session();
+                Ok(())
+            }
+            "agent-info" => {
+                self.open_agent_info();
+                Ok(())
+            }
+            "kill-running" => {
+                self.open_kill_running();
+                Ok(())
+            }
             "clear-status-line" => {
                 self.clear_status_line();
                 Ok(())
             }
-            "detach-agent" => self.confirm_detach_selected_session(),
-            "recreate-working-copy" => self.confirm_recreate_selected_working_copy(),
-            "reconnect-agent" => self.reconnect_selected_session(false),
+            "detach-agent" => {
+                self.confirm_detach_selected_session();
+                Ok(())
+            }
+            "recreate-working-copy" => {
+                self.confirm_recreate_selected_working_copy();
+                Ok(())
+            }
+            "reconnect-agent" => self.reconnect_selected_session(LaunchView::Minimized),
             "force-reconnect-agent" => self.force_reconnect_agent(),
-            "refresh-changes" => self.refresh_changed_files_now(),
+            "refresh-changes" => {
+                self.refresh_changed_files_now();
+                Ok(())
+            }
             "move-agent-up" => {
                 self.move_selected_agent(reorder::MoveDir::Up);
                 Ok(())
@@ -5905,7 +6210,10 @@ impl App {
                 self.move_selected_agent(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "delete-terminal" => self.delete_terminal_from_palette(),
+            "delete-terminal" => {
+                self.delete_terminal_from_palette();
+                Ok(())
+            }
             "filter-agents" => {
                 self.filter_agents_from_palette();
                 Ok(())
@@ -5926,36 +6234,64 @@ impl App {
                 self.move_selected_terminal(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "show-agent" => self.activate_center_agent(true, false),
-            "show-terminal" => self.show_or_open_first_terminal(),
-            "new-terminal-for-agent" => self.new_companion_terminal(),
-            "new-terminal-for-project" => {
-                self.open_project_chooser(ProjectChooserIntent::ProjectTerminal)
+            "show-agent" => self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized),
+            "show-terminal" => {
+                self.show_or_open_first_terminal();
+                Ok(())
             }
-            "new-standalone-agent" => self.open_standalone_agent_browser(),
-            "new-standalone-terminal" => self.show_standalone_terminal(),
-            "add-project" => self.open_project_browser(),
+            "new-terminal-for-agent" => {
+                self.new_companion_terminal();
+                Ok(())
+            }
+            "new-terminal-for-project" => {
+                self.open_project_chooser(ProjectChooserIntent::ProjectTerminal);
+                Ok(())
+            }
+            "new-standalone-agent" => {
+                self.open_standalone_agent_browser();
+                Ok(())
+            }
+            "new-standalone-terminal" => {
+                self.show_standalone_terminal();
+                Ok(())
+            }
+            "add-project" => {
+                self.open_project_browser();
+                Ok(())
+            }
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
-            "open-worktree-with" => self.open_worktree_editor_picker(),
+            "open-worktree-with" => {
+                self.open_worktree_editor_picker();
+                Ok(())
+            }
             "open-current-pr" => {
                 self.open_current_pr_in_browser();
                 Ok(())
             }
-            "attach-pull-request" => self.open_attach_pull_request_prompt(),
-            "detach-pull-request" => self.detach_pull_request(),
-            "resume-pull-request-autodetection" => self.resume_pull_request_autodetection(),
+            "attach-pull-request" => {
+                self.open_attach_pull_request_prompt();
+                Ok(())
+            }
+            "detach-pull-request" => {
+                self.detach_pull_request();
+                Ok(())
+            }
+            "resume-pull-request-autodetection" => {
+                self.resume_pull_request_autodetection();
+                Ok(())
+            }
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())
             }
             "toggle-sidebar" => {
-                self.left_collapsed = !self.left_collapsed;
+                self.panes.left_collapsed = !self.panes.left_collapsed;
                 Ok(())
             }
             "toggle-git-pane" => {
-                self.right_collapsed = !self.right_collapsed;
-                if self.right_collapsed && self.focus == FocusPane::Files {
+                self.panes.right_collapsed = !self.panes.right_collapsed;
+                if self.panes.right_collapsed && self.focus == FocusPane::Files {
                     self.focus = FocusPane::Center;
                 }
                 Ok(())
@@ -6002,16 +6338,23 @@ impl App {
             // Both first-load screens can be opened deliberately even when their
             // `[ui] disable_*` flag is set: the flags suppress only what dux does
             // on its own, never what the user asks for.
-            "show-welcome-screen" => self.show_welcome_screen_command(),
-            "show-release-notes" => self.show_release_notes_command(),
+            "show-welcome-screen" => {
+                self.show_welcome_screen_command();
+                Ok(())
+            }
+            "show-release-notes" => {
+                self.show_release_notes_command();
+                Ok(())
+            }
             "toggle-diff-line-numbers" => {
-                self.show_diff_line_numbers = !self.show_diff_line_numbers;
-                self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
+                self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
+                self.engine.config.ui.show_diff_line_numbers =
+                    self.view_prefs.show_diff_line_numbers;
                 self.engine
                     .config_writer
                     .save_lazy(self.engine.config.clone());
                 self.refresh_current_diff();
-                let state = if self.show_diff_line_numbers {
+                let state = if self.view_prefs.show_diff_line_numbers {
                     "enabled"
                 } else {
                     "disabled"
@@ -6090,8 +6433,8 @@ impl App {
                 Ok(())
             }
             "toggle-pr-banner-position" => {
-                self.pr_banner_at_bottom = !self.pr_banner_at_bottom;
-                let pos = if self.pr_banner_at_bottom {
+                self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
+                let pos = if self.view_prefs.pr_banner_at_bottom {
                     "bottom"
                 } else {
                     "top"
@@ -6104,7 +6447,7 @@ impl App {
                 Ok(())
             }
             "force-redraw" => {
-                self.force_redraw = true;
+                self.notes.force_redraw = true;
                 self.set_info("Interface redrawn. All screen contents have been repainted.");
                 Ok(())
             }
@@ -6189,7 +6532,7 @@ impl App {
     /// only a reload has to re-seed them.
     pub(crate) fn sync_view_state_from_config(&mut self) {
         let ui = &self.engine.config.ui;
-        self.pr_banner_at_bottom =
+        self.view_prefs.pr_banner_at_bottom =
             dux_core::config_effective::effective_pr_banner_position(&ui.pr_banner_position)
                 == dux_core::config_effective::PrBannerPosition::Bottom;
         let clear_after = Duration::from_secs(ui.status_clear_seconds.into());
@@ -6197,8 +6540,8 @@ impl App {
         self.status.set_clear_after(clear_after);
         // If the changes pane just became hidden while the Files pane was
         // focused, move focus to the center, matching the toggle.
-        self.right_hidden = hide_right;
-        if self.right_hidden && self.focus == FocusPane::Files {
+        self.panes.right_hidden = hide_right;
+        if self.panes.right_hidden && self.focus == FocusPane::Files {
             self.focus = FocusPane::Center;
         }
     }
@@ -6214,7 +6557,7 @@ impl App {
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&config.ui.theme, &self.engine.paths);
         self.theme = theme;
-        self.show_diff_line_numbers = config.ui.show_diff_line_numbers;
+        self.view_prefs.show_diff_line_numbers = config.ui.show_diff_line_numbers;
         self.left_width_pct = config.ui.left_width_pct;
         self.right_width_pct = config.ui.right_width_pct;
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
@@ -6225,7 +6568,11 @@ impl App {
 
     fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
         let theme_warning = self.take_reload_view_state(&config);
-        let github_was_enabled = self.engine.github_integration_enabled;
+        let github_was_enabled = if self.engine.github_integration_enabled {
+            dux_core::engine::GithubIntegration::Enabled
+        } else {
+            dux_core::engine::GithubIntegration::Disabled
+        };
         self.engine.github_integration_enabled = config.ui.github_integration;
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
@@ -6251,18 +6598,18 @@ impl App {
     /// Everything a reload owes once `engine.config` holds the new config,
     /// compared with `before`, the config it replaced: the view, the project
     /// list, the GitHub integration, the serve and Tailscale switches.
-    /// `github_was_enabled` is whether the integration was on before; the
+    /// `github` is whether the integration was on before; the
     /// `gh` probe a reload owes is asked for here, by the engine's one rule
     /// ([`dux_core::engine::Engine::probe_gh_after_reload`]), and nowhere
     /// else on this surface. Runs after a successful apply and after one
     /// that failed but adopted the config anyway, so neither claims a
     /// setting that is not in force.
-    pub(crate) fn run_config_swap_effects(&mut self, before: &Config, github_was_enabled: bool) {
-        self.engine.probe_gh_after_reload(if github_was_enabled {
-            dux_core::engine::GithubIntegration::Enabled
-        } else {
-            dux_core::engine::GithubIntegration::Disabled
-        });
+    pub(crate) fn run_config_swap_effects(
+        &mut self,
+        before: &Config,
+        github: dux_core::engine::GithubIntegration,
+    ) {
+        self.engine.probe_gh_after_reload(github);
         self.sync_view_state_from_config();
 
         self.engine.refresh_project_defaults();
@@ -6273,12 +6620,7 @@ impl App {
         // filter may have moved.
         self.rebuild_left_items();
         self.engine.update_branch_sync_sessions();
-        self.engine
-            .retune_pr_sync_after_reload(if github_was_enabled {
-                dux_core::engine::GithubIntegration::Enabled
-            } else {
-                dux_core::engine::GithubIntegration::Disabled
-            });
+        self.engine.retune_pr_sync_after_reload(github);
         self.reload_changed_files();
         self.refresh_current_diff();
         // `[server] serve_while_tui` is both the startup default and a live
@@ -6287,7 +6629,11 @@ impl App {
         // the listener to go away. Done last, after `engine.config` holds the
         // reloaded values, so the start path reads the new port and Tailscale mode.
         let serving_before = self.background_server_is_serving();
-        let wanted = self.engine.config.server.serve_while_tui;
+        let wanted = if self.engine.config.server.serve_while_tui {
+            crate::app::background_server::ServeWanted::On
+        } else {
+            crate::app::background_server::ServeWanted::Off
+        };
         self.apply_serve_while_tui_setting(wanted);
         // `[server] tailscale` is live too, and in this mode the terminal UI owns
         // the reload: the serve is the companion's, and the actor arm that owns it
@@ -6376,13 +6722,13 @@ impl App {
         // Until the user toggles the Inactive section by hand, auto-manage it:
         // expand when every agent is inactive (don't hide a wholly-dormant
         // workspace behind a collapsed toggle), collapse once any agent is active.
-        if !self.inactive_collapse_overridden {
+        if !self.inactive_tail.overridden {
             let has_active = self
                 .engine
                 .sessions
                 .iter()
                 .any(|s| matches!(s.status, crate::model::SessionStatus::Active));
-            self.inactive_collapsed = has_active;
+            self.inactive_tail.collapsed = has_active;
         }
         // Expire a stale query-scoped dismissal: it applies only to the exact
         // query it was made under, so a changed or cleared query drops it and
@@ -6397,9 +6743,14 @@ impl App {
         }
         // Derived search expansion: while the filter query hits something in
         // the Inactive tail (and the user has not dismissed it for this exact
-        // query), the tail renders OPEN without mutating `inactive_collapsed`,
+        // query), the tail renders OPEN without mutating `inactive_tail.collapsed`,
         // so clearing the query restores the user's collapse preference.
-        let effective_collapsed = self.inactive_collapsed && !self.inactive_tail_forced_open();
+        let effective_collapsed =
+            if self.inactive_tail.collapsed && !self.inactive_tail_forced_open() {
+                InactiveTail::Collapsed
+            } else {
+                InactiveTail::Expanded
+            };
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         // Precompute the "hot" bit (working || needs-attention) per session so the
         // predicate can borrow this Vec while `build_left_items` borrows
@@ -6441,7 +6792,7 @@ impl App {
             })
             .collect();
         self.put_left_cursor_back(was_on);
-        self.left_rows_built = true;
+        self.left_list.built = true;
         self.ensure_selectable_left_item();
         // The same query prunes the terminal list (`terminal_items`), so the
         // terminal cursor is repaired in the same breath as the agent one: this
@@ -6515,7 +6866,7 @@ impl App {
 
     /// Whether the Inactive tail is currently held open by the search: a live
     /// query with at least one visible inactive hit, not dismissed for this
-    /// exact query. Pure derivation; `inactive_collapsed` is never consulted or
+    /// exact query. Pure derivation; `inactive_tail.collapsed` is never consulted or
     /// mutated here.
     fn inactive_tail_forced_open(&self) -> bool {
         // The decision is the core-owned `quiet_tail::quiet_tail_forced_open`
@@ -6541,7 +6892,7 @@ impl App {
     /// palette can run from anywhere, so it brings the pane into view and gives
     /// it focus, or the query would be typed into nothing.
     pub(crate) fn filter_agents_from_palette(&mut self) {
-        self.left_collapsed = false;
+        self.panes.left_collapsed = false;
         self.focus = FocusPane::Left;
         self.left_section = LeftSection::Projects;
         self.open_agent_filter();
@@ -6552,15 +6903,17 @@ impl App {
     /// terminal row is the selection: the remembered terminal index outlives
     /// the cursor moving back onto an agent, and deleting a terminal the
     /// user is not looking at is not what they asked for.
-    pub(crate) fn delete_terminal_from_palette(&mut self) -> Result<()> {
+    pub(crate) fn delete_terminal_from_palette(&mut self) {
         if self.left_section != LeftSection::Terminals {
             self.set_error(
                 "Select a terminal in the agents pane first, then run delete-terminal again to \
                  close it.",
             );
-            return Ok(());
+            return;
         }
-        self.confirm_delete_selected_terminal()
+        {
+            self.confirm_delete_selected_terminal();
+        }
     }
 
     pub(crate) fn open_agent_filter(&mut self) {
@@ -6646,10 +6999,10 @@ impl App {
     /// What the agent cursor is on, read from the list as this surface last
     /// built it.
     fn left_cursor_row(&self) -> LeftCursorOn {
-        if !self.left_rows_built {
+        if !self.left_list.built {
             return LeftCursorOn::Unknown;
         }
-        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
+        if self.left_list.cursor_parked && self.selected_left >= self.left_rows.len() {
             return LeftCursorOn::Nothing;
         }
         match self.left_rows.get(self.selected_left) {
@@ -6678,7 +7031,7 @@ impl App {
                     .position(|candidate| *candidate == row)
                 {
                     self.selected_left = pos;
-                    self.left_cursor_parked = false;
+                    self.left_list.cursor_parked = false;
                 } else {
                     self.park_left_cursor();
                 }
@@ -6695,7 +7048,7 @@ impl App {
 
     fn park_left_cursor(&mut self) {
         self.selected_left = self.left_rows.len();
-        self.left_cursor_parked = true;
+        self.left_list.cursor_parked = true;
     }
 
     /// Rebuild the agent list after the filter changed: the user is choosing
@@ -6704,8 +7057,8 @@ impl App {
     pub(crate) fn rebuild_left_items_for_filter(&mut self) {
         let row = self.selected_left;
         self.rebuild_left_items();
-        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
-            self.left_cursor_parked = false;
+        if self.left_list.cursor_parked && self.selected_left >= self.left_rows.len() {
+            self.left_list.cursor_parked = false;
             self.selected_left = row;
             self.ensure_selectable_left_item();
         }
@@ -6716,7 +7069,7 @@ impl App {
             self.selected_left = 0;
             return;
         }
-        if self.left_cursor_parked && self.selected_left >= self.left_items_cache.len() {
+        if self.left_list.cursor_parked && self.selected_left >= self.left_items_cache.len() {
             return;
         }
         if self.selected_left >= self.left_items_cache.len() {
@@ -6752,21 +7105,21 @@ impl App {
     /// the `InactiveToggle` row. Keeps the cursor on the toggle row afterward.
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
         // A manual toggle takes over from the auto-manage in `rebuild_left_items`.
-        self.inactive_collapse_overridden = true;
+        self.inactive_tail.overridden = true;
         if self.inactive_tail_forced_open() {
             // Collapsing a tail the search is holding open is an explicit act:
             // record the dismissal for THIS query (it expires when the query
             // changes) and collapse the base state too, so clearing the query
             // lands on the state the user last chose. Mirrors the web QuietTail.
             self.inactive_search_dismissed = self.active_filter_query();
-            self.inactive_collapsed = true;
+            self.inactive_tail.collapsed = true;
         } else if self.active_filter_query().is_some() && self.inactive_search_dismissed.is_some() {
             // Reopening under the query that was dismissed: drop the dismissal
             // so the derivation applies again.
             self.inactive_search_dismissed = None;
-            self.inactive_collapsed = false;
+            self.inactive_tail.collapsed = false;
         } else {
-            self.inactive_collapsed = !self.inactive_collapsed;
+            self.inactive_tail.collapsed = !self.inactive_tail.collapsed;
         }
         self.rebuild_left_items();
         if let Some(new_index) = self
@@ -6858,7 +7211,7 @@ impl App {
                 let label = session_id
                     .as_deref()
                     .and_then(|id| self.engine.sessions.iter().find(|s| s.id == id))
-                    .map_or_else(|| "this agent".to_string(), |s| self.session_label(s));
+                    .map_or_else(|| "this agent".to_string(), AgentSession::display_label);
                 let key = format!("refresh-changes:{}", session_id.as_deref().unwrap_or(""));
                 self.begin_changed_files_refresh(
                     key,
@@ -6900,16 +7253,16 @@ impl App {
     /// [`Self::apply_changed_files_refresh_outcome`] resolves the keyed busy
     /// when the worker's `ChangedFilesReady` drains, in both the success and the
     /// failure branch, so the busy always reaches a final.
-    pub(crate) fn refresh_changed_files_now(&mut self) -> Result<()> {
+    pub(crate) fn refresh_changed_files_now(&mut self) {
         let Some(session) = self.selected_session() else {
             self.set_warning(
                 "Select an agent first: refreshing changed files needs a worktree to read.",
             );
-            return Ok(());
+            return;
         };
         let session_id = session.id.clone();
         let key = format!("refresh-changes:{session_id}");
-        let name = self.session_label(session);
+        let name = session.display_label();
         // The cheap half: point the watch at the session and empty the lists. No
         // git runs here.
         self.changes_tree.lists_for = None;
@@ -6924,7 +7277,7 @@ impl App {
             self.set_warning(format!(
                 "Could not refresh the changed files for \"{name}\": {reason}"
             ));
-            return Ok(());
+            return;
         };
         self.clamp_files_cursor();
         self.begin_changed_files_refresh(key, name, worktree, ChangedFilesReadVoice::Spoken);
@@ -6933,7 +7286,6 @@ impl App {
         // changed files does not over-poll `gh`.
         self.engine
             .spawn_pr_check_for_session(&session_id, dux_core::engine::PR_CHECK_MIN_INTERVAL);
-        Ok(())
     }
 
     /// Show a keyed busy for a changed-files read and hand the read to a
@@ -7174,7 +7526,7 @@ impl App {
 
     /// Open the read-only Agent Info modal for the focused agent. Routed through
     /// `PromptState` so `Esc` closes it uniformly with every other prompt.
-    pub(crate) fn open_agent_info(&mut self) -> Result<()> {
+    pub(crate) fn open_agent_info(&mut self) {
         if let Some(session) = self.selected_session().cloned() {
             let label = session.display_label();
             // A standalone agent has no project, so there is no project default
@@ -7191,8 +7543,13 @@ impl App {
                 .pr_statuses
                 .get(&session.id)
                 .map(|pr| (pr, self.engine.pr_overrides.contains_key(&session.id)));
-            let directory_missing = self.engine.folder_repo_status(&session.id)
-                == dux_core::git::FolderRepoStatus::Missing;
+            let directory_missing = if self.engine.folder_repo_status(&session.id)
+                == dux_core::git::FolderRepoStatus::Missing
+            {
+                WorkingCopy::Missing
+            } else {
+                WorkingCopy::Present
+            };
             let lines = agent_info_lines(&session, project_default, pr, directory_missing);
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
@@ -7201,10 +7558,9 @@ impl App {
         } else {
             self.set_error("No agent session selected. Select an agent to see its info.");
         }
-        Ok(())
     }
 
-    pub(crate) fn open_rename_session(&mut self) -> Result<()> {
+    pub(crate) fn open_rename_session(&mut self) {
         if let Some(session) = self.selected_session().cloned() {
             if self
                 .engine
@@ -7215,7 +7571,7 @@ impl App {
                 self.set_error(
                     "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
                 );
-                return Ok(());
+                return;
             }
             let branch_named = session.supports_branch_git();
             self.input_target = InputTarget::None;
@@ -7250,7 +7606,6 @@ impl App {
         } else {
             self.set_error("No agent session selected.");
         }
-        Ok(())
     }
 
     /// Ask, off the UI thread, whether the agent's branch has a pushed copy, so
@@ -7300,20 +7655,12 @@ impl App {
     pub(crate) fn apply_rename_session(
         &mut self,
         session_id: &str,
-        new_name: String,
-        rename_branch: bool,
+        new_name: &str,
+        rename: dux_core::engine::BranchRename,
     ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
-        match self.engine.rename_agent(
-            session_id,
-            &new_name,
-            if rename_branch {
-                dux_core::engine::BranchRename::AlsoTheBranch
-            } else {
-                dux_core::engine::BranchRename::NameOnly
-            },
-        ) {
+        match self.engine.rename_agent(session_id, new_name, rename) {
             Ok(reaction) => {
                 self.apply_reaction(reaction);
                 true
@@ -7838,7 +8185,7 @@ impl App {
 
     /// Move focus to the next/previous tab of the selected session (wrapping).
     /// No-op when the session has fewer than two tabs.
-    pub(crate) fn focus_tab_relative(&mut self, forward: bool) {
+    pub(crate) fn focus_tab_relative(&mut self, direction: FocusStep) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return;
         };
@@ -7848,7 +8195,7 @@ impl App {
         }
         let cur = self.focused_tab_id(&session_id);
         let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
-        let next = if forward {
+        let next = if direction == FocusStep::Forward {
             (idx + 1) % ids.len()
         } else {
             (idx + ids.len() - 1) % ids.len()
@@ -8068,7 +8415,7 @@ fn preflight_server_listeners(
     port: u16,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
-    bind_preflight_addrs(dux_core::config::local_addrs(port, tailscale_ip))
+    bind_preflight_addrs(&dux_core::config::local_addrs(port, tailscale_ip))
 }
 
 /// How many times a pre-flight on port 0 picks a port before a clash on the
@@ -8079,7 +8426,7 @@ const PREFLIGHT_PORT_PICKS: usize = 5;
 type Preflight = (Vec<std::net::TcpListener>, Vec<String>, Vec<String>);
 
 /// The binding half of [`preflight_server_listeners`], over a given plan.
-fn bind_preflight_addrs(addrs: Vec<dux_core::config::PlanAddr>) -> Result<Preflight> {
+fn bind_preflight_addrs(addrs: &[dux_core::config::PlanAddr]) -> Result<Preflight> {
     bind_preflight_addrs_with(addrs, std::net::TcpListener::bind)
 }
 
@@ -8093,12 +8440,12 @@ fn bind_preflight_addrs(addrs: Vec<dux_core::config::PlanAddr>) -> Result<Prefli
 /// whole pick starts over, up to [`PREFLIGHT_PORT_PICKS`] times. A configured
 /// port is never re-picked.
 fn bind_preflight_addrs_with(
-    addrs: Vec<dux_core::config::PlanAddr>,
+    addrs: &[dux_core::config::PlanAddr],
     mut bind: impl FnMut(std::net::SocketAddr) -> std::io::Result<std::net::TcpListener>,
 ) -> Result<Preflight> {
     let mut attempt = 1;
     loop {
-        match bind_preflight_once(&addrs, &mut bind) {
+        match bind_preflight_once(addrs, &mut bind) {
             Err(PreflightFailure::PickedPortTaken(_)) if attempt < PREFLIGHT_PORT_PICKS => {
                 attempt += 1;
             }
@@ -8255,10 +8602,10 @@ mod tests {
             let mut app = test_support::test_app(test_support::default_bindings());
             // Both ways to serve refuse early while a flip is starting, so the
             // sweep never binds a port or detects Tailscale.
-            app.server_flip_preflight_pending = true;
+            app.serving.flip_preflight_pending = true;
             // An `Err` is a real arm refusing on this bare fixture; only the
             // catch-all's status says the name was never matched.
-            let _ = app.execute_command(command.name.to_string());
+            let _ = app.execute_command(command.name);
             if let Some((_, message)) = app.status.most_recent_tui()
                 && message.contains("Unknown command")
             {
@@ -8275,23 +8622,23 @@ mod tests {
     fn the_palette_opens_the_agent_filter_in_view_and_focused() {
         let mut app = test_support::test_app(test_support::default_bindings());
         app.focus = FocusPane::Center;
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
-        app.execute_command("filter-agents".to_string()).unwrap();
+        app.execute_command("filter-agents").unwrap();
 
         assert!(app.agent_filter.is_some(), "the filter must be open");
         assert_eq!(app.focus, FocusPane::Left, "typing must reach the filter");
-        assert!(!app.left_collapsed, "the filter must be on screen");
+        assert!(!app.panes.left_collapsed, "the filter must be on screen");
     }
 
     #[test]
     fn the_palette_asks_before_deleting_the_selected_terminal() {
         let mut app = test_support::test_app(test_support::default_bindings());
-        app.show_companion_terminal().expect("launch a terminal");
+        app.show_companion_terminal();
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
-        app.execute_command("delete-terminal".to_string()).unwrap();
+        app.execute_command("delete-terminal").unwrap();
 
         assert!(
             matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
@@ -8303,11 +8650,11 @@ mod tests {
     #[test]
     fn the_palette_refuses_to_delete_a_terminal_that_is_not_selected() {
         let mut app = test_support::test_app(test_support::default_bindings());
-        app.show_companion_terminal().expect("launch a terminal");
+        app.show_companion_terminal();
         app.left_section = LeftSection::Projects;
         app.selected_terminal_index = 0;
 
-        app.execute_command("delete-terminal".to_string()).unwrap();
+        app.execute_command("delete-terminal").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -8323,7 +8670,7 @@ mod tests {
     fn the_palette_asks_before_checking_out_the_default_branch() {
         let mut app = test_support::test_app(test_support::default_bindings());
 
-        app.execute_command("checkout-project-default-branch".to_string())
+        app.execute_command("checkout-project-default-branch")
             .unwrap();
 
         assert!(
@@ -8368,15 +8715,33 @@ mod tests {
             branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
             worktree_shared: shared,
         };
-        assert_eq!(managed(false).branch_answer(true, true), Some(true));
-        assert_eq!(managed(false).branch_answer(true, false), Some(false));
         assert_eq!(
-            managed(false).branch_answer(false, true),
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Keep
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Keep,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "with the worktree kept there is no branch box, so nothing was asked"
         );
         assert_eq!(
-            managed(true).branch_answer(true, true),
+            managed(true).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "a shared worktree is preserved whatever is ticked, so no box is shown"
         );
@@ -8384,7 +8749,10 @@ mod tests {
             DeleteAgentTarget::Folder {
                 folder_label: "~/notes".to_string(),
             }
-            .branch_answer(true, true),
+            .branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "a standalone agent has no branch to answer about"
         );
@@ -8486,7 +8854,7 @@ mod tests {
     #[test]
     fn agent_info_lines_for_a_standalone_agent_name_the_folder_and_no_branches() {
         let s = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         let text = lines
             .iter()
             .map(|(l, _)| l.as_str())
@@ -8520,7 +8888,7 @@ mod tests {
     #[test]
     fn agent_info_lines_flag_a_directory_that_is_gone() {
         let managed = test_session("s1", "p1", 0);
-        let lines = agent_info_lines(&managed, None, None, true);
+        let lines = agent_info_lines(&managed, None, None, WorkingCopy::Missing);
         let flagged = lines
             .iter()
             .find(|(_, tone)| *tone == AgentInfoTone::Warning)
@@ -8532,7 +8900,7 @@ mod tests {
         assert!(flagged.0.contains("Recreate it"), "{}", flagged.0);
 
         assert!(
-            !agent_info_lines(&managed, None, None, false)
+            !agent_info_lines(&managed, None, None, WorkingCopy::Present)
                 .iter()
                 .any(|(text, _)| text == dux_core::working_copy::MISSING_WORKING_COPY_INFO_LINE),
             "and nothing is flagged while the copy is there"
@@ -8541,7 +8909,7 @@ mod tests {
         // dux never puts a standalone agent's folder back, so its line names a
         // different remedy.
         let standalone = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&standalone, None, None, true);
+        let lines = agent_info_lines(&standalone, None, None, WorkingCopy::Missing);
         assert!(
             lines
                 .iter()
@@ -8567,7 +8935,7 @@ mod tests {
             .expect("managed test session")
             .source_branch = "main".into();
 
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -8598,7 +8966,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = "main".into();
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
         // passes while reporting nothing at all.
@@ -8630,7 +8998,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = String::new();
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(
             !lines
                 .iter()
@@ -8652,11 +9020,11 @@ mod tests {
         };
 
         // No PR known: no line at all.
-        let none = agent_info_lines(&s, None, None, false);
+        let none = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(!none.iter().any(|(l, _)| l.starts_with("Pull request:")));
 
         // Autodetected PR: number, lowercase state, title, no pin marker.
-        let auto = agent_info_lines(&s, None, Some((&pr, false)), false);
+        let auto = agent_info_lines(&s, None, Some((&pr, false)), WorkingCopy::Present);
         let line = auto
             .iter()
             .find(|(l, _)| l.starts_with("Pull request:"))
@@ -8671,7 +9039,7 @@ mod tests {
 
         // Pinned PR: the same line carries the manual marker. This line is the
         // ONLY TUI cue that a pin exists, so the marker is load-bearing.
-        let pinned = agent_info_lines(&s, None, Some((&pr, true)), false);
+        let pinned = agent_info_lines(&s, None, Some((&pr, true)), WorkingCopy::Present);
         let line = pinned
             .iter()
             .find(|(l, _)| l.starts_with("Pull request:"))
@@ -8683,7 +9051,12 @@ mod tests {
     fn agent_info_provider_line_notes_a_divergent_project_default() {
         let s = test_session("s1", "p1", 0); // provider "codex"
         // Matching default: plain provider line, no annotation.
-        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")), None, false);
+        let same = agent_info_lines(
+            &s,
+            Some(ProviderKind::from_str("codex")),
+            None,
+            WorkingCopy::Present,
+        );
         let provider_same = same
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -8691,7 +9064,12 @@ mod tests {
         assert!(!provider_same.0.contains("project default"));
 
         // Divergent default: the line spells out the project default too.
-        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")), None, false);
+        let diff = agent_info_lines(
+            &s,
+            Some(ProviderKind::from_str("claude")),
+            None,
+            WorkingCopy::Present,
+        );
         let provider_diff = diff
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -8786,7 +9164,7 @@ mod tests {
         };
         let mut picks = 0;
         let (listeners, urls, _) =
-            bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+            bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
                 if addr.port() == 0 {
                     picks += 1;
                     if picks == 1 {
@@ -8813,7 +9191,7 @@ mod tests {
             return;
         };
         let mut picks = 0;
-        let err = bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+        let err = bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
             if addr.port() == 0 {
                 picks += 1;
                 return std::net::TcpListener::bind((addr.ip(), clash));
@@ -8839,7 +9217,7 @@ mod tests {
         };
         let port = held.local_addr().expect("held addr").port();
 
-        let err = bind_preflight_addrs(vec![dux_core::config::PlanAddr::ipv6_loopback(port)])
+        let err = bind_preflight_addrs(&[dux_core::config::PlanAddr::ipv6_loopback(port)])
             .expect_err("a program on [::1] must stop the start");
         let text = format!("{err:#}");
         assert!(
@@ -8870,7 +9248,7 @@ mod tests {
         let held_addr = held.local_addr().expect("held addr");
         let port = held_addr.port();
 
-        let (listeners, urls, warnings) = bind_preflight_addrs(vec![
+        let (listeners, urls, warnings) = bind_preflight_addrs(&[
             dux_core::config::PlanAddr::required((std::net::Ipv4Addr::LOCALHOST, port).into()),
             dux_core::config::PlanAddr::best_effort(held_addr),
         ])
@@ -8982,17 +9360,25 @@ mod tests {
         // Collapsed (default): the active row, then a single Inactive toggle; the
         // inactive session is hidden.
         assert_eq!(
-            build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &|_| {
-                true
-            }),
+            build_left_items(
+                &sessions,
+                InactiveTail::Collapsed,
+                AgentSortMode::Active,
+                &|_| false,
+                &|_| { true }
+            ),
             vec![LeftItem::Session(0), LeftItem::InactiveToggle],
         );
 
         // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
-                true
-            }),
+            build_left_items(
+                &sessions,
+                InactiveTail::Expanded,
+                AgentSortMode::Active,
+                &|_| false,
+                &|_| { true }
+            ),
             vec![
                 LeftItem::Session(0),
                 LeftItem::InactiveToggle,
@@ -9007,7 +9393,13 @@ mod tests {
         a.status = SessionStatus::Active;
         let mut b = test_session("b", "other", 0);
         b.status = SessionStatus::Active;
-        let items = build_left_items(&[a, b], true, AgentSortMode::Active, &|_| false, &|_| true);
+        let items = build_left_items(
+            &[a, b],
+            InactiveTail::Collapsed,
+            AgentSortMode::Active,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(items, vec![LeftItem::Session(0), LeftItem::Session(1)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }
@@ -9024,7 +9416,7 @@ mod tests {
         assert_eq!(
             build_left_items(
                 &[real, ghost],
-                true,
+                InactiveTail::Collapsed,
                 AgentSortMode::Active,
                 &|_| false,
                 &|_| true
@@ -9053,7 +9445,13 @@ mod tests {
             mk("i4", SessionStatus::Exited, 20),   // newer
         ];
         let hot = |i: usize| i == 2;
-        let items = build_left_items(&sessions, false, AgentSortMode::Active, &hot, &|_| true);
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Expanded,
+            AgentSortMode::Active,
+            &hot,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9081,9 +9479,13 @@ mod tests {
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
 
-        let asc = build_left_items(&sessions, true, AgentSortMode::NameAsc, &|_| false, &|_| {
-            true
-        });
+        let asc = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::NameAsc,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             asc,
             vec![
@@ -9095,7 +9497,7 @@ mod tests {
 
         let desc = build_left_items(
             &sessions,
-            true,
+            InactiveTail::Collapsed,
             AgentSortMode::NameDesc,
             &|_| false,
             &|_| true,
@@ -9138,9 +9540,13 @@ mod tests {
             s
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
-        let items = build_left_items(&sessions, true, AgentSortMode::Manual, &|_| false, &|_| {
-            true
-        });
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Manual,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9173,7 +9579,7 @@ mod tests {
         ];
         let items = build_left_items(
             &sessions,
-            false,
+            InactiveTail::Expanded,
             AgentSortMode::NameAsc,
             &|_| false,
             &|_| true,
@@ -9207,9 +9613,13 @@ mod tests {
             mk("i1", SessionStatus::Detached, 5),  // older
             mk("i2", SessionStatus::Detached, 50), // newer
         ];
-        let items = build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
-            true
-        });
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Expanded,
+            AgentSortMode::Active,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             items,
             vec![
@@ -9232,10 +9642,13 @@ mod tests {
         };
         let sessions = vec![mk("s0", 0), mk("s1", 100), mk("s2", 50)];
 
-        let updated =
-            build_left_items(&sessions, true, AgentSortMode::Updated, &|_| false, &|_| {
-                true
-            });
+        let updated = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Updated,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             updated,
             vec![
@@ -9246,10 +9659,13 @@ mod tests {
             "Updated must order the active bucket newest-first",
         );
 
-        let created =
-            build_left_items(&sessions, true, AgentSortMode::Created, &|_| false, &|_| {
-                true
-            });
+        let created = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Created,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             created,
             vec![
@@ -9286,7 +9702,13 @@ mod tests {
             AgentSortMode::NameAsc,
             AgentSortMode::NameDesc,
         ] {
-            let items = build_left_items(&sessions, true, mode, &|_| false, &|_| true);
+            let items = build_left_items(
+                &sessions,
+                InactiveTail::Collapsed,
+                mode,
+                &|_| false,
+                &|_| true,
+            );
             assert_eq!(
                 items,
                 vec![LeftItem::Session(0), LeftItem::Session(1)],
@@ -9314,7 +9736,7 @@ mod tests {
         let visible = |i: usize| i == 0 || i == 2;
         let items = build_left_items(
             &sessions,
-            false,
+            InactiveTail::Expanded,
             AgentSortMode::Active,
             &|_| false,
             &visible,
@@ -9345,7 +9767,13 @@ mod tests {
             mk("i1", SessionStatus::Detached),
         ];
         let visible = |i: usize| i == 0;
-        let items = build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &visible);
+        let items = build_left_items(
+            &sessions,
+            InactiveTail::Collapsed,
+            AgentSortMode::Active,
+            &|_| false,
+            &visible,
+        );
         assert_eq!(items, vec![LeftItem::Session(0)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }
@@ -9383,7 +9811,7 @@ mod tests {
     fn quiet_tail_auto_expands_when_search_hits_an_inactive_agent() {
         let mut app = quiet_search_app();
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "an active agent auto-collapses the tail"
         );
         assert!(!app.left_items().contains(&LeftItem::Session(1)));
@@ -9395,7 +9823,7 @@ mod tests {
             "a quiet-hit query must reveal the matching quiet row"
         );
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "the derivation must not mutate the user's collapse preference"
         );
 
@@ -9969,7 +10397,7 @@ leading_branch = "main"
             },
         ];
 
-        let rows = project_worktree_visual_rows(&entries, false, None);
+        let rows = project_worktree_visual_rows(&entries, Listing::Loaded, None);
 
         assert!(matches!(
             rows.first(),
@@ -10207,21 +10635,21 @@ leading_branch = "main"
         app.engine.config.ui.github_integration = false;
         assert_eq!(app.engine.gh_probe.generation, 0);
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle on");
         assert_eq!(
             app.engine.gh_probe.generation, 1,
             "enabling re-runs the probe",
         );
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle off");
         assert_eq!(
             app.engine.gh_probe.generation, 1,
             "disabling asks gh nothing new",
         );
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle on again");
         assert_eq!(
             app.engine.gh_probe.generation, 2,
@@ -10273,7 +10701,7 @@ leading_branch = "main"
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = crate::model::GhStatus::Unreachable;
 
-        app.execute_command("recheck-github".to_string())
+        app.execute_command("recheck-github")
             .expect("palette re-check");
 
         assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
@@ -10299,7 +10727,7 @@ leading_branch = "main"
         // the integration was last on, and nothing has re-checked since.
         app.engine.gh_status = crate::model::GhStatus::Available;
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("palette toggle on");
         assert_eq!(
             (
@@ -10312,7 +10740,7 @@ leading_branch = "main"
         assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
 
         // The same flip arriving through a config reload.
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("palette toggle off");
         let mut config = app.engine.config.clone();
         config.ui.github_integration = true;
@@ -10778,7 +11206,10 @@ mod pinned_warning_tests {
 
         // No project is missing here: the restart warning is the only thing on
         // the line, and it is owed until the user restarts.
-        app.set_pinned_warning(workers::server_restart_warning(true, &["port"]));
+        app.set_pinned_warning(workers::server_restart_warning(
+            workers::BackgroundServing::Serving,
+            &["port"],
+        ));
         app.select_left_agent_item(agent_row);
         app.select_left_agent_item(elsewhere);
         assert!(

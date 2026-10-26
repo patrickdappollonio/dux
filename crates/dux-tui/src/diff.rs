@@ -13,13 +13,13 @@ use crate::theme::Theme as AppTheme;
 use dux_core::text::count_of;
 
 /// Cached syntax highlighting resources to avoid reloading on every diff.
-pub struct SyntaxCache {
+pub(crate) struct SyntaxCache {
     pub syntax_set: SyntaxSet,
     pub theme_set: ThemeSet,
 }
 
 impl SyntaxCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
@@ -28,15 +28,23 @@ impl SyntaxCache {
 }
 
 /// Pre-rendered diff ready for display.
-pub struct DiffOutput {
+pub(crate) struct DiffOutput {
     pub lines: Vec<Line<'static>>,
     /// Display-column width of the gutter (line numbers + separator + prefix).
     /// Zero when line numbers are disabled.
     pub gutter_width: usize,
 }
 
-fn diff_line_number_width(text_diff: &TextDiff<'_, '_, str>, enabled: bool) -> usize {
-    if !enabled {
+/// Whether a rendered diff shows line numbers (`[ui] show_diff_line_numbers`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LineNumbers {
+    /// It shows them.
+    Shown,
+    /// It does not.
+    Hidden,
+}
+fn diff_line_number_width(text_diff: &TextDiff<'_, '_, str>, numbers: LineNumbers) -> usize {
+    if numbers == LineNumbers::Hidden {
         return 0;
     }
 
@@ -197,7 +205,11 @@ pub(crate) fn spawn_diff_job(
             &key.rel_path,
             &theme,
             &cache,
-            key.show_line_numbers,
+            if key.show_line_numbers {
+                LineNumbers::Shown
+            } else {
+                LineNumbers::Hidden
+            },
             key.tab_width,
         )
         .map_err(|error| format!("{error:#}"));
@@ -289,7 +301,7 @@ fn diff_file(
     rel_path: &str,
     theme: &AppTheme,
     cache: &SyntaxCache,
-    show_line_numbers: bool,
+    numbers: LineNumbers,
     diff_tab_width: u16,
 ) -> Result<DiffOutput> {
     let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
@@ -343,14 +355,14 @@ fn diff_file(
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let ln_width = diff_line_number_width(&text_diff, show_line_numbers);
+    let ln_width = diff_line_number_width(&text_diff, numbers);
 
     let gutter_style = Style::default().fg(theme.diff_line_number_fg);
     let sep_style = Style::default().fg(theme.diff_line_number_sep);
     let change_context = ChangeRenderContext {
         theme,
         cache,
-        show_line_numbers,
+        show_line_numbers: numbers == LineNumbers::Shown,
         line_number_width: ln_width,
         tab_width: diff_tab_width,
         highlight: verdict == DiffSizeVerdict::Full,
@@ -373,7 +385,7 @@ fn diff_file(
     for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
         // Hunk header (@@ ... @@).
         let mut hunk_spans: Vec<Span<'static>> = Vec::new();
-        if show_line_numbers {
+        if numbers == LineNumbers::Shown {
             // Blank gutter for hunk headers.
             let blank = " ".repeat(ln_width);
             hunk_spans.push(Span::styled(format!("{blank} {blank} "), gutter_style));
@@ -409,7 +421,7 @@ fn diff_file(
 
     // Gutter width includes line numbers, separator, and the +/-/space prefix.
     // Layout: "{old_ln} {new_ln} │{prefix}" = 2*ln_width + 2 + 1 + 1 = 2*ln_width + 4.
-    let gutter_width = if show_line_numbers {
+    let gutter_width = if numbers == LineNumbers::Shown {
         2 * ln_width + 4
     } else {
         0
@@ -749,7 +761,7 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
 /// width with no indent. The diff pane draws only the rows in the viewport, so
 /// it needs the wrapped extent for every setting, and having one wrapper answer
 /// for both is what keeps the scroll extent and the drawn rows agreeing.
-pub fn wrap_diff_lines(
+pub(crate) fn wrap_diff_lines(
     lines: &[Line<'static>],
     total_width: usize,
     gutter_width: usize,
@@ -863,7 +875,7 @@ mod tests {
             "image.bin",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -936,7 +948,7 @@ mod tests {
             "same.txt",
             &AppTheme::default_dark(),
             &SyntaxCache::new(),
-            true,
+            LineNumbers::Shown,
             4,
         )
         .unwrap();
@@ -953,7 +965,7 @@ mod tests {
             "gone.txt",
             &AppTheme::default_dark(),
             &SyntaxCache::new(),
-            true,
+            LineNumbers::Shown,
             4,
         )
         .unwrap();
@@ -978,7 +990,7 @@ mod tests {
             "hello.txt",
             &AppTheme::default_dark(),
             &cache,
-            true,
+            LineNumbers::Shown,
             4,
         )
         .unwrap();
@@ -1023,7 +1035,7 @@ mod tests {
             "hello.txt",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1064,7 +1076,7 @@ mod tests {
             "indent.rs",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1399,7 +1411,7 @@ mod tests {
             "gw.txt",
             &AppTheme::default_dark(),
             &cache,
-            true,
+            LineNumbers::Shown,
             4,
         )
         .unwrap();
@@ -1411,7 +1423,7 @@ mod tests {
             "gw.txt",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1460,7 +1472,7 @@ mod tests {
             "small.rs",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1495,7 +1507,7 @@ mod tests {
             "big.rs",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1546,7 +1558,7 @@ mod tests {
             "huge.txt",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();
@@ -1644,7 +1656,7 @@ mod tests {
             "huge.txt",
             &AppTheme::default_dark(),
             &cache,
-            false,
+            LineNumbers::Hidden,
             4,
         )
         .unwrap();

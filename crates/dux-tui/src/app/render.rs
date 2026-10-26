@@ -1,5 +1,7 @@
 use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
+use super::components::ButtonState;
+use super::components::CheckMark;
 use super::components::ellipsis::{
     ELLIPSIS, ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width,
     mark_cut_row, min_end_cut_width, min_start_cut_width, pad_to_width, path_tail,
@@ -22,6 +24,7 @@ use super::confirm_dialog::{
 };
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
+use crate::theme::FocusState;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use dux_core::prose::Prose;
 use dux_core::text::{count_of, count_of_with};
@@ -59,11 +62,11 @@ fn cut_card_lines(
     lines: &[Line<'static>],
     rows: u16,
     width: u16,
-    truncated: bool,
+    truncation: Truncation,
 ) -> Vec<Line<'static>> {
     let rows = rows as usize;
     let mut cut: Vec<Line<'static>> = lines.iter().take(rows).cloned().collect();
-    if !truncated || lines.len() <= rows {
+    if truncation == Truncation::Whole || lines.len() <= rows {
         return cut;
     }
     if let Some(last) = cut.last_mut() {
@@ -163,29 +166,44 @@ enum TabActivityGlyph {
     Attention,
 }
 
+/// The one activity cue a tab pill's glyph slot carries, highest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabCue {
+    /// The tab asked for attention.
+    NeedsAttention,
+    /// The tab is working.
+    Working,
+    /// Nothing to show.
+    Quiet,
+}
+
+/// Which half of the attention blink a frame is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlinkPhase {
+    /// The dot is drawn.
+    Lit,
+    /// The slot is blank.
+    Dark,
+}
+
 /// Resolve a tab pill's glyph slot from that tab's snapshot.
 ///
 /// The precedence copies `render_agent_row`: attention beats the working spinner,
 /// because a flagged tab may still be streaming the prompt it wants answered.
 /// Typing is deliberately absent, matching the web strip. Pure and allocation
 /// free, so it can run once per pill per frame.
-fn tab_activity_glyph(
-    working: bool,
-    needs_attention: bool,
-    blink_on: bool,
-    spinner_idx: usize,
-) -> TabActivityGlyph {
-    if needs_attention {
+fn tab_activity_glyph(cue: TabCue, blink: BlinkPhase, spinner_idx: usize) -> TabActivityGlyph {
+    if cue == TabCue::NeedsAttention {
         // The hidden half of the blink is a BLANK rather than a fall-through to
         // the spinner: a slot that alternated dot and spinner would read as two
         // competing cues instead of one blinking one.
-        return if blink_on {
+        return if blink == BlinkPhase::Lit {
             TabActivityGlyph::Attention
         } else {
             TabActivityGlyph::Blank
         };
     }
-    if working {
+    if cue == TabCue::Working {
         let frames = crate::theme::SPINNER_FRAMES;
         return TabActivityGlyph::Working(frames[spinner_idx % frames.len()]);
     }
@@ -263,10 +281,10 @@ pub(crate) enum AgentRowOwnerTag {
 pub(crate) fn agent_row_owner_tag(
     session: &AgentSession,
     project: Option<&Project>,
-    working_copy_missing: bool,
+    working_copy: WorkingCopy,
 ) -> AgentRowOwnerTag {
     match &session.workspace {
-        dux_core::model::AgentWorkspace::Managed(_) if working_copy_missing => {
+        dux_core::model::AgentWorkspace::Managed(_) if (working_copy == WorkingCopy::Missing) => {
             AgentRowOwnerTag::WorkingCopyMissing
         }
         dux_core::model::AgentWorkspace::Managed(_) => AgentRowOwnerTag::Project(
@@ -329,22 +347,13 @@ struct ProjectConfirmDialog<'a> {
 /// session, so Detached and Exited win outright.
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
-    working: bool,
-    typing: bool,
-    needs_attention: bool,
+    facts: dux_core::row_state::AgentRowFacts,
 ) -> &'static str {
     // The priority ladder is the core-owned `row_state::agent_row_state`
     // (cross-language twin of the web's `stateWord`); this surface only maps the
     // typed state to the TUI's word. The busy state is "Working" for an agent.
     use dux_core::row_state::RowState;
-    match dux_core::row_state::agent_row_state(
-        status,
-        dux_core::row_state::AgentRowFacts {
-            working,
-            typing,
-            needs_attention,
-        },
-    ) {
+    match dux_core::row_state::agent_row_state(status, facts) {
         RowState::NeedsAttention => "Needs you",
         RowState::Typing => "Typing",
         RowState::Busy => AGENT_WORKING_WORD,
@@ -725,7 +734,7 @@ fn fit_agent_meta_line(
     word: Span<'static>,
     branch: Option<Span<'static>>,
     counts: MetaCounts,
-    style: MetaLineStyle<'_>,
+    style: &MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
     let MetaLineStyle {
         sep: sep_style,
@@ -740,7 +749,7 @@ fn fit_agent_meta_line(
     let cols = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
     let name_min_cut = |s: &Span<'static>| cols(name_cut.min_width(s.content.as_ref()));
     let branch_min_cut = |s: &Span<'static>| cols(FieldCut::End.min_width(s.content.as_ref()));
-    let sep = || Span::styled(" · ", sep_style);
+    let sep = || Span::styled(" · ", *sep_style);
     const SEP_W: u16 = 3; // " · "
     let with_sep = |s: &Span<'static>| SEP_W.saturating_add(width(s));
 
@@ -801,7 +810,7 @@ fn fit_agent_meta_line(
     let mut out: Vec<Span<'static>> = vec![marker];
     if let Some(name) = name {
         out.extend(ellipsize_field_highlighted(
-            name, name_alloc, name_cut, highlight,
+            name, name_alloc, name_cut, *highlight,
         ));
         out.push(sep());
     } else if !had_name {
@@ -814,7 +823,7 @@ fn fit_agent_meta_line(
             branch,
             branch_alloc,
             FieldCut::End,
-            highlight,
+            *highlight,
         ));
     }
     for segment in [tabs, remote].into_iter().flatten() {
@@ -1058,7 +1067,14 @@ pub(super) fn delete_agent_branch_warning_prose(
             _ => " existed before the agent.",
         });
     }
-    if let Some(sentence) = unpushed_commits_sentence(unpushed, drifted) {
+    if let Some(sentence) = unpushed_commits_sentence(
+        unpushed,
+        if drifted {
+            BranchSpread::Drifted
+        } else {
+            BranchSpread::Single
+        },
+    ) {
         text.push_text(sentence);
     }
     Some(text)
@@ -1073,7 +1089,7 @@ pub(super) fn delete_agent_branch_warning_prose(
 /// anywhere, so the sentence says what is true instead.
 fn unpushed_commits_sentence(
     unpushed: Option<dux_core::git::UnpushedCommits>,
-    drifted: bool,
+    spread: BranchSpread,
 ) -> Option<String> {
     let answer = unpushed?;
     let count = answer.count;
@@ -1082,13 +1098,13 @@ fn unpushed_commits_sentence(
     }
     if answer.has_remote_refs {
         let plural = if count == 1 { "commit" } else { "commits" };
-        return Some(if drifted {
+        return Some(if spread == BranchSpread::Drifted {
             format!(" They have {count} {plural} not pushed anywhere between them.")
         } else {
             format!(" It has {count} {plural} not pushed anywhere.")
         });
     }
-    let (subject, possessive) = if drifted {
+    let (subject, possessive) = if spread == BranchSpread::Drifted {
         ("them", "their")
     } else {
         ("it", "its")
@@ -1178,14 +1194,20 @@ pub(super) const DELETE_WORKTREE_DETACHED: &str = "This worktree is not on a bra
      the working directory is removed.";
 
 #[cfg(test)]
-pub(super) fn delete_worktree_branch_line(branch: &str, delete_branch: bool) -> String {
-    delete_worktree_branch_prose(branch, delete_branch).plain()
+pub(super) fn delete_worktree_branch_line(
+    branch: &str,
+    branch_removal: dux_core::worktree_manager::BranchRemoval,
+) -> String {
+    delete_worktree_branch_prose(branch, branch_removal).plain()
 }
 
 /// [`delete_worktree_branch_line`] with the branch marked as a name.
-pub(super) fn delete_worktree_branch_prose(branch: &str, delete_branch: bool) -> Prose {
+pub(super) fn delete_worktree_branch_prose(
+    branch: &str,
+    branch_removal: dux_core::worktree_manager::BranchRemoval,
+) -> Prose {
     let lead = Prose::new().text("The branch ").quoted(branch);
-    if delete_branch {
+    if branch_removal == dux_core::worktree_manager::BranchRemoval::Delete {
         lead.text(
             " will be deleted with it, forcibly. Any commits on it that are not merged anywhere \
              else go too.",
@@ -1338,7 +1360,7 @@ fn delete_agent_cancel_button(focus: DeleteAgentFocus) -> ConfirmButton<'static>
         "Cancel",
         ButtonKind::Confirm,
         ButtonPressedTarget::ConfirmDeleteCancel,
-        focus == DeleteAgentFocus::Cancel,
+        FocusState::of(focus, DeleteAgentFocus::Cancel),
     )
 }
 
@@ -1349,7 +1371,7 @@ fn delete_agent_delete_button(focus: DeleteAgentFocus, label: &str) -> ConfirmBu
         label,
         ButtonKind::Danger,
         ButtonPressedTarget::ConfirmDeleteConfirm,
-        focus == DeleteAgentFocus::Delete,
+        FocusState::of(focus, DeleteAgentFocus::Delete),
     )
 }
 
@@ -1376,10 +1398,161 @@ fn confirm_focus_buttons(
             "Cancel",
             ButtonKind::Confirm,
             cancel_target,
-            !focus.is_confirm(),
+            if focus.is_confirm() {
+                FocusState::Unfocused
+            } else {
+                FocusState::Focused
+            },
         ),
-        ConfirmButton::new(label, kind, target, focus.is_confirm()),
+        ConfirmButton::new(
+            label,
+            kind,
+            target,
+            if focus.is_confirm() {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
+        ),
     )
+}
+
+/// Whether the embedded terminal's caret is placed as the host cursor: only
+/// for a pane that takes keys and has no take-over card over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caret {
+    /// The host cursor goes where the child's cursor is.
+    Shown,
+    /// It stays hidden.
+    Hidden,
+}
+
+/// Whether the take-over card covers the terminal pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardCover {
+    /// It does, so the hint names the take-over.
+    Covered,
+    /// It does not.
+    Clear,
+}
+
+/// Whether a card's text was cut to fit, which marks its last row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Truncation {
+    /// It was cut.
+    Cut,
+    /// It fits.
+    Whole,
+}
+
+/// How many branches a delete warning about unpushed commits covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchSpread {
+    /// Two: the agent drifted off the branch it was born on.
+    Drifted,
+    /// One.
+    Single,
+}
+
+/// Whether the sidebar has a Terminals section under the agents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalsSection {
+    /// It does, so the sidebar splits.
+    Shown,
+    /// It does not.
+    Hidden,
+}
+
+/// Whether the agent list starts with active agents, which earns a top margin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveSection {
+    /// It does.
+    Present,
+    /// Only the inactive tail is listed.
+    Absent,
+}
+
+/// Whether the agent list shows its filter row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterRow {
+    /// A filter is open.
+    Shown,
+    /// No filter is open.
+    Hidden,
+}
+
+/// Whether a modal will dim the sidebar body this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyDim {
+    /// It will, so the cursor rows are not painted.
+    Dimmed,
+    /// It will not.
+    Lit,
+}
+
+/// Whether a file list draws its hint row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HintRow {
+    /// It does.
+    Shown,
+    /// It does not.
+    Hidden,
+}
+
+/// Whether a picker list is filtering by a typed search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListSearch {
+    /// A search is being typed.
+    Searching,
+    /// No search is open.
+    Browsing,
+}
+
+/// Whether an agent row's delete is still running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowDeletion {
+    /// It is.
+    Deleting,
+    /// It is not.
+    Settled,
+}
+
+/// Whether a picker row is the current choice, which a check marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurrentMark {
+    /// It is the current choice.
+    Current,
+    /// It is not.
+    Other,
+}
+
+/// Whether the tab being closed is running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabLiveness {
+    /// Its process is running.
+    Live,
+    /// It is not running.
+    Dormant,
+}
+
+/// What closing a tab does to its agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseTabEffect {
+    /// It was the last live tab, so the agent detaches.
+    Detaches,
+    /// Only the tab goes.
+    DeletesTab,
+}
+
+/// What the project browser's input row is doing, which picks its footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowseMode {
+    /// A path is being typed into the path editor.
+    EditingPath,
+    /// A search filters the entries.
+    Searching,
+    /// The list is being browsed.
+    Browsing,
 }
 
 impl App {
@@ -1399,7 +1572,7 @@ impl App {
     ) {
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Agent",
                 body: body_lines,
                 controls_height: 0,
@@ -1422,11 +1595,11 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         label: &str,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
-        self.render_overlay_checkbox_widget(frame, area, Checkbox::new(label), checked, state, hint)
+        self.render_overlay_checkbox_widget(frame, area, Checkbox::new(label), mark, state, hint)
     }
 
     /// A prose dialog's body: a blank row, then `prose` with the one-cell body
@@ -1508,12 +1681,12 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         label: &Prose,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
         let checkbox = Checkbox::with_prose(label, &self.theme);
-        self.render_overlay_checkbox_widget(frame, area, checkbox, checked, state, hint)
+        self.render_overlay_checkbox_widget(frame, area, checkbox, mark, state, hint)
     }
 
     fn render_overlay_checkbox_widget(
@@ -1521,11 +1694,11 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         checkbox: Checkbox<'_>,
-        checked: bool,
+        mark: CheckMark,
         state: CheckboxState,
         hint: Option<Line<'static>>,
     ) -> (Rect, u16) {
-        let checkbox = checkbox.checked(checked).state(state);
+        let checkbox = checkbox.checked(mark).state(state);
         let marker_style = checkbox.marker_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
@@ -1627,21 +1800,21 @@ impl App {
             ])
             .areas(frame.area());
         self.render_header(frame, header);
-        let right_constraint = if self.right_hidden {
+        let right_constraint = if self.panes.right_hidden {
             Constraint::Length(0)
-        } else if self.right_collapsed {
+        } else if self.panes.right_collapsed {
             Constraint::Length(3)
         } else {
             Constraint::Percentage(self.right_width_pct)
         };
 
-        let [left, center, right] = if self.left_collapsed {
+        let [left, center, right] = if self.panes.left_collapsed {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(4), Constraint::Min(20), right_constraint])
                 .areas(body)
         } else {
-            let right_pct = if self.right_hidden || self.right_collapsed {
+            let right_pct = if self.panes.right_hidden || self.panes.right_collapsed {
                 0
             } else {
                 self.right_width_pct
@@ -1856,7 +2029,11 @@ impl App {
     /// the engine's config on every call so a palette toggle or a config
     /// reload takes effect on the next frame.
     pub(crate) fn glyphs(&self) -> &'static crate::theme::Glyphs {
-        crate::theme::Glyphs::for_config(self.engine.config.ui.nerd_font_icons)
+        crate::theme::Glyphs::for_config(if self.engine.config.ui.nerd_font_icons {
+            crate::theme::IconSet::Nerd
+        } else {
+            crate::theme::IconSet::Plain
+        })
     }
 
     fn agent_row_cues(&self, session: &AgentSession) -> AgentRowCues {
@@ -1864,10 +2041,12 @@ impl App {
         let needs_attention = self.engine.config.ui.attention_indicator
             && self.engine.session_needs_attention(&session.id);
         AgentRowCues {
-            needs_attention,
+            facts: dux_core::row_state::AgentRowFacts {
+                working: active && self.engine.session_is_streaming(&session.id),
+                typing: active && self.engine.session_is_typing(&session.id),
+                needs_attention,
+            },
             attention_cue: needs_attention && active,
-            working: active && self.engine.session_is_streaming(&session.id),
-            typing: active && self.engine.session_is_typing(&session.id),
             deleting: self.engine.pending_deletions.contains(&session.id),
         }
     }
@@ -1881,10 +2060,10 @@ impl App {
             }
             .to_string();
         }
-        if cues.typing {
+        if cues.facts.typing {
             return crate::theme::TYPING_GLYPH.to_string();
         }
-        if cues.working {
+        if cues.facts.working {
             return crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string();
         }
         steady_dot.to_string()
@@ -1923,7 +2102,11 @@ impl App {
         match agent_row_owner_tag(
             session,
             project,
-            self.engine.working_copy_missing(&session.id),
+            if self.engine.working_copy_missing(&session.id) {
+                WorkingCopy::Missing
+            } else {
+                WorkingCopy::Present
+            },
         ) {
             AgentRowOwnerTag::Project(ProjectTagKind::Healthy, project_name) => (
                 MetaMarker::name(Span::styled(
@@ -1980,8 +2163,13 @@ impl App {
     /// takes that branch first. A working row that reached this would be a bug,
     /// so it falls to the muted tone with the other quiet words rather than
     /// carrying a second, un-pulsing definition of the working shade.
-    fn agent_row_state_color(&self, word: &str, deleting: bool, steady_color: Color) -> Color {
-        if deleting {
+    fn agent_row_state_color(
+        &self,
+        word: &str,
+        deletion: RowDeletion,
+        steady_color: Color,
+    ) -> Color {
+        if deletion == RowDeletion::Deleting {
             return self.theme.session_deleting;
         }
         match word {
@@ -2000,13 +2188,10 @@ impl App {
         let label = session.display_label();
         let cues = self.agent_row_cues(session);
         let AgentRowCues {
-            needs_attention,
-            working,
-            typing,
-            deleting,
-            ..
+            facts, deleting, ..
         } = cues;
-        let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
+        let working = facts.working;
+        let (steady_dot, steady_color) = self.theme.session_dot(session.status);
         let dot = self.agent_row_glyph(cues, steady_dot);
         let (base_color, glyph_color) = self.agent_row_colors(session.status, cues, steady_color);
         let italic = |style: Style| {
@@ -2081,7 +2266,7 @@ impl App {
         // so the tone stays on line two. The standalone terminal row wears the
         // same star at the same indent; owned terminal rows keep their arrow.
         let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
-        let word = agent_state_word(session.status, working, typing, needs_attention);
+        let word = agent_state_word(session.status, facts);
         // The one working cue: the word pulses between the working token and the
         // muted tone beside it, and a cycling ellipsis runs after it in a slot
         // three cells wide, so the tab count behind it never moves as the dots
@@ -2099,7 +2284,15 @@ impl App {
         } else {
             (
                 word.to_string(),
-                self.agent_row_state_color(word, deleting, steady_color),
+                self.agent_row_state_color(
+                    word,
+                    if deleting {
+                        RowDeletion::Deleting
+                    } else {
+                        RowDeletion::Settled
+                    },
+                    steady_color,
+                ),
             )
         };
         // Show the branch only when it differs from the displayed name (i.e. a
@@ -2157,7 +2350,7 @@ impl App {
                 tabs: tabs_span,
                 remote: remote_span,
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default().fg(muted),
                 highlight: line2_highlight,
             },
@@ -2379,7 +2572,7 @@ impl App {
         }
     }
 
-    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
         self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
         let collapsed_left_items = self.left_items();
         let items = collapsed_left_items
@@ -2402,7 +2595,7 @@ impl App {
                                 self.theme.session_active,
                             )
                         } else {
-                            let (glyph, color) = self.theme.session_dot(&session.status);
+                            let (glyph, color) = self.theme.session_dot(session.status);
                             (glyph.to_string(), color)
                         };
                     // Project warnings appear in the narrow rail; standalone
@@ -2415,7 +2608,11 @@ impl App {
                         agent_row_owner_tag(
                             session,
                             found,
-                            self.engine.working_copy_missing(&session.id)
+                            if self.engine.working_copy_missing(&session.id) {
+                                WorkingCopy::Missing
+                            } else {
+                                WorkingCopy::Present
+                            }
                         ),
                         AgentRowOwnerTag::Project(
                             ProjectTagKind::PathMissing | ProjectTagKind::Orphan,
@@ -2452,8 +2649,8 @@ impl App {
             left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
     }
 
-    fn left_sidebar_areas(&self, area: Rect, has_terminals: bool) -> (Rect, Option<Rect>) {
-        if !has_terminals {
+    fn left_sidebar_areas(&self, area: Rect, terminals: TerminalsSection) -> (Rect, Option<Rect>) {
+        if terminals == TerminalsSection::Hidden {
             return (area, None);
         }
         let terminals_pct =
@@ -2522,14 +2719,14 @@ impl App {
     fn agent_sidebar_items(
         &self,
         left_items: &[LeftItem],
-        has_active: bool,
+        active: ActiveSection,
         row_text_width: u16,
     ) -> (Vec<ListItem<'static>>, Vec<u16>) {
         let items = left_items
             .iter()
             .map(|item| match item {
                 LeftItem::InactiveToggle => {
-                    let icon = if self.inactive_collapsed {
+                    let icon = if self.inactive_tail.collapsed {
                         self.glyphs().collapsed
                     } else {
                         self.glyphs().expanded
@@ -2538,7 +2735,7 @@ impl App {
                         format!("{icon} Inactive ({})", self.visible_inactive_count()),
                         Style::default().fg(self.theme.provider_label_fg),
                     ));
-                    if has_active {
+                    if active == ActiveSection::Present {
                         ListItem::new(vec![Line::from(""), label, Line::from("")])
                     } else {
                         ListItem::new(vec![label, Line::from("")])
@@ -2554,7 +2751,7 @@ impl App {
             .iter()
             .map(|item| match item {
                 LeftItem::Session(_) => 3,
-                LeftItem::InactiveToggle if has_active => 3,
+                LeftItem::InactiveToggle if (active == ActiveSection::Present) => 3,
                 LeftItem::InactiveToggle => 2,
             })
             .collect();
@@ -2563,10 +2760,10 @@ impl App {
 
     fn agent_sidebar_geometry(
         inner: Rect,
-        show_filter: bool,
-        has_active: bool,
+        filter: FilterRow,
+        active: ActiveSection,
     ) -> SidebarListGeometry {
-        let (search_area, list_inner) = if show_filter && inner.height >= 3 {
+        let (search_area, list_inner) = if filter == FilterRow::Shown && inner.height >= 3 {
             let [search, list] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(2), Constraint::Min(1)])
@@ -2575,7 +2772,7 @@ impl App {
         } else {
             (None, inner)
         };
-        let top_margin = u16::from(has_active && list_inner.height >= 4);
+        let top_margin = u16::from(active == ActiveSection::Present && list_inner.height >= 4);
         let content = Rect {
             y: list_inner.y + top_margin,
             height: list_inner.height - top_margin,
@@ -2604,16 +2801,25 @@ impl App {
         &mut self,
         frame: &mut Frame,
         projects_area: Rect,
-        focused: bool,
+        focused: FocusState,
     ) -> bool {
         let left_items = self.left_items();
-        let projects_focused = focused && self.left_section == LeftSection::Projects;
+        let projects_focused =
+            if focused == FocusState::Focused && self.left_section == LeftSection::Projects {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
         let title = self.agent_sidebar_title(left_items);
         // Active agents always sort ahead of the Inactive toggle, so the list
         // leads with a Session iff any agent is active. The toggle only earns a
         // leading spacer row (separating it from the active agents) when there is
         // something above it; with only inactive agents it sits flush at the top.
-        let has_active = matches!(left_items.first(), Some(LeftItem::Session(_)));
+        let has_active = if matches!(left_items.first(), Some(LeftItem::Session(_))) {
+            ActiveSection::Present
+        } else {
+            ActiveSection::Absent
+        };
         // Build the block up front so the row builder knows the text width left
         // after both gutters are reserved, and can ellipsize overflowing lines.
         let block = self.themed_block(&title, projects_focused);
@@ -2621,7 +2827,15 @@ impl App {
         let row_text_width = inner.width.saturating_sub(LEFT_PANE_GUTTER * 2);
         let (items, item_heights) =
             self.agent_sidebar_items(left_items, has_active, row_text_width);
-        let geometry = Self::agent_sidebar_geometry(inner, self.agent_filter.is_some(), has_active);
+        let geometry = Self::agent_sidebar_geometry(
+            inner,
+            if self.agent_filter.is_some() {
+                FilterRow::Shown
+            } else {
+                FilterRow::Hidden
+            },
+            has_active,
+        );
         self.mouse_layout.left_list = geometry.content;
         block.render(projects_area, frame.buffer_mut());
         if let Some(search_area) = geometry.search_area {
@@ -2636,7 +2850,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 search_area.width,
             ))
             .block(
@@ -2702,12 +2916,17 @@ impl App {
         &mut self,
         frame: &mut Frame,
         term_area: Rect,
-        focused: bool,
+        focused: FocusState,
         terminal_render_data: &[TerminalSidebarRow],
         total_terminal_count: usize,
-        body_will_dim: bool,
+        body: BodyDim,
     ) {
-        let terminals_focused = focused && self.left_section == LeftSection::Terminals;
+        let terminals_focused =
+            if focused == FocusState::Focused && self.left_section == LeftSection::Terminals {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
         let term_count = terminal_render_data.len();
         // The same visible-over-total count the Agents title carries while a
         // query is live, for the same reason: a pruned list must not read as
@@ -2760,12 +2979,15 @@ impl App {
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
                     self.glyphs(),
-                    typing,
-                    working,
+                    dux_core::row_state::TerminalRowFacts { working, typing },
                     spinner,
                     row.display_title.as_deref(),
                     &row.owner_name,
-                    row.standalone,
+                    if row.standalone {
+                        TerminalOwnerKind::Standalone
+                    } else {
+                        TerminalOwnerKind::Owned
+                    },
                     term_text_width,
                     self.start_time.elapsed().as_millis(),
                     term_highlight,
@@ -2800,7 +3022,7 @@ impl App {
             left_row_to_item(term_state.offset(), &term_heights, term_content.height);
         // Hand-paint the framed selection into the content surface, reusing the
         // same `body_will_dim` gate the agent path computed above.
-        if self.left_section == LeftSection::Terminals && !body_will_dim {
+        if self.left_section == LeftSection::Terminals && body == BodyDim::Lit {
             self.paint_framed_row_selection(
                 frame.buffer_mut(),
                 term_content,
@@ -2811,7 +3033,7 @@ impl App {
         }
         // The terminals reorder by drag exactly as the agents do, so they get
         // the same insertion rule and the same muted moving row.
-        if !body_will_dim {
+        if body == BodyDim::Lit {
             self.paint_row_drag_marker(
                 frame.buffer_mut(),
                 RowDragList::Terminals,
@@ -2823,9 +3045,9 @@ impl App {
     }
 
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Left;
+        let focused = FocusState::of(self.focus, FocusPane::Left);
 
-        if self.left_collapsed {
+        if self.panes.left_collapsed {
             self.render_collapsed_left(frame, area, focused);
             return;
         }
@@ -2834,7 +3056,11 @@ impl App {
         // exactly as the agent list above is. Every index below (the rows, the
         // selection, the mouse map) is an index into this list.
         let terminal_items = self.terminal_items();
-        let has_terminals = !terminal_items.is_empty();
+        let has_terminals = if terminal_items.is_empty() {
+            TerminalsSection::Hidden
+        } else {
+            TerminalsSection::Shown
+        };
         // Titles disambiguate against the unfiltered list, and the pane total
         // remains stable while a search changes visible rows.
         let all_terminals = self.sorted_terminal_items();
@@ -2843,7 +3069,11 @@ impl App {
         let (projects_area, terminals_area) = self.left_sidebar_areas(area, has_terminals);
         let terminal_render_data = self.terminal_sidebar_rows(&terminal_items, &all_terminals);
 
-        let body_will_dim = self.render_agent_sidebar_section(frame, projects_area, focused);
+        let body_will_dim = if self.render_agent_sidebar_section(frame, projects_area, focused) {
+            BodyDim::Dimmed
+        } else {
+            BodyDim::Lit
+        };
 
         // Hand-paint the selection in the inset body so terminal and agent rows
         // share identical framing, spacing, and selection geometry.
@@ -2863,7 +3093,7 @@ impl App {
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Center;
+        let focused = FocusState::of(self.focus, FocusPane::Center);
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
@@ -2885,7 +3115,7 @@ impl App {
         };
         let pr_banner_height: u16 = u16::from(pr_info.is_some());
 
-        let (pr_area, pane_area) = if self.pr_banner_at_bottom {
+        let (pr_area, pane_area) = if self.view_prefs.pr_banner_at_bottom {
             let [pane_area, pr_area] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(pr_banner_height)])
@@ -2929,14 +3159,14 @@ impl App {
                 self.session_surface = SessionSurface::Agent;
                 // Draw the tab strip (>=2 tabs) above the terminal and render
                 // the terminal into the remaining area.
-                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area, true);
+                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area);
                 self.render_agent_terminal(frame, term_area, &title, focused);
                 self.session_surface = saved;
             }
         }
     }
 
-    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
         let (lines, scroll, gutter_width) = match &self.center_mode {
             CenterMode::Diff {
                 lines,
@@ -3224,7 +3454,11 @@ impl App {
                         &wrapped[index],
                         placed.area.height,
                         placed.area.width,
-                        placed.truncated,
+                        if placed.truncated {
+                            Truncation::Cut
+                        } else {
+                            Truncation::Whole
+                        },
                     ))
                     .alignment(*align)
                     .render(placed.area, frame.buffer_mut());
@@ -3245,7 +3479,11 @@ impl App {
                             &wrapped[index],
                             placed.area.height,
                             placed.area.width,
-                            placed.truncated,
+                            if placed.truncated {
+                                Truncation::Cut
+                            } else {
+                                Truncation::Whole
+                            },
                         ),
                         Style::default(),
                     );
@@ -3264,7 +3502,7 @@ impl App {
     /// (`Engine::tab_resume_decision`); the copy states that rule rather than
     /// promising either outcome.
     fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect, tab_id: Option<&str>) {
-        self.welcome_logo_visible = false;
+        self.welcome_logo.visible = false;
         self.mouse_layout.dormant_tab_button = None;
 
         // Read the verdict OFF the engine first and own it: the paint below
@@ -3341,8 +3579,11 @@ impl App {
                 state: button_state_for(
                     ButtonPressedTarget::DormantTabCard,
                     self.dormant_tab_press,
-                    self.focus == FocusPane::Center,
-                    true,
+                    if self.focus == FocusPane::Center {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    },
                 ),
             },
         ));
@@ -3362,18 +3603,18 @@ impl App {
         // Rotate the tip and randomly pick a logo variant when the logo
         // becomes visible again after being hidden, or when the selected
         // left-pane item changes while the logo stays visible.
-        if !self.welcome_logo_visible || self.welcome_tip_selection != self.selected_left {
+        if !self.welcome_logo.visible || self.welcome_tip_selection != self.selected_left {
             self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
-            self.welcome_logo_alt = std::time::SystemTime::now()
+            self.welcome_logo.alt = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .is_ok_and(|d| d.subsec_nanos() % 2 == 0);
         }
-        self.welcome_logo_visible = true;
+        self.welcome_logo.visible = true;
         self.welcome_tip_selection = self.selected_left;
 
         // Pick the active logo variant. Fall back to the text logo when the
         // area is too short for the taller duck.
-        let use_alt = self.welcome_logo_alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
+        let use_alt = self.welcome_logo.alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
         let (logo, logo_w, logo_h) = if use_alt {
             (ASCII_LOGO_ALT, ASCII_LOGO_ALT_WIDTH, ASCII_LOGO_ALT_HEIGHT)
         } else {
@@ -3513,14 +3754,8 @@ impl App {
     /// If the selected agent has two or more tabs, draw a single-row desktop-style
     /// tab strip at the top of `area` and return the reduced rect for the terminal
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
-    /// single-tab agents look exactly as before. When `record_clicks` is false
-    /// (fullscreen) the strip is display-only and no hit-boxes are recorded.
-    fn render_agent_tab_strip_if_needed(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        record_clicks: bool,
-    ) -> Rect {
+    /// single-tab agents look exactly as before.
+    fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.agent_tab_regions.clear();
 
         let Some(session) = self.selected_session() else {
@@ -3564,7 +3799,7 @@ impl App {
         // word is static text and is deliberately not gated.
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
         let attention_on = self.engine.config.ui.attention_indicator && session_active;
-        let glyph_tone = self.theme.session_dot(&session.status).1;
+        let glyph_tone = self.theme.session_dot(session.status).1;
         let items: Vec<TabStripItem> = tab_ids
             .iter()
             .zip(labels)
@@ -3701,7 +3936,11 @@ impl App {
                 }
                 break;
             }
-            let active = items[i].id == focused_id;
+            let active = if items[i].id == focused_id {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
             let border_style = self.theme.border_style(active);
             let label_style = self.theme.title_style(active);
             // The pill is two cells behind one frame: the ordinal cell, a
@@ -3747,9 +3986,18 @@ impl App {
             if label_w >= 2 {
                 let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
                 match tab_activity_glyph(
-                    items[i].working,
-                    items[i].needs_attention,
-                    blink_on,
+                    if items[i].needs_attention {
+                        TabCue::NeedsAttention
+                    } else if items[i].working {
+                        TabCue::Working
+                    } else {
+                        TabCue::Quiet
+                    },
+                    if blink_on {
+                        BlinkPhase::Lit
+                    } else {
+                        BlinkPhase::Dark
+                    },
                     spinner_idx,
                 ) {
                     TabActivityGlyph::Blank => {
@@ -3771,14 +4019,12 @@ impl App {
                 .set_symbol(corners.vertical_right)
                 .set_style(border_style);
             buf.set_string(x, bot_y, &bottom, border_style);
-            if record_clicks {
-                // The whole box (all 3 rows, borders included) is clickable;
-                // the trailing gap column is not.
-                self.agent_tab_regions.push((
-                    items[i].id.clone(),
-                    Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
-                ));
-            }
+            // The whole box (all 3 rows, borders included) is clickable;
+            // the trailing gap column is not.
+            self.agent_tab_regions.push((
+                items[i].id.clone(),
+                Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
+            ));
             x += seg_w[i];
         }
 
@@ -3847,7 +4093,14 @@ impl App {
         // labels come from the same ownership predicate the routing uses.
         let pane_key = |action: Action| {
             self.bindings
-                .label_for_typeable_center(action, tab_reaches_agent)
+                .label_for_typeable_center(
+                    action,
+                    if tab_reaches_agent {
+                        crate::keybindings::TabKey::ReachesAgent
+                    } else {
+                        crate::keybindings::TabKey::MovesPanes
+                    },
+                )
                 .unwrap_or_default()
         };
         let next_pane = pane_key(Action::FocusNext);
@@ -4132,8 +4385,11 @@ impl App {
         let state = button_state_for(
             ButtonPressedTarget::TakeOverCard,
             self.takeover_press,
-            self.focus == FocusPane::Center,
-            true,
+            if self.focus == FocusPane::Center {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            },
         );
         Button::new(label)
             .state(state)
@@ -4222,8 +4478,7 @@ impl App {
         term_area: Rect,
         provider_name: Option<&str>,
         active_surface: SessionSurface,
-        receives_keys: bool,
-        card_up: bool,
+        caret: Caret,
     ) -> (bool, usize) {
         let Some(provider) = self.selected_terminal_surface_client() else {
             return (false, 0);
@@ -4237,9 +4492,12 @@ impl App {
             self.render_terminal_loading(frame, term_area, provider_name, active_surface);
             return (true, 0);
         }
-        let is_alt_screen = provider.is_alt_screen();
-        let scrollback_offset =
-            self.render_terminal_grid(frame, term_area, receives_keys, card_up, is_alt_screen);
+        let screen = if provider.is_alt_screen() {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
+        let scrollback_offset = self.render_terminal_grid(frame, term_area, caret, screen);
         (true, scrollback_offset)
     }
 
@@ -4332,17 +4590,16 @@ impl App {
         &mut self,
         frame: &mut Frame,
         term_area: Rect,
-        receives_keys: bool,
-        card_up: bool,
-        is_alt_screen: bool,
+        caret: Caret,
+        screen: dux_core::pty::ScreenBuffer,
     ) -> usize {
         self.refresh_snapshot_buf();
         self.drop_drifted_selection();
         let scrollback_offset = self.snapshot_buf.scrollback_offset;
         let selection_origin = self.snapshot_selection_origin();
         self.paint_terminal_cells(frame, term_area, selection_origin);
-        self.render_terminal_caret(frame, term_area, receives_keys, card_up);
-        self.render_terminal_scrollback_indicator(frame, term_area, is_alt_screen);
+        self.render_terminal_caret(frame, term_area, caret);
+        self.render_terminal_scrollback_indicator(frame, term_area, screen);
         scrollback_offset
     }
 
@@ -4395,14 +4652,8 @@ impl App {
         }
     }
 
-    fn render_terminal_caret(
-        &self,
-        frame: &mut Frame,
-        term_area: Rect,
-        receives_keys: bool,
-        card_up: bool,
-    ) {
-        if !receives_keys || card_up {
+    fn render_terminal_caret(&self, frame: &mut Frame, term_area: Rect, caret: Caret) {
+        if caret == Caret::Hidden {
             return;
         }
         let Some(cursor) = self.snapshot_buf.cursor else {
@@ -4422,9 +4673,9 @@ impl App {
         &self,
         frame: &mut Frame,
         term_area: Rect,
-        is_alt_screen: bool,
+        screen: dux_core::pty::ScreenBuffer,
     ) {
-        if is_alt_screen {
+        if screen == dux_core::pty::ScreenBuffer::Alternate {
             return;
         }
         let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
@@ -4474,13 +4725,13 @@ impl App {
         };
         match context.active_surface {
             SessionSurface::Agent if show_card => {
-                self.welcome_logo_visible = false;
+                self.welcome_logo.visible = false;
                 let tab_id = context.focused_tab.clone();
                 self.render_dormant_extra_tab(frame, term_area, tab_id.as_deref());
             }
             SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
             SessionSurface::Terminal => {
-                self.welcome_logo_visible = false;
+                self.welcome_logo.visible = false;
                 self.render_terminal_placeholder(
                     frame,
                     term_area,
@@ -4496,14 +4747,14 @@ impl App {
         frame: &mut Frame,
         hint_area: Rect,
         context: &AgentTerminalContext,
-        card_up: bool,
+        cover: CardCover,
         scrollback_offset: usize,
     ) {
         if hint_area.height == 0 {
             return;
         }
         let hint_line =
-            self.agent_terminal_hint_line(context, hint_area.width, card_up, scrollback_offset);
+            self.agent_terminal_hint_line(context, hint_area.width, cover, scrollback_offset);
         Paragraph::new(hint_line)
             .block(
                 Block::default()
@@ -4517,12 +4768,12 @@ impl App {
         &self,
         context: &AgentTerminalContext,
         width: u16,
-        card_up: bool,
+        cover: CardCover,
         scrollback_offset: usize,
     ) -> Line<'static> {
         if context.is_input && self.scroll_mode_active() {
             self.scroll_mode_cue_line(width)
-        } else if card_up {
+        } else if cover == CardCover::Covered {
             self.takeover_hint_line(width)
         } else if context.is_input {
             self.interactive_terminal_hint_line(scrollback_offset, width)
@@ -4634,14 +4885,20 @@ impl App {
         Line::from(Span::styled("No agent selected.", desc_style))
     }
 
-    fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+    fn render_agent_terminal(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        focused: FocusState,
+    ) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
         // Ratatui cannot detect damage to the physical terminal outside its
         // previous-frame buffer, so resend the vulnerable focused edge.
-        if focused
+        if focused == FocusState::Focused
             && self.session_surface == SessionSurface::Agent
             && area.width > 0
             && area.height > 2
@@ -4675,19 +4932,27 @@ impl App {
         // Read ownership after sizing spends an armed claim, preventing a
         // one-frame stale take-over card after a successful claim.
         let takeover_card = self.prepare_terminal_takeover();
-        let card_up = takeover_card.is_some();
+        let cover = if takeover_card.is_some() {
+            CardCover::Covered
+        } else {
+            CardCover::Clear
+        };
+        let caret = if receives_keys && cover == CardCover::Clear {
+            Caret::Shown
+        } else {
+            Caret::Hidden
+        };
 
         let (rendered_content, scrollback_offset) = self.render_terminal_client_content(
             frame,
             term_area,
             session_provider_name,
             active_surface,
-            receives_keys,
-            card_up,
+            caret,
         );
 
         if rendered_content {
-            self.welcome_logo_visible = false;
+            self.welcome_logo.visible = false;
         } else {
             self.render_terminal_empty_state(frame, term_area, &context);
         }
@@ -4706,11 +4971,11 @@ impl App {
             return;
         }
 
-        self.render_agent_terminal_hint(frame, hint_area, &context, card_up, scrollback_offset);
+        self.render_agent_terminal_hint(frame, hint_area, &context, cover, scrollback_offset);
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
-        if self.right_hidden {
+        if self.panes.right_hidden {
             return;
         }
 
@@ -4721,8 +4986,8 @@ impl App {
             return;
         }
 
-        if self.right_collapsed {
-            let focused = self.focus == FocusPane::Files;
+        if self.panes.right_collapsed {
+            let focused = FocusState::of(self.focus, FocusPane::Files);
             let block = self.themed_block("", focused);
             let unstaged_rows = self.changes_row_count(RightSection::Unstaged);
             let total = unstaged_rows + self.changes_row_count(RightSection::Staged);
@@ -4772,7 +5037,7 @@ impl App {
         }
 
         let has_staged = !self.engine.staged_files.is_empty();
-        let focused = self.focus == FocusPane::Files;
+        let focused = FocusState::of(self.focus, FocusPane::Files);
 
         if has_staged {
             let pct =
@@ -4785,20 +5050,35 @@ impl App {
                     Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
-            let list_rect =
-                self.render_file_list(frame, chunks[0], "Changes", RightSection::Unstaged, true);
+            let list_rect = self.render_file_list(
+                frame,
+                chunks[0],
+                "Changes",
+                RightSection::Unstaged,
+                HintRow::Shown,
+            );
             self.mouse_layout.unstaged_list = Some(list_rect);
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
-            let list_rect =
-                self.render_file_list(frame, area, "Changes", RightSection::Unstaged, true);
+            let list_rect = self.render_file_list(
+                frame,
+                area,
+                "Changes",
+                RightSection::Unstaged,
+                HintRow::Shown,
+            );
             self.mouse_layout.unstaged_list = Some(list_rect);
         }
     }
 
     /// Render the "Staged Changes" file list and the commit input as two
     /// separate bordered blocks (bubbles).
-    fn render_staged_with_commit(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+    fn render_staged_with_commit(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        pane_focused: FocusState,
+    ) {
         let commit_pct =
             dux_core::config_effective::effective_pane_height_pct(self.commit_pane_height_pct);
         let staged_pct = 100u16.saturating_sub(commit_pct).max(20);
@@ -4816,7 +5096,7 @@ impl App {
             files_area,
             "Staged Changes",
             RightSection::Staged,
-            false,
+            HintRow::Hidden,
         );
         self.mouse_layout.staged_list = Some(list_rect);
 
@@ -4859,7 +5139,7 @@ impl App {
     /// user nothing about what to do next. The card is untitled, since the pane
     /// frame already says "Changes".
     fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
-        let focused = self.focus == FocusPane::Files;
+        let focused = FocusState::of(self.focus, FocusPane::Files);
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -4900,7 +5180,7 @@ impl App {
         area: Rect,
         title_prefix: &str,
         section: RightSection,
-        show_hint: bool,
+        hint: HintRow,
     ) -> Rect {
         let files = match section {
             RightSection::Staged => &self.engine.staged_files,
@@ -4918,9 +5198,17 @@ impl App {
                 title_prefix,
                 files,
                 &self.theme,
-                self.theme.title_style(is_active_section),
+                self.theme.title_style(if is_active_section {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                }),
             ),
-            is_active_section,
+            if is_active_section {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
         );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -4938,15 +5226,16 @@ impl App {
         };
 
         // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
-        let (list_area, hint_area) = if show_hint && pane_focused && list_inner.height >= 4 {
-            let [la, ha] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(2)])
-                .areas(list_inner);
-            (la, Some(ha))
-        } else {
-            (list_inner, None)
-        };
+        let (list_area, hint_area) =
+            if hint == HintRow::Shown && pane_focused && list_inner.height >= 4 {
+                let [la, ha] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(2)])
+                    .areas(list_inner);
+                (la, Some(ha))
+            } else {
+                (list_inner, None)
+            };
 
         if let Some(search_area) = search_area {
             let query = format!("/ {}", self.files_search.text);
@@ -5017,13 +5306,7 @@ impl App {
                         count,
                         Style::default().fg(self.theme.hint_desc_fg),
                     )],
-                    None => format_line_stats(
-                        file.additions,
-                        file.deletions,
-                        file.binary,
-                        file.diff_excluded,
-                        &self.theme,
-                    ),
+                    None => format_line_stats(file, &self.theme),
                 };
                 let stats_width = stats
                     .iter()
@@ -5156,8 +5439,8 @@ impl App {
 
     /// The hint row under the commit message box. `focused` is whether the box
     /// is taking typing.
-    pub(super) fn commit_hint_line(&self, focused: bool, width: u16) -> Line<'static> {
-        let hints = if focused {
+    pub(super) fn commit_hint_line(&self, focused: FocusState, width: u16) -> Line<'static> {
+        let hints = if focused == FocusState::Focused {
             vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "exit").pinned()]
         } else {
             vec![
@@ -5168,12 +5451,25 @@ impl App {
         pane_hint_line(&self.theme, &hints, width)
     }
 
-    fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+    fn render_commit_input_inner(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        pane_focused: FocusState,
+    ) {
         self.mouse_layout.commit_area = Some(area);
-        let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
+        let is_active_section =
+            pane_focused == FocusState::Focused && self.right_section == RightSection::CommitInput;
         let focused = self.input_target == InputTarget::CommitMessage;
 
-        let block = self.themed_block("Commit Message", is_active_section || focused);
+        let block = self.themed_block(
+            "Commit Message",
+            if is_active_section || focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
+        );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
@@ -5230,8 +5526,15 @@ impl App {
 
         // Hint bar.
         if hint_area.height > 0 {
-            Paragraph::new(self.commit_hint_line(focused, hint_area.width))
-                .render(hint_area, frame.buffer_mut());
+            Paragraph::new(self.commit_hint_line(
+                if focused {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
+                hint_area.width,
+            ))
+            .render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -5841,7 +6144,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -5948,7 +6251,15 @@ impl App {
                     dux_core::config::TailscaleMode::No => "never bind it and stop looking",
                 };
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -6184,7 +6495,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 input_inner.width,
             ))
             .block(input_block)
@@ -6196,12 +6507,15 @@ impl App {
                 goto: self.bindings.label_for(Action::GoToPath),
                 exit_path: self.bindings.label_for(Action::ExitPathEditorOnProjectAdd),
             };
-            let bottom_spans = self.browse_projects_input_footer(
-                *editing_path,
-                *searching,
-                &footer_keys,
-                area.width.saturating_sub(2),
-            );
+            let mode = if *editing_path {
+                BrowseMode::EditingPath
+            } else if *searching {
+                BrowseMode::Searching
+            } else {
+                BrowseMode::Browsing
+            };
+            let bottom_spans =
+                self.browse_projects_input_footer(mode, &footer_keys, area.width.saturating_sub(2));
             let list_block = Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .border_style(Style::default().fg(self.theme.overlay_border))
@@ -6261,12 +6575,11 @@ impl App {
 
     fn browse_projects_input_footer(
         &self,
-        editing_path: bool,
-        searching: bool,
+        mode: BrowseMode,
         keys: &BrowseProjectsFooterKeys,
         width: u16,
     ) -> Line<'static> {
-        let hints = if editing_path {
+        let hints = if mode == BrowseMode::EditingPath {
             // The path editor completes and adds on the literal Tab and Enter
             // (`handle_project_browser_path_editor_key`), not through a binding.
             vec![
@@ -6274,7 +6587,7 @@ impl App {
                 Hint::fixed("Enter", "add"),
                 Hint::key(keys.exit_path.clone(), "browse").pinned(),
             ]
-        } else if searching {
+        } else if mode == BrowseMode::Searching {
             // Nothing merely ends the search here: the open key opens the
             // highlighted entry (`handle_project_browser_prompt_key`), and the
             // close key clears the search.
@@ -6362,7 +6675,11 @@ impl App {
                 // Only a Retarget can be a no-op: a NewTab always
                 // creates something, whatever provider it names.
                 let is_no_op =
-                    prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current;
+                    if prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current {
+                        CurrentMark::Current
+                    } else {
+                        CurrentMark::Other
+                    };
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
                     active_provider_marker_span(is_no_op, &self.theme, self.glyphs()),
@@ -6448,7 +6765,15 @@ impl App {
                 };
                 let name = pad_to_width(option.provider.as_str(), provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -6564,7 +6889,15 @@ impl App {
                 };
                 let name = pad_to_width(&name, provider_col);
                 ListItem::new(Line::from(vec![
-                    active_provider_marker_span(option.is_current, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if option.is_current {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -6734,8 +7067,15 @@ impl App {
             )
             .render(details_area, frame.buffer_mut());
 
-        let rows =
-            manage_worktree_visual_rows(&prompt.entries, prompt.loading, prompt.error.as_deref());
+        let rows = manage_worktree_visual_rows(
+            &prompt.entries,
+            if prompt.loading {
+                Listing::Loading
+            } else {
+                Listing::Loaded
+            },
+            prompt.error.as_deref(),
+        );
         let path_col = prompt
             .entries
             .iter()
@@ -6863,13 +7203,13 @@ impl App {
         let has_checkbox = prompt.has_branch_checkbox();
         let checkbox_label = delete_worktree_checkbox_prose(prompt.branch.as_deref());
         let checkbox_height = if has_checkbox {
-            let state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
             let checkbox = Checkbox::with_prose(&checkbox_label, &self.theme)
-                .checked(prompt.delete_branch)
+                .checked(if prompt.delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
                 .state(state);
             checkbox
                 .layout(
@@ -6913,7 +7253,14 @@ impl App {
                 Style::default().fg(self.theme.hint_desc_fg),
             ))),
             (Some(branch), delete_branch) => body_lines.extend(prose_lines(
-                &delete_worktree_branch_prose(branch, delete_branch),
+                &delete_worktree_branch_prose(
+                    branch,
+                    if delete_branch {
+                        dux_core::worktree_manager::BranchRemoval::Delete
+                    } else {
+                        dux_core::worktree_manager::BranchRemoval::Keep
+                    },
+                ),
                 " ",
                 Style::default().fg(if delete_branch {
                     self.theme.warning_fg
@@ -6927,7 +7274,7 @@ impl App {
         // the checkbox never sits flush against the destructive button.
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Worktree",
                 body: body_lines,
                 controls_height: checkbox_height,
@@ -6935,13 +7282,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                    prompt.focus == DeleteWorktreeFocus::Cancel,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     "Delete worktree",
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                    prompt.focus == DeleteWorktreeFocus::Delete,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Delete),
                 ),
                 reserve_labels: &[],
             },
@@ -6949,16 +7296,16 @@ impl App {
         let checkbox_area = layout.controls;
 
         let checkbox_rect = if has_checkbox {
-            let checkbox_state = if prompt.focus == DeleteWorktreeFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 checkbox_area,
                 &checkbox_label,
-                prompt.delete_branch,
+                if prompt.delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -7026,8 +7373,15 @@ impl App {
             )
             .render(details_area, frame.buffer_mut());
 
-        let rows =
-            project_worktree_visual_rows(&prompt.entries, prompt.loading, prompt.error.as_deref());
+        let rows = project_worktree_visual_rows(
+            &prompt.entries,
+            if prompt.loading {
+                Listing::Loading
+            } else {
+                Listing::Loaded
+            },
+            prompt.error.as_deref(),
+        );
         let path_col = prompt
             .entries
             .iter()
@@ -7140,8 +7494,15 @@ impl App {
         // Which entries survive the `/` filter (indices into `entries`).
         let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
 
-        let bottom_line =
-            self.project_chooser_hint_line(list.searching, *intent, area.width.saturating_sub(2));
+        let bottom_line = self.project_chooser_hint_line(
+            if list.searching {
+                ListSearch::Searching
+            } else {
+                ListSearch::Browsing
+            },
+            *intent,
+            area.width.saturating_sub(2),
+        );
 
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -7165,7 +7526,7 @@ impl App {
                 list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 filter_input_rect.map_or(0, |rect| rect.width),
             ))
             .block(details_block)
@@ -7468,7 +7829,7 @@ impl App {
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 details_inner.width,
             )
         } else if let Some(note) = &prompt.fetch_note {
@@ -7579,7 +7940,15 @@ impl App {
                     (None, dux_core::git::BranchLocation::Local) => Vec::new(),
                 };
                 let mut spans = vec![
-                    active_provider_marker_span(is_base, &self.theme, self.glyphs()),
+                    active_provider_marker_span(
+                        if is_base {
+                            CurrentMark::Current
+                        } else {
+                            CurrentMark::Other
+                        },
+                        &self.theme,
+                        self.glyphs(),
+                    ),
                     Span::styled(
                         pad_to_width(&ellipsize_middle(&branch.name, name_col), name_col),
                         name_style,
@@ -7638,7 +8007,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Change Base Branch",
                 body: lines,
                 controls_height: 0,
@@ -7728,8 +8097,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ProjectInfoClose,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, close_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::ProjectInfo {
@@ -7796,7 +8164,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Confirm Kill",
                 body: lines,
                 controls_height: 0,
@@ -7825,13 +8193,14 @@ impl App {
         let dialog_width = 68.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox_label = "Recover last working config";
-        let checkbox_state = if *focus == ConfigReloadFailedFocus::Checkbox {
-            CheckboxState::Focused
+        let checkbox_state = CheckboxState::of(*focus, ConfigReloadFailedFocus::Checkbox);
+        let recover_mark = if *recover_old_config {
+            CheckMark::Checked
         } else {
-            CheckboxState::Normal
+            CheckMark::Unchecked
         };
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(*recover_old_config)
+            .checked(recover_mark)
             .state(checkbox_state);
         let checkbox_height = checkbox
             .layout(
@@ -7866,7 +8235,7 @@ impl App {
             frame,
             "Reload Config Failed",
             dialog_width,
-            body_lines,
+            &body_lines,
             1 + checkbox_height + 1 + BUTTON_HEIGHT,
             *scroll,
         );
@@ -7882,7 +8251,7 @@ impl App {
             frame,
             checkbox_area,
             checkbox_label,
-            *recover_old_config,
+            recover_mark,
             checkbox_state,
             None,
         );
@@ -7898,15 +8267,19 @@ impl App {
                 "Close",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedClose,
-                *focus == ConfigReloadFailedFocus::Close,
+                FocusState::of(*focus, ConfigReloadFailedFocus::Close),
             ),
             ConfirmButton::new(
                 "Recover",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedApply,
-                *focus == ConfigReloadFailedFocus::Apply,
+                FocusState::of(*focus, ConfigReloadFailedFocus::Apply),
             )
-            .enabled(*recover_old_config),
+            .availability(if *recover_old_config {
+                crate::app::confirm_dialog::Availability::Enabled
+            } else {
+                crate::app::confirm_dialog::Availability::Disabled
+            }),
             &[],
         );
 
@@ -7948,7 +8321,7 @@ impl App {
             frame,
             "Add Project Failed",
             dialog_width,
-            body_lines,
+            &body_lines,
             3,
             *scroll,
         );
@@ -7969,8 +8342,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::AddProjectFailedOk,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, ok_area, &self.theme);
 
@@ -8063,8 +8435,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::AgentInfoClose,
                 self.pressed_button,
-                true,
-                true,
+                ButtonState::Focused,
             ))
             .render(frame, close_area, &self.theme);
 
@@ -8115,7 +8486,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Terminal",
                 body: lines,
                 controls_height: 0,
@@ -8153,16 +8524,24 @@ impl App {
             .into_iter()
             .filter(|id| self.engine.providers.contains_key(id.as_ref_id()))
             .count();
-        let will_detach = close_tab_detaches(
-            self.engine.providers.contains_key(TabIdRef::new(tab_id)),
+        let will_detach = if close_tab_detaches(
+            if self.engine.providers.contains_key(TabIdRef::new(tab_id)) {
+                TabLiveness::Live
+            } else {
+                TabLiveness::Dormant
+            },
             live_tabs,
-        );
+        ) {
+            CloseTabEffect::Detaches
+        } else {
+            CloseTabEffect::DeletesTab
+        };
         let agent_name = self
             .engine
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
+            .map_or_else(|| session_id.clone(), AgentSession::display_label);
 
         let tail = confirm_close_tab_tail_prose(will_detach, promoted_label.as_deref());
         let mut lines = vec![
@@ -8198,7 +8577,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Close Tab",
                 body: lines,
                 controls_height: 0,
@@ -8232,7 +8611,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| &s.id == session_id)
-            .map_or_else(|| session_id.clone(), |s| self.session_label(s));
+            .map_or_else(|| session_id.clone(), AgentSession::display_label);
         let tail = Prose::new()
             .text(" This ends the tab's session, interrupting whatever it is doing. The tab stays in the strip, ready to start again.")
             .text(if *last_running {
@@ -8270,7 +8649,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Stop Tab",
                 body: lines,
                 controls_height: 0,
@@ -8321,7 +8700,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Detach Agent",
                 body: lines,
                 controls_height: 0,
@@ -8380,14 +8759,15 @@ impl App {
         lines.extend(self.attached_section(attached, inner_width));
         let checkbox_label = (!restart_offer.is_empty())
             .then(|| dux_core::working_copy::recreate_restart_checkbox_prose(restart_offer));
-        let checkbox_state = if *focus == RecreateWorkingCopyFocus::RestartCheckbox {
-            CheckboxState::Focused
+        let checkbox_state = CheckboxState::of(*focus, RecreateWorkingCopyFocus::RestartCheckbox);
+        let restart_tabs = if *restart_tabs {
+            CheckMark::Checked
         } else {
-            CheckboxState::Normal
+            CheckMark::Unchecked
         };
         let checkbox_height = checkbox_label.as_ref().map_or(0, |label| {
             let checkbox = Checkbox::with_prose(label, &self.theme)
-                .checked(*restart_tabs)
+                .checked(restart_tabs)
                 .state(checkbox_state);
             checkbox
                 .layout(
@@ -8398,13 +8778,12 @@ impl App {
                 .height
         });
         let confirm_label = guarded_confirm_label("Recreate", attached);
-        let restart_tabs = *restart_tabs;
         let focus = *focus;
         // The frame keeps a blank row between the checkbox and the buttons, so
         // the checkbox never sits flush against the destructive button.
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Recreate Working Copy",
                 body: lines,
                 controls_height: checkbox_height,
@@ -8412,13 +8791,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
-                    focus == RecreateWorkingCopyFocus::Cancel,
+                    FocusState::of(focus, RecreateWorkingCopyFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     &confirm_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
-                    focus == RecreateWorkingCopyFocus::Recreate,
+                    FocusState::of(focus, RecreateWorkingCopyFocus::Recreate),
                 ),
                 reserve_labels: &[],
             },
@@ -8476,7 +8855,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Check Out Default Branch",
                 body: lines,
                 controls_height: 0,
@@ -8513,7 +8892,7 @@ impl App {
         let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
-            ProjectConfirmDialog {
+            &ProjectConfirmDialog {
                 title: "Delete Project",
                 body: &body,
                 attached: &attached,
@@ -8551,7 +8930,7 @@ impl App {
         let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
-            ProjectConfirmDialog {
+            &ProjectConfirmDialog {
                 title: "Remove Project",
                 body: &body,
                 attached: &attached,
@@ -8598,13 +8977,13 @@ impl App {
     fn render_project_confirm(
         &mut self,
         frame: &mut Frame,
-        dialog: ProjectConfirmDialog<'_>,
+        dialog: &ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
         let mut body = self.prose_body(dialog.body);
         body.extend(self.attached_section(dialog.attached, confirm_inner_width(frame.area())));
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: dialog.title,
                 body,
                 controls_height: 0,
@@ -8612,13 +8991,21 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     dialog.cancel_target,
-                    !dialog.confirm_focused,
+                    if dialog.confirm_focused {
+                        FocusState::Unfocused
+                    } else {
+                        FocusState::Focused
+                    },
                 ),
                 act: ConfirmButton::new(
                     dialog.confirm_label,
                     ButtonKind::Danger,
                     dialog.confirm_target,
-                    dialog.confirm_focused,
+                    if dialog.confirm_focused {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                 ),
                 reserve_labels: &[],
             },
@@ -8674,7 +9061,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Quit dux",
                 body: lines,
                 controls_height: 0,
@@ -8800,7 +9187,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: if deletes_folder {
                     "Delete Folder"
                 } else {
@@ -8852,7 +9239,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Repository Has No Commits",
                 body: lines,
                 controls_height: 0,
@@ -8921,7 +9308,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Not a Git Repository",
                 body: lines,
                 controls_height: 0,
@@ -9024,14 +9411,14 @@ impl App {
             let BranchWarningKind::Known { default_branch } = kind else {
                 unreachable!("has_checkbox requires a known default branch");
             };
-            let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let checkbox = Checkbox::with_prose(&label, &self.theme)
-                .checked(*checkout_default)
+                .checked(if *checkout_default {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
                 .state(state);
             checkbox
                 .layout(
@@ -9054,7 +9441,7 @@ impl App {
         };
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Non-Default Branch",
                 body: body_lines,
                 controls_height: checkbox_height,
@@ -9062,13 +9449,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                    *focus == ConfirmNonDefaultBranchFocus::Cancel,
+                    FocusState::of(*focus, ConfirmNonDefaultBranchFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     add_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                    *focus == ConfirmNonDefaultBranchFocus::Add,
+                    FocusState::of(*focus, ConfirmNonDefaultBranchFocus::Add),
                 ),
                 // Sized for every label the act button can show, so toggling
                 // the checkbox never resizes the buttons.
@@ -9081,17 +9468,17 @@ impl App {
             let BranchWarningKind::Known { default_branch } = kind else {
                 unreachable!("has_checkbox requires a known default branch");
             };
-            let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 checkbox_area,
                 &label,
-                *checkout_default,
+                if *checkout_default {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -9154,7 +9541,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Branch Already Exists",
                 body: lines,
                 controls_height: 0,
@@ -9182,13 +9569,13 @@ impl App {
         else {
             return;
         };
-        let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
-            CheckboxState::Focused
-        } else {
-            CheckboxState::Normal
-        };
+        let checkbox_state = CheckboxState::of(*focus, RenameSessionFocus::RenameBranchCheckbox);
         let checkbox = Checkbox::new("Also rename the git branch")
-            .checked(*rename_branch)
+            .checked(if *rename_branch {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(checkbox_state);
         let dialog_width = 62.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
@@ -9280,7 +9667,7 @@ impl App {
         // checkbox focused the field takes no keystrokes, so a caret
         // there would be a lie (and the key handler already drops
         // every key on that basis).
-        let input_focused = *focus == RenameSessionFocus::Input;
+        let input_focused = FocusState::of(*focus, RenameSessionFocus::Input);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -9313,7 +9700,11 @@ impl App {
                 frame,
                 checkbox_area,
                 "Also rename the git branch",
-                *rename_branch,
+                if *rename_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -9388,16 +9779,16 @@ impl App {
         else {
             return;
         };
-        let checkbox_state = if *focus == CloneProjectFocus::RandomizedNameCheckbox {
-            CheckboxState::Focused
-        } else {
-            CheckboxState::Normal
-        };
+        let checkbox_state = CheckboxState::of(*focus, CloneProjectFocus::RandomizedNameCheckbox);
         let checkbox_label = "Use randomized pet name";
         let dialog_width = 80.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(*randomize_name)
+            .checked(if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            })
             .state(checkbox_state);
         let checkbox_height = checkbox
             .layout(
@@ -9468,7 +9859,7 @@ impl App {
                 .render(label_area, frame.buffer_mut());
             // The caret only appears while the field has focus: a field that
             // takes no keystrokes must not look like it does.
-            let focused = *focus == field;
+            let focused = FocusState::of(*focus, field);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -9492,7 +9883,11 @@ impl App {
             frame,
             checkbox_area,
             checkbox_label,
-            *randomize_name,
+            if *randomize_name {
+                CheckMark::Checked
+            } else {
+                CheckMark::Unchecked
+            },
             checkbox_state,
             Some(Line::from(Span::styled(
                 format!(
@@ -9674,7 +10069,7 @@ impl App {
         ] {
             Paragraph::new(Line::from(Span::styled(label, label_style)))
                 .render(label_area, frame.buffer_mut());
-            let focused = *focus == field;
+            let focused = FocusState::of(*focus, field);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -9700,12 +10095,12 @@ impl App {
                 frame,
                 areas[12],
                 review_label,
-                form.review_copy_agreed,
-                if *focus == CloneProjectFocus::ReviewCopyCheckbox {
-                    CheckboxState::Focused
+                if form.review_copy_agreed {
+                    CheckMark::Checked
                 } else {
-                    CheckboxState::Normal
+                    CheckMark::Unchecked
                 },
+                CheckboxState::of(*focus, CloneProjectFocus::ReviewCopyCheckbox),
                 None,
             );
             Some(rect)
@@ -9727,8 +10122,11 @@ impl App {
                 .state(button_state_for(
                     ButtonPressedTarget::CloneChooseExisting,
                     self.pressed_button,
-                    *focus == CloneProjectFocus::ChooseExisting,
-                    true,
+                    if *focus == CloneProjectFocus::ChooseExisting {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    },
                 ))
                 .render(frame, button, &self.theme);
             choose_button = Some(button);
@@ -9789,7 +10187,7 @@ impl App {
             scroll_offset,
             selected_row,
             expanded,
-            short_window_sample,
+            cpu_window,
             ..
         } = &self.prompt
         else {
@@ -9799,14 +10197,14 @@ impl App {
         let scroll_offset = *scroll_offset;
         let selected_row = *selected_row;
         let expanded = expanded.clone();
-        let short_window_sample = *short_window_sample;
+        let cpu_window = *cpu_window;
         self.render_resource_monitor(
             frame,
             &rows,
             scroll_offset,
             selected_row,
             &expanded,
-            short_window_sample,
+            cpu_window,
         );
     }
 
@@ -9936,7 +10334,11 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(field_focused));
+            .border_style(self.theme.overlay_field_border_style(if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            }));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -9944,7 +10346,11 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            field_focused,
+            if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             input_inner.width,
         ))
         .block(input_block)
@@ -9970,8 +10376,11 @@ impl App {
                 .state(button_state_for(
                     ButtonPressedTarget::PullRequestChooseProject,
                     self.pressed_button,
-                    !field_focused,
-                    true,
+                    if field_focused {
+                        ButtonState::Normal
+                    } else {
+                        ButtonState::Focused
+                    },
                 ))
                 .render(frame, button, &self.theme);
             choose_button = Some(button);
@@ -10055,7 +10464,7 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(true));
+            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -10063,7 +10472,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -10140,7 +10549,7 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(true));
+            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -10148,7 +10557,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -10254,7 +10663,11 @@ impl App {
         let text_area = self.render_modal_text_field_frame(
             frame,
             input_area,
-            field_focused,
+            if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             engaged.then(|| {
                 self.bindings
                     .label_for_reaching(Action::ExitCommitInput, |_| true)
@@ -10331,8 +10744,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfigureFieldCancel,
                 self.pressed_button,
-                focus == ConfigureFieldFocus::Cancel,
-                true,
+                if focus == ConfigureFieldFocus::Cancel {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, cancel_button, &self.theme);
         Button::new("Save")
@@ -10340,8 +10756,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfigureFieldSave,
                 self.pressed_button,
-                focus == ConfigureFieldFocus::Save,
-                true,
+                if focus == ConfigureFieldFocus::Save {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, save_button, &self.theme);
 
@@ -10514,7 +10933,11 @@ impl App {
                 // See `Theme::overlay_field_border_style`: drawing the
                 // unfocused state from `overlay_border` and the focused
                 // one from `border_focused` is the same colour.
-                .border_style(self.theme.overlay_field_border_style(prompt.searching))
+                .border_style(self.theme.overlay_field_border_style(if prompt.searching {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                }))
                 .style(Style::default().bg(self.theme.overlay_bg));
             let filter_inner = filter_block.inner(filter_area);
             filter_input_rect = Some(filter_inner);
@@ -10537,7 +10960,11 @@ impl App {
                     prompt.filter.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
-                    prompt.searching,
+                    if prompt.searching {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                     filter_inner.width,
                 ))
                 .style(Style::default().fg(self.theme.text_fg))
@@ -10559,7 +10986,7 @@ impl App {
                 frame.set_cursor_position((cursor_x, filter_inner.y));
             }
         }
-        let list_focused = prompt.focus == StartupCommandLogFocus::List;
+        let list_focused = FocusState::of(prompt.focus, StartupCommandLogFocus::List);
         let list_block = Block::default()
             .title(" Runs ")
             .borders(Borders::ALL)
@@ -10639,8 +11066,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::StartupCommandLogsClose,
                 self.pressed_button,
-                prompt.focus == StartupCommandLogFocus::Close,
-                true,
+                if prompt.focus == StartupCommandLogFocus::Close {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, close_area, &self.theme);
         self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
@@ -10727,7 +11157,7 @@ impl App {
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 input_inner.width,
             ))
             .block(input_block)
@@ -10822,7 +11252,19 @@ impl App {
                 KillRunningFooterAction::Selected => ButtonPressedTarget::RuntimeKillSelected,
                 KillRunningFooterAction::Visible => ButtonPressedTarget::RuntimeKillVisible,
             };
-            let state = button_state_for(press_target, self.pressed_button, focused, enabled);
+            let state = button_state_for(
+                press_target,
+                self.pressed_button,
+                if enabled {
+                    if focused {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    }
+                } else {
+                    ButtonState::Disabled
+                },
+            );
             Button::new(action.button_label())
                 .kind(kind)
                 .state(state)
@@ -10858,7 +11300,11 @@ impl App {
             .filter_map(|index| prompt.runtimes.get(*index))
             .map(|runtime| {
                 let checkbox = Checkbox::new("")
-                    .checked(prompt.selected_ids.contains(&runtime.id))
+                    .checked(if prompt.selected_ids.contains(&runtime.id) {
+                        CheckMark::Checked
+                    } else {
+                        CheckMark::Unchecked
+                    })
                     .state(CheckboxState::Normal);
                 let label_padded = fit_to_width(&runtime.label, label_col);
                 let kind_color = match runtime.kind {
@@ -10922,7 +11368,11 @@ impl App {
         // The branch box comes and goes with the worktree box, so the measured
         // height has to ask the same question the renderer and the focus ring
         // ask, or the dialog's frame stops matching its contents.
-        let offers_branch_checkbox = target.offers_branch_checkbox(*delete_worktree);
+        let offers_branch_checkbox = target.offers_branch_checkbox(if *delete_worktree {
+            dux_core::engine::WorktreeOnDelete::Remove
+        } else {
+            dux_core::engine::WorktreeOnDelete::Keep
+        });
         let warned_branches = target.warned_branches();
         let branch_label = delete_agent_branch_checkbox_prose(&warned_branches);
         // ONE measuring pass over every checkbox that will be painted, so a
@@ -10934,7 +11384,13 @@ impl App {
             } else {
                 CheckboxState::Normal
             };
-            let checkbox = checkbox.checked(checked).state(state);
+            let checkbox = checkbox
+                .checked(if checked {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                })
+                .state(state);
             checkbox
                 .layout(
                     inner_width,
@@ -11018,7 +11474,7 @@ impl App {
         let confirm_label = guarded_confirm_label("Delete", attached);
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Agent",
                 body: body_lines,
                 controls_height: checkbox_height + branch_checkbox_height,
@@ -11031,16 +11487,16 @@ impl App {
             stack_rows(layout.controls, [checkbox_height, branch_checkbox_height]);
 
         let checkbox_rect = if offers_checkbox {
-            let checkbox_state = if *focus == DeleteAgentFocus::WorktreeCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::WorktreeCheckbox);
             let (rect, _) = self.render_overlay_checkbox(
                 frame,
                 checkbox_area,
                 DELETE_AGENT_WORKTREE_LABEL,
-                *delete_worktree,
+                if *delete_worktree {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -11054,16 +11510,16 @@ impl App {
         // Published only where it is actually painted, so a click cannot land
         // on a control the user cannot see.
         let branch_checkbox_rect = if offers_branch_checkbox {
-            let checkbox_state = if *focus == DeleteAgentFocus::BranchCheckbox {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
+            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::BranchCheckbox);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 branch_checkbox_area,
                 &branch_label,
-                *delete_branch,
+                if *delete_branch {
+                    CheckMark::Checked
+                } else {
+                    CheckMark::Unchecked
+                },
                 checkbox_state,
                 None,
             );
@@ -11098,12 +11554,15 @@ impl App {
         };
         self.render_dim_overlay(frame);
         let randomize_checkbox = Checkbox::new("Use randomized pet name")
-            .checked(*randomize_name)
-            .state(if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
-                CheckboxState::Focused
+            .checked(if *randomize_name {
+                CheckMark::Checked
             } else {
-                CheckboxState::Normal
-            });
+                CheckMark::Unchecked
+            })
+            .state(CheckboxState::of(
+                *focus,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ));
         let dialog_width = 60.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let randomize_checkbox_height = randomize_checkbox
@@ -11256,7 +11715,7 @@ impl App {
 
         // Same rule as the rename modal: the caret only appears while
         // the field itself has focus.
-        let input_focused = *focus == NameNewAgentFocus::Input;
+        let input_focused = FocusState::of(*focus, NameNewAgentFocus::Input);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -11278,12 +11737,12 @@ impl App {
             frame,
             randomize_checkbox_area,
             "Use randomized pet name",
-            *randomize_name,
-            if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
-                CheckboxState::Focused
+            if *randomize_name {
+                CheckMark::Checked
             } else {
-                CheckboxState::Normal
+                CheckMark::Unchecked
             },
+            CheckboxState::of(*focus, NameNewAgentFocus::RandomizedNameCheckbox),
             Some(Line::from(Span::styled(
                 format!(
                     "{}Fills this prompt with a fresh pet-tool name",
@@ -11298,12 +11757,12 @@ impl App {
                 frame,
                 copy_checkbox_area,
                 copy_checkbox_label,
-                *copy_changes,
-                if *focus == NameNewAgentFocus::CopyChangesCheckbox {
-                    CheckboxState::Focused
+                if *copy_changes {
+                    CheckMark::Checked
                 } else {
-                    CheckboxState::Normal
+                    CheckMark::Unchecked
                 },
+                CheckboxState::of(*focus, NameNewAgentFocus::CopyChangesCheckbox),
                 Some(Line::from(Span::styled(
                     format!(
                         "{}Requires the checkout to be on the same commit",
@@ -11324,12 +11783,12 @@ impl App {
                     frame,
                     review_checkbox_area,
                     review_label,
-                    question.agreed,
-                    if *focus == NameNewAgentFocus::ReviewCopyCheckbox {
-                        CheckboxState::Focused
+                    if question.agreed {
+                        CheckMark::Checked
                     } else {
-                        CheckboxState::Normal
+                        CheckMark::Unchecked
                     },
+                    CheckboxState::of(*focus, NameNewAgentFocus::ReviewCopyCheckbox),
                     None,
                 );
                 Some(rect)
@@ -11718,7 +12177,7 @@ impl App {
         let name_inner = self.render_modal_text_field_frame(
             frame,
             name_area,
-            focus == MacroEditFocus::Name,
+            FocusState::of(focus, MacroEditFocus::Name),
             None,
         );
         // The one single-line renderer, never a hand-rolled copy: it owns the
@@ -11729,7 +12188,7 @@ impl App {
             state.name_input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            focus == MacroEditFocus::Name,
+            FocusState::of(focus, MacroEditFocus::Name),
             name_inner.width,
         ))
         .render(name_inner, frame.buffer_mut());
@@ -11748,7 +12207,7 @@ impl App {
         let text_inner = self.render_modal_text_field_frame(
             frame,
             text_area,
-            focus == MacroEditFocus::Text,
+            FocusState::of(focus, MacroEditFocus::Text),
             engaged.then(|| {
                 self.bindings
                     .label_for_reaching(Action::ExitCommitInput, |_| true)
@@ -11816,7 +12275,14 @@ impl App {
             self.render_macro_editor_buttons(frame, buttons_area, focus);
 
         // ── Hints. Every key is resolved through the bindings. ────────────
-        let hints = self.macro_editor_hints(focus, engaged);
+        let hints = self.macro_editor_hints(
+            focus,
+            if engaged {
+                FieldEngagement::Engaged
+            } else {
+                FieldEngagement::Unengaged
+            },
+        );
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
 
@@ -11900,8 +12366,11 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::EditMacroCancel,
                 self.pressed_button,
-                focus == MacroEditFocus::Cancel,
-                true,
+                if focus == MacroEditFocus::Cancel {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, cancel_button, &self.theme);
         Button::new("Save")
@@ -11909,15 +12378,18 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::EditMacroSave,
                 self.pressed_button,
-                focus == MacroEditFocus::Save,
-                true,
+                if focus == MacroEditFocus::Save {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
             ))
             .render(frame, save_button, &self.theme);
         (cancel_button, save_button)
     }
 
-    fn macro_editor_hints(&self, focus: MacroEditFocus, engaged: bool) -> Vec<Hint> {
-        if focus == MacroEditFocus::Text && engaged {
+    fn macro_editor_hints(&self, focus: MacroEditFocus, engagement: FieldEngagement) -> Vec<Hint> {
+        if focus == MacroEditFocus::Text && engagement == FieldEngagement::Engaged {
             return vec![
                 Hint::key(
                     self.bindings.labels_for(Action::ExitCommitInput),
@@ -11958,7 +12430,7 @@ impl App {
         &self,
         frame: &mut Frame,
         area: Rect,
-        focused: bool,
+        focused: FocusState,
         engaged_exit_key: Option<String>,
     ) -> Rect {
         let border_style = self.theme.overlay_field_border_style(focused);
@@ -12004,7 +12476,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Macro",
                 body: lines,
                 controls_height: 0,
@@ -12037,13 +12509,13 @@ impl App {
     /// gate in `super::input`.
     fn project_chooser_hint_line(
         &self,
-        searching: bool,
+        search: ListSearch,
         intent: ProjectChooserIntent,
         width: u16,
     ) -> Line<'static> {
         let standalone = if intent != ProjectChooserIntent::NewAgent {
             Hint::maybe_key(None::<String>, "standalone")
-        } else if searching {
+        } else if search == ListSearch::Searching {
             Hint::maybe_key(
                 self.bindings
                     .label_for_text_field_dialog(Action::NewStandaloneAgent),
@@ -12057,7 +12529,7 @@ impl App {
         };
         let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let hints = if searching {
+        let hints = if search == ListSearch::Searching {
             vec![confirm, Hint::key(close_key, "clear").pinned(), standalone]
         } else {
             vec![
@@ -12141,7 +12613,7 @@ impl App {
         // boxes would be dead chrome spending three rows of a surface whose
         // whole point is maximum terminal space. The windowed center pane is
         // where tabs render and switch.
-        self.render_agent_terminal(frame, area, &title, true);
+        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -12151,7 +12623,7 @@ impl App {
         self.paint_modal_surface(frame, area, self.theme.app_bg);
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
-        self.render_agent_terminal(frame, area, " Terminal ", true);
+        self.render_agent_terminal(frame, area, " Terminal ", FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -12169,7 +12641,7 @@ impl App {
                 )
             },
         );
-        let outer_block = self.themed_block(&title, true);
+        let outer_block = self.themed_block(&title, FocusState::Focused);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
         if inner.height < 2 || inner.width < 4 {
@@ -12316,7 +12788,7 @@ impl App {
             cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -12397,7 +12869,7 @@ impl App {
             cursor,
             cursor_fg,
             cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -12468,7 +12940,7 @@ impl App {
         );
     }
 
-    fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
+    fn themed_block<'a>(&self, title: &'a str, focused: FocusState) -> Block<'a> {
         self.themed_block_line(
             Line::from(Span::styled(title, self.theme.title_style(focused))),
             focused,
@@ -12478,7 +12950,7 @@ impl App {
     /// The same block for a title that is already several styled pieces, such
     /// as the changes groups' recap, whose figures wear the diff colors rather
     /// than the title's.
-    fn themed_block_line<'a>(&self, title: Line<'a>, focused: bool) -> Block<'a> {
+    fn themed_block_line<'a>(&self, title: Line<'a>, focused: FocusState) -> Block<'a> {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -12610,7 +13082,7 @@ impl App {
         frame: &mut Frame,
         title: &str,
         dialog_width: u16,
-        body_lines: Vec<Line<'static>>,
+        body_lines: &[Line<'static>],
         extra_inner_rows: u16,
         scroll: u16,
     ) -> ErrorDialogLayout {
@@ -12620,7 +13092,7 @@ impl App {
         // scroll clamp and the marker are measured in. A wrapping paragraph draws
         // more rows than it has lines and never reports how many, the trap the
         // help page hit, where the bottom of the page was unreachable.
-        let wrapped = wrap_styled_lines(&body_lines, inner_width as usize);
+        let wrapped = wrap_styled_lines(body_lines, inner_width as usize);
         let total_rows = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
 
         // Cap the message pane so the dialog still fits the terminal WITH its
@@ -12722,7 +13194,7 @@ impl App {
         scroll_offset: u16,
         selected_row: usize,
         expanded: &HashSet<u32>,
-        short_window_sample: bool,
+        cpu_window: CpuWindow,
     ) {
         use ratatui::widgets::{Cell, Row, Table, TableState};
 
@@ -12775,7 +13247,7 @@ impl App {
                     // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
                     // monitor's poll interval: real numbers, noisier because they
                     // cover less wall-clock time. See `ResourceCollector::sample`.
-                    let cpu_str = if short_window_sample {
+                    let cpu_str = if cpu_window == CpuWindow::Short {
                         format!("~{:.1}%", stat.cpu_percent)
                     } else {
                         format!("{:.1}%", stat.cpu_percent)
@@ -12822,7 +13294,7 @@ impl App {
                         child.name.clone()
                     };
                     let label = ellipsize_end(&format!("    {connector} {name}"), name_w);
-                    let cpu_str = if short_window_sample {
+                    let cpu_str = if cpu_window == CpuWindow::Short {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
                         format!("{:.1}%", child.cpu_percent)
@@ -12969,6 +13441,14 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
         ),
     }
 }
+/// Who owns a terminal, as far as its sidebar row's second line cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalOwnerKind {
+    /// Nothing owns it: the row names its spawn directory under the star.
+    Standalone,
+    /// An agent or a project owns it: the row names the owner under the arrow.
+    Owned,
+}
 
 /// Build a terminal row's three lines (primary label, owner + state word, and a
 /// trailing blank spacer) so a companion-terminal row is structurally identical
@@ -12993,8 +13473,7 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 fn terminal_row_lines(
     theme: &crate::theme::Theme,
     glyphs: &crate::theme::Glyphs,
-    typing: bool,
-    working: bool,
+    facts: dux_core::row_state::TerminalRowFacts,
     spinner: char,
     // The resolved display title (already normalized + collision-disambiguated by
     // the shared `terminal_title` rule), or `None` when the terminal is idle.
@@ -13002,7 +13481,7 @@ fn terminal_row_lines(
     owner_name: &str,
     // Whether this terminal is standalone (owned by nothing at all), resolved by
     // the caller through an exhaustive match on the owner.
-    standalone: bool,
+    owner: TerminalOwnerKind,
     text_width: u16,
     elapsed_ms: u128,
     // The live sidebar query and the style to emphasize its hit with, or `None`
@@ -13013,9 +13492,9 @@ fn terminal_row_lines(
     // The glyph SHAPE encodes state (typing caret, running spinner, else the
     // steady dot); its color is the neutral identity color, never the live-state
     // color (that lives on the state word below).
-    let glyph = if typing {
+    let glyph = if facts.typing {
         crate::theme::TYPING_GLYPH.to_string()
-    } else if working {
+    } else if facts.working {
         spinner.to_string()
     } else {
         crate::theme::DOT_GLYPH.to_string()
@@ -13048,15 +13527,11 @@ fn terminal_row_lines(
     // web's `terminalStateWord`); this surface only words it. The busy word is
     // "Running" (a terminal runs a process; it does not "work" like an agent);
     // agents keep "Working".
-    let word =
-        match dux_core::row_state::terminal_row_state(dux_core::row_state::TerminalRowFacts {
-            working,
-            typing,
-        }) {
-            dux_core::row_state::RowState::Typing => "Typing",
-            dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
-            _ => "Idle",
-        };
+    let word = match dux_core::row_state::terminal_row_state(facts) {
+        dux_core::row_state::RowState::Typing => "Typing",
+        dux_core::row_state::RowState::Busy => TERMINAL_WORKING_WORD,
+        _ => "Idle",
+    };
     // The same working cue the agent row wears: the word pulses toward the muted
     // tone and a cycling ellipsis follows it in a fixed three-cell slot.
     let (word_text, word_color) = if word == TERMINAL_WORKING_WORD {
@@ -13069,7 +13544,7 @@ fn terminal_row_lines(
                 dux_core::working_cue::pulse_step(elapsed),
             ),
         )
-    } else if typing {
+    } else if facts.typing {
         (word.to_string(), theme.session_typing)
     } else {
         (word.to_string(), muted)
@@ -13079,7 +13554,7 @@ fn terminal_row_lines(
     // owned terminal wears the muted return arrow ("owned by"); a standalone
     // terminal wears the standalone star and its directory in the standalone
     // identity tone, the one indicator every standalone row shares.
-    let (marker, marker_fg) = if standalone {
+    let (marker, marker_fg) = if owner == TerminalOwnerKind::Standalone {
         (
             format!("  {} ", glyphs.standalone),
             theme.standalone_location_fg,
@@ -13090,7 +13565,7 @@ fn terminal_row_lines(
     // A standalone terminal's label is its spawn directory, a path cut from its
     // start; an owned terminal's is its owner's name, cut from its end.
     let marker_span = Span::styled(marker, Style::default().fg(marker_fg));
-    let marker = if standalone {
+    let marker = if owner == TerminalOwnerKind::Standalone {
         MetaMarker::path(marker_span)
     } else {
         MetaMarker::name(marker_span)
@@ -13105,7 +13580,7 @@ fn terminal_row_lines(
         Span::styled(word_text, Style::default().fg(word_color)),
         None,
         MetaCounts::default(),
-        MetaLineStyle {
+        &MetaLineStyle {
             sep: Style::default().fg(muted),
             highlight,
         },
@@ -13196,19 +13671,17 @@ pub(crate) fn changes_placeholder_row(
 }
 
 pub(crate) fn format_line_stats(
-    additions: usize,
-    deletions: usize,
-    binary: bool,
-    diff_excluded: bool,
+    file: &ChangedFile,
     theme: &crate::theme::Theme,
 ) -> Vec<Span<'static>> {
-    if binary {
+    let (additions, deletions) = (file.additions, file.deletions);
+    if file.binary {
         return vec![Span::styled(
             "bin",
             Style::default().fg(theme.diff_binary_fg),
         )];
     }
-    if diff_excluded {
+    if file.diff_excluded {
         return vec![Span::styled(
             "Excl",
             Style::default().fg(theme.diff_excluded_fg),
@@ -13393,11 +13866,11 @@ impl App {
 /// set for itself. A glyph in the string survives. The blanks are measured in
 /// display columns, so either icon set lines the names up.
 fn active_provider_marker_span(
-    is_active: bool,
+    mark: CurrentMark,
     theme: &Theme,
     glyphs: &crate::theme::Glyphs,
 ) -> Span<'static> {
-    let marker = if is_active {
+    let marker = if mark == CurrentMark::Current {
         format!(" {} ", glyphs.check)
     } else {
         " ".repeat(display_width(glyphs.check) + 2)
@@ -13516,7 +13989,7 @@ fn render_single_line_field(
     cursor: usize,
     cursor_fg: Color,
     cursor_bg: Color,
-    focused: bool,
+    focused: FocusState,
     width: u16,
 ) -> Line<'static> {
     let skip = single_line_scroll(text, cursor, usize::from(prefix.cell_width()), width);
@@ -13555,9 +14028,9 @@ fn render_single_line_cursor_input(
     cursor: usize,
     cursor_fg: Color,
     cursor_bg: Color,
-    focused: bool,
+    focused: FocusState,
 ) -> Line<'static> {
-    if !focused {
+    if focused == FocusState::Unfocused {
         return Line::from(Span::raw(format!("{prefix}{text}")));
     }
     use unicode_segmentation::UnicodeSegmentation;
@@ -13849,8 +14322,8 @@ fn status_footer_lines(status_text: &str, width: u16, countdown_columns: usize) 
 /// `ConfirmCloseTabDialog.tsx`, deliberately, so the two surfaces promise the
 /// same thing; `live_tabs` counts every live tab of the agent, the one being
 /// closed included.
-fn close_tab_detaches(closing_tab_is_live: bool, live_tabs: usize) -> bool {
-    if closing_tab_is_live {
+fn close_tab_detaches(closing: TabLiveness, live_tabs: usize) -> bool {
+    if closing == TabLiveness::Live {
         live_tabs <= 1
     } else {
         live_tabs == 0
@@ -13864,13 +14337,13 @@ fn close_tab_detaches(closing_tab_is_live: bool, live_tabs: usize) -> bool {
 /// and `successor` then names the tab taking its place). Mirrors the web's
 /// `ConfirmCloseTabDialog.tsx` so the two surfaces promise the same thing.
 #[cfg(test)]
-fn confirm_close_tab_tail(will_detach: bool, successor: Option<&str>) -> String {
-    confirm_close_tab_tail_prose(will_detach, successor).plain()
+fn confirm_close_tab_tail(effect: CloseTabEffect, successor: Option<&str>) -> String {
+    confirm_close_tab_tail_prose(effect, successor).plain()
 }
 
 /// What closing the tab costs, with the successor tab marked as a name.
-fn confirm_close_tab_tail_prose(will_detach: bool, successor: Option<&str>) -> Prose {
-    let mut tail = Prose::new().text(if will_detach {
+fn confirm_close_tab_tail_prose(effect: CloseTabEffect, successor: Option<&str>) -> Prose {
+    let mut tail = Prose::new().text(if effect == CloseTabEffect::Detaches {
         " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
     } else {
         " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation."
@@ -13924,6 +14397,24 @@ fn bare_repositories_kept_line(
 
 #[cfg(test)]
 mod tests {
+
+    /// Whether a test's row drag has moved far enough to become a drag.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DragPromotion {
+        /// It is a drag.
+        Promoted,
+        /// It is still a press.
+        Pending,
+    }
+
+    /// How wide a test's startup log lines are.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LogLineWidth {
+        /// Exactly as wide as the content pane.
+        PaneWide,
+        /// Short numbered lines.
+        Short,
+    }
     use super::*;
 
     use crate::app::test_support::{
@@ -14020,7 +14511,7 @@ mod tests {
         let app = test_app(default_bindings());
 
         let idle = line_text(&app.project_chooser_hint_line(
-            false,
+            ListSearch::Browsing,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14030,7 +14521,7 @@ mod tests {
         );
 
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14047,7 +14538,11 @@ mod tests {
         let app = test_app(default_bindings());
         for searching in [false, true] {
             let line = line_text(&app.project_chooser_hint_line(
-                searching,
+                if searching {
+                    ListSearch::Searching
+                } else {
+                    ListSearch::Browsing
+                },
                 crate::app::ProjectChooserIntent::NewAgent,
                 200,
             ));
@@ -14059,20 +14554,17 @@ mod tests {
     }
 
     fn bindings_with_standalone_keys(keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
-        crate::keybindings::RuntimeBindings::new(
-            move |action| {
-                if action == crate::keybindings::Action::NewStandaloneAgent {
-                    keys.clone()
-                } else {
-                    crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == action)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        )
+        crate::keybindings::RuntimeBindings::new(move |action| {
+            if action == crate::keybindings::Action::NewStandaloneAgent {
+                keys.clone()
+            } else {
+                crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        })
     }
 
     /// A rebinding that leaves only keys the filter types must drop the whole
@@ -14085,7 +14577,7 @@ mod tests {
             crokey::key!(ctrl - x),
         ]));
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14096,7 +14588,7 @@ mod tests {
 
         let letters_only = test_app(bindings_with_standalone_keys(vec![crokey::key!(s)]));
         let searching = line_text(&letters_only.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::NewAgent,
             200,
         ));
@@ -14119,7 +14611,7 @@ mod tests {
         let app = test_app(default_bindings());
 
         let idle = line_text(&app.project_chooser_hint_line(
-            false,
+            ListSearch::Browsing,
             crate::app::ProjectChooserIntent::Manage,
             200,
         ));
@@ -14129,7 +14621,7 @@ mod tests {
         );
 
         let searching = line_text(&app.project_chooser_hint_line(
-            true,
+            ListSearch::Searching,
             crate::app::ProjectChooserIntent::Manage,
             200,
         ));
@@ -14150,7 +14642,15 @@ mod tests {
             crate::app::ProjectChooserIntent::ProjectTerminal,
         ] {
             for searching in [false, true] {
-                let line = line_text(&app.project_chooser_hint_line(searching, intent, 200));
+                let line = line_text(&app.project_chooser_hint_line(
+                    if searching {
+                        ListSearch::Searching
+                    } else {
+                        ListSearch::Browsing
+                    },
+                    intent,
+                    200,
+                ));
                 assert!(
                     !line.contains("standalone"),
                     "{intent:?} (searching={searching}) must not name it, got {line:?}"
@@ -14864,7 +15364,7 @@ mod tests {
             dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
                 folder_path: "/home/someone/My Notes".to_string(),
             });
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
 
         let PromptState::RenameSession {
             input,
@@ -14903,7 +15403,7 @@ mod tests {
         // workspace and not about the modal having lost its checkbox.
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
             .draw(|frame| app.render(frame))
@@ -14932,7 +15432,7 @@ mod tests {
             dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
                 folder_path: "/home/someone/My Notes".to_string(),
             });
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(
             rows.contains("leave empty to show the folder's name"),
@@ -14960,7 +15460,7 @@ mod tests {
     fn the_rename_modal_warns_about_what_a_branch_rename_leaves_behind() {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
-        app.open_rename_session().expect("open the rename modal");
+        app.open_rename_session();
         let rows = rename_modal_rows(&mut app);
         assert!(rows.contains("agent-branch"), "{rows}");
         assert!(rows.contains("to the new name."), "neutral: {rows}");
@@ -15012,7 +15512,7 @@ mod tests {
             .folder_repo_statuses
             .insert(id, dux_core::git::FolderRepoStatus::NoRepo);
 
-        app.refresh_changed_files_now().expect("refresh is handled");
+        app.refresh_changed_files_now();
         let message = app.status.message();
         assert!(
             message.contains("This folder has no git repository"),
@@ -15042,7 +15542,11 @@ mod tests {
             agent_row_owner_tag(
                 &session,
                 project.as_ref(),
-                app.engine.working_copy_missing(&session.id)
+                if app.engine.working_copy_missing(&session.id) {
+                    WorkingCopy::Missing
+                } else {
+                    WorkingCopy::Present
+                }
             ),
             AgentRowOwnerTag::WorkingCopyMissing
         );
@@ -15101,7 +15605,7 @@ mod tests {
     #[test]
     fn a_standalone_agents_row_names_its_folder_instead_of_a_project() {
         let session = standalone_row_session("/home/someone/notes");
-        let tag = agent_row_owner_tag(&session, None, false);
+        let tag = agent_row_owner_tag(&session, None, WorkingCopy::Present);
         match tag {
             AgentRowOwnerTag::Folder { label } => {
                 assert!(label.contains("notes"), "got {label:?}");
@@ -15201,18 +15705,18 @@ mod tests {
     /// these one column right.
     #[test]
     fn the_project_glyph_keeps_the_agent_rows_columns_in_line() {
-        for nerd_font_icons in [false, true] {
-            assert_agent_row_columns_line_up(nerd_font_icons);
+        for icons in [crate::theme::IconSet::Plain, crate::theme::IconSet::Nerd] {
+            assert_agent_row_columns_line_up(icons);
         }
     }
 
-    fn assert_agent_row_columns_line_up(nerd_font_icons: bool) {
+    fn assert_agent_row_columns_line_up(icons: crate::theme::IconSet) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let glyphs = crate::theme::Glyphs::for_config(nerd_font_icons);
+        let glyphs = crate::theme::Glyphs::for_config(icons);
         let mut app = test_app(default_bindings());
-        app.engine.config.ui.nerd_font_icons = nerd_font_icons;
+        app.engine.config.ui.nerd_font_icons = icons == crate::theme::IconSet::Nerd;
         let mut standalone = app.engine.sessions[0].clone();
         standalone.id = "session-2".to_string();
         standalone.title = Some("Notes".to_string());
@@ -15255,7 +15759,14 @@ mod tests {
             "demo",
             "the project name follows the glyph"
         );
-        let word = agent_state_word(app.engine.sessions[0].status, false, false, false);
+        let word = agent_state_word(
+            app.engine.sessions[0].status,
+            dux_core::row_state::AgentRowFacts {
+                working: false,
+                typing: false,
+                needs_attention: false,
+            },
+        );
         assert_eq!(
             run(mx + 6, my, 3 + word.chars().count() as u16),
             format!(" · {word}"),
@@ -15341,13 +15852,73 @@ mod tests {
     fn agent_state_word_mirrors_the_web_states() {
         use crate::model::SessionStatus::{Active, Detached, Exited};
         // Args are (status, working, typing, needs_attention).
-        assert_eq!(agent_state_word(Active, true, false, false), "Working");
-        assert_eq!(agent_state_word(Active, false, false, false), "Idle");
-        assert_eq!(agent_state_word(Detached, false, false, false), "Detached");
-        assert_eq!(agent_state_word(Exited, false, false, false), "Exited");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Working"
+        );
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Idle"
+        );
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Detached"
+        );
+        assert_eq!(
+            agent_state_word(
+                Exited,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Exited"
+        );
         // Needs-attention wins over every other state, including working.
-        assert_eq!(agent_state_word(Active, true, false, true), "Needs you");
-        assert_eq!(agent_state_word(Detached, false, false, true), "Needs you");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
     }
 
     /// The search-hit split: styled spans around the matched char range, the
@@ -15400,12 +15971,14 @@ mod tests {
                 let (_, line2) = terminal_row_lines(
                     &theme,
                     &crate::theme::Glyphs::PLAIN,
-                    false,
-                    true,
+                    dux_core::row_state::TerminalRowFacts {
+                        working: true,
+                        typing: false,
+                    },
                     '◠',
                     Some("cargo test"),
                     "proj",
-                    false,
+                    TerminalOwnerKind::Owned,
                     width,
                     elapsed,
                     None,
@@ -15475,12 +16048,14 @@ mod tests {
         let (idle0, idle1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            false,
+            dux_core::row_state::TerminalRowFacts {
+                working: false,
+                typing: false,
+            },
             '◜',
             None,
             "my-branch",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -15508,12 +16083,14 @@ mod tests {
         let (working0, working1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            true,
+            dux_core::row_state::TerminalRowFacts {
+                working: true,
+                typing: false,
+            },
             '◠',
             Some("cargo test"),
             "proj",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -15545,12 +16122,14 @@ mod tests {
         let (typing0, typing1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            true,
-            true,
+            dux_core::row_state::TerminalRowFacts {
+                working: true,
+                typing: true,
+            },
             '◝',
             Some("vim"),
             "proj",
-            false,
+            TerminalOwnerKind::Owned,
             width,
             0,
             None,
@@ -15571,12 +16150,14 @@ mod tests {
         let (_, line2) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
-            false,
-            false,
+            dux_core::row_state::TerminalRowFacts {
+                working: false,
+                typing: false,
+            },
             '◜',
             None,
             "~/notes",
-            true,
+            TerminalOwnerKind::Standalone,
             40,
             0,
             None,
@@ -16179,7 +16760,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
         let expected_items = app.left_items().len();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -16274,14 +16855,64 @@ mod tests {
     fn agent_state_word_typing_sits_below_attention_and_above_working() {
         use crate::model::SessionStatus::{Active, Detached, Exited};
         // Typing is surfaced for an Active, typing session.
-        assert_eq!(agent_state_word(Active, false, true, false), "Typing");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Typing"
+        );
         // Attention still wins over typing.
-        assert_eq!(agent_state_word(Active, false, true, true), "Needs you");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
         // Typing wins over working when both are set.
-        assert_eq!(agent_state_word(Active, true, true, false), "Typing");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Typing"
+        );
         // Typing never applies to a non-Active session.
-        assert_eq!(agent_state_word(Detached, false, true, false), "Detached");
-        assert_eq!(agent_state_word(Exited, false, true, false), "Exited");
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Detached"
+        );
+        assert_eq!(
+            agent_state_word(
+                Exited,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Exited"
+        );
     }
 
     /// Render the sidebar with a live drag and return the painted buffer, the
@@ -16289,7 +16920,7 @@ mod tests {
     fn render_with_row_drag(
         source: usize,
         hover: Option<usize>,
-        promoted: bool,
+        promotion: DragPromotion,
     ) -> (ratatui::buffer::Buffer, Rect, Vec<usize>) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -16314,7 +16945,7 @@ mod tests {
             source_id: format!("s{source}"),
             hover,
             hover_id: hover.map(|index| format!("s{index}")),
-            promoted,
+            promoted: promotion == DragPromotion::Promoted,
         });
 
         let backend = TestBackend::new(120, 40);
@@ -16401,7 +17032,8 @@ mod tests {
     #[test]
     fn the_insertion_rule_marks_the_gap_the_drop_would_land_in() {
         for (source, hover) in [(0usize, 2usize), (2, 0), (0, 1), (1, 0)] {
-            let (buf, area, map) = render_with_row_drag(source, Some(hover), true);
+            let (buf, area, map) =
+                render_with_row_drag(source, Some(hover), DragPromotion::Promoted);
             let boundary = crate::app::reorder::drop_marker_boundary(source, hover);
             let expected = if boundary == 0 {
                 area.y - 1
@@ -16516,7 +17148,7 @@ mod tests {
 
     #[test]
     fn an_unpromoted_gesture_paints_no_marker() {
-        let (buf, area, _map) = render_with_row_drag(0, None, false);
+        let (buf, area, _map) = render_with_row_drag(0, None, DragPromotion::Pending);
         assert_eq!(
             painted_marker_row(&buf, area),
             None,
@@ -16573,7 +17205,7 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.engine.projects[0].path_missing = true;
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -16672,7 +17304,7 @@ mod tests {
     /// than promising a resume.
     #[test]
     fn confirm_close_tab_tail_is_destructive_for_extra_tab_with_siblings() {
-        let tail = confirm_close_tab_tail(false, None);
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, None);
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
         assert!(tail.contains("always starts fresh"), "tail: {tail}");
         assert!(tail.contains("history command"), "tail: {tail}");
@@ -16683,7 +17315,7 @@ mod tests {
     /// non-destructive-but-detaching copy.
     #[test]
     fn confirm_close_tab_tail_last_live_tab_detaches() {
-        assert!(confirm_close_tab_tail(true, None).contains("last live tab"));
+        assert!(confirm_close_tab_tail(CloseTabEffect::Detaches, None).contains("last live tab"));
     }
 
     /// Closing the tab in the session slot hands the slot on, so the tail names
@@ -16692,14 +17324,14 @@ mod tests {
     /// detaches, because the close took its last live process).
     #[test]
     fn confirm_close_tab_tail_names_the_tab_taking_the_slot() {
-        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, Some("Codex"));
         assert!(
             tail.contains("The next tab, Codex, takes its place as the agent's first tab."),
             "tail: {tail}"
         );
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
 
-        let both = confirm_close_tab_tail(true, Some("Codex"));
+        let both = confirm_close_tab_tail(CloseTabEffect::Detaches, Some("Codex"));
         assert!(both.contains("last live tab"), "tail: {both}");
         assert!(both.contains("takes its place"), "tail: {both}");
     }
@@ -16743,7 +17375,7 @@ mod tests {
 
         // The tail's last words, taken from the same pure copy the modal
         // renders, so a wording change cannot silently defeat the check.
-        let tail = confirm_close_tab_tail(false, Some("Codex"));
+        let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, Some("Codex"));
         let last_words = tail.rsplit(' ').take(3).collect::<Vec<_>>();
         for word in last_words {
             assert!(
@@ -16763,10 +17395,10 @@ mod tests {
     /// tab beside a live sibling changes nothing about the agent.
     #[test]
     fn close_tab_detaches_only_when_the_last_live_tab_goes() {
-        assert!(close_tab_detaches(true, 1));
-        assert!(!close_tab_detaches(true, 2));
-        assert!(close_tab_detaches(false, 0));
-        assert!(!close_tab_detaches(false, 1));
+        assert!(close_tab_detaches(TabLiveness::Live, 1));
+        assert!(!close_tab_detaches(TabLiveness::Live, 2));
+        assert!(close_tab_detaches(TabLiveness::Dormant, 0));
+        assert!(!close_tab_detaches(TabLiveness::Dormant, 1));
     }
 
     /// Render-level regression for the drift crumb gate: when the agent's
@@ -17501,18 +18133,15 @@ mod tests {
     /// to the item that follows it, so nothing may trail the last one.
     #[test]
     fn typeable_hint_closes_up_when_no_pane_chord_survives() {
-        let bindings = crate::keybindings::RuntimeBindings::new(
-            |action| match action {
-                Action::FocusNext => vec![crokey::key!(tab)],
-                Action::FocusPrev => vec![crokey::key!(shift - tab)],
-                _ => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let bindings = crate::keybindings::RuntimeBindings::new(|action| match action {
+            Action::FocusNext => vec![crokey::key!(tab)],
+            Action::FocusPrev => vec![crokey::key!(shift - tab)],
+            _ => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = test_app(bindings);
         app.engine.config.ui.tab_reaches_agent = true;
 
@@ -17552,7 +18181,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
                 assert_eq!(
                     term_area, area,
                     "single tab with the preference off must not reserve a strip row"
@@ -17581,7 +18210,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
                 assert_eq!(
                     term_area,
                     Rect::new(area.x, area.y + 3, area.width, area.height - 3),
@@ -17653,7 +18282,7 @@ mod tests {
         let bottom_row = Rect::new(area.x, area.y + 2, area.width, 1);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -17803,7 +18432,7 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                    app.render_agent_tab_strip_if_needed(frame, area);
                 })
                 .expect("render frame");
             strip_row_cells(&terminal, label_row)
@@ -17875,7 +18504,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -17917,7 +18546,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -17950,7 +18579,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -18007,7 +18636,7 @@ mod tests {
             let area = Rect::new(0, 0, width, 24);
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                    app.render_agent_tab_strip_if_needed(frame, area);
                 })
                 .expect("render frame");
 
@@ -18076,7 +18705,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer().clone();
@@ -18178,32 +18807,32 @@ mod tests {
         let spinner = crate::theme::SPINNER_FRAMES[3];
 
         assert_eq!(
-            tab_activity_glyph(false, false, true, 3),
+            tab_activity_glyph(TabCue::Quiet, BlinkPhase::Lit, 3),
             TabActivityGlyph::Blank,
             "an idle tab's slot is blank"
         );
         assert_eq!(
-            tab_activity_glyph(true, false, true, 3),
+            tab_activity_glyph(TabCue::Working, BlinkPhase::Lit, 3),
             TabActivityGlyph::Working(spinner),
             "a working tab carries the shared spinner frame"
         );
         assert_eq!(
-            tab_activity_glyph(false, true, true, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
             TabActivityGlyph::Attention,
             "a flagged tab carries the attention dot"
         );
         assert_eq!(
-            tab_activity_glyph(true, true, true, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Lit, 3),
             TabActivityGlyph::Attention,
             "attention beats the working spinner, as it does on the agent row"
         );
         assert_eq!(
-            tab_activity_glyph(false, true, false, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
             TabActivityGlyph::Blank,
             "the hidden half of the blink is blank"
         );
         assert_eq!(
-            tab_activity_glyph(true, true, false, 3),
+            tab_activity_glyph(TabCue::NeedsAttention, BlinkPhase::Dark, 3),
             TabActivityGlyph::Blank,
             "a flagged AND working tab goes blank in the hidden blink phase; a slot \
              that alternated dot and spinner would read as two cues"
@@ -18233,7 +18862,15 @@ mod tests {
                 TabActivityGlyph::Blank
             };
             assert_eq!(
-                tab_activity_glyph(false, true, on, 0),
+                tab_activity_glyph(
+                    TabCue::NeedsAttention,
+                    if on {
+                        BlinkPhase::Lit
+                    } else {
+                        BlinkPhase::Dark
+                    },
+                    0
+                ),
                 expected,
                 "the pill must follow the sidebar's blink at {elapsed}ms"
             );
@@ -18443,7 +19080,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer();
@@ -18559,10 +19196,7 @@ mod tests {
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
 
-        let sidebar_tone = app
-            .theme
-            .session_dot(&crate::model::SessionStatus::Active)
-            .1;
+        let sidebar_tone = app.theme.session_dot(crate::model::SessionStatus::Active).1;
         // The premise this test exists for: on a focused pill the title color
         // collides with the attention accent.
         assert_eq!(
@@ -18930,7 +19564,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let focused_width = app
@@ -18946,7 +19580,7 @@ mod tests {
         let mut terminal2 = Terminal::new(backend2).expect("terminal");
         terminal2
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let unfocused_width = app
@@ -18991,7 +19625,7 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
             .expect("render frame");
 
         let expected_grid = Rect::new(4, 3, 68, 10);
@@ -19022,16 +19656,16 @@ mod tests {
         seed_render_tab(&mut app, &session_id, "dormant-tab", "codex", 1);
         app.set_focused_tab(&session_id, "dormant-tab");
         app.session_surface = SessionSurface::Agent;
-        app.welcome_logo_visible = true;
+        app.welcome_logo.visible = true;
 
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
             .expect("render frame");
 
         assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
-        assert!(!app.welcome_logo_visible);
+        assert!(!app.welcome_logo.visible);
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         // This tab has no recorded verdict, so the card's ranked content is the
         // standing resume rule, the key hint and the button. A ten-row pane
@@ -20149,8 +20783,14 @@ mod tests {
 
     #[test]
     fn render_single_line_cursor_input_supports_empty_prefix() {
-        let line =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
+        let line = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
 
         assert_eq!(line.spans.len(), 4);
         assert_eq!(line.spans[0].content.as_ref(), "");
@@ -20987,7 +21627,7 @@ mod tests {
             Span::raw("Idle".to_string()),
             None,
             MetaCounts::default(),
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21014,7 +21654,7 @@ mod tests {
                 tabs: Some(Span::raw("3 tabs".to_string())),
                 remote: None,
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21045,7 +21685,7 @@ mod tests {
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
             MetaCounts::default(),
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21214,7 +21854,7 @@ mod tests {
                 tabs: Some(Span::raw("3 tabs".to_string())),
                 remote: Some(Span::raw("1 browser".to_string())),
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21387,7 +22027,7 @@ mod tests {
                     tabs: None,
                     remote: Some(Span::raw("12 browsers".to_string())),
                 },
-                MetaLineStyle {
+                &MetaLineStyle {
                     sep: Style::default(),
                     highlight: None,
                 },
@@ -21472,7 +22112,23 @@ mod tests {
         let theme = crate::theme::Theme::default_dark();
         let line_two = |owner: &str, standalone: bool, width: u16| {
             let (_, line2) = terminal_row_lines(
-                &theme, glyphs, false, false, '◜', None, owner, standalone, width, 0, None,
+                &theme,
+                glyphs,
+                dux_core::row_state::TerminalRowFacts {
+                    working: false,
+                    typing: false,
+                },
+                '◜',
+                None,
+                owner,
+                if standalone {
+                    TerminalOwnerKind::Standalone
+                } else {
+                    TerminalOwnerKind::Owned
+                },
+                width,
+                0,
+                None,
             );
             line_text(&line2)
         };
@@ -21529,7 +22185,7 @@ mod tests {
                 Span::raw("Idle".to_string()),
                 Some(Span::raw(branch.to_string())),
                 MetaCounts::default(),
-                MetaLineStyle {
+                &MetaLineStyle {
                     sep: Style::default(),
                     highlight: hl,
                 },
@@ -21771,7 +22427,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -21840,7 +22496,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -21886,7 +22542,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -21935,7 +22591,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -21963,7 +22619,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, rows, 0, 0, expanded, false);
+                app.render_resource_monitor(frame, rows, 0, 0, expanded, CpuWindow::Full);
             })
             .expect("render frame");
         terminal
@@ -22117,7 +22773,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
 
@@ -22548,7 +23204,12 @@ mod tests {
         let mut inline = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         inline
             .draw(|frame| {
-                app.render_agent_terminal(frame, Rect::new(2, 2, 96, 26), " Terminal ", true);
+                app.render_agent_terminal(
+                    frame,
+                    Rect::new(2, 2, 96, 26),
+                    " Terminal ",
+                    FocusState::Focused,
+                );
             })
             .expect("render inline terminal");
         assert!(
@@ -23420,7 +24081,7 @@ mod tests {
         size: (u16, u16),
         rows: usize,
         scroll: u16,
-        long_line: bool,
+        width: LogLineWidth,
     ) -> (App, ratatui::buffer::Buffer) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -23428,7 +24089,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         let content = (0..rows)
             .map(|i| {
-                if long_line {
+                if width == LogLineWidth::PaneWide {
                     // Exactly as wide as the content pane, so every rendered row
                     // reaches its last content column: the marker must not eat it.
                     let pane = centered_rect(96, 94, Rect::new(0, 0, size.0, size.1));
@@ -23478,7 +24139,7 @@ mod tests {
         let frame = Rect::new(0, 0, 100, 30);
         let rows = 400;
 
-        let (app, buf) = startup_log_frame((100, 30), rows, 0, false);
+        let (app, buf) = startup_log_frame((100, 30), rows, 0, LogLineWidth::Short);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert!(
             rows > content.height as usize,
@@ -23488,14 +24149,14 @@ mod tests {
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
 
         let max = rows as u16 - content.height;
-        let (_, buf) = startup_log_frame((100, 30), rows, max / 2, false);
+        let (_, buf) = startup_log_frame((100, 30), rows, max / 2, LogLineWidth::Short);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
-        let (_, buf) = startup_log_frame((100, 30), rows, max, false);
+        let (_, buf) = startup_log_frame((100, 30), rows, max, LogLineWidth::Short);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
 
         for scroll in [0, max / 2, max] {
-            let (_, buf) = startup_log_frame((100, 30), rows, scroll, false);
+            let (_, buf) = startup_log_frame((100, 30), rows, scroll, LogLineWidth::Short);
             assert_eq!(
                 marker_in(&buf, content),
                 None,
@@ -23507,7 +24168,7 @@ mod tests {
     #[test]
     fn a_short_startup_log_gets_no_marker() {
         let frame = Rect::new(0, 0, 100, 30);
-        let (app, buf) = startup_log_frame((100, 30), 3, 0, false);
+        let (app, buf) = startup_log_frame((100, 30), 3, 0, LogLineWidth::Short);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert!(content.height > 3, "fixture must fit");
         assert_eq!(marker_in(&buf, border_column), None);
@@ -23519,7 +24180,7 @@ mod tests {
         // the pane occupies its LAST content column. The marker lives in the
         // modal's border column, one cell further out, so that character survives.
         let frame = Rect::new(0, 0, 100, 30);
-        let (app, buf) = startup_log_frame((100, 30), 400, 5, true);
+        let (app, buf) = startup_log_frame((100, 30), 400, 5, LogLineWidth::PaneWide);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
         let last_col = content.x + content.width - 1;
@@ -23538,7 +24199,7 @@ mod tests {
         // area, which includes the marker's row. It must not reach the border
         // column the marker uses.
         let frame = Rect::new(0, 0, 100, 30);
-        let (mut app, _) = startup_log_frame((100, 30), 400, 5, false);
+        let (mut app, _) = startup_log_frame((100, 30), 400, 5, LogLineWidth::Short);
         let (_, border_column) = startup_log_rects(&app, frame);
         if let Some(viewer) = &mut app.startup_log_viewer {
             viewer.searching = true;
@@ -24320,20 +24981,17 @@ mod tests {
 
     /// Bindings with every default key list except `action`, which gets `keys`.
     fn bindings_with(action: Action, keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
-        RuntimeBindings::new(
-            move |a| {
-                if a == action {
-                    keys.clone()
-                } else {
-                    crate::keybindings::BINDING_DEFS
-                        .iter()
-                        .find(|d| d.action == a)
-                        .map(|d| d.default_keys.to_vec())
-                        .unwrap_or_default()
-                }
-            },
-            true,
-        )
+        RuntimeBindings::new(move |a| {
+            if a == action {
+                keys.clone()
+            } else {
+                crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == a)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        })
     }
 
     /// A single-code key combination as the key event a user would produce.
@@ -24769,7 +25427,7 @@ mod tests {
         (style.fg, style.add_modifier)
     }
 
-    fn expected_border_look(theme: &Theme, focused: bool) -> (Option<Color>, Modifier) {
+    fn expected_border_look(theme: &Theme, focused: FocusState) -> (Option<Color>, Modifier) {
         let style = theme.overlay_field_border_style(focused);
         (style.fg, style.add_modifier)
     }
@@ -24889,7 +25547,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, true),
+            expected_border_look(&app.theme, FocusState::Focused),
             "a focused field draws the focused border"
         );
 
@@ -24906,7 +25564,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, false),
+            expected_border_look(&app.theme, FocusState::Unfocused),
             "an unfocused field draws the unfocused border"
         );
     }
@@ -24927,7 +25585,7 @@ mod tests {
         assert_eq!(caret_columns(&buf, input, cursor_bg).len(), 1);
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, true)
+            expected_border_look(&app.theme, FocusState::Focused)
         );
 
         let mut app = test_app(default_bindings());
@@ -24943,7 +25601,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, false)
+            expected_border_look(&app.theme, FocusState::Unfocused)
         );
     }
 
@@ -25121,12 +25779,24 @@ mod tests {
 
     #[test]
     fn render_single_line_cursor_input_drops_the_caret_when_unfocused() {
-        let focused =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
+        let focused = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
         assert_eq!(focused.spans.len(), 4);
 
-        let unfocused =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, false);
+        let unfocused = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Unfocused,
+        );
         let text: String = unfocused
             .spans
             .iter()
@@ -25160,7 +25830,7 @@ mod tests {
                 0,
                 theme.input_cursor_fg,
                 theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
             );
             let caret = field
                 .spans
@@ -25207,7 +25877,7 @@ mod tests {
                 cursor,
                 Color::White,
                 Color::Black,
-                true,
+                FocusState::Focused,
                 width,
             );
             let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -25244,8 +25914,14 @@ mod tests {
         let text = "👩\u{200d}💻a";
         // At the sequence, and at a byte inside it, the caret covers all of it.
         for cursor in [0, "👩".len()] {
-            let line =
-                render_single_line_cursor_input("", text, cursor, Color::White, Color::Black, true);
+            let line = render_single_line_cursor_input(
+                "",
+                text,
+                cursor,
+                Color::White,
+                Color::Black,
+                FocusState::Focused,
+            );
             let caret: Vec<&str> = line
                 .spans
                 .iter()
@@ -25262,7 +25938,14 @@ mod tests {
     fn render_single_line_cursor_input_clamps_a_caret_inside_a_character() {
         // A byte offset that is not a char boundary must not panic; it clamps
         // back to the start of the character it landed in.
-        let line = render_single_line_cursor_input("", "áb", 1, Color::White, Color::Black, true);
+        let line = render_single_line_cursor_input(
+            "",
+            "áb",
+            1,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "áb");
     }
@@ -25453,18 +26136,15 @@ mod tests {
     /// Rebinding any of the four macro-list keys moves its footer label.
     #[test]
     fn the_macro_list_footer_names_the_bound_keys() {
-        let bindings = RuntimeBindings::new(
-            |action| match action {
-                Action::NewMacro => vec![crokey::parse("ctrl-t").expect("binding")],
-                Action::DeleteMacro => vec![crokey::parse("ctrl-x").expect("binding")],
-                other => crate::keybindings::BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == other)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            },
-            true,
-        );
+        let bindings = RuntimeBindings::new(|action| match action {
+            Action::NewMacro => vec![crokey::parse("ctrl-t").expect("binding")],
+            Action::DeleteMacro => vec![crokey::parse("ctrl-x").expect("binding")],
+            other => crate::keybindings::BINDING_DEFS
+                .iter()
+                .find(|d| d.action == other)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
+        });
         let mut app = macro_list_app(bindings);
         let buf = render_to_buffer(&mut app);
         let footer = macro_modal_footer(&buf);
@@ -25500,8 +26180,7 @@ mod tests {
         }
 
         let mut app = test_app(default_bindings());
-        app.open_project_chooser(ProjectChooserIntent::NewAgent)
-            .expect("open the project chooser");
+        app.open_project_chooser(ProjectChooserIntent::NewAgent);
 
         let resting = footer(&mut app);
         for word in ["down", "up", "search", "choose", "cancel"] {
@@ -25661,8 +26340,8 @@ mod tests {
         fn confirm(
             app: &App,
             branch: Option<&str>,
-            dirty: bool,
-            delete_branch: bool,
+            state: crate::app::test_support::WorktreeState,
+            branch_removal: dux_core::worktree_manager::BranchRemoval,
         ) -> PromptState {
             let project = app.engine.projects[0].clone();
             PromptState::ConfirmDeleteWorktree(Box::new(super::ConfirmDeleteWorktreePrompt {
@@ -25678,14 +26357,19 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/worktrees/demo/free"),
                 label: branch.unwrap_or("detached 1a2b3c4").to_string(),
                 branch: branch.map(str::to_string),
-                dirty,
-                delete_branch,
+                dirty: state == crate::app::test_support::WorktreeState::Dirty,
+                delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
                 focus: super::DeleteWorktreeFocus::Cancel,
             }))
         }
 
         let mut app = test_app(default_bindings());
-        app.prompt = confirm(&app, Some("free"), false, true);
+        app.prompt = confirm(
+            &app,
+            Some("free"),
+            crate::app::test_support::WorktreeState::Clean,
+            dux_core::worktree_manager::BranchRemoval::Delete,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains(&on_screen(&super::delete_worktree_title_prose("free"))),
@@ -25710,7 +26394,12 @@ mod tests {
             "a clean worktree gets no dirty sentence:\n{screen}"
         );
 
-        app.prompt = confirm(&app, Some("free"), true, false);
+        app.prompt = confirm(
+            &app,
+            Some("free"),
+            crate::app::test_support::WorktreeState::Dirty,
+            dux_core::worktree_manager::BranchRemoval::Keep,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains("uncommitted changes"),
@@ -25725,7 +26414,12 @@ mod tests {
             "with the checkbox off the branch survives, and the copy says so:\n{screen}"
         );
 
-        app.prompt = confirm(&app, None, false, true);
+        app.prompt = confirm(
+            &app,
+            None,
+            crate::app::test_support::WorktreeState::Clean,
+            dux_core::worktree_manager::BranchRemoval::Delete,
+        );
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains(&on_screen(&super::delete_worktree_title_prose(
@@ -25775,12 +26469,18 @@ mod tests {
              the working directory is removed."
         );
         assert_eq!(
-            super::delete_worktree_branch_line("free", true),
+            super::delete_worktree_branch_line(
+                "free",
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             "The branch \"free\" will be deleted with it, forcibly. Any commits on it that are \
              not merged anywhere else go too."
         );
         assert_eq!(
-            super::delete_worktree_branch_line("free", false),
+            super::delete_worktree_branch_line(
+                "free",
+                dux_core::worktree_manager::BranchRemoval::Keep
+            ),
             "The branch \"free\" is kept. Only the working directory is removed."
         );
     }
@@ -25788,16 +26488,16 @@ mod tests {
     /// A delete-agent prompt in a chosen state, for the rendering tests below.
     fn delete_agent_prompt(
         provenance: dux_core::model::BranchProvenance,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         delete_agent_prompt_on(
             provenance,
             "feature",
             "feature",
-            delete_worktree,
-            delete_branch,
+            worktree,
+            branch_removal,
             unpushed_commits,
         )
     }
@@ -25808,8 +26508,8 @@ mod tests {
         provenance: dux_core::model::BranchProvenance,
         branch_name: &str,
         initial_branch: &str,
-        delete_worktree: bool,
-        delete_branch: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch_removal: dux_core::worktree_manager::BranchRemoval,
         unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
@@ -25823,8 +26523,8 @@ mod tests {
                 worktree_shared: false,
             },
             focus: super::DeleteAgentFocus::WorktreeCheckbox,
-            delete_worktree,
-            delete_branch,
+            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
+            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
             unpushed_commits,
         }
     }
@@ -25884,8 +26584,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -25909,8 +26609,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            false,
-            true,
+            dux_core::engine::WorktreeOnDelete::Keep,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -25928,8 +26628,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::AttachedExisting,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -25940,8 +26640,8 @@ mod tests {
 
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::Adopted,
-            true,
-            false,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Keep,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -25952,8 +26652,8 @@ mod tests {
 
         app.prompt = delete_agent_prompt(
             dux_core::model::BranchProvenance::CreatedByDux,
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -25965,18 +26665,21 @@ mod tests {
 
     /// A counted answer from a repository that HAS remote-tracking refs, which
     /// is what "not pushed anywhere" is allowed to be said about.
-    fn pushed_nowhere(count: u32) -> Option<dux_core::git::UnpushedCommits> {
-        Some(dux_core::git::UnpushedCommits {
+    fn pushed_nowhere(count: u32) -> dux_core::git::UnpushedCommits {
+        dux_core::git::UnpushedCommits {
             count,
             has_remote_refs: true,
-        })
+        }
     }
 
     #[test]
     fn the_unpushed_sentence_says_nothing_without_a_counted_commit() {
-        assert_eq!(super::unpushed_commits_sentence(None, false), None);
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(0), false),
+            super::unpushed_commits_sentence(None, BranchSpread::Single),
+            None
+        );
+        assert_eq!(
+            super::unpushed_commits_sentence(Some(pushed_nowhere(0)), BranchSpread::Single),
             None
         );
     }
@@ -25984,11 +26687,13 @@ mod tests {
     #[test]
     fn the_unpushed_sentence_counts_and_pluralizes_per_branch_count() {
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(1), false).unwrap(),
+            super::unpushed_commits_sentence(Some(pushed_nowhere(1)), BranchSpread::Single)
+                .unwrap(),
             " It has 1 commit not pushed anywhere."
         );
         assert_eq!(
-            super::unpushed_commits_sentence(pushed_nowhere(3), true).unwrap(),
+            super::unpushed_commits_sentence(Some(pushed_nowhere(3)), BranchSpread::Drifted)
+                .unwrap(),
             " They have 3 commits not pushed anywhere between them."
         );
     }
@@ -26002,11 +26707,11 @@ mod tests {
             })
         };
         assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(1), false).unwrap(),
+            super::unpushed_commits_sentence(never_pushed(1), BranchSpread::Single).unwrap(),
             " Nothing on it has been pushed anywhere: its one commit exists only on this machine."
         );
         assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(4), true).unwrap(),
+            super::unpushed_commits_sentence(never_pushed(4), BranchSpread::Drifted).unwrap(),
             " Nothing on them has been pushed anywhere: all 4 of their commits exist only on this machine."
         );
     }
@@ -26020,7 +26725,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                pushed_nowhere(3)
+                Some(pushed_nowhere(3))
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 3 commits not pushed anywhere.")
@@ -26029,12 +26734,12 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["feature"],
-                pushed_nowhere(1)
+                Some(pushed_nowhere(1))
             )
             .as_deref(),
             Some("This branch existed before the agent. It has 1 commit not pushed anywhere.")
         );
-        for unknown in [None, pushed_nowhere(0)] {
+        for unknown in [None, Some(pushed_nowhere(0))] {
             assert_eq!(
                 super::delete_agent_branch_warning(
                     dux_core::model::BranchProvenance::AttachedExisting,
@@ -26141,8 +26846,8 @@ mod tests {
             dux_core::model::BranchProvenance::AttachedExisting,
             "develop-next",
             "develop",
-            true,
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
             Some(dux_core::git::UnpushedCommits {
                 count: 12,
                 has_remote_refs: false,
@@ -26344,9 +27049,9 @@ mod tests {
             dux_core::model::BranchProvenance::AttachedExisting,
             "develop-next",
             "develop",
-            true,
-            true,
-            pushed_nowhere(4),
+            dux_core::engine::WorktreeOnDelete::Remove,
+            dux_core::worktree_manager::BranchRemoval::Delete,
+            Some(pushed_nowhere(4)),
         );
         let screen = rendered_screen(&mut app);
         // The chips make the label wrap at this width, so the label is read
@@ -26374,7 +27079,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::AttachedExisting,
                 &["develop-next", "develop"],
-                pushed_nowhere(4)
+                Some(pushed_nowhere(4))
             )
             .as_deref(),
             Some(
@@ -26405,7 +27110,7 @@ mod tests {
             super::delete_agent_branch_warning(
                 dux_core::model::BranchProvenance::CreatedByDux,
                 &["dux/s1"],
-                pushed_nowhere(9)
+                Some(pushed_nowhere(9))
             ),
             None,
             "a branch dux created for an agent that stayed on it warns about nothing"
@@ -26532,7 +27237,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -26597,7 +27302,7 @@ mod tests {
         for at_bottom in [false, true] {
             let mut app = test_app(default_bindings());
             install_pr(&mut app);
-            app.pr_banner_at_bottom = at_bottom;
+            app.view_prefs.pr_banner_at_bottom = at_bottom;
 
             let buf = draw(&mut app);
             let band = app
@@ -26710,13 +27415,22 @@ mod tests {
 
     // -- The changes groups' aggregate recap --
 
-    fn recap_file(additions: usize, deletions: usize, binary: bool) -> ChangedFile {
+    /// Whether a test's changed file is binary.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FileContent {
+        /// A binary file, which has no line counts.
+        Binary,
+        /// A text file.
+        Text,
+    }
+
+    fn recap_file(additions: usize, deletions: usize, content: FileContent) -> ChangedFile {
         ChangedFile {
             path: format!("f{additions}-{deletions}.rs"),
             status: "M".to_string(),
             additions,
             deletions,
-            binary,
+            binary: content == FileContent::Binary,
             diff_excluded: false,
             renamed_from: None,
             kind: dux_core::model::ChangedFileKind::File,
@@ -26724,7 +27438,12 @@ mod tests {
     }
 
     fn recap_title(app: &App, files: &[ChangedFile]) -> Line<'static> {
-        changed_files_group_title("Changes", files, &app.theme, app.theme.title_style(false))
+        changed_files_group_title(
+            "Changes",
+            files,
+            &app.theme,
+            app.theme.title_style(FocusState::Unfocused),
+        )
     }
 
     fn span_color(line: &Line<'_>, text: &str) -> Option<ratatui::style::Color> {
@@ -26739,7 +27458,13 @@ mod tests {
     #[test]
     fn the_changes_group_title_sums_the_lines_of_its_files() {
         let app = test_app(default_bindings());
-        let title = recap_title(&app, &[recap_file(12, 3, false), recap_file(7, 40, false)]);
+        let title = recap_title(
+            &app,
+            &[
+                recap_file(12, 3, FileContent::Text),
+                recap_file(7, 40, FileContent::Text),
+            ],
+        );
 
         assert_eq!(line_text(&title), "Changes (2) +19 -43");
         assert_eq!(
@@ -26762,9 +27487,9 @@ mod tests {
         let title = recap_title(
             &app,
             &[
-                recap_file(5, 1, false),
-                recap_file(0, 0, true),
-                recap_file(1, 1, true),
+                recap_file(5, 1, FileContent::Text),
+                recap_file(0, 0, FileContent::Binary),
+                recap_file(1, 1, FileContent::Binary),
             ],
         );
 
@@ -26781,7 +27506,13 @@ mod tests {
     #[test]
     fn a_changes_group_of_binaries_reports_no_lines_at_all() {
         let app = test_app(default_bindings());
-        let title = recap_title(&app, &[recap_file(0, 0, true), recap_file(0, 0, true)]);
+        let title = recap_title(
+            &app,
+            &[
+                recap_file(0, 0, FileContent::Binary),
+                recap_file(0, 0, FileContent::Binary),
+            ],
+        );
 
         assert_eq!(line_text(&title), "Changes (2) 2 bin");
     }
@@ -26806,7 +27537,7 @@ mod tests {
     fn a_diff_excluded_row_reads_excl_in_its_own_color() {
         let app = test_app(default_bindings());
 
-        let spans = format_line_stats(0, 0, false, true, &app.theme);
+        let spans = format_line_stats(&excluded_file("locked.txt"), &app.theme);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "Excl");
         assert_eq!(spans[0].style.fg, Some(app.theme.diff_excluded_fg));
@@ -26815,7 +27546,7 @@ mod tests {
             "the two countless verdicts must not look the same"
         );
 
-        let binary = format_line_stats(0, 0, true, false, &app.theme);
+        let binary = format_line_stats(&recap_file(0, 0, FileContent::Binary), &app.theme);
         assert_eq!(binary[0].content.as_ref(), "bin");
         assert_eq!(binary[0].style.fg, Some(app.theme.diff_binary_fg));
     }
@@ -26828,8 +27559,8 @@ mod tests {
         let title = recap_title(
             &app,
             &[
-                recap_file(5, 1, false),
-                recap_file(0, 0, true),
+                recap_file(5, 1, FileContent::Text),
+                recap_file(0, 0, FileContent::Binary),
                 excluded_file("locked.txt"),
                 excluded_file("also-locked.txt"),
             ],
@@ -26862,7 +27593,7 @@ mod tests {
 
         assert_eq!(line_text(&recap_title(&app, &[])), "Changes (0)");
         assert_eq!(
-            line_text(&recap_title(&app, &[recap_file(0, 0, false)])),
+            line_text(&recap_title(&app, &[recap_file(0, 0, FileContent::Text)])),
             "Changes (1)"
         );
     }
@@ -26944,7 +27675,7 @@ mod tests {
                 kind: dux_core::model::ChangedFileKind::File,
             },
         ];
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("terminal");
         terminal
@@ -26988,13 +27719,13 @@ mod tests {
         );
     }
 
-    /// Render the non-default-branch dialog with the box in `checked` and
+    /// Render the non-default-branch dialog with the box in `mark` and
     /// return the worktree sentence's row as (text, foreground of its first
     /// letter), plus where the Cancel button landed.
     fn render_branch_dialog(
         app: &mut App,
         current_branch: &str,
-        checked: bool,
+        mark: CheckMark,
     ) -> (String, ratatui::style::Color, Rect) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -27009,7 +27740,7 @@ mod tests {
                 default_branch: "main".to_string(),
             },
             focus: ConfirmNonDefaultBranchFocus::Checkbox,
-            checkout_default: checked,
+            checkout_default: (mark == CheckMark::Checked),
         };
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -27038,7 +27769,7 @@ mod tests {
     fn a_ticked_checkout_box_says_worktrees_branch_from_the_default_without_a_warning() {
         let mut app = test_app(default_bindings());
 
-        let (text, fg, _) = render_branch_dialog(&mut app, "feature", true);
+        let (text, fg, _) = render_branch_dialog(&mut app, "feature", CheckMark::Checked);
 
         assert!(
             text.contains("New worktrees will branch from  main ."),
@@ -27051,7 +27782,7 @@ mod tests {
     fn an_unticked_checkout_box_warns_that_worktrees_branch_from_the_current_branch() {
         let mut app = test_app(default_bindings());
 
-        let (text, fg, _) = render_branch_dialog(&mut app, "feature", false);
+        let (text, fg, _) = render_branch_dialog(&mut app, "feature", CheckMark::Unchecked);
 
         assert!(
             text.contains("New worktrees will branch from  feature ."),
@@ -27155,8 +27886,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         let long = "feature/a-branch-name-long-enough-to-wrap-the-worktree-sentence-onto-two-rows";
 
-        let (_, _, ticked) = render_branch_dialog(&mut app, long, true);
-        let (text, _, unticked) = render_branch_dialog(&mut app, long, false);
+        let (_, _, ticked) = render_branch_dialog(&mut app, long, CheckMark::Checked);
+        let (text, _, unticked) = render_branch_dialog(&mut app, long, CheckMark::Unchecked);
 
         assert!(text.contains("New worktrees will branch from"), "{text}");
         assert_eq!(

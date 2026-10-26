@@ -360,7 +360,7 @@ fn the_delete_terminal_dialog_chips_the_terminal() {
 fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor() {
     let mut app = test_app(default_bindings());
     let session_id = app.engine.sessions[0].id.clone();
-    let agent = app.session_label(&app.engine.sessions[0]);
+    let agent = app.engine.sessions[0].display_label();
     let close = PromptState::ConfirmCloseTab {
         attached: Vec::new(),
         session_id: session_id.clone(),
@@ -402,14 +402,17 @@ fn the_close_and_stop_tab_dialogs_chip_the_provider_the_agent_and_the_successor(
     }
 }
 
-fn delete_agent_prompt(target: DeleteAgentTarget, delete_worktree: bool) -> PromptState {
+fn delete_agent_prompt(
+    target: DeleteAgentTarget,
+    worktree: dux_core::engine::WorktreeOnDelete,
+) -> PromptState {
     PromptState::ConfirmDeleteAgent {
         attached: Vec::new(),
         session_id: "s1".to_string(),
         agent_label: "launch-at-login".to_string(),
         target,
         focus: DeleteAgentFocus::Cancel,
-        delete_worktree,
+        delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
         delete_branch: true,
         unpushed_commits: Some(dux_core::git::UnpushedCommits {
             count: 2,
@@ -454,10 +457,9 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
             None,
         )
         .unwrap();
-    app.confirm_delete_selected_session()
-        .expect("open the delete dialog");
+    app.confirm_delete_selected_session();
 
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
 
     let PromptState::ConfirmDeleteAgent { focus, .. } = &app.prompt else {
         panic!("the delete dialog stays open, got {:?}", app.prompt);
@@ -503,7 +505,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
         *focus = DeleteAgentFocus::Delete;
     }
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
     let PromptState::ConfirmDeleteAgent {
         focus, attached, ..
     } = &app.prompt
@@ -514,7 +516,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     assert_eq!(*focus, DeleteAgentFocus::Cancel);
     assert!(app.engine.sessions.iter().any(|s| s.id == agent));
 
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
 
     assert!(matches!(app.prompt, PromptState::None));
     assert!(
@@ -534,8 +536,7 @@ fn a_double_click_on_a_refused_delete_never_presses_the_override() {
     let agent = app.engine.sessions[0].id.clone();
     let tab = app.engine.sessions[0].slot_tab_id().to_string();
     crate::app::test_support::watch_from_a_browser(&app, &tab, &agent);
-    app.confirm_delete_selected_session()
-        .expect("open the delete dialog");
+    app.confirm_delete_selected_session();
     let click = |app: &mut App, rect: ratatui::layout::Rect| {
         let (column, row) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
         for kind in [
@@ -608,7 +609,7 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
                 branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
                 worktree_shared: false,
             },
-            true,
+            dux_core::engine::WorktreeOnDelete::Remove,
         ),
     );
     assert_chipped(&app, &buf, "launch-at-login");
@@ -628,7 +629,7 @@ fn the_standalone_delete_dialog_chips_the_agent_and_its_folder() {
             DeleteAgentTarget::Folder {
                 folder_label: "~/notes-sa".to_string(),
             },
-            false,
+            dux_core::engine::WorktreeOnDelete::Keep,
         ),
     );
     assert_chipped(&app, &buf, "launch-at-login");
@@ -1236,7 +1237,7 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
                 review_copy_agreed: false,
                 checked_review: None,
                 edits: 0,
-                submit_pending: false,
+                check_purpose: crate::app::pr_clone::PrFolderCheck::Open,
                 checking: false,
                 error: None,
             })),

@@ -19,7 +19,7 @@ fn regenerate_preview_with_show_never_prints_a_plaintext_password() {
             !dux_core::config::plaintext_password_problems(&body).is_empty(),
             "dux does not call {body:?} a plaintext password"
         );
-        let out = regenerate_preview(&body, &fresh, true);
+        let out = regenerate_preview(&body, &fresh, dux_core::config_keys::HeldBack::Shown);
         if out.contains(S) {
             leaks.push(format!("{body:?}:\n{out}"));
         }
@@ -39,7 +39,7 @@ fn regenerate_preview_of_a_broken_file_with_show_never_prints_a_password() {
         format!("[server.auth]\n'password' = \"{S}\"\nbroken =\n"),
         format!("[server.auth]\npassword = \"\"\"\n{S}\n\"\"\"\nbroken =\n"),
     ] {
-        let out = regenerate_preview(&body, &fresh, true);
+        let out = regenerate_preview(&body, &fresh, dux_core::config_keys::HeldBack::Shown);
         if out.contains(S) {
             leaks.push(format!("{body:?}:\n{out}"));
         }
@@ -62,12 +62,16 @@ path = \"/tmp/x\"
 "
         ),
     ] {
-        let regen = regenerate_preview(&body, &fresh, false);
+        let regen = regenerate_preview(&body, &fresh, dux_core::config_keys::HeldBack::Masked);
         if regen.contains(S) {
             leaks.push(format!("regenerate {body:?}:\n{regen}"));
         }
         if let Ok(restored) = crate::config::restore_documentation(&body) {
-            let out = restore_docs_preview(&body, &restored.text, false);
+            let out = restore_docs_preview(
+                &body,
+                &restored.text,
+                dux_core::config_keys::HeldBack::Masked,
+            );
             if out.contains(S) {
                 let lines: Vec<&str> = out.lines().filter(|l| l.contains(S)).collect();
                 leaks.push(format!("restore-docs {body:?}:\n{}", lines.join("\n")));
@@ -99,16 +103,30 @@ fn previews_hold_back_the_password_hash_and_blocked_addresses_without_show() {
             "server.auth.password_hash = \"{hash}\"\nserver.auth.blocked_addresses = [\n  \"{address}\",\n]\n"
         ),
     ] {
-        let mut hidden = vec![("regenerate", regenerate_preview(&body, &fresh, false))];
-        let mut shown = vec![("regenerate", regenerate_preview(&body, &fresh, true))];
+        let mut hidden = vec![(
+            "regenerate",
+            regenerate_preview(&body, &fresh, dux_core::config_keys::HeldBack::Masked),
+        )];
+        let mut shown = vec![(
+            "regenerate",
+            regenerate_preview(&body, &fresh, dux_core::config_keys::HeldBack::Shown),
+        )];
         if let Ok(restored) = crate::config::restore_documentation(&body) {
             hidden.push((
                 "restore-docs",
-                restore_docs_preview(&body, &restored.text, false),
+                restore_docs_preview(
+                    &body,
+                    &restored.text,
+                    dux_core::config_keys::HeldBack::Masked,
+                ),
             ));
             shown.push((
                 "restore-docs",
-                restore_docs_preview(&body, &restored.text, true),
+                restore_docs_preview(
+                    &body,
+                    &restored.text,
+                    dux_core::config_keys::HeldBack::Shown,
+                ),
             ));
         }
         for (preview, out) in hidden {

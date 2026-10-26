@@ -114,6 +114,34 @@ impl DrainedEventMetadata {
     }
 }
 
+/// Whether a drained worker reaction carries a checkout inspection on into a
+/// default-branch checkout, which keeps the inspection's status op open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectFollowUp {
+    /// The reaction dispatches the checkout; its own final closes the op.
+    ChainsCheckout,
+    /// Nothing follows; the inspection is done.
+    Done,
+}
+
+/// How a project clone a draft was kept for ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloneEnding {
+    /// It cloned; the draft is no longer needed.
+    Cloned,
+    /// It was refused or failed; the draft can be restored.
+    RefusedOrFailed,
+}
+
+/// Whether a background server is serving when server settings change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundServing {
+    /// A listener is bound and keeps its old settings until restarted.
+    Serving,
+    /// Nothing is serving.
+    Idle,
+}
+
 impl App {
     pub(crate) fn drain_events(&mut self) {
         // The release-notes worker's PAYLOAD rides its own channel (the keyed
@@ -186,8 +214,13 @@ impl App {
         let Some(session_id) = session_owner_id(pty) else {
             return false;
         };
-        let was_focused_tab = context.selected_session.as_deref() == Some(session_id)
-            && context.focused_tab.as_deref() == Some(pty.id.as_str());
+        let was_focused_tab = if context.selected_session.as_deref() == Some(session_id)
+            && context.focused_tab.as_deref() == Some(pty.id.as_str())
+        {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let support_provider = (!self
             .engine
             .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(&pty.id)))
@@ -207,13 +240,13 @@ impl App {
         }
     }
 
-    fn apply_closed_agent_tab(&mut self, pty: &PrunedPty, session_id: &str, was_focused_tab: bool) {
+    fn apply_closed_agent_tab(&mut self, pty: &PrunedPty, session_id: &str, tab_focus: FocusState) {
         // The prune's own account of the close, in the sentence the browser
         // gets: the row is gone, so nothing here could look these facts up.
         if let Some(closed) = &pty.closed_tab {
             self.set_info(closed_tab_exit_notice(closed));
         }
-        if !was_focused_tab {
+        if tab_focus == FocusState::Unfocused {
             return;
         }
         let target = self
@@ -230,13 +263,13 @@ impl App {
         }
     }
 
-    fn apply_exited_agent_tab(&mut self, support_provider: Option<String>, was_focused_tab: bool) {
+    fn apply_exited_agent_tab(&mut self, support_provider: Option<String>, tab_focus: FocusState) {
         if let Some(provider) = support_provider {
             self.set_info(format!("Tab ({provider}) exited."));
         }
         if self.input_target == InputTarget::Agent
             && self.session_surface == SessionSurface::Agent
-            && was_focused_tab
+            && tab_focus == FocusState::Focused
         {
             self.reset_raw_input_state();
         }
@@ -368,10 +401,14 @@ impl App {
             self.disarm_tui_launch_for_failed_event(&event);
             let reaction = self.engine.process_worker_event(event);
             self.note_changed_files_owner(&metadata);
-            let chains_forward = matches!(
+            let chains_forward = if matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
-            );
+            ) {
+                InspectFollowUp::ChainsCheckout
+            } else {
+                InspectFollowUp::Done
+            };
             let routing = self.companion_routing();
             self.notify_companion(&reaction);
             self.apply_routed_reaction(reaction, &routing);
@@ -458,12 +495,12 @@ impl App {
             WorkerEvent::AgentLaunchFailed(data) => {
                 self.tui_launched_ptys.remove(data.request.tab_id.as_str());
                 if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
-                    self.create_agent_started_here = false;
+                    self.notes.create_agent_started_here = false;
                     self.pull_request_create = None;
                 }
             }
             WorkerEvent::CreateAgentFailed { message, .. } => {
-                self.create_agent_started_here = false;
+                self.notes.create_agent_started_here = false;
                 // A question keeps the request: the reply reopens the prompt on it.
                 if message.ask().is_none() {
                     self.pull_request_create = None;
@@ -476,7 +513,7 @@ impl App {
     fn apply_drained_event_metadata(
         &mut self,
         metadata: DrainedEventMetadata,
-        chains_forward: bool,
+        follow_up: InspectFollowUp,
     ) {
         if let Some(answer) = metadata.changed_files_answer {
             self.apply_changed_files_refresh_outcome(&answer.worktree, answer.error);
@@ -488,24 +525,31 @@ impl App {
             self.resolve_pr_lookup_completion(completion);
         }
         if let Some(id) = metadata.checkout_inspect_completion {
-            self.resolve_checkout_inspect_completion(id, chains_forward);
+            self.resolve_checkout_inspect_completion(&id, follow_up);
         }
         if let Some((id, refused_or_failed)) = metadata.clone_completion {
-            self.settle_clone_draft(&id, refused_or_failed);
+            self.settle_clone_draft(
+                &id,
+                if refused_or_failed {
+                    CloneEnding::RefusedOrFailed
+                } else {
+                    CloneEnding::Cloned
+                },
+            );
         }
     }
 
     /// A clone this form started has answered: keep its draft for the next
     /// open when it was refused or failed, and drop it otherwise, since the
     /// clone is on disk and the same request would only be refused.
-    fn settle_clone_draft(&mut self, op_id: &str, refused_or_failed: bool) {
+    fn settle_clone_draft(&mut self, op_id: &str, ending: CloneEnding) {
         let Some(draft) = self.clone_draft.as_mut() else {
             return;
         };
         if draft.op_id != op_id {
             return;
         }
-        if refused_or_failed {
+        if ending == CloneEnding::RefusedOrFailed {
             draft.restorable = true;
         } else {
             self.clone_draft = None;
@@ -517,15 +561,13 @@ impl App {
             && answer.status_op_id.is_some();
         if current {
             self.pending_pr_reference_op = None;
-            if let Err(error) = self.apply_pull_request_reference_resolution(
+            self.apply_pull_request_reference_resolution(
                 answer.raw_input,
-                answer.repository,
+                &answer.repository,
                 answer.result,
                 answer.offer,
                 answer.clone_unavailable,
-            ) {
-                self.set_error(format!("{error:#}"));
-            }
+            );
         }
         if let Some(id) = answer.status_op_id
             && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
@@ -546,8 +588,10 @@ impl App {
         }
     }
 
-    fn resolve_checkout_inspect_completion(&mut self, id: String, chains_forward: bool) {
-        if !chains_forward && let Some(op) = self.pending_checkout_inspect_ops.remove(&id) {
+    fn resolve_checkout_inspect_completion(&mut self, id: &str, follow_up: InspectFollowUp) {
+        if follow_up == InspectFollowUp::Done
+            && let Some(op) = self.pending_checkout_inspect_ops.remove(id)
+        {
             self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
         }
     }
@@ -583,7 +627,7 @@ impl App {
             // its view even though it did no work itself. `service_companion`
             // folds this into its own post-mutation refresh at the end of the
             // iteration.
-            self.companion_followup_ran = true;
+            self.notes.companion_followup_ran = true;
             return;
         }
         match reaction {
@@ -704,14 +748,14 @@ impl App {
             }
 
             EventReaction::BrowserEntriesArrived { dir, entries } => {
-                self.apply_browser_entries(dir, entries);
+                self.apply_browser_entries(&dir, entries);
             }
             EventReaction::ProjectWorktreesArrived {
                 project_id,
                 result,
                 status_op_id,
             } => {
-                self.apply_project_worktrees_arrived(project_id, result, status_op_id);
+                self.apply_project_worktrees_arrived(&project_id, result, status_op_id);
             }
 
             EventReaction::ManageableWorktreesArrived {
@@ -719,27 +763,27 @@ impl App {
                 result,
                 status_op_id,
             } => {
-                self.apply_manageable_worktrees_arrived(project_id, result, status_op_id);
+                self.apply_manageable_worktrees_arrived(&project_id, result, status_op_id);
             }
 
             EventReaction::OpenNewAgentPromptForPr {
                 pr,
                 status_op_id: _,
             } => {
-                self.apply_open_new_agent_prompt_for_pr(*pr);
+                self.apply_open_new_agent_prompt_for_pr(&pr);
             }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branches,
                 our_busy_message: _,
             } => {
-                self.apply_worktree_remove_succeeded(session_id, branches);
+                self.apply_worktree_remove_succeeded(&session_id, branches);
             }
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,
             } => {
-                self.apply_worktree_remove_failed(session_id, message);
+                self.apply_worktree_remove_failed(&session_id, message);
             }
             EventReaction::WorktreeRemoveWaiting {
                 session_id,
@@ -753,7 +797,14 @@ impl App {
             }
 
             EventReaction::ResourceStatsArrived(stats, was_baseline) => {
-                self.apply_resource_stats(stats, was_baseline);
+                self.apply_resource_stats(
+                    stats,
+                    if was_baseline {
+                        CpuWindow::Short
+                    } else {
+                        CpuWindow::Full
+                    },
+                );
             }
 
             EventReaction::AddProjectAfterBranchCheckout {
@@ -764,9 +815,9 @@ impl App {
                 status_op_id: _,
             } => {
                 self.apply_add_project_after_branch_checkout(
-                    path,
-                    name,
-                    target_branch,
+                    &path,
+                    &name,
+                    &target_branch,
                     leading_branch,
                 );
             }
@@ -782,8 +833,8 @@ impl App {
                 status_op_id: _,
             } => {
                 self.apply_add_project_after_initial_commit(
-                    path,
-                    name,
+                    &path,
+                    &name,
                     branch,
                     leading_branch,
                     (initialized_repo, seeded_gitignore, seed_warning),
@@ -798,7 +849,7 @@ impl App {
                 let was_in_flight = self.engine.is_in_flight(&create);
                 let finished = self.engine.finish_clone(&done);
                 if !was_in_flight && self.engine.is_in_flight(&create) {
-                    self.create_agent_started_here = true;
+                    self.notes.create_agent_started_here = true;
                 }
                 self.apply_routed_reaction(finished, routing);
             }
@@ -834,7 +885,15 @@ impl App {
                 before,
                 github_was_enabled,
                 error,
-            } => self.apply_config_adopted(*before, github_was_enabled, error),
+            } => self.apply_config_adopted(
+                &before,
+                if github_was_enabled {
+                    dux_core::engine::GithubIntegration::Enabled
+                } else {
+                    dux_core::engine::GithubIntegration::Disabled
+                },
+                error,
+            ),
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
                 self.apply_project_persistence_outcome(*boxed);
@@ -887,19 +946,19 @@ impl App {
 
     fn apply_add_project_after_branch_checkout(
         &mut self,
-        path: String,
-        name: String,
-        target_branch: String,
+        path: &str,
+        name: &str,
+        target_branch: &str,
         leading_branch: String,
     ) {
-        let display_name = project_display_name(&path, &name);
+        let display_name = project_display_name(path, name);
         let status_message = format!(
             "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
         );
         if let Err(error) = self.finish_add_project_with_status(
             path,
             name,
-            target_branch.clone(),
+            target_branch.to_string(),
             leading_branch,
             status_message,
         ) {
@@ -909,16 +968,20 @@ impl App {
 
     fn apply_add_project_after_initial_commit(
         &mut self,
-        path: String,
-        name: String,
+        path: &str,
+        name: &str,
         branch: String,
         leading_branch: String,
         setup: (bool, bool, Option<String>),
     ) {
         let (initialized_repo, seeded_gitignore, seed_warning) = setup;
-        let display_name = project_display_name(&path, &name);
-        let status_message =
-            initial_commit_project_status(&display_name, initialized_repo, seeded_gitignore);
+        let display_name = project_display_name(path, name);
+        let repo = match (initialized_repo, seeded_gitignore) {
+            (true, true) => RepoSetup::InitializedWithGitignore,
+            (true, false) => RepoSetup::Initialized,
+            (false, _) => RepoSetup::Existing,
+        };
+        let status_message = initial_commit_project_status(&display_name, repo);
         if let Err(error) =
             self.finish_add_project_with_status(path, name, branch, leading_branch, status_message)
         {
@@ -951,14 +1014,10 @@ impl App {
                 "Project branch was detected, but config.toml could not be updated: {error:#}"
             )),
         }
-        if let Err(error) = self.continue_create_agent_after_branch_inspection(project, inspection)
-        {
-            self.set_error(format!("{error:#}"));
-        } else {
-            self.set_info(format!(
-                "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
-            ));
-        }
+        self.continue_create_agent_after_branch_inspection(project, inspection);
+        self.set_info(format!(
+            "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+        ));
     }
 
     fn apply_dispatch_project_default_branch_checkout(
@@ -982,14 +1041,18 @@ impl App {
         self.dispatch_non_default_branch_checkout(
             NonDefaultBranchAction::CheckoutProjectDefault { project },
             default_branch,
-            "for the selected project".to_string(),
+            "for the selected project",
             status_op_id,
         );
     }
 
     pub(crate) fn apply_reloaded_config_reaction(&mut self, config: Config) {
         let before = self.engine.config.clone();
-        let github_was_enabled = self.engine.github_integration_enabled;
+        let github_was_enabled = if self.engine.github_integration_enabled {
+            dux_core::engine::GithubIntegration::Enabled
+        } else {
+            dux_core::engine::GithubIntegration::Disabled
+        };
         let fallback = config.clone();
         let mut apply_error = None;
         let outcome = match self.apply_reloaded_config(config) {
@@ -1034,16 +1097,21 @@ impl App {
     /// (see `EventReaction::ConfigAdopted`): the view takes it, everything a
     /// reload's swap owes runs against `before`, the config it replaced, and
     /// the reload answers as an apply that failed, the same answer the
-    /// terminal UI's own failed apply gives. `github_was_enabled` is the
+    /// terminal UI's own failed apply gives. `github` is the
     /// engine's own state before the reload; its apply asked `gh` for
     /// nothing, so this surface asks where a reload owes it.
-    fn apply_config_adopted(&mut self, before: Config, github_was_enabled: bool, error: String) {
+    fn apply_config_adopted(
+        &mut self,
+        before: &Config,
+        github: dux_core::engine::GithubIntegration,
+        error: String,
+    ) {
         let adopted = self.engine.config.clone();
         // The failure is the message, so the theme's own warning is left to
         // the next reload.
         let _ = self.take_reload_view_state(&adopted);
-        self.run_config_swap_effects(&before, github_was_enabled);
-        self.note_config_adopted(&before);
+        self.run_config_swap_effects(before, github);
+        self.note_config_adopted(before);
         let outcome = TuiConfigReloadOutcome::ApplyFailed(error.clone());
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
@@ -1069,7 +1137,11 @@ impl App {
             &self.engine.config.server,
         ));
         if !changed.is_empty() {
-            let serving = self.background_server_is_serving();
+            let serving = if self.background_server_is_serving() {
+                BackgroundServing::Serving
+            } else {
+                BackgroundServing::Idle
+            };
             owed.push(server_restart_warning(serving, &changed));
         }
         owed.extend(dux_core::control_socket::moved_warning(
@@ -1124,7 +1196,7 @@ impl App {
         warning: Option<String>,
         startup: dux_core::serve_log::StartupNotes,
     ) {
-        self.server_flip_preflight_pending = false;
+        self.serving.flip_preflight_pending = false;
         match result {
             Ok((listeners, urls)) => {
                 self.apply_server_flip_preflight_success(listeners, urls, warning, startup);
@@ -1170,7 +1242,7 @@ impl App {
         });
     }
 
-    fn apply_browser_entries(&mut self, dir: PathBuf, entries: Vec<BrowserEntry>) {
+    fn apply_browser_entries(&mut self, dir: &Path, entries: Vec<BrowserEntry>) {
         if let PromptState::BrowseProjects {
             current_dir,
             entries: current_entries,
@@ -1178,7 +1250,7 @@ impl App {
             selected,
             ..
         } = &mut self.prompt
-            && *current_dir == dir
+            && current_dir.as_path() == dir
         {
             *current_entries = entries;
             *loading = false;
@@ -1188,17 +1260,17 @@ impl App {
 
     fn apply_worktree_remove_succeeded(
         &mut self,
-        session_id: String,
+        session_id: &str,
         branches: dux_core::engine::RemovedBranches,
     ) {
-        let op = self.pending_delete_ops.remove(&session_id);
+        let op = self.pending_delete_ops.remove(session_id);
         if self.engine.sessions.iter().any(|s| s.id == session_id) {
             let cleanup = self.finish_delete_session(
-                &session_id,
+                session_id,
                 WorktreeRemoval::Performed {
                     branches: branches.clone(),
                 },
-                false,
+                DeleteReport::Quiet,
             );
             if let Err(error) = cleanup {
                 // The delete's own busy is dismissed first, so it does not
@@ -1235,9 +1307,9 @@ impl App {
         }
     }
 
-    fn apply_worktree_remove_failed(&mut self, session_id: String, message: String) {
+    fn apply_worktree_remove_failed(&mut self, session_id: &str, message: String) {
         let session_present = self.engine.sessions.iter().any(|s| s.id == session_id);
-        if let Some(op) = self.pending_delete_ops.remove(&session_id) {
+        if let Some(op) = self.pending_delete_ops.remove(session_id) {
             let outcome = if session_present {
                 TuiDeleteOutcome::FailedNamed { message }
             } else {
@@ -1269,7 +1341,9 @@ impl App {
                         dux_core::git::RemoveResult::default(),
                     ),
                 };
-                if let Err(error) = self.finish_delete_session(&session_id, removal, false) {
+                if let Err(error) =
+                    self.finish_delete_session(&session_id, removal, DeleteReport::Quiet)
+                {
                     self.set_error(format!("Failed to delete agent: {error:#}"));
                 } else {
                     let op = self.build_delete_status_op(&session_id, busy_message.to_string());
@@ -1279,7 +1353,9 @@ impl App {
                 }
             }
             BeginDeleteSessionOutcome::Inline { removal } => {
-                if let Err(error) = self.finish_delete_session(&session_id, removal, true) {
+                if let Err(error) =
+                    self.finish_delete_session(&session_id, removal, DeleteReport::Announce)
+                {
                     self.set_error(format!("{error:#}"));
                 }
             }
@@ -1290,8 +1366,12 @@ impl App {
         self.apply_finish_delete_session_outcome(
             &view.session_id,
             view.outcome,
-            view.removal,
-            view.update_status,
+            &view.removal,
+            if view.update_status {
+                DeleteReport::Announce
+            } else {
+                DeleteReport::Quiet
+            },
         );
     }
 
@@ -1344,7 +1424,7 @@ impl App {
 
     fn apply_project_worktrees_arrived(
         &mut self,
-        project_id: String,
+        project_id: &str,
         result: Result<Vec<ProjectWorktreeEntry>, String>,
         status_op_id: Option<String>,
     ) {
@@ -1371,12 +1451,12 @@ impl App {
         } else {
             WorktreesFinalOutcome::Dismissed
         };
-        self.resolve_worktree_listing_op(status_op_id, outcome);
+        self.resolve_worktree_listing_op(status_op_id, &outcome);
     }
 
     fn apply_manageable_worktrees_arrived(
         &mut self,
-        project_id: String,
+        project_id: &str,
         result: Result<Vec<dux_core::worktree_manager::ManagedWorktree>, String>,
         status_op_id: Option<String>,
     ) {
@@ -1401,22 +1481,22 @@ impl App {
         } else {
             WorktreesFinalOutcome::Dismissed
         };
-        self.resolve_worktree_listing_op(status_op_id, outcome);
+        self.resolve_worktree_listing_op(status_op_id, &outcome);
     }
 
     fn resolve_worktree_listing_op(
         &mut self,
         status_op_id: Option<String>,
-        outcome: WorktreesFinalOutcome,
+        outcome: &WorktreesFinalOutcome,
     ) {
         if let Some(id) = status_op_id
             && let Some(op) = self.pending_worktree_ops.remove(&id)
         {
-            self.apply_reaction(op.resolve(&outcome).into_reaction());
+            self.apply_reaction(op.resolve(outcome).into_reaction());
         }
     }
 
-    fn apply_open_new_agent_prompt_for_pr(&mut self, pr: dux_core::worker::ResolvedPullRequest) {
+    fn apply_open_new_agent_prompt_for_pr(&mut self, pr: &dux_core::worker::ResolvedPullRequest) {
         let request = CreateAgentRequest::PullRequest {
             project: pr.project.clone(),
             host: pr.host.clone(),
@@ -1435,29 +1515,26 @@ impl App {
             agents: Vec::new(),
             cloned: None,
         };
-        if let Err(err) = self.open_name_new_agent_prompt(request) {
-            self.set_error(format!("{err:#}"));
-        } else {
-            self.set_info(format!(
-                "Resolved PR #{}: {}. Confirm or edit the branch name.",
-                pr.number, pr.title
-            ));
-        }
+        self.open_name_new_agent_prompt(request);
+        self.set_info(format!(
+            "Resolved PR #{}: {}. Confirm or edit the branch name.",
+            pr.number, pr.title
+        ));
     }
 
-    fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, was_baseline: bool) {
+    fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, window: CpuWindow) {
         if let PromptState::ResourceMonitor {
             rows,
             selected_row,
             expanded,
             last_refresh,
-            short_window_sample,
+            cpu_window,
             ..
         } = &mut self.prompt
         {
             *rows = stats;
             *last_refresh = Instant::now();
-            *short_window_sample = was_baseline;
+            *cpu_window = window;
             let max_row = build_visual_rows(rows, expanded).len().saturating_sub(1);
             if *selected_row > max_row {
                 *selected_row = max_row;
@@ -1473,8 +1550,8 @@ impl App {
     /// can fall back to its legacy `set_info`/`set_error`.
     fn resolve_persist_op(
         &mut self,
-        status_op_id: &Option<String>,
-        outcome: PersistFinalOutcome,
+        status_op_id: Option<&str>,
+        outcome: &PersistFinalOutcome,
     ) -> bool {
         let Some(id) = status_op_id else {
             return false;
@@ -1482,7 +1559,7 @@ impl App {
         let Some(op) = self.pending_persist_ops.remove(id) else {
             return false;
         };
-        let resolved = op.resolve(&outcome);
+        let resolved = op.resolve(outcome);
         self.apply_reaction(resolved.into_reaction());
         true
     }
@@ -1490,13 +1567,16 @@ impl App {
     fn apply_project_persistence_failure(
         &mut self,
         action: ProjectPersistenceAction,
-        error: String,
-        status_op_id: &Option<String>,
+        error: &str,
+        status_op_id: Option<&str>,
     ) {
-        if self.resolve_persist_op(status_op_id, PersistFinalOutcome::DbFailed(error.clone())) {
+        if self.resolve_persist_op(
+            status_op_id,
+            &PersistFinalOutcome::DbFailed(error.to_string()),
+        ) {
             return;
         }
-        self.set_error(project_persistence_failure_message(action, &error));
+        self.set_error(project_persistence_failure_message(action, error));
     }
 
     fn apply_added_project(&mut self, status_message: String) {
@@ -1508,7 +1588,7 @@ impl App {
 
     fn apply_project_removal(
         &mut self,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
         config_error_prefix: &'static str,
         success_message: String,
     ) {
@@ -1524,10 +1604,10 @@ impl App {
 
     fn apply_default_provider_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         provider: Option<ProviderKind>,
-        global_default: ProviderKind,
-        status_op_id: &Option<String>,
+        global_default: &ProviderKind,
+        status_op_id: Option<&str>,
     ) {
         self.rebuild_left_items();
         let success_message = match provider {
@@ -1553,9 +1633,9 @@ impl App {
 
     fn apply_auto_reopen_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         auto_reopen_agents: Option<bool>,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         let enabled = auto_reopen_agents.unwrap_or(true);
         self.save_runtime_projects_and_finish_status(
@@ -1573,9 +1653,9 @@ impl App {
 
     fn apply_startup_command_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         startup_command: Option<String>,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
         let success_message = match startup_command {
             Some(command) => {
@@ -1594,11 +1674,11 @@ impl App {
 
     fn apply_env_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         env_count: usize,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
     ) {
-        let success_message = super::render::project_env_saved_message(env_count, &project_name);
+        let success_message = super::render::project_env_saved_message(env_count, project_name);
         self.save_runtime_projects_and_finish_status(
             status_op_id,
             &format!(
@@ -1610,7 +1690,7 @@ impl App {
 
     fn save_runtime_projects_and_finish_status(
         &mut self,
-        status_op_id: &Option<String>,
+        status_op_id: Option<&str>,
         config_error_prefix: &str,
         success_message: String,
     ) {
@@ -1621,7 +1701,7 @@ impl App {
             .save_eager(self.engine.config.clone())
         {
             Ok(()) => {
-                if !self.resolve_persist_op(status_op_id, PersistFinalOutcome::Saved) {
+                if !self.resolve_persist_op(status_op_id, &PersistFinalOutcome::Saved) {
                     self.set_info(success_message);
                 }
             }
@@ -1629,7 +1709,7 @@ impl App {
                 let error = error.clone();
                 if !self.resolve_persist_op(
                     status_op_id,
-                    PersistFinalOutcome::ConfigWriteFailed(error.clone()),
+                    &PersistFinalOutcome::ConfigWriteFailed(error.clone()),
                 ) {
                     self.set_error(format!("{config_error_prefix}: {error}"));
                 }
@@ -1646,7 +1726,7 @@ impl App {
 
         match view {
             ProjectPersistenceView::PersistenceFailed { error } => {
-                self.apply_project_persistence_failure(action, error, &status_op_id);
+                self.apply_project_persistence_failure(action, &error, status_op_id.as_deref());
             }
             ProjectPersistenceView::Added {
                 project_id: _,
@@ -1656,14 +1736,14 @@ impl App {
             }
             ProjectPersistenceView::Removed { project_name } => {
                 self.apply_project_removal(
-                    &status_op_id,
+                    status_op_id.as_deref(),
                     "Project was removed from the database, but config.toml could not be updated",
                     format!("Removed project \"{project_name}\" from app"),
                 );
             }
             ProjectPersistenceView::Deleted { project_name } => {
                 self.apply_project_removal(
-                    &status_op_id,
+                    status_op_id.as_deref(),
                     "Project was deleted from the database, but config.toml could not be updated",
                     format!("Deleted project \"{project_name}\" and all its agents"),
                 );
@@ -1674,29 +1754,37 @@ impl App {
                 global_default,
             } => {
                 self.apply_default_provider_update(
-                    project_name,
+                    &project_name,
                     provider,
-                    global_default,
-                    &status_op_id,
+                    &global_default,
+                    status_op_id.as_deref(),
                 );
             }
             ProjectPersistenceView::AutoReopenUpdated {
                 project_name,
                 auto_reopen_agents,
             } => {
-                self.apply_auto_reopen_update(project_name, auto_reopen_agents, &status_op_id);
+                self.apply_auto_reopen_update(
+                    &project_name,
+                    auto_reopen_agents,
+                    status_op_id.as_deref(),
+                );
             }
             ProjectPersistenceView::StartupCommandUpdated {
                 project_name,
                 startup_command,
             } => {
-                self.apply_startup_command_update(project_name, startup_command, &status_op_id);
+                self.apply_startup_command_update(
+                    &project_name,
+                    startup_command,
+                    status_op_id.as_deref(),
+                );
             }
             ProjectPersistenceView::EnvUpdated {
                 project_name,
                 env_count,
             } => {
-                self.apply_env_update(project_name, env_count, &status_op_id);
+                self.apply_env_update(&project_name, env_count, status_op_id.as_deref());
             }
         }
     }
@@ -1715,7 +1803,7 @@ impl App {
             &outcome.view,
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
-        ) && std::mem::take(&mut self.create_agent_started_here);
+        ) && std::mem::take(&mut self.notes.create_agent_started_here);
         if created_here {
             self.pull_request_create = None;
         }
@@ -1725,6 +1813,11 @@ impl App {
             matches!(&outcome.view, AgentLaunchReadyView::ResumeFallback { .. })
                 && self.tui_fallback_tabs.remove(&outcome.tab_id);
         let started_here = armed || created_here || fell_back_from_here;
+        let view = if outcome.wants_fullscreen {
+            LaunchView::Fullscreen
+        } else {
+            LaunchView::Minimized
+        };
         if started_here
             && self
                 .engine
@@ -1779,7 +1872,7 @@ impl App {
                 // (Center focused, typeable); only a fullscreen-seeking launch
                 // lands fullscreen. A create is never fullscreen-seeking, but
                 // the shared landing helper keeps the rule in one place.
-                self.land_completed_launch(outcome.wants_fullscreen);
+                self.land_completed_launch(view);
                 // The create success / startup-error keyed final is resolved
                 // ENGINE-SIDE and arrives as a sibling `Status` in the same
                 // `Multi`; this arm keeps only the non-status view work.
@@ -1807,11 +1900,8 @@ impl App {
                     self.show_agent_surface();
                     // Land minimized unless the launch sought
                     // fullscreen (see CreateCommitted above).
-                    self.land_completed_launch(outcome.wants_fullscreen);
-                    self.launch_completion_message(
-                        status_message.to_string(),
-                        outcome.wants_fullscreen,
-                    )
+                    self.land_completed_launch(view);
+                    self.launch_completion_message(&status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };
@@ -1822,7 +1912,7 @@ impl App {
                 // resolving the slot tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
-                    dux_core::engine::LaunchOutcome::Ready {
+                    &dux_core::engine::LaunchOutcome::Ready {
                         status_message: status_message.into(),
                         quiet_on: outcome.status_quiet,
                     },
@@ -1853,17 +1943,14 @@ impl App {
                     // when the landing actually happened: a fallback for an
                     // unselected agent moves no focus, so promising a typeable
                     // pane there would be a lie.
-                    self.land_completed_launch(outcome.wants_fullscreen);
-                    self.launch_completion_message(
-                        status_message.to_string(),
-                        outcome.wants_fullscreen,
-                    )
+                    self.land_completed_launch(view);
+                    self.launch_completion_message(&status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::Ready {
+                    &dux_core::engine::LaunchOutcome::Ready {
                         status_message: status_message.into(),
                         quiet_on: outcome.status_quiet,
                     },
@@ -1919,7 +2006,7 @@ impl App {
                 // stashed (the message is byte-identical either way).
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::ReconnectFailed {
+                    &dux_core::engine::LaunchOutcome::ReconnectFailed {
                         branch_name: agent_label,
                         message,
                     },
@@ -1932,7 +2019,7 @@ impl App {
             } => {
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::ForceReconnectFailed {
+                    &dux_core::engine::LaunchOutcome::ForceReconnectFailed {
                         branch_name: agent_label,
                         message,
                     },
@@ -1978,15 +2065,15 @@ impl App {
     fn resolve_reconnect_op_or(
         &mut self,
         session_id: &str,
-        outcome: dux_core::engine::LaunchOutcome,
+        outcome: &dux_core::engine::LaunchOutcome,
     ) {
         if let Some(op) = self.pending_reconnect_ops.remove(session_id) {
-            self.apply_reaction(op.resolve(&outcome).into_reaction());
+            self.apply_reaction(op.resolve(outcome).into_reaction());
             return;
         }
         // No op stashed: apply the SAME final anonymously (no key), preserving the
         // pre-op behavior. `reconnect_final` is the single wording source.
-        match dux_core::engine::launch_outcome_final(&outcome) {
+        match dux_core::engine::launch_outcome_final(outcome) {
             // An extra tab has no op under its id, so this is the only path its
             // final takes; it honours the surface flag or a quieted launch would
             // still print here.
@@ -2071,21 +2158,28 @@ fn project_display_name(path: &str, name: &str) -> String {
     }
 }
 
-fn initial_commit_project_status(
-    display_name: &str,
-    initialized_repo: bool,
-    seeded_gitignore: bool,
-) -> String {
-    if initialized_repo && seeded_gitignore {
-        format!(
+/// What adding a project with an initial commit did to its folder first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepoSetup {
+    /// The folder was already a repository.
+    Existing,
+    /// A repository was initialized.
+    Initialized,
+    /// A repository was initialized and a starter .gitignore seeded.
+    InitializedWithGitignore,
+}
+
+fn initial_commit_project_status(display_name: &str, repo: RepoSetup) -> String {
+    match repo {
+        RepoSetup::InitializedWithGitignore => format!(
             "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to workspace."
-        )
-    } else if initialized_repo {
-        format!(
+        ),
+        RepoSetup::Initialized => format!(
             "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to workspace."
-        )
-    } else {
-        format!("Created an initial commit and added project \"{display_name}\" to workspace.")
+        ),
+        RepoSetup::Existing => {
+            format!("Created an initial commit and added project \"{display_name}\" to workspace.")
+        }
     }
 }
 
@@ -2112,7 +2206,11 @@ fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
     }
     agent_exit_status_message(
         pty.exit_success,
-        pty.is_minimal,
+        if pty.is_minimal {
+            ExitScreen::Minimal
+        } else {
+            ExitScreen::Full
+        },
         &pty.output_excerpt,
         pty.read_error.as_deref(),
         reconnect_key,
@@ -2126,9 +2224,18 @@ fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
 /// one a child that was merely slow to be reaped gets, and the user is told the
 /// agent exited when what actually happened is that dux stopped being able to
 /// read the terminal and killed a process that may have been perfectly healthy.
+/// How much an exited agent left on its screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitScreen {
+    /// Little enough to quote in the status line.
+    Minimal,
+    /// A full screen, which the pane itself shows.
+    Full,
+}
+
 fn agent_exit_status_message(
     exit_success: Option<bool>,
-    is_minimal: bool,
+    screen: ExitScreen,
     excerpt: &str,
     read_error: Option<&str>,
     reconnect_key: &str,
@@ -2143,7 +2250,7 @@ fn agent_exit_status_message(
         .join(" ");
     // What the provider left on screen, when there is a short enough run of it
     // to be worth quoting. Built once so the read-error message can carry it too.
-    let output_clause = if is_minimal && !output.is_empty() {
+    let output_clause = if screen == ExitScreen::Minimal && !output.is_empty() {
         let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
         let more = if output.truncated {
             " Full output was written to the logs."
@@ -2202,9 +2309,9 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 
 /// The warning for a reloaded `[server]` change that only a restart applies,
 /// naming the changed `settings`.
-pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
+pub(crate) fn server_restart_warning(serving: BackgroundServing, settings: &[&str]) -> String {
     let named = settings.join(", ");
-    if serving_in_background {
+    if serving == BackgroundServing::Serving {
         format!(
             "Server settings changed in config ({named}), but a listener that is already bound \
          cannot adopt them. Stop the background server and start it again to apply them."
@@ -2219,7 +2326,7 @@ pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&s
 
 pub(crate) fn run_create_agent_branch_inspection_job(
     project: Project,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
@@ -2258,6 +2365,15 @@ pub(crate) fn run_create_agent_branch_inspection_job(
 
 #[cfg(test)]
 mod tests {
+
+    /// What a test writes to `server.auth.disable_no_auth_warning`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum NoAuthWarning {
+        /// `true`: the warning is dismissed.
+        Dismissed,
+        /// `false`: it shows again.
+        Shown,
+    }
     use std::sync::mpsc;
 
     use chrono::Utc;
@@ -2386,12 +2502,16 @@ mod tests {
             .expect("the reload is asked for");
     }
 
-    /// dux writes the no-password warning's dismissal (`value`) to the file
+    /// dux writes the no-password warning's dismissal (`warning`) to the file
     /// itself, as the route does, and asks for the reload it owes.
-    fn dismiss_and_reload(app: &mut App, value: bool) {
+    fn dismiss_and_reload(app: &mut App, warning: NoAuthWarning) {
         let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
-        dux_core::config_keys::set_plain(&app.engine.paths.config_path, &key, &value.to_string())
-            .expect("dux writes the file");
+        dux_core::config_keys::set_plain(
+            &app.engine.paths.config_path,
+            &key,
+            &(warning == NoAuthWarning::Dismissed).to_string(),
+        )
+        .expect("dux writes the file");
         app.engine
             .reload_after_own_config_write(|engine| {
                 engine.apply(dux_core::engine::Command::ReloadConfig)
@@ -2415,21 +2535,21 @@ mod tests {
         let read = next_reload_read(&app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
 
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         let read = next_reload_read(&app);
         assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // Two quick writes of dux's own, the second while the first one's
         // reload is still reading.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         assert_eq!(land_reloads(&mut app, read), Vec::<String>::new());
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // Somebody asks while dux's own reload is reading.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
         ask_for_a_reload(&mut app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
@@ -2438,14 +2558,14 @@ mod tests {
         // Somebody's reload is reading when dux writes.
         ask_for_a_reload(&mut app);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
 
         // dux's write and somebody's request fold into one follow-up.
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         let read = next_reload_read(&app);
-        dismiss_and_reload(&mut app, true);
+        dismiss_and_reload(&mut app, NoAuthWarning::Dismissed);
         ask_for_a_reload(&mut app);
         assert_eq!(land_reloads(&mut app, read), vec![RELOADED.to_string()]);
         assert!(app.engine.config.server.auth.disable_no_auth_warning);
@@ -2456,7 +2576,7 @@ mod tests {
             &mut app.engine.config_writer,
             dux_core::config_queue::ConfigWriteQueue::with_dead_writer(&paths.config_path),
         );
-        dismiss_and_reload(&mut app, false);
+        dismiss_and_reload(&mut app, NoAuthWarning::Shown);
         assert!(!app.engine.reloading, "the reload never started");
         app.engine.config_writer = writer;
         ask_for_a_reload(&mut app);
@@ -2676,7 +2796,7 @@ mod tests {
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
@@ -2698,7 +2818,7 @@ mod tests {
     fn assert_agent_input_cleared(app: &crate::app::App) {
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
-        assert!(!app.in_bracket_paste);
+        assert!(!app.raw_paste.in_bracket);
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(!app.raw_input_parser.in_bracket_paste());
@@ -2840,7 +2960,7 @@ mod tests {
     fn create_failure_disarms_the_tui_origin_before_the_event_is_processed() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
         app.engine
             .worker_tx
             .send(WorkerEvent::CreateAgentFailed {
@@ -2852,7 +2972,7 @@ mod tests {
 
         app.drain_events();
 
-        assert!(!app.create_agent_started_here);
+        assert!(!app.notes.create_agent_started_here);
     }
 
     /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a `StatusOp`)
@@ -3181,7 +3301,7 @@ mod tests {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.id.clone(),
@@ -3232,7 +3352,7 @@ mod tests {
         app.selected_terminal_index = 0;
 
         let newest = app.engine.sessions[19].clone();
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: newest.id.clone(),
             session: newest.clone(),
@@ -3347,7 +3467,7 @@ mod tests {
         let session = app.engine.sessions[0].clone();
 
         // Mirror the dispatch site: mint the op, show its pending busy, stash it.
-        let op = app.build_reconnect_status_op(format!(
+        let op = App::build_reconnect_status_op(format!(
             "Launching agent \"{}\"...",
             session.branch_name().expect("managed test session")
         ));
@@ -3408,7 +3528,7 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
 
-        let op = app.build_reconnect_status_op("Launching agent...".to_string());
+        let op = App::build_reconnect_status_op("Launching agent...".to_string());
         let op_key = op.id().to_string();
         app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
         app.pending_reconnect_ops.insert(session.id.clone(), op);
@@ -3479,7 +3599,7 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
 
-        let op = app.build_reconnect_status_op(format!(
+        let op = App::build_reconnect_status_op(format!(
             "Launching agent \"{}\"...",
             session.branch_name().expect("managed test session")
         ));
@@ -3607,7 +3727,8 @@ mod tests {
     fn agent_exit_status_message_caps_long_provider_output() {
         let long_output = "x".repeat(200);
 
-        let message = agent_exit_status_message(Some(false), true, &long_output, None, "r");
+        let message =
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, &long_output, None, "r");
 
         assert!(message.contains("Output: "));
         assert!(message.contains("…"));
@@ -3620,7 +3741,8 @@ mod tests {
 
     #[test]
     fn agent_exit_status_message_concats_short_provider_output() {
-        let message = agent_exit_status_message(Some(false), true, "first\nsecond", None, "r");
+        let message =
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, "first\nsecond", None, "r");
 
         assert!(message.contains("Output: first second."));
         assert!(!message.contains('|'));
@@ -3633,8 +3755,13 @@ mod tests {
     /// dux stopped being able to read the terminal and killed it.
     #[test]
     fn agent_exit_status_message_says_a_read_error_ended_the_run() {
-        let message =
-            agent_exit_status_message(None, true, "boot\nfailed", Some("bad file descriptor"), "r");
+        let message = agent_exit_status_message(
+            None,
+            ExitScreen::Minimal,
+            "boot\nfailed",
+            Some("bad file descriptor"),
+            "r",
+        );
 
         assert!(
             message.contains("read error"),
@@ -3650,7 +3777,8 @@ mod tests {
         );
         assert!(message.contains("to relaunch"));
 
-        let ordinary = agent_exit_status_message(None, true, "boot\nfailed", None, "r");
+        let ordinary =
+            agent_exit_status_message(None, ExitScreen::Minimal, "boot\nfailed", None, "r");
         assert!(
             !ordinary.contains("read error"),
             "an ordinary end of input must not gain a read-error clause: {ordinary}"
@@ -3705,7 +3833,7 @@ mod tests {
         let message = pruned_agent_exit_message(&pruned_agent("feat/x"), "Ctrl-r");
         assert_eq!(
             message,
-            agent_exit_status_message(Some(false), true, "boom", None, "Ctrl-r"),
+            agent_exit_status_message(Some(false), ExitScreen::Minimal, "boom", None, "Ctrl-r"),
             "with no refusal recorded the line is the ordinary exit message"
         );
         assert!(!message.contains("could not resume"));
@@ -3959,7 +4087,10 @@ mod tests {
         });
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
     }
 
     #[test]
@@ -3973,7 +4104,10 @@ mod tests {
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
         assert_eq!(
             message,
             "Server settings changed in config (port). Nothing is serving right now, so they apply the next time a server starts."
@@ -4013,13 +4147,16 @@ mod tests {
             .status
             .most_recent_tui()
             .expect("the restart warning must survive the warning window");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
     }
 
     #[test]
     fn the_server_restart_warning_names_the_background_server_only_while_it_serves() {
-        let serving = server_restart_warning(true, &["port"]);
-        let idle = server_restart_warning(false, &["port"]);
+        let serving = server_restart_warning(BackgroundServing::Serving, &["port"]);
+        let idle = server_restart_warning(BackgroundServing::Idle, &["port"]);
         assert_ne!(serving, idle);
         assert!(
             serving.contains("background server"),
@@ -4130,7 +4267,7 @@ mod tests {
         );
         assert_eq!(app.status.tone(), StatusTone::Busy);
 
-        app.resolve_reconnect_op_or("session-1", dux_core::engine::LaunchOutcome::Missing);
+        app.resolve_reconnect_op_or("session-1", &dux_core::engine::LaunchOutcome::Missing);
 
         assert!(
             app.status.most_recent_tui().is_none(),
@@ -4364,7 +4501,7 @@ mod tests {
 
         crate::app::test_support::wait_for_pty_eof(&mut app, &slot);
         app.drain_events();
-        app.do_delete_session("session-1", false, None)
+        app.do_delete_session("session-1", dux_core::engine::WorktreeOnDelete::Keep, None)
             .expect("delete the agent");
 
         assert!(

@@ -26,8 +26,16 @@ fn child_runs_a_preview() {
     };
     crate::config::install_canonical_renderer();
     let _ = match which {
-        "regenerate" => run_regenerate(&paths, false, false),
-        "restore-docs" => run_restore_docs(&paths, false, false),
+        "regenerate" => run_regenerate(
+            &paths,
+            ConfigRewrite::Preview,
+            dux_core::config_keys::HeldBack::Masked,
+        ),
+        "restore-docs" => run_restore_docs(
+            &paths,
+            ConfigRewrite::Preview,
+            dux_core::config_keys::HeldBack::Masked,
+        ),
         _ => unreachable!(),
     };
 }

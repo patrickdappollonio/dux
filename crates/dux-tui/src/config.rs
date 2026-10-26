@@ -10,21 +10,32 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::keybindings;
 
-pub use dux_core::config::*;
+pub(crate) use dux_core::config::*;
+
+/// Whether config.toml is being read for a start or for a reload of a running
+/// dux, which may neither create the file nor accept it gone or empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigRead {
+    /// A start, which writes the commented template when there is no file.
+    Start,
+    /// A reload, which keeps the running settings when the file is unusable.
+    Reload,
+}
+
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
-pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
-    ensure_config_with(paths, false)
+pub(crate) fn ensure_config(paths: &DuxPaths) -> Result<Config> {
+    ensure_config_with(paths, ConfigRead::Start)
 }
 
 /// [`ensure_config`] for a reload: never creates the file, and refuses one
 /// that is gone or empty (judged on the text that is parsed, so a file
 /// truncated mid-read cannot load as the defaults, which have no password).
-pub fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
-    ensure_config_with(paths, true)
+pub(crate) fn ensure_config_for_reload(paths: &DuxPaths) -> Result<Config> {
+    ensure_config_with(paths, ConfigRead::Reload)
 }
 
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
-fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
+fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     // Any core-side write that CREATES config.toml (bootstrap project-sync) must
     // emit the commented template, not a bare one.
     install_canonical_renderer();
@@ -38,7 +49,7 @@ fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
         }
         .into());
     }
-    if !reload && !paths.config_path.exists() {
+    if purpose == ConfigRead::Start && !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -56,13 +67,16 @@ fn ensure_config_with(paths: &DuxPaths, reload: bool) -> Result<Config> {
     let migrate =
         |read: std::io::Result<String>| -> Result<(Option<String>, (String, String, bool))> {
             let raw = read.map_err(|error| {
-                load_error(if reload && error.kind() == std::io::ErrorKind::NotFound {
-                    dux_core::config::ConfigLoadProblem::Missing
-                } else {
-                    dux_core::config::ConfigLoadProblem::Unreadable(error.to_string())
-                })
+                load_error(
+                    if purpose == ConfigRead::Reload && error.kind() == std::io::ErrorKind::NotFound
+                    {
+                        dux_core::config::ConfigLoadProblem::Missing
+                    } else {
+                        dux_core::config::ConfigLoadProblem::Unreadable(error.to_string())
+                    },
+                )
             })?;
-            if reload && raw.trim().is_empty() {
+            if purpose == ConfigRead::Reload && raw.trim().is_empty() {
                 return Err(load_error(dux_core::config::ConfigLoadProblem::Empty).into());
             }
             dux_core::config::auth_section_of(&raw).map_err(load_error)?;
@@ -1933,13 +1947,13 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
     out
 }
 
-pub fn render_default_config() -> String {
+pub(crate) fn render_default_config() -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
     render_config(&Config::default(), &bindings)
 }
 
 /// Render a config through the canonical renderer (public for CLI diff).
-pub fn render_config_with(
+pub(crate) fn render_config_with(
     config: &Config,
     bindings: &crate::keybindings::RuntimeBindings,
 ) -> String {
@@ -1953,7 +1967,7 @@ pub fn render_config_with(
 /// This is the function handed to `dux_core::config_write::set_canonical_renderer`,
 /// which is how `dux serve`, a surface with no access to `RuntimeBindings`,
 /// still creates a fully-commented config on first run.
-pub fn render_config_documented(config: &Config) -> String {
+pub(crate) fn render_config_documented(config: &Config) -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
     render_config(config, &bindings)
 }
@@ -2106,7 +2120,7 @@ fn keys_start_problems(raw: &str) -> Vec<String> {
 
 /// The result of re-applying the commented template to an existing config.
 #[derive(Debug)]
-pub struct RestoredConfig {
+pub(crate) struct RestoredConfig {
     /// The full text of the restored file. Not yet written anywhere.
     pub text: String,
     /// Orphaned sections that were removed, as dotted paths.
@@ -2121,7 +2135,7 @@ pub struct RestoredConfig {
 
 impl RestoredConfig {
     /// Whether restoring would leave the file byte-identical.
-    pub fn is_noop(&self, original_raw: &str) -> bool {
+    pub(crate) fn is_noop(&self, original_raw: &str) -> bool {
         self.text == original_raw
     }
 }
@@ -2143,7 +2157,7 @@ impl RestoredConfig {
 /// * The result is re-parsed and compared against the config parsed from the
 ///   input. A mismatch aborts with an error rather than writing, so a renderer
 ///   bug can never silently rewrite a user's settings.
-pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
+pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     let original: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
         anyhow::anyhow!(
             "config.toml is not valid TOML, so its values cannot be read back safely: {}",
@@ -2217,7 +2231,7 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
 )]
 #[allow(deprecated)] // internal delegation: body calls deprecated core fns (patch_config_file, write_config_secure)
-pub fn save_config(
+pub(crate) fn save_config(
     config_path: &Path,
     config: &Config,
     _bindings: &crate::keybindings::RuntimeBindings,
@@ -2661,7 +2675,7 @@ fn not_a_key_sentence(action: &str, at: Option<usize>) -> String {
 ///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`); a
 ///    binding that does not is named by its action, never repeated.
 /// 3. No two actions bind the same normalized key in overlapping scopes.
-pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
+pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
     let problems = key_binding_problems(keys, &|_| None);
     if problems.is_empty() {
         Ok(())
