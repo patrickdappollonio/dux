@@ -6028,6 +6028,8 @@ fn provider_command_available_in_path(command: &str, paths: &std::ffi::OsStr) ->
 }
 
 fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
@@ -6035,7 +6037,6 @@ fn is_executable_file(path: &Path) -> bool {
         return false;
     }
 
-    use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o111 != 0
 }
 
@@ -8151,8 +8152,9 @@ auth = { minimum_password_score = 9 }
     }
 
     fn write_executable(path: &Path) {
-        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write fixture command");
         use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write fixture command");
         let mut permissions = std::fs::metadata(path)
             .expect("fixture metadata")
             .permissions();

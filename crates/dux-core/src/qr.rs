@@ -271,9 +271,10 @@ mod tests {
 
     /// Decode the drawn code the way a phone would: as pixels, with no help.
     fn decode(rows: &[String], polarity: Polarity) -> String {
-        let grid = modules(rows, polarity);
         const SCALE: usize = 6;
         const MARGIN: usize = 4;
+
+        let grid = modules(rows, polarity);
         let size = grid.len();
         let px = (size + 2 * MARGIN) * SCALE;
         let mut image = rqrr::PreparedImage::prepare_from_greyscale(px, px, |x, y| {

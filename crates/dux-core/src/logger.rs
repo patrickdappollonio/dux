@@ -455,11 +455,12 @@ impl RotatingLog {
                 state.size = 0;
             }
             Err(err) => {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+
                 // The handle still points at the file that was just renamed, so
                 // putting it back under the live name keeps later lines where a
                 // reader expects them.
                 let restored = fs::rename(self.numbered(1), &self.path).is_ok();
-                static REPORTED: std::sync::Once = std::sync::Once::new();
                 report_rotation_failure(
                     &REPORTED,
                     &format!(

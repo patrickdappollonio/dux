@@ -324,13 +324,14 @@ mod tests {
 
     #[test]
     fn a_resource_is_picked_by_id_or_by_a_name_only_it_has() {
-        let items = [("a1", "web"), ("b2", "api"), ("c3", "api"), ("web", "docs")];
         fn id<'a>(item: &'a (&'static str, &'static str)) -> &'a str {
             item.0
         }
         fn name<'a>(item: &'a (&'static str, &'static str)) -> &'a str {
             item.1
         }
+
+        let items = [("a1", "web"), ("b2", "api"), ("c3", "api"), ("web", "docs")];
 
         assert_eq!(select("agent", "b2", &items, id, name).unwrap().0, "b2");
         assert_eq!(

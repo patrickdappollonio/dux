@@ -642,12 +642,13 @@ mod tests {
     /// while the real bug (threads counted) blows the count past the band.
     #[test]
     fn aggregate_tree_over_a_threaded_process_excludes_threads() {
-        let _guard = CHILD_PROCESS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Spin many threads: if the adapter ever stopped flagging thread rows,
         // the count would jump to ~THREADS, far outside the asserted band.
         const THREADS: usize = 16;
+
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(THREADS);
 
         let mut child = std::process::Command::new("sleep")
@@ -1013,11 +1014,11 @@ mod tests {
     /// a multi-threaded burn is never clamped at 100.
     #[test]
     fn cpu_reads_high_for_a_burning_tree_and_near_zero_for_an_idle_one() {
+        use std::os::unix::process::CommandExt;
+
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        use std::os::unix::process::CommandExt;
 
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         // Four spinning subshells under one `sh`: a real multi-process tree

@@ -4291,9 +4291,6 @@ mod tests {
     /// cursor report, and nothing may follow.
     #[test]
     fn termenv_background_probe_reads_the_osc_reply_before_its_fence() {
-        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
-        let replies = terminal.process(b"\x1b]11;?\x1b\\\x1b[6n");
-
         // termenv's readNextResponse: an OSC reply ends at ST or BEL, a CSI
         // reply at its final byte `R`.
         fn next_response(input: &[u8]) -> Option<(&[u8], bool, &[u8])> {
@@ -4312,6 +4309,9 @@ mod tests {
             };
             Some((&input[..end], is_osc, &input[end..]))
         }
+
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        let replies = terminal.process(b"\x1b]11;?\x1b\\\x1b[6n");
 
         let (first, first_is_osc, rest) =
             next_response(&replies).expect("termenv must read a first response");
@@ -6584,20 +6584,6 @@ mod tests {
     /// and a removal must still find the job.
     #[test]
     fn a_child_seen_to_exit_has_its_survivors_recorded_before_the_client_drops() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("job.pid");
-        let args = vec![
-            "-c".to_string(),
-            format!(
-                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
-                pidfile.display()
-            ),
-        ];
-        let mut client =
-            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
-        let session = client.process_session().expect("a session");
-        let registry = crate::process_sessions::AgentProcessRegistry::default();
-        client.set_leader_exit_hook(registry.leader_exit_hook(session));
         struct Kill(std::path::PathBuf);
         impl Drop for Kill {
             fn drop(&mut self) {
@@ -6612,6 +6598,21 @@ mod tests {
                 }
             }
         }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let session = client.process_session().expect("a session");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        client.set_leader_exit_hook(registry.leader_exit_hook(session));
         let _job = Kill(pidfile.clone());
 
         let deadline = Instant::now() + std::time::Duration::from_secs(5);

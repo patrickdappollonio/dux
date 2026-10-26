@@ -108,6 +108,15 @@ pub fn diff_head_via_git_as(
     rel_path: &str,
     requested: Option<&'static encoding_rs::Encoding>,
 ) -> anyhow::Result<DiffHead> {
+    // Everything past the spawn goes through this, so no early return can leave
+    // a child behind.
+    fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
+        if how == Reap::KillFirst {
+            let _ = child.kill();
+        }
+        child.wait().ok().and_then(|status| status.code())
+    }
+
     let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
 
     let head_prefix = crate::git::file_prefix_at_head(worktree, rel_path, BINARY_SAMPLE_BYTES)?;
@@ -180,15 +189,6 @@ pub fn diff_head_via_git_as(
         }
         buffer
     });
-
-    // Everything past the spawn goes through this, so no early return can leave
-    // a child behind.
-    fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
-        if how == Reap::KillFirst {
-            let _ = child.kill();
-        }
-        child.wait().ok().and_then(|status| status.code())
-    }
 
     let Some(stdout) = child.stdout.take() else {
         reap(&mut child, Reap::KillFirst);

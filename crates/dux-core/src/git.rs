@@ -6969,6 +6969,8 @@ fn never_in_an_agent_name(ch: char) -> bool {
 /// same hash, so it fits the filesystem's limit on one name and two long names
 /// that share their start still get folders of their own.
 pub(crate) fn agent_folder_name(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+
     let flat: String = name
         .chars()
         .map(|ch| {
@@ -6987,7 +6989,6 @@ pub(crate) fn agent_folder_name(name: &str) -> String {
     if name.is_ascii() && flat.len() <= AGENT_FOLDER_MAX_UNITS {
         return flat;
     }
-    use sha2::{Digest, Sha256};
     let digest = Sha256::digest(name.as_bytes());
     let hash = crate::text::hex_lower(&digest[..8]);
     let budget = AGENT_FOLDER_MAX_UNITS - hash.len() - 1;

@@ -1607,16 +1607,17 @@ impl AgentProcessRegistry {
         touches: &dyn Fn(&std::path::Path) -> bool,
         except: &[ProcessSession],
     ) -> Option<String> {
-        // A leader reaped a moment ago may still have its record in flight.
-        if let Err(reason) = self.recordings_settled() {
-            return Some(reason);
-        }
         type Tracked = (
             ProcessSession,
             std::path::PathBuf,
             Vec<ProcessIdentity>,
             Option<String>,
         );
+
+        // A leader reaped a moment ago may still have its record in flight.
+        if let Err(reason) = self.recordings_settled() {
+            return Some(reason);
+        }
         let tracked: Vec<Tracked> = {
             let inner = self.lock();
             let mut all: Vec<(ProcessSession, std::path::PathBuf)> = inner

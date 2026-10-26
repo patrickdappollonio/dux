@@ -1985,10 +1985,11 @@ mod tests {
 
     #[test]
     fn macros_reflect_a_config_reload() {
+        use crate::config::{MacroEntry, MacroSurface};
+
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
-        use crate::config::{MacroEntry, MacroSurface};
         let (mut engine, _tmp) = test_engine();
         assert!(engine.bootstrap().macros.is_empty());
 

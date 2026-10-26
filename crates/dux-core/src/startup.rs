@@ -1886,6 +1886,22 @@ mod review16_tests {
     /// and ends by itself once the job is ended by a removal.
     #[test]
     fn the_drain_never_occupies_the_worktree_and_ends_with_the_job() {
+        // Whatever happens below, the job's session is ended when the test
+        // ends, and with it the drains (their last writer closes).
+        struct EndSessions(Vec<crate::process_sessions::ProcessSession>);
+        impl Drop for EndSessions {
+            fn drop(&mut self) {
+                for session in &self.0 {
+                    if let Some(group) = rustix::process::Pid::from_raw(session.sid as i32) {
+                        let _ = rustix::process::kill_process_group(
+                            group,
+                            rustix::process::Signal::KILL,
+                        );
+                    }
+                }
+            }
+        }
+
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("wt");
         fs::create_dir_all(&worktree).unwrap();
@@ -1909,21 +1925,6 @@ mod review16_tests {
             },
             &registry,
         );
-        // Whatever happens below, the job's session is ended when the test
-        // ends, and with it the drains (their last writer closes).
-        struct EndSessions(Vec<crate::process_sessions::ProcessSession>);
-        impl Drop for EndSessions {
-            fn drop(&mut self) {
-                for session in &self.0 {
-                    if let Some(group) = rustix::process::Pid::from_raw(session.sid as i32) {
-                        let _ = rustix::process::kill_process_group(
-                            group,
-                            rustix::process::Signal::KILL,
-                        );
-                    }
-                }
-            }
-        }
         let sessions = registry.sessions_in(&worktree);
         let _end = EndSessions(sessions.clone());
         assert!(result.status.is_ok(), "{:?}", result.status);

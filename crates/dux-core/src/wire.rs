@@ -10567,6 +10567,11 @@ mod tests {
 
     #[test]
     fn apply_wire_init_repo_clears_the_gate_and_resolves_the_op() {
+        // (folder name, shape, remote reachable, project's current branch and
+        // leading branch when it is added, the warning when one is raised,
+        // else the end of the refusal)
+        type Outcome<'a> = Result<(&'a str, &'a str, Option<String>), &'a str>;
+
         // Catches a stranded busy toast plus a permanently locked path.
         // Asserts only outcome-independent invariants (the commit outcome
         // depends on whether this machine has an ambient git identity).
@@ -10854,10 +10859,6 @@ mod tests {
         // with no commits has no branch to lead with at all.
         let widget = "github.com/acme/widget";
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        // (folder name, shape, remote reachable, project's current branch and
-        // leading branch when it is added, the warning when one is raised,
-        // else the end of the refusal)
-        type Outcome<'a> = Result<(&'a str, &'a str, Option<String>), &'a str>;
         let cases: Vec<(&str, &str, bool, Outcome<'_>)> = vec![
             (
                 "added-single-branch",

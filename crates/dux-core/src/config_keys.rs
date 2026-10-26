@@ -1661,6 +1661,108 @@ pub fn shown_file_text(
     values: HeldBack,
     binding_understood: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
+    // What a value at `path` (and every key inside it) makes of its line.
+    fn mask_of(
+        path: &[Step],
+        value: &toml_edit::Value,
+        shown: HeldBack,
+        held_back: &dyn Fn(&[Step]) -> bool,
+        binding_understood: &dyn Fn(&str) -> bool,
+    ) -> Mask {
+        let show = shown == HeldBack::Shown;
+        let mut mask = Mask::Shown;
+        if !show && held_back(path) {
+            mask = Mask::Hidden;
+        }
+        let key_path = keys(path);
+        if !show
+            && key_path.len() == 2
+            && key_path[0] == "keys"
+            && match value {
+                toml_edit::Value::String(text) => !binding_understood(text.value()),
+                toml_edit::Value::Array(items) => items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| !binding_understood(text))),
+                _ => false,
+            }
+        {
+            mask = Mask::Hidden;
+        }
+        match value {
+            toml_edit::Value::InlineTable(table) => {
+                for (key, child) in table {
+                    let mut at = path.to_vec();
+                    at.push(Step::Key(key.to_string()));
+                    mask = mask.max(mask_of(&at, child, shown, held_back, binding_understood));
+                }
+            }
+            toml_edit::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    let mut at = path.to_vec();
+                    at.push(Step::Index(index));
+                    mask = mask.max(mask_of(&at, item, shown, held_back, binding_understood));
+                }
+            }
+            _ => {}
+        }
+        mask
+    }
+    fn walk(
+        table: &toml_edit::Table,
+        path: &mut Vec<Step>,
+        out: &mut Vec<Entry>,
+        line_of: &dyn Fn(usize) -> usize,
+    ) {
+        for (key, item) in table {
+            path.push(Step::Key(key.to_string()));
+            match item {
+                toml_edit::Item::Value(value) => {
+                    let start = table
+                        .key(key)
+                        .and_then(toml_edit::Key::span)
+                        .or_else(|| value.span())
+                        .map(|span| line_of(span.start));
+                    let end = value.span().map(|span| line_of(span.end.saturating_sub(1)));
+                    if let Some(start) = start {
+                        out.push(Entry::Value {
+                            start,
+                            end: end.unwrap_or(start).max(start),
+                            path: path.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                }
+                toml_edit::Item::Table(child) => {
+                    if let Some(span) = child.span() {
+                        out.push(Entry::Header {
+                            line: line_of(span.start),
+                            path: path.clone(),
+                            array: false,
+                            text: Some(span),
+                        });
+                    }
+                    walk(child, path, out, line_of);
+                }
+                toml_edit::Item::ArrayOfTables(entries) => {
+                    for (index, child) in entries.iter().enumerate() {
+                        path.push(Step::Index(index));
+                        if let Some(span) = child.span() {
+                            out.push(Entry::Header {
+                                line: line_of(span.start),
+                                path: path.clone(),
+                                array: true,
+                                text: Some(span),
+                            });
+                        }
+                        walk(child, path, out, line_of);
+                        path.pop();
+                    }
+                }
+                toml_edit::Item::None => {}
+            }
+            path.pop();
+        }
+    }
     use crate::config::PathStep as Step;
     /// What a line holds.
     enum Entry {
@@ -1719,62 +1821,6 @@ pub fn shown_file_text(
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
     };
-    fn walk(
-        table: &toml_edit::Table,
-        path: &mut Vec<Step>,
-        out: &mut Vec<Entry>,
-        line_of: &dyn Fn(usize) -> usize,
-    ) {
-        for (key, item) in table {
-            path.push(Step::Key(key.to_string()));
-            match item {
-                toml_edit::Item::Value(value) => {
-                    let start = table
-                        .key(key)
-                        .and_then(toml_edit::Key::span)
-                        .or_else(|| value.span())
-                        .map(|span| line_of(span.start));
-                    let end = value.span().map(|span| line_of(span.end.saturating_sub(1)));
-                    if let Some(start) = start {
-                        out.push(Entry::Value {
-                            start,
-                            end: end.unwrap_or(start).max(start),
-                            path: path.clone(),
-                            value: value.clone(),
-                        });
-                    }
-                }
-                toml_edit::Item::Table(child) => {
-                    if let Some(span) = child.span() {
-                        out.push(Entry::Header {
-                            line: line_of(span.start),
-                            path: path.clone(),
-                            array: false,
-                            text: Some(span),
-                        });
-                    }
-                    walk(child, path, out, line_of);
-                }
-                toml_edit::Item::ArrayOfTables(entries) => {
-                    for (index, child) in entries.iter().enumerate() {
-                        path.push(Step::Index(index));
-                        if let Some(span) = child.span() {
-                            out.push(Entry::Header {
-                                line: line_of(span.start),
-                                path: path.clone(),
-                                array: true,
-                                text: Some(span),
-                            });
-                        }
-                        walk(child, path, out, line_of);
-                        path.pop();
-                    }
-                }
-                toml_edit::Item::None => {}
-            }
-            path.pop();
-        }
-    }
     let mut entries = Vec::new();
     walk(doc.as_table(), &mut Vec::new(), &mut entries, &line_of);
     // A path whose values a printer holds back without `show`.
@@ -1790,52 +1836,6 @@ pub fn shown_file_text(
             .iter()
             .any(|password| password.steps.starts_with(path) || path.starts_with(&password.steps))
     };
-    // What a value at `path` (and every key inside it) makes of its line.
-    fn mask_of(
-        path: &[Step],
-        value: &toml_edit::Value,
-        shown: HeldBack,
-        held_back: &dyn Fn(&[Step]) -> bool,
-        binding_understood: &dyn Fn(&str) -> bool,
-    ) -> Mask {
-        let show = shown == HeldBack::Shown;
-        let mut mask = Mask::Shown;
-        if !show && held_back(path) {
-            mask = Mask::Hidden;
-        }
-        let key_path = keys(path);
-        if !show
-            && key_path.len() == 2
-            && key_path[0] == "keys"
-            && match value {
-                toml_edit::Value::String(text) => !binding_understood(text.value()),
-                toml_edit::Value::Array(items) => items
-                    .iter()
-                    .any(|item| item.as_str().is_some_and(|text| !binding_understood(text))),
-                _ => false,
-            }
-        {
-            mask = Mask::Hidden;
-        }
-        match value {
-            toml_edit::Value::InlineTable(table) => {
-                for (key, child) in table {
-                    let mut at = path.to_vec();
-                    at.push(Step::Key(key.to_string()));
-                    mask = mask.max(mask_of(&at, child, shown, held_back, binding_understood));
-                }
-            }
-            toml_edit::Value::Array(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    let mut at = path.to_vec();
-                    at.push(Step::Index(index));
-                    mask = mask.max(mask_of(&at, item, shown, held_back, binding_understood));
-                }
-            }
-            _ => {}
-        }
-        mask
-    }
     let lines: Vec<&str> = raw.split_inclusive('\n').collect();
     let mut shown: Vec<Option<String>> =
         lines.iter().map(|line| Some((*line).to_string())).collect();
@@ -2205,6 +2205,25 @@ fn render_in_use(
     corrections: &[Correction],
     names: HeldBack,
 ) -> String {
+    fn mark(
+        table: &mut dyn toml_edit::TableLike,
+        at: &mut Vec<String>,
+        marks: &[(Vec<String>, String)],
+    ) {
+        for (key, item) in table.iter_mut() {
+            at.push(key.get().to_string());
+            match item {
+                Item::Value(value) => {
+                    if let Some((_, mark)) = marks.iter().find(|(path, _)| path == at) {
+                        value.decor_mut().set_suffix(mark.as_str());
+                    }
+                }
+                Item::Table(child) => mark(child, at, marks),
+                _ => {}
+            }
+            at.pop();
+        }
+    }
     let mut leaves = Vec::new();
     leaves_of(in_use, &mut path.to_vec(), &mut leaves);
     let marks: Vec<(Vec<String>, String)> = leaves
@@ -2232,25 +2251,6 @@ fn render_in_use(
     let Ok(mut doc) = text.parse::<DocumentMut>() else {
         return text;
     };
-    fn mark(
-        table: &mut dyn toml_edit::TableLike,
-        at: &mut Vec<String>,
-        marks: &[(Vec<String>, String)],
-    ) {
-        for (key, item) in table.iter_mut() {
-            at.push(key.get().to_string());
-            match item {
-                Item::Value(value) => {
-                    if let Some((_, mark)) = marks.iter().find(|(path, _)| path == at) {
-                        value.decor_mut().set_suffix(mark.as_str());
-                    }
-                }
-                Item::Table(child) => mark(child, at, marks),
-                _ => {}
-            }
-            at.pop();
-        }
-    }
     mark(doc.as_table_mut(), &mut path.to_vec(), &marks);
     doc.to_string().trim_end().to_string()
 }

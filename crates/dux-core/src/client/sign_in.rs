@@ -90,6 +90,11 @@ pub struct SignedIn {
 /// Fails when the remote cannot be reached, refuses the password, or answers with something that is
 /// not a token.
 pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, CliError> {
+    #[derive(serde::Deserialize)]
+    struct Issued {
+        token: String,
+    }
+
     let body = serde_json::json!({ "password": password, "label": LABEL });
     let reply = send(
         name,
@@ -104,10 +109,6 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, Cl
     )?;
     if reply.status != 200 {
         return Err(CliError::new(Exit::Failed, reply_sentence(&reply)));
-    }
-    #[derive(serde::Deserialize)]
-    struct Issued {
-        token: String,
     }
     let token = serde_json::from_slice::<Issued>(&reply.body)
         .map(|issued| issued.token)

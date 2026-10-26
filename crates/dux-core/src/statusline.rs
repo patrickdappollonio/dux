@@ -3303,8 +3303,9 @@ mod tests {
 
     #[test]
     fn nothing_counts_down_that_does_not_clear_on_a_timer() {
-        let t0 = Instant::now();
         type Post = fn(&mut KeyedStatusController, Instant);
+
+        let t0 = Instant::now();
         let untimed: [(&str, Post); 5] = [
             ("busy", |c, t| {
                 c.set(t, None, StatusTone::Busy, "busy");
