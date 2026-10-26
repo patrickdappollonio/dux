@@ -1,3 +1,4 @@
+use crate::numeric::usize_to_u16_wrapping;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::{Color, Modifier, Style};
@@ -156,7 +157,7 @@ impl<'a> Checkbox<'a> {
         }
 
         CheckboxLayout {
-            height: lines.len() as u16,
+            height: usize_to_u16_wrapping(lines.len()),
             lines,
             background: None,
         }
@@ -207,7 +208,7 @@ impl Widget for CheckboxLayout {
         }
 
         for (offset, line) in self.lines.into_iter().enumerate() {
-            let y = area.y.saturating_add(offset as u16);
+            let y = area.y.saturating_add(usize_to_u16_wrapping(offset));
             if y >= area.y.saturating_add(area.height) {
                 break;
             }

@@ -620,7 +620,7 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
     if tab_width == 0 || !line.contains('\t') {
         return line.to_string();
     }
-    let tw = tab_width as usize;
+    let tw = usize::from(tab_width);
     let mut out = String::with_capacity(line.len());
     let mut col: usize = 0;
     for ch in line.chars() {

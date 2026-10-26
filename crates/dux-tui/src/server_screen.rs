@@ -25,6 +25,7 @@
 //! `FnMut`, wired up by the binary (`crates/dux/src/main.rs`), the only crate
 //! that depends on both.
 
+use crate::numeric::usize_to_u16_wrapping;
 use std::collections::VecDeque;
 use std::io::{Stdout, Write, stdout};
 use std::sync::Mutex;
@@ -625,7 +626,7 @@ impl ServerStatusScreen {
                         .iter()
                         .map(|segs| wrapped_row_count(segs, inner_width))
                         .sum();
-                    let footer_rows = footer.len() as u16 + 1;
+                    let footer_rows = usize_to_u16_wrapping(footer.len()) + 1;
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .vertical_margin(V_MARGIN)
@@ -848,13 +849,13 @@ fn draw_log_panel(
     };
     frame.render_widget(block, area);
     let pinned_area = Rect {
-        height: pinned_rows as u16,
+        height: usize_to_u16_wrapping(pinned_rows),
         ..content
     };
     frame.render_widget(Paragraph::new(view.pinned_rows.clone()), pinned_area);
     let scroll_area = Rect {
-        y: content.y + pinned_rows as u16,
-        height: viewport as u16,
+        y: content.y + usize_to_u16_wrapping(pinned_rows),
+        height: usize_to_u16_wrapping(viewport),
         ..content
     };
     let end = (start + viewport).min(total);
@@ -881,12 +882,12 @@ fn line_render_width(segments: &ScreenLine) -> usize {
 
 /// Estimate how many rows a header line occupies once wrapped to `inner_width`.
 fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
-    let width = inner_width.max(1) as usize;
+    let width = usize::from(inner_width.max(1));
     let chars = line_render_width(segments);
     if chars == 0 {
         return 1;
     }
-    (chars.div_ceil(width)) as u16
+    usize_to_u16_wrapping(chars.div_ceil(width))
 }
 
 /// Map a key to what it does here. The return and quit keys are not bindings:
@@ -1283,7 +1284,7 @@ impl ServerLogViewer {
         );
         let inner_width = area.width.saturating_sub(4).max(1);
         let footer = viewer_footer_lines(theme, bindings, inner_width);
-        let footer_rows = footer.len() as u16 + 1;
+        let footer_rows = usize_to_u16_wrapping(footer.len()) + 1;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .vertical_margin(1)
@@ -1892,7 +1893,10 @@ mod tests {
                     let start = rows.len().saturating_sub(viewport);
                     std::hint::black_box(rows[start..].to_vec());
                 }
-                old_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+                old_runs.push(
+                    started.elapsed().as_secs_f64() * 1000.0
+                        / f64::from(u32::try_from(frames).expect("50 frames fit in a u32")),
+                );
 
                 let mut view = LogView::new(ring.capacity());
                 view.set_width(width, &theme);
@@ -1905,7 +1909,10 @@ mod tests {
                     let start = total.saturating_sub(viewport);
                     std::hint::black_box(view.scroll_window(PinnedRows::Stuck, start, total));
                 }
-                new_runs.push(started.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+                new_runs.push(
+                    started.elapsed().as_secs_f64() * 1000.0
+                        / f64::from(u32::try_from(frames).expect("50 frames fit in a u32")),
+                );
             }
             let summary = |runs: &mut Vec<f64>| {
                 runs.sort_by(|a, b| a.partial_cmp(b).unwrap());

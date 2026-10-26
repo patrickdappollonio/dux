@@ -44,6 +44,7 @@ use crate::config::MacroSurface;
 use crate::git;
 use crate::keybindings::{Action, HintContext};
 use crate::model::{AgentSession, ChangedFile, CompanionTerminalStatus, Project, SessionSurface};
+use crate::numeric::{u64_to_f64, u128_to_u64_wrapping, usize_to_u16_wrapping};
 use crate::statusline::StatusTone;
 use crate::theme::FocusState;
 use crate::theme::Theme;
@@ -102,7 +103,7 @@ fn cut_card_lines(
     width: u16,
     truncation: Truncation,
 ) -> Vec<Line<'static>> {
-    let rows = rows as usize;
+    let rows = usize::from(rows);
     let mut cut: Vec<Line<'static>> = lines.iter().take(rows).cloned().collect();
     if truncation == Truncation::Whole || lines.len() <= rows {
         return cut;
@@ -409,7 +410,7 @@ pub(crate) fn agent_state_word(
 /// the list's top), each holding the item index that occupies that row. Pure and
 /// unit-tested; ratatui scrolls whole items, so the top item is never clipped.
 pub(crate) fn left_row_to_item(offset: usize, heights: &[u16], area_height: u16) -> Vec<usize> {
-    let cap = area_height as usize;
+    let cap = usize::from(area_height);
     let mut map = Vec::with_capacity(cap);
     let mut item = offset;
     while map.len() < cap && item < heights.len() {
@@ -556,7 +557,7 @@ fn right_align_line(
     // at least `min_gap` because the left group was capped at `left_budget`.
     let pad = total_w.saturating_sub(width(&out) + right_w);
     if pad > 0 {
-        out.push(Span::raw(" ".repeat(pad as usize)));
+        out.push(Span::raw(" ".repeat(usize::from(pad))));
     }
     out.extend(right);
     out
@@ -1385,9 +1386,9 @@ fn macro_edit_text_inner_area(popup: Rect) -> Rect {
 
 fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
     let text_inner = macro_edit_text_inner_area(popup);
-    let wrap_w = text_inner.width.saturating_sub(1) as usize;
+    let wrap_w = usize::from(text_inner.width.saturating_sub(1));
     input.set_display_width(if wrap_w > 0 { Some(wrap_w) } else { None });
-    input.set_visible_lines(text_inner.height as usize);
+    input.set_visible_lines(usize::from(text_inner.height));
     input.ensure_cursor_visible();
 }
 
@@ -2310,7 +2311,7 @@ impl App {
         // three cells wide, so the tab count behind it never moves as the dots
         // come and go.
         let (word_text, word_color) = if working && !deleting && word == AGENT_WORKING_WORD {
-            let elapsed = self.start_time.elapsed().as_millis() as u64;
+            let elapsed = u128_to_u64_wrapping(self.start_time.elapsed().as_millis());
             (
                 format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
                 crate::theme::working_word_color(
@@ -2437,7 +2438,7 @@ impl App {
                 let rel = rel_end.saturating_sub(1);
                 if map.get(rel) == Some(&sel) {
                     let tint = self.theme.selection_bar_tint();
-                    let y = list_inner.y + rel as u16;
+                    let y = list_inner.y + usize_to_u16_wrapping(rel);
                     for x in list_inner.x..list_inner.x + list_inner.width {
                         buf[(x, y)].set_bg(tint);
                     }
@@ -2467,7 +2468,7 @@ impl App {
         let tint = self.theme.selection_bar_tint();
         let x0 = area.x;
         let x1 = area.x + area.width;
-        let row_at = |rel: usize| area.y + rel as u16;
+        let row_at = |rel: usize| area.y + usize_to_u16_wrapping(rel);
 
         // A content row: a faint tint across the full width, gutters included
         // (background only, so the row's own text colors survive on top).
@@ -2536,7 +2537,7 @@ impl App {
                 if map.get(rel + offset) != Some(&drag.source) {
                     break;
                 }
-                let y = list_content.y + (rel + offset) as u16;
+                let y = list_content.y + usize_to_u16_wrapping(rel + offset);
                 for x in x0..x1 {
                     buf[(x, y)].set_fg(self.theme.provider_label_fg);
                 }
@@ -2555,7 +2556,7 @@ impl App {
             Some(above) => map
                 .iter()
                 .rposition(|&i| i == above)
-                .map(|rel| list_content.y + rel as u16),
+                .map(|rel| list_content.y + usize_to_u16_wrapping(rel)),
         };
         let Some(y) = marker_y else {
             return;
@@ -2588,7 +2589,7 @@ impl App {
         };
         // The toggle ends with a trailing spacer, so the label sits one row above
         // the item's last row.
-        let y = list_content.y + rel_end.saturating_sub(1) as u16;
+        let y = list_content.y + usize_to_u16_wrapping(rel_end.saturating_sub(1));
         let x0 = list_content.x;
         let x1 = list_content.x + list_content.width;
         // Stop a gutter short of the right edge so the rule keeps the same right
@@ -3232,7 +3233,7 @@ impl App {
 
         self.last_diff_height = content_area.height;
 
-        let w = content_area.width.max(1) as usize;
+        let w = usize::from(content_area.width.max(1));
 
         // Wrap once per diff, width and gutter setting rather than once per
         // frame: the wrap walks every line of the file, and a frame draws forty
@@ -3377,7 +3378,7 @@ impl App {
         let sources: Vec<Vec<Line<'static>>> =
             blocks.iter().map(|block| self.card_source(block)).collect();
         let measure = |index: usize, width: u16| {
-            u16::try_from(wrap_styled_lines(&sources[index], width as usize).len())
+            u16::try_from(wrap_styled_lines(&sources[index], usize::from(width)).len())
                 .unwrap_or(u16::MAX)
         };
 
@@ -3407,7 +3408,7 @@ impl App {
         // line in the wrong place.
         let wrapped: Vec<Vec<Line<'static>>> = sources
             .iter()
-            .map(|source| wrap_styled_lines(source, plan.content_width as usize))
+            .map(|source| wrap_styled_lines(source, usize::from(plan.content_width)))
             .collect();
         self.paint_pane_card(frame, title, &plan, blocks, &wrapped, &kept)
     }
@@ -3775,7 +3776,7 @@ impl App {
             ],
         };
 
-        let height = lines.len() as u16;
+        let height = usize_to_u16_wrapping(lines.len());
         let y = area.y + area.height.saturating_sub(height) / 2;
         render_centered_lines(
             frame.buffer_mut(),
@@ -3997,17 +3998,17 @@ impl App {
             let top = format!(
                 "{}{}{}{}{}",
                 corners.top_left,
-                corners.horizontal_top.repeat(ord_w as usize),
+                corners.horizontal_top.repeat(usize::from(ord_w)),
                 ratatui::symbols::line::HORIZONTAL_DOWN,
-                corners.horizontal_top.repeat(label_w as usize),
+                corners.horizontal_top.repeat(usize::from(label_w)),
                 corners.top_right
             );
             let bottom = format!(
                 "{}{}{}{}{}",
                 corners.bottom_left,
-                corners.horizontal_bottom.repeat(ord_w as usize),
+                corners.horizontal_bottom.repeat(usize::from(ord_w)),
                 ratatui::symbols::line::HORIZONTAL_UP,
-                corners.horizontal_bottom.repeat(label_w as usize),
+                corners.horizontal_bottom.repeat(usize::from(label_w)),
                 corners.bottom_right
             );
             buf.set_string(x, top_y, &top, border_style);
@@ -4172,13 +4173,13 @@ impl App {
             hints.push(Hint::key(macro_key, "macros"));
         }
         let mut spans =
-            fitted_hint_spans(&self.theme, HintTone::Pane, &hints, width as usize).spans;
+            fitted_hint_spans(&self.theme, HintTone::Pane, &hints, usize::from(width)).spans;
 
         if tab_reaches_agent {
             const CUE: &str = "tabs are sent to the agent";
             const GAP: usize = 2;
             let chords: usize = spans.iter().map(|span| display_width(&span.content)).sum();
-            if let Some(pad) = (width as usize).checked_sub(chords + GAP + CUE.chars().count()) {
+            if let Some(pad) = usize::from(width).checked_sub(chords + GAP + CUE.chars().count()) {
                 spans.push(Span::styled(" ".repeat(pad + GAP), desc_style));
                 spans.push(Span::styled(CUE, desc_style));
             }
@@ -4228,7 +4229,7 @@ impl App {
                 if index == 0 { hint.pinned() } else { hint }
             })
             .collect();
-        let fitted = fitted_hint_spans(&self.theme, HintTone::Pane, &hints, width as usize);
+        let fitted = fitted_hint_spans(&self.theme, HintTone::Pane, &hints, usize::from(width));
         let mut spans = fitted.spans;
         if fitted.shown == 0 {
             // Every key that could press the button has been unbound, or the
@@ -4236,7 +4237,7 @@ impl App {
             // there to click, so the line says that instead of nothing.
             spans.clear();
             let fallback = "Press Take over to type here";
-            if fallback.chars().count() <= width as usize {
+            if fallback.chars().count() <= usize::from(width) {
                 spans.push(Span::styled(fallback, desc_style));
             }
         }
@@ -4354,7 +4355,7 @@ impl App {
                 prose,
                 Style::default().fg(self.theme.hint_desc_fg),
             ))],
-            prose_w as usize,
+            usize::from(prose_w),
         );
         let prose_rows = u16::try_from(prose_lines.len()).unwrap_or(u16::MAX);
 
@@ -4674,7 +4675,7 @@ impl App {
                 .hyperlinks
                 .then_some(cell.link)
                 .flatten()
-                .and_then(|index| self.snapshot_buf.links.get(index as usize))
+                .and_then(|index| self.snapshot_buf.links.get(usize::from(index)))
                 .filter(|_| symbol == cell.symbol.as_str());
             if let Some(uri) = link_uri {
                 let width = symbol.cell_width().max(1);
@@ -4724,7 +4725,7 @@ impl App {
         let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
             return;
         };
-        let badge_width = label.len() as u16;
+        let badge_width = usize_to_u16_wrapping(label.len());
         if term_area.height == 0 || badge_width > term_area.width {
             return;
         }
@@ -5037,7 +5038,7 @@ impl App {
             // The rail is one status glyph per row, but a row is still a row:
             // slice to the visible window exactly as the full pane does, and
             // build only the rows in it.
-            let viewport = block.inner(area).height as usize;
+            let viewport = usize::from(block.inner(area).height);
             let window_start = list_window_start(total, Some(self.files_index), viewport);
             let window_end = window_start.saturating_add(viewport).min(total);
             let rows: Vec<_> = self
@@ -5291,7 +5292,7 @@ impl App {
                 .render(search_area, frame.buffer_mut());
         }
 
-        let inner_width = list_area.width as usize;
+        let inner_width = usize::from(list_area.width);
         // Reserve a one-column right margin so the stats don't butt against the
         // border, mirroring the ~1-column left inset from the status prefix.
         let content_width = inner_width.saturating_sub(1);
@@ -5301,7 +5302,7 @@ impl App {
         // width measurements per frame to paint the couple of dozen rows that
         // fit, on every keystroke and every tick.
         let selected = is_active_section.then_some(self.files_index);
-        let viewport = list_area.height as usize;
+        let viewport = usize::from(list_area.height);
         let window_start = list_window_start(row_count, selected, viewport);
         let window_end = window_start.saturating_add(viewport).min(row_count);
         let items = self
@@ -5524,11 +5525,11 @@ impl App {
         self.mouse_layout.commit_text_area = Some(text_area);
 
         // Update TextInput's display dimensions to match the available area.
-        let text_w = text_area.width as usize;
+        let text_w = usize::from(text_area.width);
         self.commit_input
             .set_display_width(if text_w > 0 { Some(text_w) } else { None });
         self.commit_input
-            .set_visible_lines(text_area.height as usize);
+            .set_visible_lines(usize::from(text_area.height));
 
         if self.commit_input.is_empty() && !focused {
             // Show placeholder when unfocused and empty: nothing to render
@@ -5548,10 +5549,10 @@ impl App {
                 }
             } else {
                 for (i, line_text) in visible.iter().enumerate() {
-                    if i >= text_area.height as usize {
+                    if i >= usize::from(text_area.height) {
                         break;
                     }
-                    let y = text_area.y + i as u16;
+                    let y = text_area.y + usize_to_u16_wrapping(i);
                     let line_area = Rect::new(text_area.x, y, text_area.width, 1);
                     Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
                 }
@@ -5559,8 +5560,8 @@ impl App {
 
             // Position the hardware cursor when focused.
             if focused && !is_empty {
-                let cx = text_area.x + cursor_col as u16;
-                let cy = text_area.y + cursor_row as u16;
+                let cx = text_area.x + usize_to_u16_wrapping(cursor_col);
+                let cy = text_area.y + usize_to_u16_wrapping(cursor_row);
                 if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
                     frame.set_cursor_position((cx, cy));
                 }
@@ -5588,7 +5589,7 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .areas(area);
 
-        let hint_spans = self.footer_hint_spans(&hints, hints_area.width as usize);
+        let hint_spans = self.footer_hint_spans(&hints, usize::from(hints_area.width));
         Paragraph::new(Line::from(hint_spans))
             .style(Style::default().bg(self.theme.hint_bar_bg))
             .render(hints_area, frame.buffer_mut());
@@ -5665,7 +5666,7 @@ impl App {
             wrapped.truncate(rows);
             if let Some(last) = wrapped.pop() {
                 let style = last.style;
-                let marked = mark_cut_row(last.spans, text_width as u16);
+                let marked = mark_cut_row(last.spans, usize_to_u16_wrapping(text_width));
                 wrapped.push(Line::from(marked).style(style));
             }
         }
@@ -6043,13 +6044,13 @@ impl App {
             .areas(inner);
         self.overlay_layout.active = OverlayMouseLayout::Help;
 
-        let lines = self.help_content_lines(content_area.width as usize);
+        let lines = self.help_content_lines(usize::from(content_area.width));
 
         // Wrap the content here rather than letting the `Paragraph` do it: the
         // clamp below is built from the line count, and a wrapping paragraph
         // renders more rows than it has lines without reporting how many.
         // Pre-wrapping makes `wrapped.len()` the rendered height by construction.
-        let wrapped = wrap_styled_lines(&lines, content_area.width as usize);
+        let wrapped = wrap_styled_lines(&lines, usize::from(content_area.width));
 
         // Track content size for scroll clamping in input handler.
         let total_lines = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
@@ -6132,7 +6133,7 @@ impl App {
                 .map(|binding| display_width(binding.palette_name.unwrap()))
                 .max()
                 .unwrap_or(0);
-            let inner_width = popup.width as usize - 3;
+            let inner_width = usize::from(popup.width) - 3;
             let gap = 2usize;
             commands
                 .iter()
@@ -7631,14 +7632,14 @@ impl App {
         // The path keeps room for its leaf on a narrow screen: the name gives
         // up width first, then the base, each down to its floor.
         const PATH_FLOOR: usize = 14;
-        let room = (list_inner.width as usize).saturating_sub(gutters + PATH_FLOOR);
+        let room = usize::from(list_inner.width).saturating_sub(gutters + PATH_FLOOR);
         if name_col + base_col > room {
             name_col = room.saturating_sub(base_col).max(8);
         }
         if name_col + base_col > room {
             base_col = room.saturating_sub(name_col).max(8);
         }
-        let path_col = (list_inner.width as usize).saturating_sub(gutters + name_col + base_col);
+        let path_col = usize::from(list_inner.width).saturating_sub(gutters + name_col + base_col);
 
         let items = visible
             .iter()
@@ -7793,7 +7794,7 @@ impl App {
             ],
             area.width.saturating_sub(2),
         );
-        let header_height = header.len() as u16 + 2;
+        let header_height = usize_to_u16_wrapping(header.len()) + 2;
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(header_height), Constraint::Min(3)])
@@ -7939,7 +7940,7 @@ impl App {
             .unwrap_or(8)
             .clamp(8, 32);
         let marker_width = display_width(self.glyphs().check) + 2;
-        let note_col = (list_inner.width as usize).saturating_sub(marker_width + name_col + 3);
+        let note_col = usize::from(list_inner.width).saturating_sub(marker_width + name_col + 3);
         let items = visible
             .iter()
             .filter_map(|index| prompt.branches.get(*index))
@@ -8106,7 +8107,7 @@ impl App {
             body_lines.push(Line::from(vec![label, value]));
         }
         let body_lines = wrap_styled_lines(&body_lines, usize::from(inner_width));
-        let body_height = body_lines.len() as u16;
+        let body_height = usize_to_u16_wrapping(body_lines.len());
         let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
         self.clear_overlay_area(frame, area);
 
@@ -9670,7 +9671,7 @@ impl App {
                     checkbox.label_style(Style::default()),
                 )
                 .height
-                .saturating_add(note.len() as u16)
+                .saturating_add(usize_to_u16_wrapping(note.len()))
         } else {
             0
         };
@@ -10281,13 +10282,13 @@ impl App {
         block.render(content_area, frame.buffer_mut());
 
         // Compute the visible window.
-        let visible_h = inner.height as usize;
+        let visible_h = usize::from(inner.height);
         let total = lines.len();
         let max_offset = total.saturating_sub(visible_h);
-        let offset = (*scroll_offset as usize).min(max_offset);
+        let offset = usize::from(*scroll_offset).min(max_offset);
 
         // When scroll_offset exceeds max (auto-scroll sentinel), pin to bottom.
-        let start = if *scroll_offset as usize >= total {
+        let start = if usize::from(*scroll_offset) >= total {
             max_offset
         } else {
             offset
@@ -10719,8 +10720,9 @@ impl App {
         );
 
         let mut render_input = input.clone();
-        render_input.set_display_width((text_area.width > 0).then_some(text_area.width as usize));
-        render_input.set_visible_lines(text_area.height as usize);
+        render_input
+            .set_display_width((text_area.width > 0).then_some(usize::from(text_area.width)));
+        render_input.set_visible_lines(usize::from(text_area.height));
         let visible = render_input.visible_lines();
         let is_empty = render_input.is_empty();
         if is_empty {
@@ -10731,11 +10733,15 @@ impl App {
             }
         } else {
             for (index, line_text) in visible.iter().enumerate() {
-                if index >= text_area.height as usize {
+                if index >= usize::from(text_area.height) {
                     break;
                 }
-                let line_area =
-                    Rect::new(text_area.x, text_area.y + index as u16, text_area.width, 1);
+                let line_area = Rect::new(
+                    text_area.x,
+                    text_area.y + usize_to_u16_wrapping(index),
+                    text_area.width,
+                    1,
+                );
                 Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
             }
         }
@@ -10743,8 +10749,8 @@ impl App {
         // field that will not receive your keys is a lie.
         if engaged {
             let (cursor_row, cursor_col) = render_input.cursor_display_position();
-            let cx = text_area.x + cursor_col as u16;
-            let cy = text_area.y + cursor_row as u16;
+            let cx = text_area.x + usize_to_u16_wrapping(cursor_col);
+            let cy = text_area.y + usize_to_u16_wrapping(cursor_row);
             if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
                 frame.set_cursor_position((cx, cy));
             }
@@ -10758,7 +10764,7 @@ impl App {
             input_area,
             text_area,
             render_input.scroll_offset(),
-            text_area.height as usize,
+            usize::from(text_area.height),
             render_input.total_lines(),
             self.theme.hint_desc_fg,
         );
@@ -11059,11 +11065,11 @@ impl App {
         let scroll_offset = prompt.scroll_offset.min(max_scroll);
         for (display_row, line) in content_lines
             .iter()
-            .skip(scroll_offset as usize)
-            .take(body_inner.height as usize)
+            .skip(usize::from(scroll_offset))
+            .take(usize::from(body_inner.height))
             .enumerate()
         {
-            let y = body_inner.y + display_row as u16;
+            let y = body_inner.y + usize_to_u16_wrapping(display_row);
             for (display_col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
                 if display_col >= body_inner.width {
                     break;
@@ -11074,7 +11080,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|selection| {
                         selection.anchor != selection.end
-                            && selection.contains(scroll_offset + display_row as u16, display_col)
+                            && selection.contains(
+                                scroll_offset + usize_to_u16_wrapping(display_row),
+                                display_col,
+                            )
                     });
                 let style = if selected {
                     self.theme.selection_style()
@@ -11091,8 +11100,8 @@ impl App {
             frame,
             body_area,
             body_inner,
-            scroll_offset as usize,
-            body_inner.height as usize,
+            usize::from(scroll_offset),
+            usize::from(body_inner.height),
             content_lines.len(),
             &self.theme,
         );
@@ -12125,7 +12134,7 @@ impl App {
                     // a macro name can hold wide glyphs just as the preview
                     // can.
                     let prefix_len = 1 + display_width(name) + display_width(&surface_label) + 3;
-                    let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
+                    let max_len = usize::from(list_area.width).saturating_sub(prefix_len + 2);
                     spans.push(Span::styled(
                         ellipsize_end(&text_preview, max_len),
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -12258,12 +12267,12 @@ impl App {
             }),
         );
         for (index, line_text) in state.text_input.visible_lines().iter().enumerate() {
-            if index >= text_inner.height as usize {
+            if index >= usize::from(text_inner.height) {
                 break;
             }
             let line_area = Rect::new(
                 text_inner.x,
-                text_inner.y + index as u16,
+                text_inner.y + usize_to_u16_wrapping(index),
                 text_inner.width,
                 1,
             );
@@ -12278,7 +12287,7 @@ impl App {
             text_area,
             text_inner,
             state.text_input.scroll_offset(),
-            text_inner.height as usize,
+            usize::from(text_inner.height),
             state.text_input.total_lines(),
             self.theme.hint_desc_fg,
         );
@@ -12300,8 +12309,8 @@ impl App {
         } else if focus == MacroEditFocus::Text && engaged {
             let (cursor_row, cursor_col) = state.text_input.cursor_display_position();
             let (cx, cy) = (
-                text_inner.x + cursor_col as u16 + 1,
-                text_inner.y + cursor_row as u16,
+                text_inner.x + usize_to_u16_wrapping(cursor_col) + 1,
+                text_inner.y + usize_to_u16_wrapping(cursor_row),
             );
             if cx < text_inner.x + text_inner.width && cy < text_inner.y + text_inner.height {
                 frame.set_cursor_position((cx, cy));
@@ -12354,11 +12363,11 @@ impl App {
         const GAP: &str = "    ";
         let mut spans = vec![Span::styled(PREFIX, label_style)];
         let mut option_areas = [Rect::default(); 3];
-        let mut cursor_x = area.x + PREFIX.chars().count() as u16;
+        let mut cursor_x = area.x + usize_to_u16_wrapping(PREFIX.chars().count());
         for (index, (variant, label)) in options.iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw(GAP));
-                cursor_x += GAP.chars().count() as u16;
+                cursor_x += usize_to_u16_wrapping(GAP.chars().count());
             }
             let selected = *variant == state.surface;
             let bullet = if selected { "● " } else { "○ " };
@@ -12373,7 +12382,7 @@ impl App {
             };
             spans.push(Span::styled(bullet, style));
             spans.push(Span::styled(*label, style));
-            let width = (bullet.chars().count() + label.chars().count()) as u16;
+            let width = usize_to_u16_wrapping(bullet.chars().count() + label.chars().count());
             option_areas[index] = Rect::new(cursor_x, area.y, width, 1);
             cursor_x += width;
         }
@@ -12715,8 +12724,8 @@ impl App {
 
         for (row, line) in lines
             .iter()
-            .skip(viewer.scroll_offset as usize)
-            .take(term_area.height as usize)
+            .skip(usize::from(viewer.scroll_offset))
+            .take(usize::from(term_area.height))
             .enumerate()
         {
             let line_style = if !query.is_empty() && line.to_lowercase().contains(&query) {
@@ -12724,14 +12733,15 @@ impl App {
             } else {
                 Style::default().fg(self.theme.text_fg)
             };
-            let y = term_area.y + row as u16;
+            let y = term_area.y + usize_to_u16_wrapping(row);
             for (col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
                 if col >= term_area.width {
                     break;
                 }
                 let selected = self.terminal_selection.as_ref().is_some_and(|selection| {
                     selection.anchor != selection.end
-                        && selection.contains(viewer.scroll_offset + row as u16, col)
+                        && selection
+                            .contains(viewer.scroll_offset + usize_to_u16_wrapping(row), col)
                 });
                 let style = if selected {
                     self.theme.selection_style()
@@ -12757,8 +12767,8 @@ impl App {
             frame,
             area,
             term_area,
-            drawn_scroll as usize,
-            term_area.height as usize,
+            usize::from(drawn_scroll),
+            usize::from(term_area.height),
             total_rows,
             self.theme.hint_key_fg,
         );
@@ -12868,7 +12878,7 @@ impl App {
 
         // Compute total height: input block (3) + list block (variable).
         // The list block shares borders with the input block (no top border).
-        let list_content_h = (filtered.len() as u16).clamp(1, 8);
+        let list_content_h = usize_to_u16_wrapping(filtered.len()).clamp(1, 8);
         // list block = content + bottom border (1). Left/right borders are sides.
         let list_block_h = list_content_h + 1; // +1 for bottom border
         let input_block_h: u16 = 3; // top border + input + bottom border (shared with list top)
@@ -12937,7 +12947,7 @@ impl App {
             .map(|&(name, _)| display_width(name))
             .max()
             .unwrap_or(0);
-        let inner_w = list_area.width.saturating_sub(3) as usize; // borders + padding
+        let inner_w = usize::from(list_area.width.saturating_sub(3)); // borders + padding
         let gap = 2usize;
 
         let items: Vec<ListItem<'_>> = if filtered.is_empty() {
@@ -13140,7 +13150,7 @@ impl App {
         // scroll clamp and the marker are measured in. A wrapping paragraph draws
         // more rows than it has lines and never reports how many, the trap the
         // help page hit, where the bottom of the page was unreachable.
-        let wrapped = wrap_styled_lines(body_lines, inner_width as usize);
+        let wrapped = wrap_styled_lines(body_lines, usize::from(inner_width));
         let total_rows = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
 
         // Cap the message pane so the dialog still fits the terminal WITH its
@@ -13199,9 +13209,9 @@ impl App {
             frame,
             area,
             body,
-            scroll as usize,
-            body.height as usize,
-            total_rows as usize,
+            usize::from(scroll),
+            usize::from(body.height),
+            usize::from(total_rows),
             self.theme.hint_key_fg,
         );
 
@@ -13372,7 +13382,7 @@ impl App {
         }
         widths.push(Constraint::Length(columns.cpu_w));
         widths.push(Constraint::Length(columns.rss_w));
-        debug_assert_eq!(widths.len() as u16, columns.visible_count());
+        debug_assert_eq!(usize_to_u16_wrapping(widths.len()), columns.visible_count());
 
         let highlight_style = self.theme.selection_style();
         let table = Table::new(table_rows, widths)
@@ -13380,7 +13390,7 @@ impl App {
             .row_highlight_style(highlight_style);
 
         let mut table_state = TableState::default()
-            .with_offset(scroll_offset as usize)
+            .with_offset(usize::from(scroll_offset))
             .with_selected(Some(selected_row));
         StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);
 
@@ -13468,11 +13478,11 @@ fn format_bytes(bytes: u64) -> String {
     const MIB: u64 = KIB * 1024;
     const GIB: u64 = MIB * 1024;
     if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+        format!("{:.1} GiB", u64_to_f64(bytes) / u64_to_f64(GIB))
     } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+        format!("{:.1} MiB", u64_to_f64(bytes) / u64_to_f64(MIB))
     } else if bytes >= KIB {
-        format!("{:.0} KiB", bytes as f64 / KIB as f64)
+        format!("{:.0} KiB", u64_to_f64(bytes) / u64_to_f64(KIB))
     } else {
         format!("{bytes} B")
     }
@@ -13583,7 +13593,7 @@ fn terminal_row_lines(
     // The same working cue the agent row wears: the word pulses toward the muted
     // tone and a cycling ellipsis follows it in a fixed three-cell slot.
     let (word_text, word_color) = if word == TERMINAL_WORKING_WORD {
-        let elapsed = elapsed_ms as u64;
+        let elapsed = u128_to_u64_wrapping(elapsed_ms);
         (
             format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
             crate::theme::working_word_color(
@@ -14233,7 +14243,7 @@ impl App {
         let has_title = !title_trimmed.is_empty();
 
         // Available content width inside the pill (between the two caps).
-        let avail = area.width as usize;
+        let avail = usize::from(area.width);
         let inner_w = avail.saturating_sub(2); // 2 = left cap + right cap
         if inner_w < 4 {
             return;
@@ -14322,7 +14332,7 @@ fn osc8_wrap_symbol(symbol: &str, uri: &str) -> String {
 }
 
 fn visible_terminal_symbol(symbol: &str, col: u16, viewport_width: u16) -> &str {
-    let width = symbol.cell_width().max(1) as usize;
+    let width = usize::from(symbol.cell_width().max(1));
     if usize::from(col) + width <= usize::from(viewport_width) {
         symbol
     } else {
@@ -14358,7 +14368,7 @@ fn status_footer_lines(status_text: &str, width: u16, countdown_columns: usize) 
         return 1;
     }
     let status_text_len = display_width(status_text) + 3 + countdown_columns; // " ● " prefix
-    if status_text_len > width as usize {
+    if status_text_len > usize::from(width) {
         2
     } else {
         1
@@ -14469,6 +14479,7 @@ mod tests {
         SearchableList, StartupCommandLogPrompt, StartupLogViewer,
     };
     use crate::keybindings::{RuntimeBindings, text_field_owns_key};
+    use crate::numeric::usize_to_i64;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use dux_core::ids::TabId;
     use dux_core::worker::ProcessInfo;
@@ -14525,7 +14536,7 @@ mod tests {
                 .draw(|frame| app.render(frame))
                 .expect("render frame");
             let buffer = terminal.backend().buffer().clone();
-            let width = buffer.area.width as usize;
+            let width = usize::from(buffer.area.width);
             buffer
                 .content()
                 .iter()
@@ -15826,7 +15837,7 @@ mod tests {
             },
         );
         assert_eq!(
-            run(mx + 6, my, 3 + word.chars().count() as u16),
+            run(mx + 6, my, 3 + usize_to_u16_wrapping(word.chars().count())),
             format!(" · {word}"),
             "the state word stays at the column the row's widths add up to"
         );
@@ -16577,7 +16588,7 @@ mod tests {
                     label: format!("shell {i}"),
                     foreground_cmd: None,
                     client,
-                    sort_order: i as u64,
+                    sort_order: u64::try_from(i).expect("a test index fits in a u64"),
                     created_at: chrono::Utc::now(),
                 },
             );
@@ -16826,7 +16837,7 @@ mod tests {
             .expect("render frame");
 
         assert!(app.mouse_layout.left_list.width > 0);
-        let expected_rows = expected_items.min(app.mouse_layout.left_list.height as usize);
+        let expected_rows = expected_items.min(usize::from(app.mouse_layout.left_list.height));
         assert_eq!(
             app.mouse_layout.left_row_to_item,
             (0..expected_rows).collect::<Vec<_>>(),
@@ -17097,10 +17108,11 @@ mod tests {
                 area.y - 1
             } else {
                 area.y
-                    + map
-                        .iter()
-                        .rposition(|&i| i == boundary - 1)
-                        .expect("the row above the gap is on screen") as u16
+                    + usize_to_u16_wrapping(
+                        map.iter()
+                            .rposition(|&i| i == boundary - 1)
+                            .expect("the row above the gap is on screen"),
+                    )
             };
             assert_eq!(
                 painted_marker_row(&buf, area),
@@ -17116,10 +17128,11 @@ mod tests {
             // hovered row, so a downward drag paints BELOW that row's text and an
             // upward one above it.
             let hovered_top = area.y
-                + map
-                    .iter()
-                    .position(|&i| i == hover)
-                    .expect("the hovered row is on screen") as u16;
+                + usize_to_u16_wrapping(
+                    map.iter()
+                        .position(|&i| i == hover)
+                        .expect("the hovered row is on screen"),
+                );
             if hover > source {
                 assert!(
                     expected > hovered_top,
@@ -17160,7 +17173,7 @@ mod tests {
                     label: id.to_string(),
                     foreground_cmd: None,
                     client,
-                    sort_order: index as u64,
+                    sort_order: u64::try_from(index).expect("a test index fits in a u64"),
                     created_at: now,
                 },
             );
@@ -17186,12 +17199,13 @@ mod tests {
         // boundary rule the agent list paints by.
         let boundary = crate::app::reorder::drop_marker_boundary(0, 2);
         let marker_y = area.y
-            + app
-                .mouse_layout
-                .terminal_row_to_item
-                .iter()
-                .rposition(|&i| i == boundary - 1)
-                .expect("the row above the gap is on screen") as u16;
+            + usize_to_u16_wrapping(
+                app.mouse_layout
+                    .terminal_row_to_item
+                    .iter()
+                    .rposition(|&i| i == boundary - 1)
+                    .expect("the row above the gap is on screen"),
+            );
         let rule = drag_row_text(&buf, area, marker_y);
         assert!(
             rule.chars().all(|c| c == '\u{2500}') && !rule.is_empty(),
@@ -17420,7 +17434,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render frame");
         let buffer = terminal.backend().buffer().clone();
-        let width = buffer.area.width as usize;
+        let width = usize::from(buffer.area.width);
         let screen = buffer
             .content()
             .iter()
@@ -17801,7 +17815,7 @@ mod tests {
         );
         for (width, height) in [(80u16, 30u16), (30, 12), (20, 6), (14, 4), (8, 3), (4, 2)] {
             let rows = dormant_card_rows(&mut app, Some("tab-x"), width, height);
-            assert_eq!(rows.len(), height as usize);
+            assert_eq!(rows.len(), usize::from(height));
         }
         // At this size the card is down to its button. The excerpt is the LAST
         // prose the ranks give up, but it does go, and the way out outlives
@@ -17982,7 +17996,7 @@ mod tests {
         let x = (0..buf.area.width)
             .find(|&x| {
                 "serving".char_indices().all(|(i, c)| {
-                    let x = x + i as u16;
+                    let x = x + usize_to_u16_wrapping(i);
                     x < buf.area.width && buf[(x, 0)].symbol() == c.to_string()
                 })
             })
@@ -18160,7 +18174,7 @@ mod tests {
         );
         assert_eq!(
             rendered.chars().count(),
-            width as usize,
+            usize::from(width),
             "the padded line must fill the pane exactly: {rendered:?}"
         );
     }
@@ -18752,7 +18766,7 @@ mod tests {
                 &session_id,
                 &format!("tab-{i}"),
                 &format!("provider-{i}"),
-                i as i64,
+                usize_to_i64(i),
             );
         }
         let tab_ids = app.session_tab_ids(&session_id);
@@ -19077,7 +19091,7 @@ mod tests {
         // The name starts after the glyph and its space. Every one of its cells
         // must carry the same foreground: a sweeping band would tint them apart.
         let label = session.display_label();
-        let shades: Vec<Color> = (0..label.chars().count() as u16)
+        let shades: Vec<Color> = (0..usize_to_u16_wrapping(label.chars().count()))
             .map(|offset| buf[(2 + offset, 0)].fg)
             .collect();
         assert!(
@@ -19154,7 +19168,8 @@ mod tests {
     /// time and completes a turn after six, whatever the event loop is doing.
     #[test]
     fn spinner_advances_one_frame_per_cadence_and_turns_in_six() {
-        let frame = crate::theme::SPINNER_FRAME_MS as u64;
+        let frame = u64::try_from(crate::theme::SPINNER_FRAME_MS)
+            .expect("a frame period in milliseconds fits in a u64");
         let index_at = |elapsed_ms: u64| {
             let mut app = test_app(default_bindings());
             app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
@@ -19189,7 +19204,7 @@ mod tests {
         // Idle: both slots blank.
         let cells = tab_strip_label_row(&mut app, 80);
         for tab in [slot_tab.as_str(), "tab-2"] {
-            let col = tab_glyph_col(&app, tab) as usize;
+            let col = usize::from(tab_glyph_col(&app, tab));
             assert_eq!(
                 cells[col].0, " ",
                 "an idle pill's slot must be blank ({tab})"
@@ -19204,14 +19219,14 @@ mod tests {
             .insert("tab-2".to_string(), Instant::now());
         let cells = tab_strip_label_row(&mut app, 80);
         assert!(
-            cells[tab_glyph_col(&app, "tab-2") as usize]
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))]
                 .0
                 .chars()
                 .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
             "the working tab must carry a frame of the agent list's shared spinner"
         );
         assert_eq!(
-            cells[tab_glyph_col(&app, &slot_tab) as usize].0,
+            cells[usize::from(tab_glyph_col(&app, &slot_tab))].0,
             " ",
             "its idle sibling must stay blank"
         );
@@ -19221,7 +19236,7 @@ mod tests {
             .needs_attention
             .insert(TabId::new(slot_tab.clone()));
         let cells = tab_strip_label_row(&mut app, 80);
-        let flagged = &cells[tab_glyph_col(&app, &slot_tab) as usize];
+        let flagged = &cells[usize::from(tab_glyph_col(&app, &slot_tab))];
         assert_eq!(
             flagged.0,
             crate::theme::ATTENTION_GLYPH,
@@ -19232,7 +19247,7 @@ mod tests {
             "the attention dot wears the theme's attention accent, like the agent row"
         );
         assert!(
-            cells[tab_glyph_col(&app, "tab-2") as usize]
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))]
                 .0
                 .chars()
                 .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
@@ -19267,7 +19282,7 @@ mod tests {
         );
 
         let cells = tab_strip_label_row(&mut app, 80);
-        let glyph = &cells[tab_glyph_col(&app, "tab-2") as usize];
+        let glyph = &cells[usize::from(tab_glyph_col(&app, "tab-2"))];
         assert!(
             glyph
                 .0
@@ -19339,7 +19354,7 @@ mod tests {
         );
 
         // The box's own right border column survives the squeeze.
-        let right_border = (rect.x + rect.width - 1) as usize;
+        let right_border = usize::from(rect.x + rect.width - 1);
         assert_eq!(
             cells[right_border].0, "│",
             "the focused pill's right border must survive the squeeze: {row:?}"
@@ -19347,7 +19362,7 @@ mod tests {
         // And the slot is still PAINTED at that floor, strictly inside the
         // frame. Asserting only that nothing overflowed would pass just as
         // happily if the guard skipped the glyph entirely.
-        let slot = tab_glyph_col_with_ord(&app, "tab-98", ORD_W) as usize;
+        let slot = usize::from(tab_glyph_col_with_ord(&app, "tab-98", ORD_W));
         assert!(
             slot < right_border,
             "the activity slot ({slot}) must sit strictly inside the right border \
@@ -19378,7 +19393,7 @@ mod tests {
 
             let cells = tab_strip_label_row(&mut app, 80);
             assert_eq!(
-                cells[tab_glyph_col(&app, "tab-2") as usize].0,
+                cells[usize::from(tab_glyph_col(&app, "tab-2"))].0,
                 expected,
                 "at {elapsed}ms into the blink cycle"
             );
@@ -19396,7 +19411,7 @@ mod tests {
 
         let cells = tab_strip_label_row(&mut app, 80);
         assert_eq!(
-            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))].0,
             " ",
             "with the preference off a flagged pill shows nothing"
         );
@@ -19406,7 +19421,7 @@ mod tests {
             .insert("tab-2".to_string(), Instant::now());
         let cells = tab_strip_label_row(&mut app, 80);
         assert!(
-            cells[tab_glyph_col(&app, "tab-2") as usize]
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))]
                 .0
                 .chars()
                 .all(|c| crate::theme::SPINNER_FRAMES.contains(&c)),
@@ -19434,7 +19449,7 @@ mod tests {
 
             let cells = tab_strip_label_row(&mut app, 80);
             assert_eq!(
-                cells[tab_glyph_col(&app, "tab-2") as usize].0,
+                cells[usize::from(tab_glyph_col(&app, "tab-2"))].0,
                 " ",
                 "a {status:?} session's pill must not animate, because the run loop \
                  would not be polling fast enough to animate it smoothly"
@@ -19467,7 +19482,7 @@ mod tests {
 
         let cells = tab_strip_label_row(&mut app, 80);
         assert_eq!(
-            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))].0,
             " ",
             "the pill of a flagged exited agent must not blink"
         );
@@ -19492,7 +19507,7 @@ mod tests {
 
         let cells = tab_strip_label_row(&mut app, 80);
         assert_eq!(
-            cells[tab_glyph_col(&app, "tab-2") as usize].0,
+            cells[usize::from(tab_glyph_col(&app, "tab-2"))].0,
             " ",
             "an idle focused pill has nothing to say in its activity slot"
         );
@@ -20442,7 +20457,7 @@ mod tests {
     /// site's geometry rather than guessing it.
     fn scrollback_badge_rect(app: &App, term_area: Rect) -> Option<Rect> {
         let label = scrollback_indicator_label(app.snapshot_buf.scrollback_offset)?;
-        let width = label.len() as u16;
+        let width = usize_to_u16_wrapping(label.len());
         (term_area.height > 0 && width <= term_area.width)
             .then(|| Rect::new(term_area.x + term_area.width - width, term_area.y, width, 1))
     }
@@ -21008,9 +21023,9 @@ mod tests {
         let inner = macro_text_rect(&app.overlay_layout.active);
         let area = Rect::new(inner.x - 1, inner.y - 1, inner.width + 2, inner.height + 2);
         let cell = scroll_marker_rect(area, inner);
-        let glyph = rows[cell.y as usize]
+        let glyph = rows[usize::from(cell.y)]
             .chars()
-            .nth(cell.x as usize)
+            .nth(usize::from(cell.x))
             .expect("marker cell")
             .to_string();
         assert!(
@@ -22842,7 +22857,7 @@ mod tests {
                 .map(|x| buf.cell((x, y)).expect("cell in bounds").symbol())
                 .collect();
             if let Some(byte_idx) = row_text.find("TOTAL") {
-                let x = row_text[..byte_idx].chars().count() as u16;
+                let x = usize_to_u16_wrapping(row_text[..byte_idx].chars().count());
                 let bold = buf
                     .cell((x, y))
                     .expect("cell in bounds")
@@ -22950,7 +22965,7 @@ mod tests {
             .unwrap_or(0);
         let wide = u16::try_from(widest.max(100)).unwrap_or(u16::MAX);
         for width in [40u16, 55, 72, wide] {
-            let lines = app.help_content_lines(width as usize);
+            let lines = app.help_content_lines(usize::from(width));
             // Tall enough that neither rendering is clipped at the bottom.
             let height = u16::try_from(lines.len() * 3).unwrap_or(u16::MAX).max(10);
 
@@ -22963,7 +22978,7 @@ mod tests {
                 })
                 .expect("render frame");
 
-            let wrapped = wrap_styled_lines(&lines, width as usize);
+            let wrapped = wrap_styled_lines(&lines, usize::from(width));
             let mut ours = Terminal::new(TestBackend::new(width, height)).expect("terminal");
             ours.draw(|frame| {
                 Paragraph::new(wrapped.clone()).render(frame.area(), frame.buffer_mut());
@@ -23529,7 +23544,7 @@ mod tests {
             unreachable!()
         };
         assert!(
-            items > list.height as usize + 1,
+            items > usize::from(list.height) + 1,
             "the palette must overflow its list for this test to mean anything: \
              {items} commands in {} rows",
             list.height
@@ -23543,7 +23558,7 @@ mod tests {
 
         // Selecting an item just past the viewport scrolls the list by one, which
         // is the middle.
-        let (app, buf) = palette_frame((120, 40), "", list.height as usize);
+        let (app, buf) = palette_frame((120, 40), "", usize::from(list.height));
         let (_, border_column) = palette_rects(&app);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
@@ -23627,7 +23642,7 @@ mod tests {
             unreachable!()
         };
         assert!(
-            items > 0 && items <= list.height as usize,
+            items > 0 && items <= usize::from(list.height),
             "fixture must fit: {items} commands in {} rows",
             list.height
         );
@@ -24014,7 +24029,7 @@ mod tests {
             let (app, buf) = diff_frame((120, 40), 20_000, gutter_width, scroll);
             let (content, _) = diff_rects(&app);
             let rows = diff_content_rows(&buf, content);
-            assert_eq!(rows.len(), content.height as usize);
+            assert_eq!(rows.len(), usize::from(content.height));
             for (offset, row) in rows.iter().enumerate() {
                 let index = usize::from(scroll) + offset;
                 let expected = if gutter_width > 0 {
@@ -24149,7 +24164,7 @@ mod tests {
                     // Exactly as wide as the content pane, so every rendered row
                     // reaches its last content column: the marker must not eat it.
                     let pane = centered_rect(96, 94, Rect::new(0, 0, size.0, size.1));
-                    "X".repeat(pane.width.saturating_sub(2) as usize)
+                    "X".repeat(usize::from(pane.width.saturating_sub(2)))
                 } else {
                     format!("log line {i}")
                 }
@@ -24198,13 +24213,13 @@ mod tests {
         let (app, buf) = startup_log_frame((100, 30), rows, 0, LogLineWidth::Short);
         let (content, border_column) = startup_log_rects(&app, frame);
         assert!(
-            rows > content.height as usize,
+            rows > usize::from(content.height),
             "the fixture must overflow: {rows} rows in {}",
             content.height
         );
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
 
-        let max = rows as u16 - content.height;
+        let max = usize_to_u16_wrapping(rows) - content.height;
         let (_, buf) = startup_log_frame((100, 30), rows, max / 2, LogLineWidth::Short);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
@@ -24330,12 +24345,12 @@ mod tests {
         let (app, buf) = startup_command_logs_frame((120, 34), rows, 0);
         let (body, border_column) = startup_command_logs_rects(&app);
         assert!(
-            rows > body.height as usize,
+            rows > usize::from(body.height),
             "the fixture must overflow the body"
         );
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
 
-        let max = rows as u16 - body.height;
+        let max = usize_to_u16_wrapping(rows) - body.height;
         let (_, buf) = startup_command_logs_frame((120, 34), rows, max / 2);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
@@ -24410,7 +24425,7 @@ mod tests {
         let (app, buf) = change_theme_frame((90, 30), 60, 0);
         let (list, border_column, items) = change_theme_rects(&app);
         assert!(
-            items > list.height as usize + 1,
+            items > usize::from(list.height) + 1,
             "the picker must overflow: {items} themes in {} rows",
             list.height
         );
@@ -24421,7 +24436,7 @@ mod tests {
             "a marker inside the list would sit on a theme's own row"
         );
 
-        let (app, buf) = change_theme_frame((90, 30), 60, list.height as usize);
+        let (app, buf) = change_theme_frame((90, 30), 60, usize::from(list.height));
         let (_, border_column, _) = change_theme_rects(&app);
         assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
 
@@ -24435,7 +24450,7 @@ mod tests {
         let (app, buf) = change_theme_frame((90, 30), 3, 0);
         let (list, border_column, items) = change_theme_rects(&app);
         assert!(
-            items > 0 && items <= list.height as usize,
+            items > 0 && items <= usize::from(list.height),
             "fixture must fit: {items} themes in {} rows",
             list.height
         );
@@ -24511,7 +24526,7 @@ mod tests {
             let (app, buf) = browse_projects_frame((90, 30), 60, 0, filter);
             let (list, border_column, items) = browse_projects_rects(&app);
             assert!(
-                items > list.height as usize + 1,
+                items > usize::from(list.height) + 1,
                 "the browser must overflow (filter {filter:?}): {items} entries in {} rows",
                 list.height
             );
@@ -24526,7 +24541,7 @@ mod tests {
                 "a marker inside the list would sit on a directory's own row"
             );
 
-            let (app, buf) = browse_projects_frame((90, 30), 60, list.height as usize, filter);
+            let (app, buf) = browse_projects_frame((90, 30), 60, usize::from(list.height), filter);
             let (_, border_column, _) = browse_projects_rects(&app);
             assert_eq!(
                 marker_in(&buf, border_column).as_deref(),
@@ -24550,7 +24565,7 @@ mod tests {
             let (app, buf) = browse_projects_frame((90, 30), 3, 0, filter);
             let (list, border_column, items) = browse_projects_rects(&app);
             assert!(
-                items > 0 && items <= list.height as usize,
+                items > 0 && items <= usize::from(list.height),
                 "fixture must fit: {items} entries in {} rows",
                 list.height
             );
@@ -24610,7 +24625,7 @@ mod tests {
                 continue;
             }
             let marker = row.find('[').expect("a checkbox row carries a marker");
-            let cell = &buf[(marker as u16, y)];
+            let cell = &buf[(usize_to_u16_wrapping(marker), y)];
             return Style::default()
                 .fg(cell.fg)
                 .bg(cell.bg)
@@ -24933,9 +24948,9 @@ mod tests {
                 // The field's outer rect is its inner rect plus the border ring.
                 let area = Rect::new(input.x - 1, input.y - 1, input.width + 2, input.height + 2);
                 let cell = scroll_marker_rect(area, input);
-                rows[cell.y as usize]
+                rows[usize::from(cell.y)]
                     .chars()
-                    .nth(cell.x as usize)
+                    .nth(usize::from(cell.x))
                     .expect("marker cell")
             };
             assert!(
@@ -24958,9 +24973,9 @@ mod tests {
                 };
                 let area = Rect::new(input.x - 1, input.y - 1, input.width + 2, input.height + 2);
                 let cell = scroll_marker_rect(area, input);
-                rows[cell.y as usize]
+                rows[usize::from(cell.y)]
                     .chars()
-                    .nth(cell.x as usize)
+                    .nth(usize::from(cell.x))
                     .expect("marker cell")
             };
             assert!(
@@ -24990,10 +25005,11 @@ mod tests {
                 continue;
             }
             let corner = row.find('╭').expect("the filter box has a top-left corner");
-            let x = row
-                .char_indices()
-                .position(|(byte, _)| byte == corner)
-                .expect("corner column") as u16;
+            let x = usize_to_u16_wrapping(
+                row.char_indices()
+                    .position(|(byte, _)| byte == corner)
+                    .expect("corner column"),
+            );
             return cell_style(buf, x, y);
         }
         panic!("the filter box was not rendered");
@@ -26181,7 +26197,7 @@ mod tests {
             buf.area,
         );
         let y = popup.y + popup.height - 2;
-        let last_text_col = popup.x + 1 + expected.chars().count() as u16;
+        let last_text_col = popup.x + 1 + usize_to_u16_wrapping(expected.chars().count());
         assert_ne!(
             buf[(last_text_col, y)].fg,
             app.theme.hint_desc_fg,
@@ -27809,7 +27825,7 @@ mod tests {
                 .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect();
             if let Some(col) = row.find(needle) {
-                let x = row[..col].chars().count() as u16;
+                let x = usize_to_u16_wrapping(row[..col].chars().count());
                 let OverlayMouseLayout::ConfirmNonDefaultBranch { cancel_button, .. } =
                     app.overlay_layout.active
                 else {
@@ -27881,7 +27897,7 @@ mod tests {
         // wrap split them.
         let cell = |x: u16, y: u16| buffer[(x, y)].symbol().to_string();
         let title = "╭Check Out Default Branch";
-        let title_len = title.chars().count() as u16;
+        let title_len = usize_to_u16_wrapping(title.chars().count());
         let (top, left) = (0..cancel_button.y)
             .find_map(|y| {
                 (0..buffer.area.width.saturating_sub(title_len))

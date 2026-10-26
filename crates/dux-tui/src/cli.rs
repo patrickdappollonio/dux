@@ -1756,7 +1756,7 @@ mod tests {
         let repo_job_alive = job.try_wait().expect("try_wait").is_none();
         // End the whole group we started, whatever the reset did.
         let _ = rustix::process::kill_process_group(
-            rustix::process::Pid::from_raw(job.id() as i32).unwrap(),
+            rustix::process::Pid::from_raw(job.id().cast_signed()).unwrap(),
             rustix::process::Signal::KILL,
         );
         let _ = job.kill();
@@ -3729,7 +3729,7 @@ mod tests {
             .iter()
             .any(|row| row.pid == child_pid && !row.exited);
         let _ = rustix::process::kill_process_group(
-            rustix::process::Pid::from_raw(job.id() as i32).unwrap(),
+            rustix::process::Pid::from_raw(job.id().cast_signed()).unwrap(),
             rustix::process::Signal::KILL,
         );
         let _ = job.kill();

@@ -1,4 +1,6 @@
 use crate::app::background_server::ReloadListenerChanges;
+use crate::numeric::u128_to_usize_wrapping;
+use crate::numeric::usize_to_i64;
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
@@ -3848,8 +3850,10 @@ impl TerminalSelection {
     /// copy on its own. Copying it back is out of scope; the snapshot carries no
     /// scrollback.
     pub(crate) fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
-        let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
-        let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
+        let offset_delta =
+            usize_to_i64(now.scrollback_offset) - usize_to_i64(self.origin.scrollback_offset);
+        let total_delta =
+            usize_to_i64(now.scrollback_total) - usize_to_i64(self.origin.scrollback_total);
         let origin_row = i64::from(live_row) - offset_delta + total_delta;
         u16::try_from(origin_row).ok()
     }
@@ -4953,7 +4957,7 @@ impl App {
             redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as usize),
+                .map_or(0, |d| u128_to_usize_wrapping(d.as_millis())),
             welcome_tip_selection: usize::MAX,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
@@ -5598,8 +5602,9 @@ impl App {
     /// (`SPINNER_FRAME_MS` per frame). Unlike `tick_count`, this stays
     /// constant-speed regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
-        ((self.start_time.elapsed().as_millis() / crate::theme::SPINNER_FRAME_MS) as usize)
-            % crate::theme::SPINNER_FRAMES.len()
+        u128_to_usize_wrapping(
+            self.start_time.elapsed().as_millis() / crate::theme::SPINNER_FRAME_MS,
+        ) % crate::theme::SPINNER_FRAMES.len()
     }
 
     /// Whether the sidebar attention glyph is visible at this point of its
@@ -6040,7 +6045,7 @@ impl App {
             if stored_project != Some(project_config) {
                 self.engine
                     .session_store
-                    .upsert_project_at(project_config, index as i64)?;
+                    .upsert_project_at(project_config, usize_to_i64(index))?;
             }
         }
         if self.engine.config.projects != config_project_configs {
@@ -8329,7 +8334,7 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
             stored.id == project_config.id || same_expanded_project_path(stored, project_config)
         });
         if stored_project != Some(project_config) {
-            session_store.upsert_project_at(project_config, index as i64)?;
+            session_store.upsert_project_at(project_config, usize_to_i64(index))?;
         }
     }
 

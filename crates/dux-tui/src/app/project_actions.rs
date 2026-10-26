@@ -934,6 +934,7 @@ mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
     use crate::app::{Listing, OverlayMouseLayout};
+    use crate::numeric::usize_to_u16_wrapping;
     use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1122,7 +1123,7 @@ mod tests {
             .map(|x| buffer[(x, row)].symbol())
             .collect();
         let start = line.find("Folder: ").unwrap() + "Folder: ".len();
-        let x = line[..start].chars().count() as u16 + 1;
+        let x = usize_to_u16_wrapping(line[..start].chars().count()) + 1;
         assert_eq!(
             buffer[(x, row)].bg,
             chip_bg.expect("chip bg"),
@@ -1192,7 +1193,7 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect();
                 line.find(needle).is_some_and(|at| {
-                    let x = line[..at].chars().count() as u16;
+                    let x = usize_to_u16_wrapping(line[..at].chars().count());
                     buffer[(x, y)].bg == chip_bg
                 })
             })

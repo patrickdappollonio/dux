@@ -647,7 +647,12 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 rows: labels
                     .iter()
                     .enumerate()
-                    .map(|(n, label)| resource_row(label, 100 + n as u32))
+                    .map(|(n, label)| {
+                        resource_row(
+                            label,
+                            100 + u32::try_from(n).expect("a test count fits in a u32"),
+                        )
+                    })
                     .collect(),
                 scroll_offset: 0,
                 selected_row: 0,

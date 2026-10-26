@@ -7,6 +7,7 @@
 //! bold, that the chip is padded by one chip-colored cell on each side, and that
 //! no straight quote is left around it.
 
+use crate::numeric::usize_to_u16_wrapping;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -61,7 +62,7 @@ fn screen(buf: &Buffer) -> String {
 /// Names in these tests are ASCII, so one character is one cell.
 fn occurrences(buf: &Buffer, name: &str) -> Vec<(u16, u16)> {
     let chars: Vec<String> = name.chars().map(|c| c.to_string()).collect();
-    let len = chars.len() as u16;
+    let len = usize_to_u16_wrapping(chars.len());
     let mut hits = Vec::new();
     for y in 0..buf.area.height {
         for x in 0..buf.area.width.saturating_sub(len - 1) {
@@ -80,7 +81,7 @@ fn assert_chipped(app: &App, buf: &Buffer, name: &str) {
     let hits = occurrences(buf, name);
     let shown = screen(buf);
     assert!(!hits.is_empty(), "{name:?} is not on screen:\n{shown}");
-    let len = name.chars().count() as u16;
+    let len = usize_to_u16_wrapping(name.chars().count());
     for (x, y) in hits {
         for cx in x..x + len {
             let cell = &buf[(cx, y)];
@@ -127,7 +128,7 @@ fn assert_chipped(app: &App, buf: &Buffer, name: &str) {
 fn dialog_text(buf: &Buffer, title: &str) -> String {
     let edge = format!("\u{256d}{title}");
     let edge: Vec<String> = edge.chars().map(|c| c.to_string()).collect();
-    let len = edge.len() as u16;
+    let len = usize_to_u16_wrapping(edge.len());
     let cell = |x: u16, y: u16| buf[(x, y)].symbol().to_string();
     let (top, left) = (0..buf.area.height)
         .find_map(|y| {
@@ -867,7 +868,7 @@ fn assert_chipped_on_row(app: &App, buf: &Buffer, row_marker: &str, name: &str) 
         .lines()
         .enumerate()
         .filter(|(_, row)| row.contains(row_marker))
-        .map(|(y, _)| y as u16)
+        .map(|(y, _)| usize_to_u16_wrapping(y))
         .collect();
     assert!(
         !marked_rows.is_empty(),
@@ -881,7 +882,7 @@ fn assert_chipped_on_row(app: &App, buf: &Buffer, row_marker: &str, name: &str) 
         !hits.is_empty(),
         "{name:?} is not on the {row_marker:?} row:\n{shown}"
     );
-    let len = name.chars().count() as u16;
+    let len = usize_to_u16_wrapping(name.chars().count());
     for (x, y) in hits {
         for cx in x..x + len {
             let cell = &buf[(cx, y)];
@@ -1561,7 +1562,7 @@ fn assert_body_text(app: &App, buf: &Buffer, words: &str) {
     let hits = occurrences(buf, words);
     let shown = screen(buf);
     assert!(!hits.is_empty(), "{words:?} is not on screen:\n{shown}");
-    let len = words.chars().count() as u16;
+    let len = usize_to_u16_wrapping(words.chars().count());
     for (x, y) in hits {
         for cx in x..x + len {
             let cell = &buf[(cx, y)];

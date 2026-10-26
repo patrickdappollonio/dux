@@ -1364,7 +1364,7 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect();
             assert!(
-                rendered.chars().count() <= width as usize,
+                rendered.chars().count() <= usize::from(width),
                 "the hint must fit {width} columns, got {} for {rendered:?}",
                 rendered.chars().count()
             );
@@ -3053,10 +3053,10 @@ mod tests {
         assert!(title_row < button.y, "the title is above the button");
 
         let card_columns = |y: u16| {
-            rows[y as usize]
+            rows[usize::from(y)]
                 .chars()
-                .skip(button.x as usize)
-                .take(button.width as usize)
+                .skip(usize::from(button.x))
+                .take(usize::from(button.width))
                 .collect::<String>()
         };
         assert!(
@@ -3110,10 +3110,10 @@ mod tests {
     /// The padding on either side of a button's label, measured off the drawn
     /// frame: `(left, right, inner width)`.
     fn label_padding(rows: &[String], button: ratatui::layout::Rect) -> (usize, usize, usize) {
-        let inner: Vec<char> = rows[(button.y + 1) as usize]
+        let inner: Vec<char> = rows[usize::from(button.y + 1)]
             .chars()
-            .skip(button.x as usize + 1)
-            .take(button.width as usize - 2)
+            .skip(usize::from(button.x) + 1)
+            .take(usize::from(button.width) - 2)
             .collect();
         let left = inner.iter().take_while(|c| **c == ' ').count();
         let right = inner.iter().rev().take_while(|c| **c == ' ').count();

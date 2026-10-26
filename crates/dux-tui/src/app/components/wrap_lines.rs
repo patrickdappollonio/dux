@@ -296,6 +296,7 @@ fn cells_to_line(cells: Vec<Cell>) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric::usize_to_u16_wrapping;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
@@ -481,7 +482,7 @@ mod tests {
             lines.push(Line::from(Span::styled(
                 format!(
                     " About dux{}",
-                    " ".repeat(width as usize - "About dux".len() - 3)
+                    " ".repeat(usize::from(width) - "About dux".len() - 3)
                 ),
                 banner,
             )));
@@ -494,7 +495,7 @@ mod tests {
                 })
                 .expect("draw");
 
-            let wrapped = wrap_styled_lines(&lines, width as usize);
+            let wrapped = wrap_styled_lines(&lines, usize::from(width));
             let mut ours = Terminal::new(TestBackend::new(width, height)).expect("term");
             ours.draw(|frame| {
                 Paragraph::new(wrapped.clone()).render(frame.area(), frame.buffer_mut());
@@ -541,7 +542,9 @@ mod tests {
             .expect("draw");
         let buf = ratatui_side.backend().buffer().clone();
         for (y, want) in texts(&wrapped).iter().enumerate() {
-            let got: String = (0..20).map(|x| buf[(x, y as u16)].symbol()).collect();
+            let got: String = (0..20)
+                .map(|x| buf[(x, usize_to_u16_wrapping(y))].symbol())
+                .collect();
             assert_eq!(got.trim_end(), want, "row {y} differs from ratatui's wrap");
         }
     }

@@ -2,6 +2,7 @@ use super::components::wrap_lines::cluster_width;
 use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
 use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
+use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
@@ -13,6 +14,13 @@ use ratatui::buffer::CellWidth;
 /// mouse-tracking app is never over-scrolled. Keyboard scrolling is unaffected.
 /// Must match xterm's `scrollSensitivity` in the web's TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
+
+/// [`MOUSE_WHEEL_LINES`] as the integer type a scroll call takes.
+fn wheel_lines<T: TryFrom<usize>>() -> T {
+    T::try_from(MOUSE_WHEEL_LINES)
+        .ok()
+        .expect("three lines fit in every integer type")
+}
 
 /// What a successful commit says, and whether it points at the push key.
 ///
@@ -773,7 +781,9 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
         return 0;
     }
 
-    (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
+    u32_to_u16_wrapping(
+        ((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width),
+    )
 }
 
 /// What one mouse press over the embedded terminal grid means, once the OSC 8
@@ -963,7 +973,7 @@ fn scroll_startup_command_log(
     if delta >= 0 {
         prompt.scroll_offset = prompt
             .scroll_offset
-            .saturating_add(delta as u16)
+            .saturating_add(delta.cast_unsigned())
             .min(startup_command_log_max_scroll(&prompt.content, body));
     } else {
         prompt.scroll_offset = prompt.scroll_offset.saturating_sub(delta.unsigned_abs());
@@ -1687,7 +1697,7 @@ impl App {
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+            self.scroll_pty(ScrollDirection::Up, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -1701,7 +1711,7 @@ impl App {
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+            self.scroll_pty(ScrollDirection::Down, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -2345,7 +2355,7 @@ impl App {
         if delta >= 0 {
             viewer.scroll_offset = viewer
                 .scroll_offset
-                .saturating_add(delta as u16)
+                .saturating_add(delta.cast_unsigned())
                 .min(max_scroll);
         } else {
             viewer.scroll_offset = viewer.scroll_offset.saturating_sub(delta.unsigned_abs());
@@ -2536,11 +2546,11 @@ impl App {
             }
             Some(Action::ScrollPageDown) => {
                 let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
-                self.scroll_startup_log_viewer(page.max(1) as i16);
+                self.scroll_startup_log_viewer(page.max(1).cast_signed());
             }
             Some(Action::ScrollPageUp) => {
                 let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
-                self.scroll_startup_log_viewer(-(page.max(1) as i16));
+                self.scroll_startup_log_viewer(-page.max(1).cast_signed());
             }
             Some(Action::ScrollLineDown | Action::MoveDown) => {
                 self.scroll_startup_log_viewer(1);
@@ -3144,7 +3154,7 @@ impl App {
         let poll_ms = 100u64.min(self.max_poll_ms());
         let timeout = rustix::time::Timespec {
             tv_sec: 0,
-            tv_nsec: (poll_ms * 1_000_000) as i64,
+            tv_nsec: (poll_ms * 1_000_000).cast_signed(),
         };
         let stdin_borrow = stdin_handle.as_fd();
         let ready = crate::io_retry::retry_on_interrupt_errno(|| {
@@ -3497,7 +3507,7 @@ impl App {
                 dispatch.forwarded.note(raw);
             }
         } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(direction, self.last_pty_size.0 as usize);
+            self.scroll_pty(direction, usize::from(self.last_pty_size.0));
         }
     }
 
@@ -3933,12 +3943,12 @@ impl App {
             // literal because no dialog or palette actions represent them.
             if matches!(action, Some(Action::MoveUp)) {
                 *selected_row = selected_row.saturating_sub(1);
-                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
                 return Some(false);
             }
             if matches!(action, Some(Action::MoveDown)) {
                 *selected_row = (*selected_row + 1).min(max_row);
-                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
                 return Some(false);
             }
             match key.code {
@@ -3971,7 +3981,7 @@ impl App {
                 }
                 _ => {}
             }
-            *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+            *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
             return Some(false);
         }
 
@@ -4024,7 +4034,7 @@ impl App {
                 Span::raw(" │ "),
                 Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
             ]));
-            *scroll_offset = lines.len() as u16;
+            *scroll_offset = usize_to_u16_wrapping(lines.len());
 
             return Some(false);
         }
@@ -4659,7 +4669,7 @@ impl App {
             OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => Some(body),
             _ => None,
         };
-        let page = body.map_or(10, |body| body.height.max(1)) as i16;
+        let page = body.map_or(10, |body| body.height.max(1)).cast_signed();
 
         // Search owns text and caret keys; unconsumed navigation continues
         // through the picker ladder below against the filtered entries.
@@ -8314,9 +8324,9 @@ impl App {
             return;
         };
         let next = if delta >= 0 {
-            scroll.saturating_add(delta as u16)
+            scroll.saturating_add(u32_to_u16_wrapping(delta.unsigned_abs()))
         } else {
-            scroll.saturating_sub(delta.unsigned_abs() as u16)
+            scroll.saturating_sub(u32_to_u16_wrapping(delta.unsigned_abs()))
         };
         *scroll = next.min(max);
     }
@@ -9779,11 +9789,11 @@ impl App {
         }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.scroll_first_load(MOUSE_WHEEL_LINES as i32);
+                self.scroll_first_load(wheel_lines::<i32>());
                 Some(false)
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_first_load(-(MOUSE_WHEEL_LINES as i32));
+                self.scroll_first_load(-wheel_lines::<i32>());
                 Some(false)
             }
             _ => None,
@@ -9841,7 +9851,7 @@ impl App {
             }
             _ => {}
         }
-        *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+        *scroll_offset = usize_to_u16_wrapping((*selected_row).saturating_sub(5));
         Some(false)
     }
 
@@ -9863,7 +9873,7 @@ impl App {
                 return Some(false);
             }
             MouseEventKind::ScrollDown => {
-                *scroll_offset = (*scroll_offset + 3).min(lines.len() as u16);
+                *scroll_offset = (*scroll_offset + 3).min(usize_to_u16_wrapping(lines.len()));
                 return Some(false);
             }
             _ => {}
@@ -9889,7 +9899,7 @@ impl App {
                 Style::default().add_modifier(Modifier::DIM),
             ),
         ]));
-        *scroll_offset = lines.len() as u16;
+        *scroll_offset = usize_to_u16_wrapping(lines.len());
         Some(false)
     }
 
@@ -9915,13 +9925,13 @@ impl App {
             }
             MouseEventKind::ScrollUp if contains_point(body, mouse.column, mouse.row) => {
                 if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                    scroll_startup_command_log(prompt, Some(body), -(MOUSE_WHEEL_LINES as i16));
+                    scroll_startup_command_log(prompt, Some(body), -wheel_lines::<i16>());
                 }
                 Some(false)
             }
             MouseEventKind::ScrollDown if contains_point(body, mouse.column, mouse.row) => {
                 if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
-                    scroll_startup_command_log(prompt, Some(body), MOUSE_WHEEL_LINES as i16);
+                    scroll_startup_command_log(prompt, Some(body), wheel_lines::<i16>());
                 }
                 Some(false)
             }
@@ -10803,9 +10813,9 @@ impl App {
 
     fn scroll_commit_input(&mut self, direction: ScrollDirection) {
         let delta = if direction == ScrollDirection::Down {
-            MOUSE_WHEEL_LINES as isize
+            wheel_lines::<isize>()
         } else {
-            -(MOUSE_WHEEL_LINES as isize)
+            -wheel_lines::<isize>()
         };
         self.commit_input.scroll_by(delta);
     }
@@ -10851,7 +10861,7 @@ impl App {
     fn handle_center_mouse_wheel(&mut self, mouse: MouseEvent) {
         self.focus = FocusPane::Center;
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let delta = MOUSE_WHEEL_LINES as u16;
+            let delta = wheel_lines::<u16>();
             if matches!(mouse.kind, MouseEventKind::ScrollDown) {
                 let max_scroll = self
                     .last_diff_visual_lines
@@ -10956,7 +10966,7 @@ impl App {
         let index = cell.link?;
         self.snapshot_buf
             .links
-            .get(index as usize)
+            .get(usize::from(index))
             .map(String::as_str)
     }
 
@@ -11275,7 +11285,7 @@ impl App {
             "\x1b[<{cb};{};{}{}",
             column + 1,
             row + 1,
-            final_byte as char
+            char::from(final_byte)
         )
         .into_bytes();
         let Some(translated) =
@@ -11528,9 +11538,9 @@ impl App {
             .saturating_sub(self.last_help_height.max(1));
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help);
+                *scroll = (*scroll + wheel_lines::<u16>()).min(max_help);
             }
-            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16),
+            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(wheel_lines::<u16>()),
             _ => {}
         }
         true
@@ -11561,11 +11571,11 @@ impl App {
             }
             MouseEventKind::ScrollDown if inside_log => {
                 self.terminal_selection = None;
-                self.scroll_startup_log_viewer(MOUSE_WHEEL_LINES as i16);
+                self.scroll_startup_log_viewer(wheel_lines::<i16>());
             }
             MouseEventKind::ScrollUp if inside_log => {
                 self.terminal_selection = None;
-                self.scroll_startup_log_viewer(-(MOUSE_WHEEL_LINES as i16));
+                self.scroll_startup_log_viewer(-wheel_lines::<i16>());
             }
             _ => {}
         }
@@ -12390,7 +12400,7 @@ impl App {
         let (start, end) = sel.ordered();
         let mut selected = Vec::new();
         for row in start.row..=end.row {
-            let Some(line) = lines.get(row as usize) else {
+            let Some(line) = lines.get(usize::from(row)) else {
                 continue;
             };
             let start_col = if row == start.row { start.col } else { 0 };
@@ -12619,7 +12629,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{DOUBLE_CLICK_THRESHOLD, MOUSE_WHEEL_LINES, MouseTarget, PromptMouseTarget};
+    use super::{DOUBLE_CLICK_THRESHOLD, MouseTarget, PromptMouseTarget, wheel_lines};
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
@@ -12631,6 +12641,7 @@ mod tests {
         startup_command_log_visual_lines,
     };
     use crate::app::{ConfirmAnswer, ConfirmFocus};
+    use crate::numeric::usize_to_u16_wrapping;
     use dux_core::worker::ReviewCopyConsent;
     use std::collections::BTreeMap;
 
@@ -12855,7 +12866,7 @@ mod tests {
 
     /// The screen row carrying agent-list item `index` under the identity map.
     fn left_row_y(app: &App, index: usize) -> u16 {
-        app.mouse_layout.left_list.y + index as u16
+        app.mouse_layout.left_list.y + usize_to_u16_wrapping(index)
     }
 
     #[test]
@@ -13292,7 +13303,7 @@ mod tests {
                     label: id.to_string(),
                     foreground_cmd: None,
                     client,
-                    sort_order: index as u64,
+                    sort_order: u64::try_from(index).expect("a test index fits in a u64"),
                     created_at: now,
                 },
             );
@@ -13304,7 +13315,7 @@ mod tests {
 
     /// The screen row carrying terminal `index` under the identity map.
     fn terminal_row_y(app: &App, index: usize) -> u16 {
-        app.mouse_layout.terminal_list.y + index as u16
+        app.mouse_layout.terminal_list.y + usize_to_u16_wrapping(index)
     }
 
     #[test]
@@ -19504,7 +19515,7 @@ not_a_real_action = ["x"]
                 .rposition(|&i| i == toggle_idx)
                 .expect("toggle row");
             // The toggle ends with a trailing spacer; its label is one row up.
-            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
+            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
             let lx = app.mouse_layout.left_list.x;
             let lw = app.mouse_layout.left_list.width;
             let buf = terminal.backend().buffer();
@@ -19549,7 +19560,7 @@ not_a_real_action = ["x"]
                 .iter()
                 .rposition(|&i| i == toggle_idx)
                 .expect("toggle row");
-            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
+            let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel.saturating_sub(1));
             let lx = app.mouse_layout.left_list.x;
             let lw = app.mouse_layout.left_list.width;
             let buf = terminal.backend().buffer();
@@ -19626,7 +19637,7 @@ not_a_real_action = ["x"]
         assert!(rel_start > 0, "inactive agent is not the first row");
         // The selected inactive agent gets the tinted selection band on its name
         // row like any other agent, with no accent bar.
-        let y = app.mouse_layout.left_list.y + rel_start as u16;
+        let y = app.mouse_layout.left_list.y + usize_to_u16_wrapping(rel_start);
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x;
         assert_ne!(
@@ -24913,7 +24924,7 @@ cyan = "#00ffff"
             other => panic!("expected change theme prompt, got {other:?}"),
         };
 
-        let row = 9 + target_index as u16;
+        let row = 9 + usize_to_u16_wrapping(target_index);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, row));
 
         match &app.prompt {
@@ -25129,7 +25140,7 @@ cyan = "#00ffff"
         let PromptState::FirstLoad(prompt) = &app.prompt else {
             panic!("expected first-load prompt");
         };
-        assert_eq!(prompt.scroll, MOUSE_WHEEL_LINES as u16);
+        assert_eq!(prompt.scroll, wheel_lines::<u16>());
         assert_eq!(prompt.focus, FirstLoadButton::Primary);
 
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, 20, 8));
@@ -25683,7 +25694,7 @@ cyan = "#00ffff"
             offset: 0,
         };
 
-        let y = 5 + held_row as u16;
+        let y = 5 + usize_to_u16_wrapping(held_row);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, y));
 
@@ -29969,7 +29980,7 @@ cyan = "#00ffff"
             startup_command_log_visual_lines(
                 &app.startup_log_viewer.as_ref().expect("viewer").content,
                 20
-            )[narrow_offset as usize],
+            )[usize::from(narrow_offset)],
             "needle line",
             "test premise: the recorded offset names the match at this width"
         );
@@ -30001,7 +30012,8 @@ cyan = "#00ffff"
             "test premise: the match sits at a different visual row once rewrapped"
         );
         assert_eq!(
-            startup_command_log_visual_lines(&viewer.content, 80)[viewer.scroll_offset as usize],
+            startup_command_log_visual_lines(&viewer.content, 80)
+                [usize::from(viewer.scroll_offset)],
             "needle line",
             "the search offset must still name the match, not the text that \
              rewrapped into its old row"
@@ -30051,7 +30063,7 @@ cyan = "#00ffff"
             startup_command_log_visual_lines(
                 &app.startup_log_viewer.as_ref().expect("viewer").content,
                 20
-            )[search_offset as usize],
+            )[usize::from(search_offset)],
             "needle line",
             "test premise: the search must have parked the view on the match"
         );
@@ -30080,7 +30092,8 @@ cyan = "#00ffff"
             .position(|line| line == "needle line")
             .expect("match at the wide width");
         assert_ne!(
-            viewer.scroll_offset as usize, wide_match,
+            usize::from(viewer.scroll_offset),
+            wide_match,
             "test premise: the clamped offset must differ from the match's row \
              or this proves nothing"
         );
@@ -31359,11 +31372,15 @@ cyan = "#00ffff"
         let drawn_at = |text: &str| -> (u16, u16) {
             let cells: Vec<String> = text.chars().map(String::from).collect();
             for y in 0..buf.area.height {
-                for x in 0..buf.area.width.saturating_sub(cells.len() as u16) {
+                for x in 0..buf
+                    .area
+                    .width
+                    .saturating_sub(usize_to_u16_wrapping(cells.len()))
+                {
                     if cells
                         .iter()
                         .enumerate()
-                        .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c)
+                        .all(|(i, c)| buf[(x + usize_to_u16_wrapping(i), y)].symbol() == c)
                     {
                         return (x, y);
                     }
@@ -34486,14 +34503,19 @@ cyan = "#00ffff"
         );
         // When the incoming chunk alone exceeds the cap, prior prefix is
         // discarded and only the trailing window of the new chunk remains.
-        let expected_tail: Vec<u8> = (200 - super::LOADING_INPUT_BUF_MAX as u8..200u8).collect();
+        let expected_tail: Vec<u8> =
+            (200 - u8::try_from(super::LOADING_INPUT_BUF_MAX)
+                .expect("the loading buffer cap fits in a byte")..200u8)
+                .collect();
         assert_eq!(buf, expected_tail);
     }
 
     #[test]
     fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
         // Fill exactly to cap with distinct leading bytes.
-        let mut buf: Vec<u8> = (0..super::LOADING_INPUT_BUF_MAX as u8).collect();
+        let mut buf: Vec<u8> = (0..u8::try_from(super::LOADING_INPUT_BUF_MAX)
+            .expect("the loading buffer cap fits in a byte"))
+            .collect();
         // Append 5 more bytes: should drop the first 5.
         super::append_capped(
             &mut buf,

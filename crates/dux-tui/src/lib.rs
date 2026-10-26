@@ -12,6 +12,7 @@ mod diff;
 pub(crate) use dux_core::focus;
 mod key_encode;
 mod keybindings;
+mod numeric;
 mod raw_input;
 mod server_screen;
 mod theme;

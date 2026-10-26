@@ -1,3 +1,5 @@
+use crate::numeric::u32_to_usize;
+use crate::numeric::u64_to_usize;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 #[cfg(test)]
@@ -799,7 +801,7 @@ fn config_schema() -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Without focus reports the grace never applies: the\n# focused agent's indicator clears right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.ui.attention_grace_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.ui.attention_grace_seconds)),
         },
         ConfigEntry::Field {
             key: "auto_reopen_agents",
@@ -1291,7 +1293,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Changing this needs a server restart to take effect (a reload of the\n\
                  # running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_events_connections as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.max_websocket_events_connections))
+            },
         },
         ConfigEntry::Field {
             key: "max_websocket_agent_connections",
@@ -1304,7 +1308,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # server restart to take effect (a reload of the running server cannot\n\
                  # resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_agent_connections as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_agent_connections)),
         },
         ConfigEntry::Field {
             key: "max_websocket_terminal_connections",
@@ -1316,7 +1320,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # class until the server restarts. Changing this needs a server restart\n\
                  # to take effect (a reload of the running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_terminal_connections as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.max_websocket_terminal_connections))
+            },
         },
         ConfigEntry::Field {
             key: "max_websocket_tab_connections",
@@ -1329,7 +1335,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # blocks all tab streams until the server restarts. Changing this needs a\n\
                  # server restart to take effect.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tab_connections as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_tab_connections)),
         },
         ConfigEntry::Field {
             key: "max_websocket_tabs_per_agent",
@@ -1345,7 +1351,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # agent may have; that is [ui] agent_tabs_max (default 20). The two\n\
                  # differ on purpose: creating a tab is cheap, streaming one is not.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tabs_per_agent as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.max_websocket_tabs_per_agent)),
         },
         ConfigEntry::Field {
             key: "title",
@@ -1409,7 +1415,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # way out. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.replay_wait_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.replay_wait_seconds)),
         },
         ConfigEntry::Field {
             key: "reconnect_backoff_cap_seconds",
@@ -1422,7 +1428,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # large and coming back into coverage takes a while to notice. Default 10.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_backoff_cap_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.reconnect_backoff_cap_seconds)),
         },
         ConfigEntry::Field {
             key: "reconnect_attempts",
@@ -1436,7 +1442,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # still abandoned on the deadline below. Default 8.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempts as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.reconnect_attempts)),
         },
         ConfigEntry::Field {
             key: "reconnect_attempt_timeout_seconds",
@@ -1451,7 +1457,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # notice. Default 10.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.reconnect_attempt_timeout_seconds as usize),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.reconnect_attempt_timeout_seconds))
+            },
         },
         ConfigEntry::Field {
             key: "changes_request_timeout_seconds",
@@ -1466,7 +1474,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # above 600 are treated as 600. Default 30.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.changes_request_timeout_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.changes_request_timeout_seconds)),
         },
         ConfigEntry::Field {
             key: "heartbeat_seconds",
@@ -1479,7 +1487,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # a dead terminal takes longer to come back. Default 15.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.heartbeat_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.heartbeat_seconds)),
         },
         ConfigEntry::Field {
             key: "heartbeat_deadline_seconds",
@@ -1495,7 +1503,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Default 30.\n\
                  # A config reload applies this to every open browser tab right away.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.heartbeat_deadline_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.heartbeat_deadline_seconds)),
         },
         ConfigEntry::Field {
             key: "pty_send_timeout_seconds",
@@ -1511,7 +1519,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # Default 60.\n\
                  # A config reload applies this to the next terminal connection.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.pty_send_timeout_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.pty_send_timeout_seconds)),
         },
         ConfigEntry::Field {
             key: "operation_unknown_after_seconds",
@@ -1523,7 +1531,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # unknown. Default 1800 (30 minutes).\n\
                  # A config reload applies this to the changes started after it.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.operation_unknown_after_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.operation_unknown_after_seconds)),
         },
         ConfigEntry::Field {
             key: "operation_retention_seconds",
@@ -1534,7 +1542,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # forgets them all. Default 1800 (30 minutes).\n\
                  # A config reload applies this to the changes started after it.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.operation_retention_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.operation_retention_seconds)),
         },
         ConfigEntry::Field {
             key: "presence_grace_seconds",
@@ -1551,7 +1559,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # counting the moment the connection is lost. Default 300.\n\
                  # A config reload applies this to the next connection that is lost.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.presence_grace_seconds as usize),
+            value_fn: |c| FieldValue::Usize(u64_to_usize(c.server.presence_grace_seconds)),
         },
         ConfigEntry::Field {
             key: "tree_list_max_concurrency",
@@ -1565,7 +1573,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # rather than being refused. Set to 0 to disable the bound entirely.\n\
                  # The limit is sized at startup, so changing it needs a restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.tree_list_max_concurrency)),
         },
         ConfigEntry::Field {
             key: "release_notes_max_concurrency",
@@ -1582,7 +1590,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # the bound entirely.\n\
                  # The limit is sized at startup, so changing it needs a restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.release_notes_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.release_notes_max_concurrency)),
         },
         ConfigEntry::Field {
             key: "file_drop_max_bytes",
@@ -1611,7 +1619,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # all would stall every drop forever; use file_drop_max_bytes = 0 to switch\n\
                  # the feature off. Read at startup, so a change needs a server restart.",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.file_drop_max_concurrency as usize),
+            value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.file_drop_max_concurrency)),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("server.auth"),
@@ -2393,7 +2401,7 @@ fn escape_toml_string(value: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                out.push_str(&format!("\\u{:04X}", c as u32));
+                out.push_str(&format!("\\u{:04X}", u32::from(c)));
             }
             c => out.push(c),
         }

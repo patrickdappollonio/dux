@@ -228,7 +228,7 @@ pub(crate) fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) 
         return None;
     }
 
-    Some(format!("\x1b[<{cb};{tx};{ty}{}", final_byte as char).into_bytes())
+    Some(format!("\x1b[<{cb};{tx};{ty}{}", char::from(final_byte)).into_bytes())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

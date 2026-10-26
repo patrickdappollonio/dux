@@ -799,7 +799,11 @@ mod tests {
                 baseline,
                 "{name} armed a cue that renders nothing"
             );
-            advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+            advance_blink(
+                &mut app,
+                u64::try_from(REFUSAL_BLINK_MS)
+                    .expect("a frame period in milliseconds fits in a u64"),
+            );
             assert_eq!(
                 render_to_buffer(&mut app),
                 baseline,
@@ -829,7 +833,10 @@ mod tests {
 
         // Past the cue's duration the modal must be indistinguishable from one
         // that was never clicked: no frozen-bright, no frozen-dim.
-        advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+        advance_blink(
+            &mut app,
+            u64::try_from(REFUSAL_BLINK_MS).expect("a frame period in milliseconds fits in a u64"),
+        );
         assert_eq!(
             render_to_buffer(&mut app),
             baseline,

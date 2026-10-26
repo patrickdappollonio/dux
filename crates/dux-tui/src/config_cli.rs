@@ -6,6 +6,7 @@
 //! asks the dux holding `dux.lock` to reload over its control socket
 //! ([`dux_core::client::reload`]).
 
+use crate::numeric::usize_to_u64;
 use std::io::{Read, Write};
 
 use crate::config::ConfigRead;
@@ -840,7 +841,7 @@ fn read_secret(input: impl Read) -> Result<Password> {
         .take(STDIN_LIMIT + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| anyhow!("could not read standard input: {e}"))?;
-    if bytes.len() as u64 > STDIN_LIMIT {
+    if usize_to_u64(bytes.len()) > STDIN_LIMIT {
         return Err(StdinTooLarge.into());
     }
     if bytes.ends_with(b"\n") {
@@ -1003,6 +1004,7 @@ fn prompt_hidden(label: &str, meter: Option<Meter<'_>>) -> Result<Password> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric::u64_to_usize;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     const COMMENTED: &str = "\
@@ -1276,14 +1278,14 @@ port = 3890
 
     #[test]
     fn stdin_beyond_any_allowed_value_is_refused() {
-        let huge = "x".repeat(STDIN_LIMIT as usize + 10);
+        let huge = "x".repeat(u64_to_usize(STDIN_LIMIT) + 10);
         assert!(
             read_secret(huge.as_bytes())
                 .unwrap_err()
                 .is::<StdinTooLarge>()
         );
         // An environment value up to 1 MiB is read whole.
-        let large = "x".repeat(ENV_VALUE_STDIN_LIMIT as usize);
+        let large = "x".repeat(u64_to_usize(ENV_VALUE_STDIN_LIMIT));
         assert_eq!(
             read_secret(large.as_bytes()).unwrap().byte_len(),
             large.len()

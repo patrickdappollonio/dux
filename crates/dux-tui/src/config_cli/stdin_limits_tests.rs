@@ -1,5 +1,6 @@
 //! `--stdin` refuses what is too large in words that fit what was being read.
 use super::*;
+use crate::numeric::u64_to_usize;
 
 fn paths_in(dir: &std::path::Path) -> DuxPaths {
     DuxPaths {
@@ -16,7 +17,7 @@ fn paths_in(dir: &std::path::Path) -> DuxPaths {
 struct Oversized;
 impl SecretSource for Oversized {
     fn read_stdin(&mut self) -> Result<Password> {
-        read_secret("x".repeat(STDIN_LIMIT as usize + 1).as_bytes())
+        read_secret("x".repeat(u64_to_usize(STDIN_LIMIT) + 1).as_bytes())
     }
     fn prompt_twice(
         &mut self,
@@ -59,7 +60,7 @@ fn set_stdin(key: &str, secrets: &mut dyn SecretSource) -> (Result<()>, String) 
 #[test]
 fn an_environment_value_up_to_one_mebibyte_is_read_and_stored() {
     crate::config::install_canonical_renderer();
-    let value = "v".repeat(ENV_VALUE_STDIN_LIMIT as usize);
+    let value = "v".repeat(u64_to_usize(ENV_VALUE_STDIN_LIMIT));
     let (result, after) = set_stdin("env.BIG_VALUE", &mut Piped(format!("{value}\n")));
     result.expect("a value of exactly 1 MiB is stored");
     assert!(after.contains(&value));

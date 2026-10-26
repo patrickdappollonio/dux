@@ -24,6 +24,7 @@
 
 use super::{App, PromptState};
 use crate::logger;
+use crate::numeric::u32_to_u16_wrapping;
 use crate::theme::Theme;
 use anyhow::Result;
 use dux_core::worker::WorkerEvent;
@@ -336,7 +337,7 @@ pub(crate) fn welcome_lines(
     width: u16,
     colors: &FirstLoadColors,
 ) -> Vec<Line<'static>> {
-    let w = width.saturating_sub(1) as usize;
+    let w = usize::from(width.saturating_sub(1));
     // The tagline WRAPS. The gallery renders it as one unwrapped span, which
     // silently clips it at the prose column's edge (the tagline is 71 columns and
     // the prose column at the 90-column target is 50). The approved intent is a
@@ -399,7 +400,7 @@ pub(crate) fn whats_new_lines(
     width: u16,
     colors: &FirstLoadColors,
 ) -> Vec<Line<'static>> {
-    let w = width.saturating_sub(1) as usize;
+    let w = usize::from(width.saturating_sub(1));
     let mut lines = Vec::new();
     if !notes.headline.trim().is_empty() {
         // Wrapped for the same reason as the welcome tagline: a release headline
@@ -528,8 +529,8 @@ pub(crate) fn button_row(
     if let Some(link) = link {
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let link_len = link.chars().count();
-        if used + 2 + link_len <= width as usize {
-            let pad = width as usize - used - link_len;
+        if used + 2 + link_len <= usize::from(width) {
+            let pad = usize::from(width) - used - link_len;
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(
                 link.to_string(),
@@ -637,7 +638,7 @@ pub(crate) fn render_modal(
 
         let duck_rows = u16::try_from(DUCK.len()).unwrap_or(u16::MAX);
         let top = art_col.height.saturating_sub(duck_rows) / 2;
-        let art: Vec<Line<'_>> = std::iter::repeat_n(Line::from(""), top as usize)
+        let art: Vec<Line<'_>> = std::iter::repeat_n(Line::from(""), usize::from(top))
             .chain(DUCK.iter().map(|row| {
                 Line::from(Span::styled(
                     format!(" {row}"),
@@ -680,7 +681,7 @@ pub(crate) fn render_modal(
     );
 
     Paragraph::new(Line::from(Span::styled(
-        "─".repeat(sep.width as usize),
+        "─".repeat(usize::from(sep.width)),
         Style::default().fg(colors.rule),
     )))
     .render(sep, frame.buffer_mut());
@@ -1102,9 +1103,13 @@ impl App {
             .saturating_sub(self.last_first_load_height.max(1));
         if let PromptState::FirstLoad(prompt) = &mut self.prompt {
             let next = if delta >= 0 {
-                prompt.scroll.saturating_add(delta as u16)
+                prompt
+                    .scroll
+                    .saturating_add(u32_to_u16_wrapping(delta.unsigned_abs()))
             } else {
-                prompt.scroll.saturating_sub(delta.unsigned_abs() as u16)
+                prompt
+                    .scroll
+                    .saturating_sub(u32_to_u16_wrapping(delta.unsigned_abs()))
             };
             prompt.scroll = next.min(max);
         }
@@ -1235,7 +1240,7 @@ mod tests {
         for row in DUCK {
             assert_eq!(
                 row.chars().count(),
-                ART_WIDTH as usize,
+                usize::from(ART_WIDTH),
                 "every duck row must be exactly {ART_WIDTH} columns: {row}"
             );
         }
@@ -1590,7 +1595,7 @@ mod tests {
 
         let welcome = sample_welcome();
         assert!(
-            welcome.tagline.chars().count() > prose_cols as usize,
+            welcome.tagline.chars().count() > usize::from(prose_cols),
             "only meaningful while the tagline overflows the column"
         );
         let lines = welcome_lines(&welcome, prose_cols, &colors);
@@ -1616,7 +1621,7 @@ mod tests {
             for line in group {
                 let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
                 assert!(
-                    width <= prose_cols as usize,
+                    width <= usize::from(prose_cols),
                     "line is wider than its column and would be clipped: {line:?}"
                 );
             }

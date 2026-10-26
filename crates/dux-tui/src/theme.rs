@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::numeric::f32_to_u8_saturating;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -61,7 +62,9 @@ pub(crate) fn working_word_color(working: Color, muted: Color, step: usize) -> C
     else {
         return working;
     };
-    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * blend).round() as u8;
+    let mix = |a: u8, b: u8| {
+        f32_to_u8_saturating((f32::from(a) + (f32::from(b) - f32::from(a)) * blend).round())
+    };
     Color::Rgb(mix(wr, mr), mix(wg, mg), mix(wb, mb))
 }
 
@@ -614,8 +617,9 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
 fn blend_over(top: Color, bottom: Color, alpha: f32) -> Color {
     match (top, bottom) {
         (Color::Rgb(tr, tg, tb), Color::Rgb(br, bg, bb)) => {
-            let mix =
-                |t: u8, b: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
+            let mix = |t: u8, b: u8| {
+                f32_to_u8_saturating((f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round())
+            };
             Color::Rgb(mix(tr, br), mix(tg, bg), mix(tb, bb))
         }
         _ => bottom,
@@ -1064,7 +1068,7 @@ mod tests {
         );
         let plain = Glyphs::PLAIN.all();
         for (index, (name, glyph)) in Glyphs::NERD.all().into_iter().enumerate() {
-            let cp = glyph.chars().next().unwrap() as u32;
+            let cp = u32::from(glyph.chars().next().unwrap());
             assert!(
                 !(0xF500..=0xFD46).contains(&cp),
                 "nerd {name} uses retired codepoint U+{cp:X}"
