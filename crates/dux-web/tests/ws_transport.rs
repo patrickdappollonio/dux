@@ -274,9 +274,6 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
     assert_eq!(resp.status(), 400, "path traversal must be rejected");
 }
 
-/// A version past the editor's size ceiling answers 200 with the head of git's
-/// own patch rather than the 400 it used to, so the browser has something to
-/// show for a file it cannot hold.
 /// `count` lines reading `<word> 0` up to `<word> <count - 1>`, each ending in a newline.
 fn numbered_lines(word: &str, count: usize) -> String {
     use std::fmt::Write as _;
@@ -286,6 +283,9 @@ fn numbered_lines(word: &str, count: usize) -> String {
     })
 }
 
+/// A version past the editor's size ceiling answers 200 with the head of git's
+/// own patch rather than the 400 it used to, so the browser has something to
+/// show for a file it cannot hold.
 #[tokio::test]
 async fn http_file_diff_answers_a_huge_file_with_the_diff_head() {
     let (addr, tmp) = boot_with_repo().await;

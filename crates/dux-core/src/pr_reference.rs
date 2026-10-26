@@ -805,13 +805,6 @@ fn read_colon_form(input: &str) -> ColonForm<'_> {
     ColonForm::NotScp
 }
 
-/// The host a message and a match should use, from a schemeless authority as
-/// written.
-///
-/// Credentials come off, because a pasted address can carry a token that must
-/// not reach a log line or a match. A port comes off only for the ssh family,
-/// where it is the transport's and says nothing about the server's API; a web
-/// port is KEPT, or the match lands on a different server.
 /// How an authority was written: the ssh family's, whose port belongs to the
 /// transport, or a web address's, whose port names the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -822,6 +815,13 @@ enum AuthorityForm {
     Web,
 }
 
+/// The host a message and a match should use, from a schemeless authority as
+/// written.
+///
+/// Credentials come off, because a pasted address can carry a token that must
+/// not reach a log line or a match. A port comes off only for the ssh family,
+/// where it is the transport's and says nothing about the server's API; a web
+/// port is KEPT, or the match lands on a different server.
 fn host_from_authority(authority: &str, form: AuthorityForm) -> Result<String, String> {
     let host = match authority.rsplit_once('@') {
         Some((_, host)) => host,

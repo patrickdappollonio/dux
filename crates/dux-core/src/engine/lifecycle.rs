@@ -1511,11 +1511,11 @@ impl Engine {
         })
     }
 
-    /// Close the row of a tab whose clean exit earned it, and report whether a
-    /// row actually went. The slot tab hands its slot to the next tab in strip
-    /// order first (the same one transaction a user-initiated close runs), which
-    /// deletes the outgoing row with the pointer move; an extra tab's row is
-    /// simply removed.
+    /// Close the row of the slot tab whose clean exit earned it, and report
+    /// whether a row actually went. The slot tab hands its slot to the next tab
+    /// in strip order (the same one transaction a user-initiated close runs),
+    /// which deletes the outgoing row with the pointer move; an extra tab's row
+    /// needs none of this and is simply removed by the caller.
     ///
     /// A promotion that cannot land leaves the row alone rather than half-doing
     /// the close: the agent is mid-delete or its store refused, and a slot

@@ -19,9 +19,6 @@ fn kill(pid: u32) {
     }
 }
 
-/// Wire a client the way the engine does (events.rs / companion.rs), let its
-/// leader exit leaving a job in its group, observe the exit with `try_wait` (as
-/// the exit prune and the terminating reap do) and drop it in the same tick.
 /// Whether the drop waits for the leader-exit record to land first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordWait {
@@ -31,6 +28,9 @@ enum RecordWait {
     DropAtOnce,
 }
 
+/// Wire a client the way the engine does (events.rs / companion.rs), let its
+/// leader exit leaving a job in its group, observe the exit with `try_wait` (as
+/// the exit prune and the terminating reap do) and drop it in the same tick.
 fn run(record: RecordWait) -> (u32, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let pidfile = dir.path().join("job.pid");

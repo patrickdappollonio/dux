@@ -2255,13 +2255,6 @@ fn pruned_agent_exit_message(pty: &PrunedPty, reconnect_key: &str) -> String {
     )
 }
 
-/// The ordinary exit status line for an agent PTY that has been pruned.
-///
-/// `read_error` is the one fact no other field carries. After a read error there
-/// is almost never an exit status, so without it the message is identical to the
-/// one a child that was merely slow to be reaped gets, and the user is told the
-/// agent exited when what actually happened is that dux stopped being able to
-/// read the terminal and killed a process that may have been perfectly healthy.
 /// How much an exited agent left on its screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitScreen {
@@ -2271,6 +2264,13 @@ enum ExitScreen {
     Full,
 }
 
+/// The ordinary exit status line for an agent PTY that has been pruned.
+///
+/// `read_error` is the one fact no other field carries. After a read error there
+/// is almost never an exit status, so without it the message is identical to the
+/// one a child that was merely slow to be reaped gets, and the user is told the
+/// agent exited when what actually happened is that dux stopped being able to
+/// read the terminal and killed a process that may have been perfectly healthy.
 fn agent_exit_status_message(
     exit_success: Option<bool>,
     screen: ExitScreen,

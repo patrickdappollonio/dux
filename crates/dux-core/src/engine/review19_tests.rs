@@ -103,9 +103,7 @@ fn checkout(tmp: &Path, engine: &mut Engine) -> (PathBuf, PathBuf) {
     (upstream, repo)
 }
 
-/// A local branch `feat` whose commit adds a gitlink at `alone`, checked out
-/// with a guarded switch from `main`, where `alone` is an ignored link to a
-/// standalone agent's folder and is recorded as that agent's folder.
+/// What `.gitmodules` says about ignoring the gitlink at `alone`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubmoduleIgnore {
     /// `.gitmodules` says `ignore = all`.
@@ -114,6 +112,9 @@ enum SubmoduleIgnore {
     Unset,
 }
 
+/// A local branch `feat` whose commit adds a gitlink at `alone`, checked out
+/// with a guarded switch from `main`, where `alone` is an ignored link to a
+/// standalone agent's folder and is recorded as that agent's folder.
 fn switch_over_link(ignore: SubmoduleIgnore) -> (Result<(), String>, std::fs::FileType) {
     let (mut engine, tmp) = test_engine();
     let repo = tmp.path().join("repo");

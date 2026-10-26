@@ -917,6 +917,8 @@ enum LogRead {
     Follow,
 }
 
+/// `dux server logs`: the last lines of the server log and, with `Follow`, every line after.
+/// With no dux running on this machine, its log file is read as it stands.
 fn server_logs(
     read: LogRead,
     lines: usize,

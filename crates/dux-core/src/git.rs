@@ -7881,10 +7881,19 @@ fn owner_repo_from_path(path: &str) -> Option<String> {
 /// reached over a different port.
 const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 
+/// Whether a remote is reached over ssh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteTransport {
+    /// An ssh remote (scp-like or an ssh scheme).
+    Ssh,
+    /// Any other transport.
+    NotSsh,
+}
+
 /// The host to ASK ABOUT for a remote, which is not always the host written in
 /// the remote.
 ///
-/// `ssh_transport` says whether git would run this address over ssh, which
+/// `transport` says whether git would run this address over ssh, which
 /// matters for exactly one hostname and is passed rather than inferred so the
 /// two call sites have to state it.
 ///
@@ -7907,15 +7916,6 @@ const GITHUB_SSH_ALT_HOST: &str = "ssh.github.com";
 /// endpoint and inventing one would be guessing at an address on somebody
 /// else's network. And it applies only over ssh, the transport it is documented
 /// for: `https://ssh.github.com/...` is not an endpoint GitHub offers.
-/// Whether a remote is reached over ssh.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RemoteTransport {
-    /// An ssh remote (scp-like or an ssh scheme).
-    Ssh,
-    /// Any other transport.
-    NotSsh,
-}
-
 fn remote_api_host(host: &str, transport: RemoteTransport) -> String {
     // `gh` has never heard of `ssh.github.com`, so the name that has to be
     // checked against the policy, and handed onwards, is `github.com`.

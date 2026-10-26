@@ -944,10 +944,6 @@ fn find_folder_row<'a>(
     }
 }
 
-/// Delete a folder only if live status still calls it untracked. The row was
-/// classified when the dialog opened, and an agent may have staged or
-/// committed inside it since: deleting what is now tracked would destroy work
-/// that exists in no other place.
 /// The spinner's sentence while `op` runs on the folder `label`.
 fn folder_op_busy(op: FolderOp, label: &str, count_words: &str) -> String {
     match op {
@@ -996,6 +992,10 @@ fn run_folder_op(
     }
 }
 
+/// Delete a folder only if live status still calls it untracked. The row was
+/// classified when the dialog opened, and an agent may have staged or
+/// committed inside it since: deleting what is now tracked would destroy work
+/// that exists in no other place.
 fn delete_untracked_folder(
     worktree: &Path,
     path: &str,

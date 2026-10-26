@@ -3239,6 +3239,16 @@ impl Engine {
         }
     }
 
+    /// Whether the GitHub integration is on now, for a reload to compare
+    /// against what it turns it into.
+    pub fn github_integration(&self) -> GithubIntegration {
+        if self.github_integration_enabled {
+            GithubIntegration::Enabled
+        } else {
+            GithubIntegration::Disabled
+        }
+    }
+
     /// A surface could not finish applying a reloaded config (the error is
     /// its own to report). The engine still adopts the new config, so memory,
     /// the writer's base and the file agree: nothing old can be saved over the
@@ -3250,19 +3260,6 @@ impl Engine {
     /// the apply failed), the engine's projects are derived from the kept
     /// config's own projects alone, so memory, the writer's base and the
     /// file still agree.
-    /// Whether the GitHub integration is on now, for a reload to compare
-    /// against what it turns it into.
-    pub fn github_integration(&self) -> GithubIntegration {
-        if self.github_integration_enabled {
-            GithubIntegration::Enabled
-        } else {
-            GithubIntegration::Disabled
-        }
-    }
-
-    /// Adopt a reloaded config the surface could not fully apply, so memory,
-    /// the projects and the file agree; a session database that cannot be read
-    /// keeps the config's own projects.
     pub fn keep_reloaded_config(&mut self, config: Config) {
         self.github_integration_enabled = config.ui.github_integration;
         let derived = self

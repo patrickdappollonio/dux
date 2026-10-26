@@ -9296,8 +9296,6 @@ mod tests {
         ));
     }
 
-    /// Build failed-launch data for an extra tab: `tab_id` differs from the
-    /// session id, mirroring a real extra-tab launch.
     /// Whether a failed tab launch was a brand-new tab or a reopened one.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum TabLaunch {
@@ -9305,6 +9303,8 @@ mod tests {
         Reopened,
     }
 
+    /// Build failed-launch data for an extra tab: `tab_id` differs from the
+    /// session id, mirroring a real extra-tab launch.
     fn make_tab_failed_data(
         session_id: &str,
         tab_id: &str,

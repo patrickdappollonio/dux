@@ -3309,14 +3309,6 @@ impl Dimensions for TerminalDimensions {
     }
 }
 
-/// Translate an alacritty cell's style flags into our serializable
-/// `CellModifier`. Shared by the per-frame snapshot and the reconnect repaint.
-/// How many of a row's columns the reconnect replay prints. A soft-wrapped row
-/// keeps its full width, whose trailing cells are what make the client's
-/// autowrap fire at the right column; any other row is right-trimmed to its last
-/// non-empty cell so a blank screen does not cost a screenful of spaces.
-/// `Cell::is_empty` is false for a colored space, so visible trailing blocks
-/// survive the trim.
 /// Whether a grid row soft-wraps onto the next one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowEnd {
@@ -3326,6 +3318,12 @@ enum RowEnd {
     Ends,
 }
 
+/// How many of a row's columns the reconnect replay prints. A soft-wrapped row
+/// keeps its full width, whose trailing cells are what make the client's
+/// autowrap fire at the right column; any other row is right-trimmed to its last
+/// non-empty cell so a blank screen does not cost a screenful of spaces.
+/// `Cell::is_empty` is false for a colored space, so visible trailing blocks
+/// survive the trim.
 fn row_emit_width(cells: &[Cell], cols: usize, end: RowEnd) -> usize {
     if end == RowEnd::SoftWrapped {
         return cols;
@@ -3373,6 +3371,8 @@ fn push_replay_cell(
     }
 }
 
+/// Translate an alacritty cell's style flags into our serializable
+/// `CellModifier`. Shared by the per-frame snapshot and the reconnect repaint.
 fn cell_modifier(cell: &Cell) -> CellModifier {
     let mut modifier = CellModifier::default();
     if cell.flags.contains(Flags::BOLD) {
@@ -5959,8 +5959,6 @@ mod tests {
         }
     }
 
-    /// Build a reader-loop state around fresh flags, and hand back the flags the
-    /// loop is expected to publish.
     /// A probed reader-loop state and the flags and writer queue it publishes to.
     type ReaderLoopProbe = (
         ReaderLoopState,
@@ -5969,6 +5967,8 @@ mod tests {
         std::sync::mpsc::Receiver<PtyWriteMsg>,
     );
 
+    /// Build a reader-loop state around fresh flags, and hand back the flags the
+    /// loop is expected to publish.
     fn reader_loop_probe() -> ReaderLoopProbe {
         let exited = Arc::new(AtomicBool::new(false));
         let read_error: Arc<OnceLock<String>> = Arc::new(OnceLock::new());

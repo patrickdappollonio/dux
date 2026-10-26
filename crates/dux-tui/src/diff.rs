@@ -288,15 +288,6 @@ fn count_lines(bytes: &[u8]) -> usize {
     }
 }
 
-/// Compute a syntax-highlighted, unified diff for a single file.
-///
-/// `worktree_path` is the root of the git worktree and `rel_path` is the
-/// file path relative to it (as reported by `git status --porcelain`).
-///
-/// Private on purpose: the git reads, the whole-file read, the line diff and
-/// the highlighting are each slow enough to freeze the run loop on a large
-/// file, so the only way in from the app is [`spawn_diff_job`], which runs it
-/// on a thread of its own.
 /// The syntax a file is highlighted with, chosen by its extension; plain text
 /// when nothing matches.
 fn syntax_for<'c>(cache: &'c SyntaxCache, rel_path: &str) -> &'c syntect::parsing::SyntaxReference {
@@ -322,6 +313,15 @@ fn file_header_lines(rel_path: &str, theme: &AppTheme) -> [Line<'static>; 2] {
     ]
 }
 
+/// Compute a syntax-highlighted, unified diff for a single file.
+///
+/// `worktree_path` is the root of the git worktree and `rel_path` is the
+/// file path relative to it (as reported by `git status --porcelain`).
+///
+/// Private on purpose: the git reads, the whole-file read, the line diff and
+/// the highlighting are each slow enough to freeze the run loop on a large
+/// file, so the only way in from the app is [`spawn_diff_job`], which runs it
+/// on a thread of its own.
 fn diff_file(
     worktree_path: &Path,
     rel_path: &str,

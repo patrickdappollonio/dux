@@ -17,9 +17,6 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// A project checkout on `main` that tracks a symbolic link `work` pointing at
-/// a folder outside it, and a branch `feat` that deletes (or, with [`LinkOnFeat::ReplacedByFile`],
-/// turns into a file) that link.
 /// What `feat` does to the tracked link.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinkOnFeat {
@@ -27,6 +24,9 @@ enum LinkOnFeat {
     ReplacedByFile,
 }
 
+/// A project checkout on `main` that tracks a symbolic link `work` pointing at
+/// a folder outside it, and a branch `feat` that deletes (or, with [`LinkOnFeat::ReplacedByFile`],
+/// turns into a file) that link.
 fn link_fixture(tmp: &Path, link: LinkOnFeat) -> (std::path::PathBuf, std::path::PathBuf) {
     let shared = tmp.join("shared");
     std::fs::create_dir_all(&shared).unwrap();
