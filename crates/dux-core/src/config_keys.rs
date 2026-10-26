@@ -175,6 +175,8 @@ impl fmt::Display for KeyError {
                     write!(f, "{known} has no setting below it with that name")?;
                 }
                 match suggestion {
+                    // backtick-ok: a refusal of `dux config`, printed by the
+                    // command line.
                     Some(close) => write!(f, "; did you mean {close}?")?,
                     None => write!(
                         f,
@@ -251,6 +253,7 @@ pub fn lookup(path: &str) -> Result<Key, KeyError> {
         if !name_like(name) {
             return Err(not_a_name(name));
         }
+        // backtick-ok: a refusal of `dux config`, printed by the command line.
         return Err(malformed_at(
             name,
             "a value goes after the setting's name and a space, not after `=`: write `dux \
@@ -802,6 +805,8 @@ fn prepare_provider(doc: &mut DocumentMut, path: &[String]) -> Result<()> {
         if field == "command" {
             return Ok(());
         }
+        // backtick-ok: a refusal of `dux config set`, printed by the command
+        // line.
         anyhow::bail!(
             "providers.{name} is not a provider dux knows, so it needs a command first: run \
              `dux config set providers.{name}.command <command>`, then set {field}. Nothing was \
@@ -1042,6 +1047,8 @@ fn password_policy_of(raw: &str) -> Result<crate::auth::PasswordPolicy> {
             .map(|problem| problem.message)
             .collect();
     if !problems.is_empty() {
+        // backtick-ok: a refusal to set the password, printed by the command
+        // line or answered to Preferences as an HTTP refusal.
         anyhow::bail!(
             "the password policy in [server.auth] is invalid ({}), so dux cannot tell what a \
              new password has to meet. Fix that first with `dux config set \

@@ -3279,6 +3279,7 @@ pub(crate) fn problem_kind(message: &str) -> String {
     }
     // The name serde reports missing is a field of dux's own schema, never
     // anything the file wrote, so it is kept: `missing field surface`.
+    // backtick-ok: matches serde's own wording, which the result drops.
     if let Some(rest) = message.strip_prefix("missing field `")
         && let Some((field, _)) = rest.split_once('`')
     {
@@ -3350,6 +3351,10 @@ impl std::fmt::Display for ConfigLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path = self.path.display();
         match &self.problem {
+            // backtick-ok: an error value. A start that fails prints it to the
+            // terminal dux was started from, and a refused reload relays it
+            // whole after "Config reload failed:", as the loader's error text
+            // rather than a sentence built for the status line.
             ConfigLoadProblem::Unreadable(error) => write!(
                 f,
                 "{path} could not be read ({error}), so dux cannot tell whether [server.auth] \
@@ -3769,6 +3774,8 @@ fn misplaced_auth_problems_tagged(raw: &str) -> Vec<(crate::config_auth::Problem
             let parts: Vec<PathPart<'_>> = misplaced.shown.iter().map(PathStep::as_part).collect();
             let shown = shown_parts(raw, &parts);
             let message = if let Some(path) = misplaced.virtual_path {
+                // backtick-ok: one of the reasons a ConfigLoadError carries,
+                // relayed as the loader's error text (see its Display).
                 format!(
                     "{shown} is not read: a plaintext password is not read from config.toml; set \
                      one with `dux config set {}` and remove this line, so dux will not start \

@@ -22,7 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dux_core::config::{TailscaleMode, TailscaleModeOutcome};
+use dux_core::status_text::StatusText;
 use dux_core::tailscale::{TailscaleIdentity, TailscaleUnavailable};
+
+/// The command that lists this machine's Funnel routes, which the Funnel
+/// sentences name as a chip.
+const FUNNEL_STATUS: &str = "tailscale funnel status";
 
 /// How often the watcher asks whether the Tailscale address is there. A constant
 /// rather than a setting: an implementation cadence, well inside the time a person
@@ -409,11 +414,15 @@ impl LegStatus {
     /// Say something about this machine's tailnet NAME (a rename, a serve route,
     /// Funnel). Posted at once on its own key: these are not interface flaps, so
     /// nothing here is held for a dwell.
-    pub(crate) fn identity_news(&self, tone: dux_core::statusline::StatusTone, message: &str) {
+    pub(crate) fn identity_news(
+        &self,
+        tone: dux_core::statusline::StatusTone,
+        message: &StatusText,
+    ) {
         self.post(dux_core::engine::StatusUpdate::keyed(
             TAILSCALE_IDENTITY_KEY,
             tone,
-            message,
+            message.clone(),
         ));
     }
 
@@ -961,6 +970,8 @@ pub(crate) fn serve_hint(identity: &TailscaleIdentity, port: u16) -> Option<Stri
     } else {
         ""
     };
+    // backtick-ok: printed to the serve's console and the log only, never a
+    // status (`say_serve_hint_once`).
     Some(format!(
         "Tip: `tailscale serve --bg {port}` would also put dux at https://{name} with a real \
          certificate, for every device on your tailnet. dux never runs it for you.{certificates}"
@@ -977,10 +988,10 @@ pub(crate) fn identity_news(
     previous: Option<&TailscaleIdentity>,
     next: &TailscaleIdentity,
     password: Password,
-) -> Vec<(dux_core::statusline::StatusTone, String)> {
+) -> Vec<(dux_core::statusline::StatusTone, StatusText)> {
     use dux_core::statusline::StatusTone;
     let password_set = password == Password::Set;
-    let mut news = Vec::new();
+    let mut news: Vec<(StatusTone, StatusText)> = Vec::new();
     // A Funnel that forwards to dux's port is the Funnel state's news (see
     // `funnel_state_news`), said once there; this only speaks for a Funnel elsewhere,
     // which withdraws the name and nothing more.
@@ -997,26 +1008,32 @@ pub(crate) fn identity_news(
         news.push(if password_set {
             (
                 StatusTone::Warning,
-                "A Tailscale Funnel route on this machine publishes it to the public \
+                dux_core::status_text![
+                    "A Tailscale Funnel route on this machine publishes it to the public \
                      internet. It does not forward to dux's port, but if it reaches dux through \
                      another program on this machine, its visitors are asked for dux's \
-                     password like anyone else from the network. `tailscale funnel status` \
-                     lists it."
-                    .to_string(),
+                     password like anyone else from the network. ",
+                    q(FUNNEL_STATUS),
+                    " lists it."
+                ],
             )
         } else {
             (
                 StatusTone::Warning,
-                format!(
-                    "A Tailscale Funnel route on this machine publishes it to the public \
-                     internet and no password is set, so dux stopped answering to {name}. That \
-                     Funnel does not forward to dux's port, but dux cannot tell whether it \
-                     reaches dux through another program on this machine; if it does, anyone on \
-                     the internet can drive your terminals. Set a password \
-                     (`dux config set server.auth.password`), or turn the Funnel route off \
-                     (`tailscale funnel status` lists it) and dux answers to {name} again by \
-                     itself."
-                ),
+                dux_core::status_text![
+                    format!(
+                        "A Tailscale Funnel route on this machine publishes it to the public \
+                         internet and no password is set, so dux stopped answering to {name}. \
+                         That Funnel does not forward to dux's port, but dux cannot tell \
+                         whether it reaches dux through another program on this machine; if it \
+                         does, anyone on the internet can drive your terminals. Set a password \
+                         ("
+                    ),
+                    q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+                    "), or turn the Funnel route off (",
+                    q(FUNNEL_STATUS),
+                    format!(" lists it) and dux answers to {name} again by itself."),
+                ],
             )
         });
     }
@@ -1030,7 +1047,7 @@ pub(crate) fn identity_news(
     {
         news.push((
             StatusTone::Info,
-            format!("The Tailscale Funnel route is off, so dux answers to {name} again."),
+            format!("The Tailscale Funnel route is off, so dux answers to {name} again.").into(),
         ));
     }
 
@@ -1043,14 +1060,16 @@ pub(crate) fn identity_news(
             format!(
                 "This machine's tailnet name changed from {old} to {new} (the tailnet or the \
                  machine was renamed). dux now answers to {new} and no longer to {old}."
-            ),
+            )
+            .into(),
         )),
         (Some(old), None) if !next.funnel => news.push((
             StatusTone::Info,
             format!(
                 "Tailscale no longer reports {old} as this machine's name (logged out, renamed \
                  outside the tailnet's domain, or MagicDNS off), so dux stopped answering to it."
-            ),
+            )
+            .into(),
         )),
         _ => {}
     }
@@ -1068,7 +1087,8 @@ pub(crate) fn identity_news(
                     "tailscale serve now forwards {url} to dux: open it from any device on your \
                      tailnet. The first visit can take about 30 seconds while Tailscale issues \
                      the certificate."
-                ),
+                )
+                .into(),
             ));
         }
         for url in before.iter().filter(|url| !after.contains(url)) {
@@ -1077,7 +1097,8 @@ pub(crate) fn identity_news(
                 format!(
                     "{url} no longer reaches dux: its tailscale serve route was removed or now \
                      points somewhere else."
-                ),
+                )
+                .into(),
             ));
         }
     }
@@ -1099,20 +1120,26 @@ pub(crate) enum Because {
 /// from in here, and publishing a containerised dux through one is a setup the
 /// operator chose, so this says what dux cannot know and what that means rather
 /// than refusing.
-pub(crate) fn container_warning(password: Password) -> String {
-    let consequence = if password == Password::Set {
+pub(crate) fn container_warning(password: Password) -> StatusText {
+    let consequence: StatusText = if password == Password::Set {
         "so if anything outside could publish it, set [server.auth] require = \"everywhere\": \
          a request relayed onto this port looks like this machine"
+            .into()
     } else {
-        "and no password is set: anything that can reach this port can drive your terminals. Set \
-         one with `dux config set server.auth.password`, or keep the port private to your own \
-         network"
+        dux_core::status_text![
+            "and no password is set: anything that can reach this port can drive your \
+             terminals. Set one with ",
+            q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+            ", or keep the port private to your own network"
+        ]
     };
-    format!(
+    dux_core::status_text![
         "dux is running inside a container and sees no Tailscale here. It cannot see a \
          Tailscale outside this container, so it cannot tell whether something outside \
-         publishes this port, {consequence}."
-    )
+         publishes this port, ",
+        consequence,
+        "."
+    ]
 }
 
 /// Where a FAILED look leaves the Funnel state.
@@ -1166,7 +1193,7 @@ pub(crate) fn funnel_state_news(
     after: crate::exposure::FunnelState,
     because: Because,
     password: Password,
-) -> Option<(dux_core::statusline::StatusTone, String)> {
+) -> Option<(dux_core::statusline::StatusTone, StatusText)> {
     use crate::exposure::FunnelState::{
         Checking, CliNotFound, Funnel, FunnelSaved, Open, Unchecked, Unconfirmed,
     };
@@ -1180,47 +1207,63 @@ pub(crate) fn funnel_state_news(
     if before == Unchecked || after == Unchecked {
         return None;
     }
-    let meanwhile = if password_set {
+    let meanwhile: StatusText = if password_set {
         "Until then dux treats requests from this machine as coming from the network, so they \
          are asked for the password like the rest."
+            .into()
     } else {
-        "No password is set, so anything such a Funnel publishes can drive your terminals: set \
-         one with `dux config set server.auth.password`."
+        dux_core::status_text![
+            "No password is set, so anything such a Funnel publishes can drive your terminals: \
+             set one with ",
+            q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+            "."
+        ]
     };
-    let sentence = |what: &str| format!("{what} {meanwhile}");
+    let sentence = |what: StatusText| dux_core::status_text![what, " ", &meanwhile];
     match (before, after) {
         (_, Funnel) => Some((
             StatusTone::Warning,
             if password_set {
-                "A Tailscale Funnel forwards connections from the public internet to dux's port. \
-                 Every request through it, and every request from this machine while it stands, \
-                 is asked for the password (`tailscale funnel status` lists the Funnel)."
-                    .to_string()
+                dux_core::status_text![
+                    "A Tailscale Funnel forwards connections from the public internet to dux's \
+                     port. Every request through it, and every request from this machine while \
+                     it stands, is asked for the password (",
+                    q(FUNNEL_STATUS),
+                    " lists the Funnel)."
+                ]
             } else {
-                "A Tailscale Funnel forwards connections from the public internet to dux's port \
-                 and no password is set: anyone on the internet who finds it can drive your \
-                 terminals. Set a password now with `dux config set server.auth.password`, or \
-                 turn the Funnel off (`tailscale funnel status` lists it)."
-                    .to_string()
+                dux_core::status_text![
+                    "A Tailscale Funnel forwards connections from the public internet to dux's \
+                     port and no password is set: anyone on the internet who finds it can drive \
+                     your terminals. Set a password now with ",
+                    q(dux_core::config_auth::SET_PASSWORD_COMMAND),
+                    ", or turn the Funnel off (",
+                    q(FUNNEL_STATUS),
+                    " lists it)."
+                ]
             },
         )),
         (_, Unconfirmed) => Some((
             StatusTone::Warning,
-            sentence(
+            sentence(dux_core::status_text![
                 "dux could not confirm that no Tailscale Funnel publishes it to the public \
                  internet (the tailscale CLI failed, did not answer, or cannot reach its \
-                 daemon). Fix tailscaled on this machine (`tailscale status` shows what it \
-                 says).",
-            ),
+                 daemon). Fix tailscaled on this machine (",
+                q("tailscale status"),
+                " shows what it says).",
+            ]),
         )),
         (_, FunnelSaved) => Some((
             StatusTone::Warning,
-            sentence(
+            sentence(dux_core::status_text![
                 "Tailscale is down on this machine, but its saved settings Funnel this dux \
                  server to the public internet, and Tailscale brings that Funnel back the \
-                 moment it is up again. Bring Tailscale up (`tailscale up`), then turn the \
-                 Funnel off (`tailscale funnel status` lists it).",
-            ),
+                 moment it is up again. Bring Tailscale up (",
+                q("tailscale up"),
+                "), then turn the Funnel off (",
+                q(FUNNEL_STATUS),
+                " lists it).",
+            ]),
         )),
         (_, CliNotFound) => Some((
             StatusTone::Warning,
@@ -1228,7 +1271,8 @@ pub(crate) fn funnel_state_news(
                 "Tailscale is running on this machine, but dux cannot find the tailscale \
                  command to ask it whether a Tailscale Funnel publishes this server to the \
                  public internet. dux looks for it on your PATH, in /usr/local/bin, and in \
-                 /Applications/Tailscale.app/Contents/MacOS/Tailscale.",
+                 /Applications/Tailscale.app/Contents/MacOS/Tailscale."
+                    .into(),
             ),
         )),
         (Funnel | FunnelSaved | Unconfirmed | CliNotFound, Open) => Some((
@@ -1236,12 +1280,12 @@ pub(crate) fn funnel_state_news(
             match because {
                 Because::Look => "dux confirmed that no Tailscale Funnel publishes it, and takes \
                                   requests from this machine for this machine again."
-                    .to_string(),
+                    .into(),
                 Because::NoTailscaleHere => "Tailscale is not running on this machine (or \
                                              not installed), so nothing can publish dux \
                                              through Funnel; dux takes requests from this \
                                              machine for this machine again."
-                    .to_string(),
+                    .into(),
             },
         )),
         (Checking, Open)

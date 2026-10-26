@@ -81,6 +81,7 @@ pub fn ui_build_state() -> UiBuildState {
 /// startup banner row and logged to `dux.log`, because the person who can fix
 /// this is the one who launched the server, and they may never open a browser.
 /// The served page carries the same message for whoever does open one.
+// backtick-ok: the startup banner, the log and the notice page, never a status.
 pub const UI_NOT_BUILT_WARNING: &str = "This binary was built with DUX_DISABLE_UI_BUILD set, so it contains NO web UI. \
      Every page serves a notice explaining that. Rebuild without DUX_DISABLE_UI_BUILD \
      (run `npm ci` in crates/dux-web/web first) to serve the real web UI.";
@@ -106,6 +107,7 @@ pub const fn ui_build_warning(state: UiBuildState) -> Option<&'static str> {
 /// Warning for a build stamped as complete whose embedded asset set is empty or
 /// nearly empty. It gives source builders repair steps and tells binary-package
 /// users to report a packaging error.
+// backtick-ok: the startup banner, the log and the notice page, never a status.
 pub const UI_EMPTY_EMBED_WARNING: &str = "This binary reports a real frontend build, but almost no web assets are embedded \
      in it, so server mode will answer 404 for the web UI. The build script and \
      rust-embed disagreed about what to bake in. Building from source? Run `touch \

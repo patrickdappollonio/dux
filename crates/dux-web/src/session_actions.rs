@@ -2337,13 +2337,10 @@ async fn resolve_pull_request_reference(
     if let Some(host) = reference.host.as_deref()
         && !policy.allows(host)
     {
+        // The status's words, in their plain spelling: this is an HTTP refusal.
         return (
             StatusCode::BAD_REQUEST,
-            format!(
-                "dux cannot look up pull requests on {host}. Sign in to that host with \
-                 `gh auth login --hostname {host}`, or paste a reference from a host you \
-                 are already signed in to."
-            ),
+            dux_core::gh::host_not_signed_in(host).to_string(),
         )
             .into_response();
     }

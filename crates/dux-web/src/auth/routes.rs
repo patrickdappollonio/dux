@@ -471,6 +471,7 @@ async fn change_password(
                 return refusal(
                     StatusCode::FORBIDDEN,
                     json!({
+                        // backtick-ok: an HTTP refusal body, not a status.
                         "error": "first_password_not_here",
                         "message": format!(
                             "The first password can only be set from the machine dux runs on, \
@@ -673,6 +674,7 @@ fn route_refusal(via: super::provenance::Via, cause: &str) -> String {
             "This browser reached dux over loopback, but {cause}, so dux cannot tell it is \
              this machine."
         ),
+        // backtick-ok: part of an HTTP refusal body, not a status.
         Via::OwnAddress => "This browser reached dux from one of this machine's own addresses, \
              which a relay on this machine (socat, `ssh -L`, a proxy) looks exactly like, so dux \
              cannot tell it is this machine."

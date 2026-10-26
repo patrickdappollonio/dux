@@ -72,6 +72,10 @@ impl CookieSecure {
     }
 }
 
+/// The command that sets the web password, for a sentence that names it (as a
+/// chip, with `status_text!`'s `q(..)`).
+pub const SET_PASSWORD_COMMAND: &str = "dux config set server.auth.password";
+
 pub(crate) const DEFAULT_MINIMUM_PASSWORD_LENGTH: u32 = 12;
 pub(crate) const DEFAULT_MINIMUM_PASSWORD_SCORE: u8 = 2;
 pub(crate) const DEFAULT_MAX_FAILED_LOGINS: u32 = 5;

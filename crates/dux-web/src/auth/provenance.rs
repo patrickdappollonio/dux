@@ -396,6 +396,8 @@ pub(crate) fn is_tailscale(ip: IpAddr) -> bool {
 
 /// Why a connection from one of this machine's own addresses is not this
 /// machine or the tailnet.
+// backtick-ok: names marked for the sign-in page's inline-code chips, like the
+// exposure gate's reasons; a status reads them through `warnings::marked`.
 const OWN_ADDRESS: &str = "the connection came from one of this machine's own addresses, as a \
      relay on this machine (socat, `ssh -L`, a proxy, a Funnel TCP forward) does too";
 

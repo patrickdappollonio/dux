@@ -1749,7 +1749,7 @@ pub enum WebPrLookupOutcome {
     /// The lookup failed; `message` is the already-formatted error line.
     Failed {
         /// The error line.
-        message: String,
+        message: StatusText,
     },
 }
 
@@ -5791,7 +5791,7 @@ impl Engine {
                 let reason = crate::engine::format_panic_payload(&*payload);
                 crate::logger::error(&format!("pr-attach lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(crate::worker::WorkerEvent::PullRequestResolved {
-                    result: Err(format!("Worker panicked: {reason}")),
+                    result: Err(format!("Worker panicked: {reason}").into()),
                     purpose: crate::worker::PrLookupPurpose::Attach {
                         session_id: sid_panic,
                     },

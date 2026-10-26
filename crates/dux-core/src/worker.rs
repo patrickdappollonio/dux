@@ -912,8 +912,10 @@ pub enum WorkerEvent {
     },
     /// A `gh pr view` lookup finished.
     PullRequestResolved {
-        /// The pull request, or why it could not be resolved.
-        result: Result<ResolvedPullRequest, String>,
+        /// The pull request, or why it could not be resolved: a status
+        /// sentence, so a name in it (the command that signs in to a host,
+        /// say) reaches the web as a chip.
+        result: Result<ResolvedPullRequest, crate::status_text::StatusText>,
         /// Why the lookup ran. A create-flow resolution opens the name prompt
         /// (TUI) or hands off to the create dispatch (web); an attach-flow
         /// resolution is applied ENGINE-SIDE (`apply_pr_attach`) after

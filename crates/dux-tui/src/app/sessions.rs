@@ -786,11 +786,7 @@ impl App {
         if let Some(host) = reference.host.as_deref()
             && !policy.allows(host)
         {
-            self.set_error(format!(
-                "dux cannot look up pull requests on {host}. Sign in to that host with \
-                 `gh auth login --hostname {host}`, or paste a reference from a host you \
-                 are already signed in to."
-            ));
+            self.set_error(dux_core::gh::host_not_signed_in(host));
             return;
         }
         let Some(repository) = reference.repository_label() else {
@@ -1008,7 +1004,7 @@ impl App {
                 let reason = dux_core::engine::format_panic_payload(&*payload);
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
-                    result: Err(format!("Worker panicked: {reason}")),
+                    result: Err(format!("Worker panicked: {reason}").into()),
                     purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
                     status_op_id: Some(op_id_panic),
                 });

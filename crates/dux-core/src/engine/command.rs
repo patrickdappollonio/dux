@@ -1481,28 +1481,15 @@ impl Engine {
                         auth.password_hash
                             .clone_from(&running.server.auth.password_hash);
                         recovered.server.auth = auth;
-                        Some(Some(
-                            "The file's [server.auth] had no password but the running \
-                             dux has one, so the running password was kept. To remove \
-                             it, run `dux config set server.auth.password_hash \"\"`."
-                                .to_string(),
-                        ))
+                        Some(Some(recover_kept_password_note()))
                     }
                     Some(Ok(auth)) => {
                         recovered.server.auth = auth;
                         Some(None)
                     }
-                    Some(Err(problem)) => Some(Some(format!(
-                        "The file's [server.auth] could not be read, so the running \
-                         dux's web password settings were written back ({}); check \
-                         them with `dux config get server.auth`. What could not be \
-                         read: {}",
-                        if recovered.server.auth.has_password() {
-                            "a password is set"
-                        } else {
-                            "no password is set"
-                        },
-                        problem.reason()
+                    Some(Err(problem)) => Some(Some(recover_unreadable_auth_note(
+                        &recovered.server.auth,
+                        problem.reason(),
                     ))),
                 };
                 Ok((surface.recover_render(&recovered), auth_note))
@@ -1516,9 +1503,10 @@ impl Engine {
                     "Restored the last working configuration to config.toml. Its \
                      [server.auth] was kept as the file had it.",
                 ),
-                Some(Some(note)) => StatusUpdate::warning(format!(
-                    "Restored the last working configuration to config.toml. {note}"
-                )),
+                Some(Some(note)) => StatusUpdate::warning(crate::status_text![
+                    "Restored the last working configuration to config.toml. ",
+                    note
+                ]),
             }),
             Err(e) => EventReaction::Status(StatusUpdate::error(format!(
                 "Couldn't restore the last working configuration: {e:#}"
@@ -2412,9 +2400,75 @@ fn create_launch_final(
     }
 }
 
+/// What Recover config adds when the file's `[server.auth]` had no password
+/// but the running dux has one: the running password stayed.
+fn recover_kept_password_note() -> crate::status_text::StatusText {
+    crate::status_text![
+        "The file's [server.auth] had no password but the running dux has one, so the running \
+         password was kept. To remove it, run ",
+        q("dux config set server.auth.password_hash \"\""),
+        "."
+    ]
+}
+
+/// What Recover config adds when the file's `[server.auth]` could not be read,
+/// so the running settings were written back.
+fn recover_unreadable_auth_note(
+    running: &crate::config_auth::ServerAuthConfig,
+    reason: &str,
+) -> crate::status_text::StatusText {
+    let password = if running.has_password() {
+        "a password is set"
+    } else {
+        "no password is set"
+    };
+    crate::status_text![
+        format!(
+            "The file's [server.auth] could not be read, so the running dux's web password \
+             settings were written back ({password}); check them with "
+        ),
+        q("dux config get server.auth"),
+        format!(". What could not be read: {reason}")
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The commands a Recover config note names reach the web as chips and the
+    /// status line in quotes, never between backticks.
+    #[test]
+    fn the_recover_notes_name_their_commands_as_chips() {
+        for (note, command) in [
+            (
+                recover_kept_password_note(),
+                "dux config set server.auth.password_hash \"\"",
+            ),
+            (
+                recover_unreadable_auth_note(
+                    &crate::config_auth::ServerAuthConfig {
+                        password_hash: "set".to_string(),
+                        ..crate::config_auth::ServerAuthConfig::default()
+                    },
+                    "not TOML",
+                ),
+                "dux config get server.auth",
+            ),
+        ] {
+            assert!(!note.contains('`'), "{note}");
+            assert!(note.contains(&format!("\"{command}\"")), "{note}");
+            assert!(
+                note.segments().expect("built from parts").contains(
+                    &crate::prose::ProseSegment::Name {
+                        name: command.to_string(),
+                        quoted: true,
+                    }
+                ),
+                "{note:?}"
+            );
+        }
+    }
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::ids::TabId;
     use crate::statusline::StatusTone;

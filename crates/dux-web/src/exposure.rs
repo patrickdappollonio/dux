@@ -124,11 +124,16 @@ impl Exposure {
     /// after review). A Funnel that serves dux over HTTP does not close it:
     /// Tailscale marks every such request, so it is told apart by the marker.
     pub fn trust_gate(&self) -> Option<&'static str> {
+        // A reason marks its names in backticks for the sign-in page's
+        // inline-code chips (`required_reason`); a status reads it through
+        // `auth::warnings::marked`, which makes each one a chip.
         if self.forward_known() {
+            // backtick-ok: names marked for the chips, as above.
             return Some("a `tailscale serve` TCP forward reaches dux's port");
         }
         match self.funnel {
             FunnelState::Open | FunnelState::Funnel | FunnelState::FunnelSaved => None,
+            // backtick-ok: names marked for the chips, as above.
             FunnelState::Unchecked => Some(
                 "`[server] tailscale` is `no` (or dux runs with `--no-tailscale`), so dux cannot \
                  check for a Tailscale Funnel or forward",

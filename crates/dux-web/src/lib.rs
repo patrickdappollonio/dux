@@ -447,6 +447,8 @@ fn tailnet_password_clause(auth: &dux_core::config::ServerAuthConfig) -> &'stati
     use dux_core::config::AuthRequire;
     match (auth.has_password(), auth.require) {
         (false, _) => {
+            // backtick-ok: the startup banner's safety note, printed to the
+            // serve's console only.
             " with no password set. Set one with `dux config set server.auth.password`, or set \
              tailscale = \"no\" under [server] to serve without that address."
         }
@@ -492,6 +494,8 @@ pub fn safety_note_public(auth: &dux_core::config::ServerAuthConfig) -> String {
          (tailscale serve, or an HTTPS front end of your own with [server.auth] require = \"everywhere\")."
             .to_string()
     } else {
+        // backtick-ok: the startup banner's safety note, printed to the serve's
+        // console only.
         "Reachable on your network with NO password set. Anyone who can reach this address \
          controls your agents and worktrees. Set one with `dux config set \
          server.auth.password`, or put dux behind Tailscale."
@@ -1934,7 +1938,7 @@ async fn apply_mode_request(
                 if before != crate::exposure::FunnelState::Unchecked {
                     say(
                         dux_core::statusline::StatusTone::Warning,
-                        &crate::serve_legs::no_longer_checking_funnel(),
+                        &crate::serve_legs::no_longer_checking_funnel().into(),
                         console,
                         status,
                     );
@@ -2208,7 +2212,7 @@ async fn apply_leg_command(
 /// `dux server` terminal or the flip's activity panel), and both surfaces.
 fn say(
     tone: dux_core::statusline::StatusTone,
-    message: &str,
+    message: &dux_core::status_text::StatusText,
     console: &Console,
     status: &LegStatus,
 ) {
