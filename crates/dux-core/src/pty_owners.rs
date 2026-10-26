@@ -11,6 +11,7 @@
 /// under one lock acquisition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerRecord {
+    /// The owning connection's id.
     pub conn_id: u64,
     /// The owning connection's raw `User-Agent`, already length-bounded by the
     /// capture at the upgrade; `None` when it sent none.
@@ -46,8 +47,11 @@ pub struct OwnersState {
 /// the geometry it carried. See [`OwnersState::applied`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppliedGrid {
+    /// The resize sequence it was stamped with.
     pub seq: u64,
+    /// The height it carried, in rows.
     pub rows: u16,
+    /// The width it carried, in columns.
     pub cols: u16,
 }
 
@@ -62,7 +66,9 @@ pub enum GridApplyOutcome<T> {
     /// geometry that was re-applied when this call was overtaken while its
     /// callback was touching the child.
     Applied {
+        /// What the apply callback returned.
         result: T,
+        /// The newer geometry, as rows and columns, re-applied after this one was overtaken.
         superseding_grid: Option<(u16, u16)>,
     },
 }
@@ -78,6 +84,7 @@ pub enum GridApplyOutcome<T> {
 /// [`Self::write_if_owner`] and [`Self::may_write`].
 #[derive(Default)]
 pub struct PtySizeOwners {
+    /// The owner map and its counters, under one lock.
     pub owners: std::sync::Mutex<OwnersState>,
 }
 
@@ -94,8 +101,11 @@ static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// `claimed_new`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteClaim {
+    /// Whether the stdin may be forwarded.
     pub allowed: bool,
+    /// Whether the check itself claimed an unowned pty.
     pub claimed_new: bool,
+    /// The epoch of that claim; `Some` exactly when `claimed_new` is.
     pub epoch: Option<u64>,
 }
 
@@ -108,8 +118,11 @@ pub struct WriteClaim {
 /// exactly when `apply` is (see [`OwnersState::grid_seq`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResizeClaim {
+    /// Whether the resize is applied.
     pub apply: bool,
+    /// The epoch of the ownership handover, when there was one.
     pub epoch: Option<u64>,
+    /// The resize sequence stamped; `Some` exactly when `apply` is.
     pub seq: Option<u64>,
 }
 

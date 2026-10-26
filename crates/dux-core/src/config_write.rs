@@ -37,7 +37,9 @@ use crate::file_modes::PRIVATE_FILE_MODE as CONFIG_FILE_MODE;
 /// use `NoFsync` (crash-safe via rename, but not power-loss-durable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
+    /// Fsync the file before the rename, for power-loss durability.
     Fsync,
+    /// Rename without an fsync: crash-safe, but not power-loss-durable.
     NoFsync,
 }
 
@@ -355,6 +357,12 @@ pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
     patch_config_file_with(config_path, config, Durability::Fsync)
 }
 
+/// Patches the existing config file in place to match `config`, keeping the user's comments and
+/// layout, with the given durability.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or parsed as TOML, or the write fails.
 pub fn patch_config_file_with(
     config_path: &Path,
     config: &Config,
@@ -373,7 +381,9 @@ pub fn patch_config_file_with(
 /// setting that was, and is gone now, was deleted by hand.
 #[derive(Clone, Copy)]
 pub struct SaveBase<'a> {
+    /// The config the file last agreed with.
     pub config: &'a Config,
+    /// The file's text as dux has seen it since it last read it, when known.
     pub seen: Option<&'a str>,
 }
 
@@ -1522,7 +1532,9 @@ enum AuthRule {
 /// IT read came before the write (it carries `before`) or not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileWrite {
+    /// The read token of the text the write replaced.
     pub before: String,
+    /// The read token of the text it wrote.
     pub after: String,
 }
 
@@ -1640,8 +1652,8 @@ fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthCo
     }
 }
 
-/// Save config: patch in place if the file exists, otherwise write a plain
-/// (uncommented) `toml_edit` serialization from scratch. Used by surfaces that
+/// Save config: patch in place if the file exists, otherwise write the
+/// documented template from scratch (see [`render_config_documented`]). Used by surfaces that
 /// don't have the TUI's canonical commented renderer (e.g. the web). The TUI
 /// keeps its own `save_config` for the pretty first-creation path.
 #[deprecated(
@@ -1651,6 +1663,12 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     save_config_with(config_path, config, Durability::Fsync)
 }
 
+/// Saves `config` with the given durability: patches the file in place when it exists, and writes
+/// the documented template otherwise.
+///
+/// # Errors
+///
+/// Fails when an existing file cannot be read or parsed as TOML, or the write fails.
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     if config_path.exists() {
         patch_config_file_three_way(config_path, None, config, durability).map(|_| ())
@@ -1704,6 +1722,12 @@ pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
     write_config_plain_with(config_path, config, Durability::Fsync)
 }
 
+/// Overwrites the file with a fresh plain serialization of `config`, with the given durability,
+/// whatever is on disk.
+///
+/// # Errors
+///
+/// Fails when the write fails.
 pub fn write_config_plain_with(
     config_path: &Path,
     config: &Config,
@@ -2987,6 +3011,7 @@ pub struct RestoreMergeReport {
 }
 
 impl RestoreMergeReport {
+    /// Whether the merge dropped, kept and failed to place nothing.
     pub fn is_empty(&self) -> bool {
         self.dropped.is_empty() && self.preserved.is_empty() && self.unplaceable.is_empty()
     }

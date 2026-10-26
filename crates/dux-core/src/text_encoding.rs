@@ -29,6 +29,7 @@ pub use encoding_rs::Encoding;
 /// What a file's bytes are as editor text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decoded {
+    /// Text the editor can open, with how it is encoded.
     Text(DecodedText),
     /// Not text in any sense the editor can round-trip: a NUL, a known binary
     /// signature, or a byte-order mark whose promise the bytes do not keep and
@@ -36,9 +37,12 @@ pub enum Decoded {
     Binary,
 }
 
+/// A file's bytes decoded as editor text, with what a save needs to write them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedText {
+    /// The decoded text, without any byte-order mark.
     pub text: String,
+    /// The encoding the bytes were decoded from.
     pub encoding: &'static Encoding,
     /// The file began with a byte-order mark for `encoding`, which is not part
     /// of `text` and has to be written back by a save.
@@ -178,7 +182,9 @@ impl std::error::Error for WouldRewriteUntouched {}
 /// it back: whether its encoding writes it back unchanged, and its line endings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SavedVerdict {
+    /// Why a save in this encoding could not write the file back unchanged, or `None`.
     pub unwritable: Option<Unwritable>,
+    /// The text's line endings.
     pub line_endings: LineEndings,
 }
 
@@ -221,6 +227,7 @@ pub(crate) fn would_rewrite_untouched(
 /// papered over with replacement characters, which a save would write back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeRefused {
+    /// The encoding that was asked for.
     pub encoding: &'static Encoding,
     /// Byte offset of the first sequence that is not valid in `encoding`.
     pub offset: usize,
@@ -241,11 +248,14 @@ impl std::fmt::Display for DecodeRefused {
 /// A line ending style, as the editor writes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Eol {
+    /// Unix line endings, `\n`.
     Lf,
+    /// Windows line endings, `\r\n`.
     Crlf,
 }
 
 impl Eol {
+    /// The style's short name: `LF` or `CRLF`.
     pub fn label(self) -> &'static str {
         match self {
             Eol::Lf => "LF",
@@ -316,7 +326,9 @@ impl std::error::Error for DecodeRefused {}
 /// no bytes for. Nothing is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unmappable {
+    /// The encoding the save targets.
     pub encoding: &'static Encoding,
+    /// A character in the text it has no bytes for.
     pub character: char,
     /// 1-based line of the character in the text being saved.
     pub line: usize,

@@ -22,7 +22,9 @@ use crate::config_keys::{HeldBack, NOT_SHOWN, ValueForm};
 /// A config file as read for a listing: its text (empty when there is no
 /// file yet) and what dux loads from it.
 pub struct ConfigFile {
+    /// The file's text; empty when there is no file yet.
     pub raw: String,
+    /// What dux loads from it.
     pub config: Config,
 }
 
@@ -115,7 +117,9 @@ pub fn logged_path(path: &str) -> std::borrow::Cow<'_, str> {
 /// One macro as listed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacroItem {
+    /// The macro's name as shown.
     pub name: String,
+    /// Where the macro may run: `agent`, `terminal` or `both`.
     pub surface: String,
     /// `None` when the name is hidden.
     pub text: Option<String>,
@@ -162,7 +166,9 @@ pub(crate) fn macros_of(file: &ConfigFile) -> Vec<MacroItem> {
 /// for, and never under a hidden name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvItem {
+    /// The variable's name as shown.
     pub name: String,
+    /// The variable's value, when values are shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
 }
@@ -191,6 +197,7 @@ pub fn env(raw: &str, env: &BTreeMap<String, String>, values: HeldBack) -> Vec<E
 /// One provider as listed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderItem {
+    /// The provider's name as shown.
     pub name: String,
     /// `built in` for a provider dux ships, `yours` for one the file adds.
     pub source: String,
@@ -231,7 +238,9 @@ pub fn providers(file: &ConfigFile) -> Vec<ProviderItem> {
 /// One keybinding as listed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyItem {
+    /// The action's config name.
     pub action: String,
+    /// The key combos bound to it.
     pub keys: Vec<String>,
     /// `default` when it is the terminal UI's own binding, `yours` otherwise.
     pub source: String,
@@ -276,8 +285,11 @@ pub fn keys(raw: &str) -> Result<Vec<KeyItem>, String> {
 /// One theme as listed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeItem {
+    /// The theme's name, as `ui.theme` spells it.
     pub name: String,
+    /// Where it comes from: `bundled`, `opaline` or `user`.
     pub source: String,
+    /// Whether it is the theme `ui.theme` names.
     pub current: bool,
 }
 
