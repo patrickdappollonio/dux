@@ -9,106 +9,209 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     // Navigation
+    /// Navigate down through projects, sessions, files, and lists.
     MoveDown,
+    /// Navigate up through projects, sessions, files, and lists.
     MoveUp,
     // Projects pane
+    /// Collapse or expand the selected project.
     ToggleProject,
+    /// Create a new agent session (worktree).
     NewAgent,
+    /// Create a new agent session from a GitHub pull request.
     NewAgentFromPr,
+    /// Create a new agent from an existing git worktree.
     NewAgentFromWorktree,
+    /// Manage a project: its actions, settings and base branch.
     ManageProjects,
+    /// Remove a worktree dux manages for a project, and optionally its branch.
     ManageWorktrees,
+    /// Filter the agent list by name, branch, project, or provider.
     FilterAgents,
+    /// Fork the selected agent into a fresh worktree and session.
     ForkAgent,
+    /// Swap the selected agent worktree to a different provider.
     ChangeAgentProvider,
+    /// Change the global default provider used for new agent sessions in projects without an
+    /// explicit project override.
     ChangeDefaultProvider,
+    /// Change the selected project's default provider used for new agent sessions in that project
+    /// only.
     ChangeProjectDefaultProvider,
+    /// Focus the selected agent's pane. With the pane focused, this key types into a live agent and
+    /// launches a dormant one.
     FocusAgent,
+    /// Open the project browser.
     OpenProjectBrowser,
     /// Palette-only: open the clone form, which clones a repository as a new
     /// project and starts an agent on it. The web counterpart is "Clone a
     /// repository…" in the Add project menu.
     CloneProject,
+    /// Copy the selected agent's directory.
     CopyPath,
+    /// Open the selected agent's directory in the configured editor.
     OpenWorktreeInEditor,
+    /// Open a picker and choose which editor should open the selected agent's directory.
     ChooseWorktreeEditor,
+    /// Git pull the selected project checkout.
     RefreshProject,
+    /// Check out the default branch for the selected project, and branch new worktrees from it.
     CheckoutProjectDefaultBranch,
+    /// Pick any local or origin branch for the selected project to switch to, and branch new
+    /// worktrees from it.
     ChangeProjectBaseBranch,
+    /// Restart the CLI for the selected agent.
     ReconnectAgent,
+    /// Delete the selected session and worktree.
     DeleteSession,
+    /// Delete the selected companion terminal.
     DeleteTerminal,
     // Agent pane
+    /// Open the selected agent fullscreen, where keys go to the agent verbatim.
     InteractAgent,
+    /// Open the first companion terminal for the selected agent, or launch a new one in the agent's
+    /// directory if none exists.
     ShowTerminal,
     // Agent tabs (Center-scope; non-interactive only)
+    /// Focus the next tab of the selected agent.
     NextTab,
+    /// Focus the previous tab of the selected agent.
     PrevTab,
+    /// Add a tab to the selected agent (starts fresh).
     NewTab,
+    /// Close the focused tab of the selected agent.
     CloseTab,
+    /// Stop the focused tab of the selected agent; the tab stays, ready to start again.
     StopTab,
+    /// Focus tab 1 of the selected agent.
     SelectTab1,
+    /// Focus tab 2 of the selected agent.
     SelectTab2,
+    /// Focus tab 3 of the selected agent.
     SelectTab3,
+    /// Focus tab 4 of the selected agent. Ships with no default key: most terminals send the same
+    /// byte for Ctrl-4 and Ctrl-\ (the macro bar), so bind your own key here for direct access.
     SelectTab4,
+    /// Focus tab 5 of the selected agent.
     SelectTab5,
+    /// Focus tab 6 of the selected agent.
     SelectTab6,
+    /// Focus tab 7 of the selected agent.
     SelectTab7,
+    /// Focus tab 8 of the selected agent.
     SelectTab8,
+    /// Focus tab 9 of the selected agent.
     SelectTab9,
+    /// Open the macro command bar to send text macros. Works over the windowed agent pane and in
+    /// fullscreen.
     OpenMacroBar,
+    /// Open the selected agent's current pull request in the default browser.
     OpenCurrentPullRequest,
+    /// Attach a GitHub pull request to the selected agent, pausing autodetection.
     AttachPullRequest,
+    /// Detach the selected agent's pull request and stop looking for one on it, until you attach a
+    /// pull request by hand or resume autodetection.
     DetachPullRequest,
+    /// Start looking for a pull request on the selected agent's branch again, after a detach.
     ResumePullRequestAutodetection,
+    /// Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent
+    /// while dux chords stay active; fullscreen, keys go to the agent verbatim.
     ToggleFullscreen,
+    /// Scroll up one page in the agent output. Forwarded to the app itself when it owns the screen
+    /// (see each provider's forward_scroll).
     ScrollPageUp,
+    /// Scroll down one page in the agent output. Forwarded to the app itself when it owns the
+    /// screen (see each provider's forward_scroll).
     ScrollPageDown,
+    /// Scroll up one line in any scrollable view. In a typing agent pane this key reaches the agent
+    /// until the view is scrolled back.
     ScrollLineUp,
+    /// Scroll down one line in any scrollable view. In a typing agent pane this key reaches the
+    /// agent until the view is scrolled back.
     ScrollLineDown,
+    /// Exit scroll mode and jump to the latest output.
     ScrollToBottom,
+    /// Jump to the top of the scrollback buffer.
     ScrollToTop,
     // Files pane (git staging)
+    /// Open the selected file's diff, or expand or collapse the selected folder.
     OpenDiff,
+    /// Stage or unstage the selected file, or a whole folder.
     StageUnstage,
+    /// Commit staged changes.
     CommitChanges,
+    /// Discard changes to the selected file, or delete an untracked folder.
     DiscardChanges,
+    /// Open the commit message editor.
     EngageCommitInput,
+    /// Push to remote.
     PushToRemote,
+    /// Pull from remote.
     PullFromRemote,
+    /// Start searching changed files in the files pane.
     SearchFiles,
+    /// Jump to the next active search match in the files pane.
     SearchNext,
     // Commit message editor
+    /// Exit the commit message editor.
     ExitCommitInput,
     // Global
+    /// Focus the next pane.
     FocusNext,
+    /// Focus the previous pane.
     FocusPrev,
+    /// Open the command palette.
     OpenPalette,
+    /// Enter resize mode to resize side panes.
     ToggleResizeMode,
+    /// Toggle the projects sidebar.
     ToggleSidebar,
+    /// Toggle the git pane.
     ToggleGitPane,
+    /// Toggle the help overlay.
     ToggleHelp,
+    /// Force a full terminal redraw.
     ForceRedraw,
+    /// Quit the application.
     Quit,
+    /// Close the current overlay or dialog.
     CloseOverlay,
     // Resize mode
+    /// Grow the left pane width.
     ResizeGrow,
+    /// Shrink the left pane width.
     ResizeShrink,
     // Overlays and dialogs
+    /// Toggle search mode in search-capable lists and overlays.
     SearchToggle,
+    /// Open path editor in the project browser.
     GoToPath,
+    /// Exit typed-path mode in the project browser.
     ExitPathEditorOnProjectAdd,
+    /// Open or navigate into the selected entry in the project browser.
     OpenEntry,
+    /// Add the current directory as a project.
     AddCurrentDir,
+    /// Open the selected startup command log file.
     OpenStartupCommandLogFile,
+    /// Open the selected startup command log folder.
     OpenStartupCommandLogFolder,
+    /// Confirm the selected action in a dialog.
     Confirm,
+    /// Toggle between options in a confirmation dialog.
     ToggleSelection,
+    /// Toggle the hovered runtime in the kill-running modal.
     ToggleMarked,
     // Palette-only (no direct keybinding)
+    /// Open the kill-running modal for agents and companion terminals.
     KillRunning,
+    /// Clear the message on the status line.
     ClearStatusLine,
+    /// Ask the selected agent to shut down and wait the configured shutdown timeout before forcing
+    /// it; it stays listed as Detached and can be resumed.
     DetachAgent,
+    /// Check the selected agent's branch out again at the path its working copy used to occupy, for
+    /// an agent whose working copy is gone from disk.
     RecreateWorkingCopy,
     /// Web-only: open the Monaco config.toml editor, reached from the web app
     /// menu's Configuration submenu. Has no TUI behavior (the TUI edits config
@@ -123,6 +226,7 @@ pub enum Action {
     /// `config.server.title`/`favicon` via `dux config`) and no palette registry
     /// row. Kept for the same `validate_keys` reason as `EditConfig` above.
     RenameWebInstance,
+    /// Spawn a new companion terminal in the selected agent's directory.
     NewTerminal,
     /// Palette-only: open the project chooser to pick a project, then spawn a
     /// project-owned terminal at that project's repo root. Distinct from
@@ -142,11 +246,17 @@ pub enum Action {
     /// inside the NEW-AGENT project chooser, where it answers "none of these". It
     /// is inert in that modal's other intents, which ask a different question.
     NewStandaloneAgent,
+    /// Rename the selected agent session.
     RenameSession,
+    /// Remove the selected project and its sessions.
     DeleteProject,
+    /// Remove project from app (keeps files on disk).
     RemoveProject,
+    /// Cycle the agent-list sort mode (active, updated, created, name).
     SortAgents,
+    /// Remove or restore the git pane.
     RemoveGitPane,
+    /// Open the text macros editor.
     EditMacros,
     /// Create a new macro from the macro list.
     NewMacro,
@@ -154,29 +264,48 @@ pub enum Action {
     DeleteMacro,
     /// Empty the focused full-text field (a modal body, or the commit message).
     ClearTextField,
+    /// Open input event debugger to inspect keyboard and mouse events.
     DebugInput,
+    /// Toggle line numbers in diff view.
     ToggleDiffLineNumbers,
+    /// Show CPU and memory usage for dux and all running agents.
     ResourceMonitor,
+    /// Toggle GitHub PR integration.
     ToggleGithubIntegration,
+    /// Ask the gh CLI again whether GitHub features can be used, without restarting dux.
     RecheckGithub,
+    /// Toggle auto-copying selected text in the web terminal.
     ToggleCopyOnSelect,
+    /// Toggle startup auto-reopen for agents in the selected project.
     ToggleProjectAutoReopenAgents,
+    /// Toggle startup auto-reopen for the selected agent.
     ToggleAgentAutoReopen,
+    /// Configure the selected project's startup command for newly created agents.
     ConfigureStartupCommand,
+    /// Configure environment variables for every project's agents and terminals.
     ConfigureGlobalEnv,
+    /// Configure the selected project's environment variables for agents and terminals.
     ConfigureProjectEnv,
+    /// Rerun the selected agent's project startup command.
     RerunStartupCommandOnAgent,
+    /// Open startup command logs for the selected agent or project.
     ReadStartupCommandLogs,
+    /// Toggle whether the agent name prompt starts with a random pet name.
     ToggleRandomizedPetNameDefault,
+    /// Move PR banner between top and bottom of agent pane.
     TogglePrBannerPosition,
+    /// Restart the agent without resuming the prior session.
     ForceReconnectAgent,
     /// Palette-only: recompute the selected agent's changed files right now.
     /// dux polls for changes a user makes outside it (from a terminal, say),
     /// so this is the way to stop waiting for the next poll. No default
     /// keybinding.
     RefreshChanges,
+    /// Open a picker to switch the dux color theme.
     ChangeTheme,
+    /// Reload the configuration file.
     ReloadConfig,
+    /// Tear down the TUI and serve the dux web UI over the same agents.
     StartWebServer,
     /// Palette-only: start serving the web UI in the BACKGROUND, with the
     /// terminal UI still running. Distinct from `StartWebServer`, which hands the
@@ -190,6 +319,7 @@ pub enum Action {
     /// Palette-only: open the `[server] tailscale` picker. The web counterpart is
     /// the Preferences dialog's Tailscale row.
     SetTailscaleMode,
+    /// Toggle always showing the agent tab strip, even with a single tab.
     ToggleAlwaysShowTabs,
     /// Flip `ui.tab_reaches_agent`: whether the typeable center pane sends Tab
     /// and Shift-Tab to the agent instead of cycling panes with them.
@@ -213,13 +343,21 @@ pub enum Action {
     // Manual reordering (the TUI equivalent of the web's drag-to-reorder). Each
     // moves the selected agent/terminal in the sidebar and switches the sort to
     // manual. Palette-only (no default keybinding).
+    /// Move the selected agent up one position (switches sorting to manual).
     MoveAgentUp,
+    /// Move the selected agent down one position (switches sorting to manual).
     MoveAgentDown,
+    /// Move the selected agent to the top (switches sorting to manual).
     MoveAgentTop,
+    /// Move the selected agent to the bottom (switches sorting to manual).
     MoveAgentBottom,
+    /// Move the selected terminal up one position (switches sorting to manual).
     MoveTerminalUp,
+    /// Move the selected terminal down one position (switches sorting to manual).
     MoveTerminalDown,
+    /// Move the selected terminal to the top (switches sorting to manual).
     MoveTerminalTop,
+    /// Move the selected terminal to the bottom (switches sorting to manual).
     MoveTerminalBottom,
 }
 
