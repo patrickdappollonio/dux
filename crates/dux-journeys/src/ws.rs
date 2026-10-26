@@ -19,7 +19,9 @@ type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// Why an upgrade did not become a socket: the HTTP answer dux gave instead.
 #[derive(Debug)]
 pub struct Refused {
+    /// The HTTP status code.
     pub status: u16,
+    /// The body as text, decoded lossily.
     pub body: String,
 }
 
@@ -33,6 +35,7 @@ pub enum Ended {
 }
 
 /// One open WebSocket.
+#[derive(Debug)]
 pub struct Socket {
     stream: Stream,
     /// Binary frames read so far (terminal output).
@@ -41,6 +44,15 @@ pub struct Socket {
 
 /// Open `path` (`/ws/events`, `/ws/sessions/<id>/pty`) as `client`: its cookie,
 /// its `Origin`, its extra headers.
+///
+/// # Errors
+///
+/// When dux answers the upgrade with an HTTP response instead: its status and body.
+///
+/// # Panics
+///
+/// When `path` does not make a socket URL, one of the client's headers is not a valid
+/// header, or the connection fails below HTTP.
 pub async fn connect(client: &Client, path: &str) -> Result<Socket, Refused> {
     let mut url = client.base().join(path).expect("a socket path");
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -81,6 +93,10 @@ pub async fn connect(client: &Client, path: &str) -> Result<Socket, Refused> {
 }
 
 /// Open `path` and panic unless it upgraded.
+///
+/// # Panics
+///
+/// When the upgrade is refused or fails.
 pub async fn connect_ok(client: &Client, path: &str) -> Socket {
     match connect(client, path).await {
         Ok(socket) => socket,
@@ -101,6 +117,10 @@ pub const CLOSE_BLOCKED: u16 = 4403;
 /// serve: ACCEPT the upgrade (a refused upgrade reaches a browser as a bare
 /// network drop, code 1006, which it cannot tell from an outage) and then close
 /// it with `code`.
+///
+/// # Panics
+///
+/// When the upgrade is refused, or the socket does not close with `code` within 10 seconds.
 pub async fn assert_accepted_then_closed(client: &Client, path: &str, code: u16, what: &str) {
     let mut socket = match connect(client, path).await {
         Ok(socket) => socket,
@@ -120,6 +140,10 @@ pub async fn assert_accepted_then_closed(client: &Client, path: &str, code: u16,
 
 impl Socket {
     /// Send a text frame.
+    ///
+    /// # Panics
+    ///
+    /// When the frame cannot be sent.
     pub async fn send_text(&mut self, text: &str) {
         self.stream
             .send(Message::Text(text.into()))
@@ -128,6 +152,10 @@ impl Socket {
     }
 
     /// Send bytes as a binary frame (keystrokes, on a PTY socket).
+    ///
+    /// # Panics
+    ///
+    /// When the frame cannot be sent.
     pub async fn send_bytes(&mut self, bytes: &[u8]) {
         self.stream
             .send(Message::Binary(bytes.to_vec().into()))

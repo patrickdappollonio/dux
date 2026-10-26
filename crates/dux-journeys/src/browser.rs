@@ -32,8 +32,9 @@ pub const WEBDRIVER_PORT: u16 = 4444;
 
 /// One browser. The container is removed when dropped (call [`Browser::quit`]
 /// first for a clean session end).
+#[derive(Debug)]
 pub struct Browser {
-    pub driver: WebDriver,
+    driver: WebDriver,
     container: ContainerAsync<GenericImage>,
     _reaper: Reaper,
 }
@@ -52,6 +53,11 @@ fn chromedriver_command() -> Vec<String> {
 
 impl Browser {
     /// A browser on `network`, which dux must also be on.
+    ///
+    /// # Panics
+    ///
+    /// When the container does not start, its `WebDriver` port is not published, or no
+    /// `WebDriver` session opens within 30 seconds.
     pub async fn on_network(network: &JourneyNetwork) -> Browser {
         let (image, tag) = journey_image().await;
         let (name, reaper, logs) = identity("browser");
@@ -83,6 +89,11 @@ impl Browser {
 
     /// A browser in `dux`'s own network namespace (this machine). `dux` must
     /// have been started with `with_published(WEBDRIVER_PORT)`.
+    ///
+    /// # Panics
+    ///
+    /// When the container does not start, `dux` does not publish [`WEBDRIVER_PORT`], or no
+    /// `WebDriver` session opens within 30 seconds.
     pub async fn beside(dux: &Dux) -> Browser {
         let (image, tag) = journey_image().await;
         let (name, reaper, logs) = identity("browser");
@@ -113,6 +124,10 @@ impl Browser {
     }
 
     /// Go to `url` and wait for the document to finish loading.
+    ///
+    /// # Panics
+    ///
+    /// When the browser cannot load `url`.
     pub async fn goto(&self, url: &str) {
         self.driver
             .goto(url)
@@ -121,6 +136,10 @@ impl Browser {
     }
 
     /// Wait until an element matching `css` exists, or panic naming `what`.
+    ///
+    /// # Panics
+    ///
+    /// When no element matches `css` within 20 seconds.
     pub async fn wait_for(&self, css: &str, what: &str) -> fantoccini::elements::Element {
         self.driver
             .wait()
@@ -147,6 +166,10 @@ impl Browser {
     }
 
     /// The page's current URL.
+    ///
+    /// # Panics
+    ///
+    /// When the browser cannot say which URL it is on.
     pub async fn url(&self) -> String {
         self.driver
             .current_url()

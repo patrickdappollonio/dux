@@ -20,6 +20,8 @@
 //! over the build lock. Build it first with
 //! `cargo build --profile journeys --bin dux` (or point `DUX_JOURNEY_BIN` at one).
 
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -55,6 +57,10 @@ const IMAGE_INPUTS: &[&str] = &[
 const SETUP_DEADLINE: Duration = Duration::from_mins(30);
 
 /// One pinned image reference (`name:tag@sha256:...`) from journey-images.env.
+///
+/// # Panics
+///
+/// When journey-images.env names no `key`.
 pub fn pinned(key: &str) -> String {
     PINNED
         .lines()
@@ -95,6 +101,10 @@ pub fn pinned_parts(key: &str) -> (String, String) {
 }
 
 /// The repository root, found from this crate's own manifest.
+///
+/// # Panics
+///
+/// When the workspace root this crate's manifest names cannot be resolved.
 pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -161,6 +171,11 @@ fn newest_source(root: &Path) -> Option<(SystemTime, PathBuf)> {
 /// binary older than the newest source is refused too (a journey run against
 /// yesterday's dux passes or fails for the wrong reason), unless
 /// `DUX_JOURNEY_ALLOW_STALE=1` says that is intended.
+///
+/// # Panics
+///
+/// When `DUX_JOURNEY_BIN` names no file, no binary has been built, or the binary is older
+/// than the newest source while `DUX_JOURNEY_ALLOW_STALE` is not `1`.
 pub fn dux_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("DUX_JOURNEY_BIN") {
         let path = PathBuf::from(path);
@@ -222,7 +237,10 @@ fn content_tag() -> String {
     hasher.update([0]);
     hasher.update(host_glibc().as_bytes());
     let digest = hasher.finalize();
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = digest.iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
     format!("j-{}", &hex[..16])
 }
 
@@ -233,6 +251,11 @@ static SETUP: OnceCell<(String, String)> = OnceCell::const_new();
 /// heartbeat and Ctrl-C cleanup), dead runs' leftovers removed, the journey
 /// image present, the pinned proxy images pulled. Returns the journey image as
 /// `(name, tag)`.
+///
+/// # Panics
+///
+/// When a step fails (Docker missing, a heartbeat, build or pull failing) or the setup takes
+/// over 30 minutes.
 pub async fn setup() -> (String, String) {
     SETUP
         .get_or_init(|| async {
@@ -251,12 +274,10 @@ pub async fn setup() -> (String, String) {
                 }
                 image
             });
-            match tokio::time::timeout(SETUP_DEADLINE, work).await {
-                Ok(result) => result.expect("the journey setup"),
-                Err(_) => {
-                    panic!("the journey setup (image build and pulls) took over {SETUP_DEADLINE:?}")
-                }
-            }
+            let Ok(result) = tokio::time::timeout(SETUP_DEADLINE, work).await else {
+                panic!("the journey setup (image build and pulls) took over {SETUP_DEADLINE:?}")
+            };
+            result.expect("the journey setup")
         })
         .await
         .clone()
@@ -310,22 +331,29 @@ fn build_lock() -> Option<std::fs::File> {
         Ok(file) => match file.lock() {
             Ok(()) => Some(file),
             Err(err) => {
-                eprintln!(
+                say(&format!(
                     "dux-journeys: cannot lock {} ({err}); building without the lock",
                     path.display()
-                );
+                ));
                 None
             }
         },
         Err(err) => {
-            eprintln!(
+            say(&format!(
                 "dux-journeys: cannot open the image build lock {} ({err}); is the directory \
                  owned by another user? Building without the lock",
                 path.display()
-            );
+            ));
             None
         }
     }
+}
+
+/// Write `text` as a line on stderr at once. The setup runs on a blocking thread, outside the test
+/// harness's output capture, so this is where its progress has always gone; a stderr that cannot
+/// take a line has nowhere to report it.
+pub(crate) fn say(text: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "{text}");
 }
 
 /// Build the journey image unless it exists.
@@ -338,7 +366,9 @@ fn ensure_built(tag: &str) {
     if image_present(&full) {
         return;
     }
-    eprintln!("dux-journeys: building image {full} from tools/preview-env (once per change)");
+    say(&format!(
+        "dux-journeys: building image {full} from tools/preview-env (once per change)"
+    ));
     let base = format!("BASE_IMAGE={}", pinned("JOURNEY_BASE_IMAGE"));
     let status = Command::new("docker")
         .args([
@@ -364,7 +394,8 @@ fn ensure_built(tag: &str) {
 /// created BEFORE the container is, so a journey cancelled between Docker
 /// creating the container and the harness getting a handle on it (a deadline, a
 /// failed copy or start) still removes it. A container already gone is fine.
-pub struct Reaper(pub String);
+#[derive(Debug)]
+pub(crate) struct Reaper(pub(crate) String);
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -376,11 +407,17 @@ impl Drop for Reaper {
 
 /// A Docker network of the journey's own, labelled with this run and removed
 /// when dropped. Whoever holds it must drop it after the containers on it.
+#[derive(Debug)]
 pub struct JourneyNetwork {
     name: String,
 }
 
 impl JourneyNetwork {
+    /// Create a new network, labelled as this run's.
+    ///
+    /// # Panics
+    ///
+    /// When `docker network create` fails.
     pub fn create() -> JourneyNetwork {
         let name = format!("dux-journeys-net-{}", crate::util::suffix());
         let output = docker(&[
@@ -400,7 +437,8 @@ impl JourneyNetwork {
         JourneyNetwork { name }
     }
 
-    pub fn name(&self) -> &str {
+    /// The network's name, for a container to join it by.
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 }

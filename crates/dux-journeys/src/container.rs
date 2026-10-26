@@ -20,7 +20,7 @@ use crate::util::{LogBuffer, container_logs, suffix};
 
 /// A container name for this journey, its reaper, and its log buffer
 /// (recorded against the running journey).
-pub fn identity(kind: &str) -> (String, Reaper, LogBuffer) {
+pub(crate) fn identity(kind: &str) -> (String, Reaper, LogBuffer) {
     let name = format!("dux-journeys-{kind}-{}", suffix());
     let reaper = Reaper(name.clone());
     let logs = container_logs(&name);
@@ -28,7 +28,7 @@ pub fn identity(kind: &str) -> (String, Reaper, LogBuffer) {
 }
 
 /// Name, label and log a container request the way every journey container is.
-pub fn labelled(
+pub(crate) fn labelled(
     request: ContainerRequest<GenericImage>,
     name: &str,
     logs: &LogBuffer,
@@ -42,7 +42,9 @@ pub fn labelled(
 
 /// A host-config modifier that publishes exactly `ports`, each on
 /// `127.0.0.1` with an ephemeral host port, and nothing else.
-pub fn loopback_publish(ports: Vec<u16>) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
+pub(crate) fn loopback_publish(
+    ports: Vec<u16>,
+) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
     move |host: &mut HostConfig| {
         // An init process as PID 1, so the container's own process (often a
         // shell) gets its signals and the container stops at once.
@@ -66,7 +68,9 @@ pub fn loopback_publish(ports: Vec<u16>) -> impl Fn(&mut HostConfig) + Send + Sy
 
 /// A host-config modifier that joins another container's network namespace and
 /// publishes nothing (a namespace that is not its own cannot publish).
-pub fn share_namespace_of(container_id: &str) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
+pub(crate) fn share_namespace_of(
+    container_id: &str,
+) -> impl Fn(&mut HostConfig) + Send + Sync + 'static {
     let namespace = format!("container:{container_id}");
     move |host: &mut HostConfig| {
         host.init = Some(true);
@@ -79,6 +83,10 @@ pub fn share_namespace_of(container_id: &str) -> impl Fn(&mut HostConfig) + Send
 /// The host side of every port binding of a container, as Docker reports it:
 /// `(container port, host ip, host port)`. For the test that proves nothing is
 /// published beyond loopback.
+///
+/// # Panics
+///
+/// When `docker container inspect` cannot run or does not print JSON.
 pub async fn published_bindings(container_id: &str) -> Vec<(String, String, String)> {
     let output = tokio::process::Command::new("docker")
         .args([
