@@ -99,14 +99,6 @@ pub(crate) struct ModalSpec {
 
 #[allow(dead_code)]
 impl ModalSpec {
-    const fn new(family: ModalFamily, multiline_field: bool, confirm_button: bool) -> Self {
-        Self {
-            family,
-            multiline_field,
-            confirm_button,
-        }
-    }
-
     /// The dual-mode rule: **a modal containing a multi-line text field must
     /// have a confirm button.**
     ///
@@ -148,20 +140,20 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::FirstLoad(_)
         | PromptState::DebugInput { .. }
         // The Project info screen: facts and a Close, which dismisses.
-        | PromptState::ProjectInfo(_) => ModalSpec::new(Report, false, false),
+        | PromptState::ProjectInfo(_) => ModalSpec { family: Report, multiline_field: false, confirm_button: false },
 
         // A Picker despite reading like a report: a `ListState` cursor over the
         // runs, vertical keys that move that selection (the output pane scrolls
         // on the paging keys), a filter, and a confirm key that promotes the
         // selected run to the fullscreen viewer. Its one button is a Close, a way
         // out and not a commit, so the confirm-button claim stays false.
-        PromptState::StartupCommandLogs(_) => ModalSpec::new(Picker, false, false),
+        PromptState::StartupCommandLogs(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // A Picker despite reading like a report: a `ListState` selection cursor,
         // vertical keys that move that cursor (a value, not a scroll offset and
         // not focus), and a confirm key that acts on the selected row by
         // expanding it rather than choosing it and closing.
-        PromptState::ResourceMonitor { .. } => ModalSpec::new(Picker, false, false),
+        PromptState::ResourceMonitor { .. } => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // ── Confirm ─────────────────────────────────────────────────────
         PromptState::ConfirmDeleteAgent { .. }
@@ -187,7 +179,7 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // Prose, a conditional checkbox and a Cancel/Delete pair; horizontal
         // keys move focus and Space acts on what has it.
         | PromptState::ConfirmDeleteWorktree(_)
-        | PromptState::ConfigReloadFailed { .. } => ModalSpec::new(Confirm, false, true),
+        | PromptState::ConfigReloadFailed { .. } => ModalSpec { family: Confirm, multiline_field: false, confirm_button: true },
 
         // ── Picker ──────────────────────────────────────────────────────
         // A selection cursor over rows; Enter picks. The palette types into
@@ -219,13 +211,13 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ChangeProjectDefaultProvider(_)
         // Three modes, the saved one marked, and picking one applies it. Rows and
         // nothing else, so no buttons and no focus concept.
-        | PromptState::SetTailscaleMode(_) => ModalSpec::new(Picker, false, false),
+        | PromptState::SetTailscaleMode(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // The one picker that keeps its buttons: they are distinct actions (kill
         // the hovered runtime, kill the marked ones, kill everything the filter
         // shows), not a confirm/cancel pair restating what Enter does. Do not
         // remove them for consistency.
-        PromptState::KillRunning(_) => ModalSpec::new(Picker, false, true),
+        PromptState::KillRunning(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: true },
 
         // ── Form ────────────────────────────────────────────────────────
         // Single-line field plus (for two of them) checkboxes. Enter submits,
@@ -239,14 +231,14 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::AttachPullRequestInput { .. }
         // The standalone-agent name field: one single-line control, so Enter
         // submits and the rule asks no button of it either.
-        | PromptState::NameStandaloneAgent { .. } => ModalSpec::new(Form, false, false),
+        | PromptState::NameStandaloneAgent { .. } => ModalSpec { family: Form, multiline_field: false, confirm_button: false },
 
         // The three configure modals: one full-text field plus Cancel/Save.
         // They were the dual-mode rule's only violators and are now compliant,
         // so `KNOWN_DUAL_MODE_VIOLATIONS` is empty.
         PromptState::ConfigureStartupCommand { .. }
         | PromptState::ConfigureProjectEnv { .. }
-        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec::new(Form, true, true),
+        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec { family: Form, multiline_field: true, confirm_button: true },
 
         // ── The one variant that is two modals ──────────────────────────
         // `EditMacros` serves two families depending on its own state, so the
@@ -255,16 +247,16 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::EditMacros {
             pending_delete: Some(_),
             ..
-        } => ModalSpec::new(Confirm, false, true),
+        } => ModalSpec { family: Confirm, multiline_field: false, confirm_button: true },
         // The editor: a name field, a multiline body, a surface selector, and
         // Cancel/Save. Compliant with the dual-mode rule, and the reference for
         // what compliance looks like.
         PromptState::EditMacros {
             editing: Some(_), ..
-        } => ModalSpec::new(Form, true, true),
+        } => ModalSpec { family: Form, multiline_field: true, confirm_button: true },
         // The list underneath: rows with a selection cursor, no buttons,
         // publishing its rows as `OverlayMouseLayout::EditMacroList`.
-        PromptState::EditMacros { .. } => ModalSpec::new(Picker, false, false),
+        PromptState::EditMacros { .. } => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
     };
     Some(spec)
 }
@@ -596,9 +588,21 @@ pub(super) mod tests {
 
     #[test]
     fn the_dual_mode_rule_only_bites_multiline_modals() {
-        let single_line_no_button = ModalSpec::new(ModalFamily::Form, false, false);
-        let multiline_no_button = ModalSpec::new(ModalFamily::Form, true, false);
-        let multiline_with_button = ModalSpec::new(ModalFamily::Form, true, true);
+        let single_line_no_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: false,
+            confirm_button: false,
+        };
+        let multiline_no_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: true,
+            confirm_button: false,
+        };
+        let multiline_with_button = ModalSpec {
+            family: ModalFamily::Form,
+            multiline_field: true,
+            confirm_button: true,
+        };
         assert!(single_line_no_button.satisfies_dual_mode_rule());
         assert!(!multiline_no_button.satisfies_dual_mode_rule());
         assert!(multiline_with_button.satisfies_dual_mode_rule());
