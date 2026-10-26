@@ -67,6 +67,7 @@ pub(crate) fn branch_drift_log_line(
 /// Status-line update returned from the Engine for the App to apply.
 #[derive(Clone, Debug)]
 pub struct StatusUpdate {
+    /// How the message reads: busy, info, warning or error.
     pub tone: StatusTone,
     /// The plain sentence: what the terminal UI prints, byte for byte.
     pub message: String,
@@ -103,6 +104,7 @@ pub struct StatusUpdate {
 }
 
 impl StatusUpdate {
+    /// An info-toned status saying `message`.
     pub fn info(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -139,6 +141,7 @@ impl StatusUpdate {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A warning-toned status saying `message`.
     pub fn warning(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -154,6 +157,7 @@ impl StatusUpdate {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// An error-toned status saying `message`.
     pub fn error(message: impl Into<StatusText>) -> Self {
         let message = message.into();
         let ask = message.ask().cloned();
@@ -248,22 +252,33 @@ pub enum EventReaction {
     Multi(Vec<EventReaction>),
 
     // -- View-sync triggers (the App's derived cache lives in App state). --
+    /// Rebuild the sidebar rows from the engine's state.
     RebuildLeftItems,
+    /// Read the watched worktree's changed files again.
     ReloadChangedFiles,
+    /// Clamp the changed-files cursor to the list it now points into.
     ClampFilesCursor,
 
     // -- Agent launch (T2b: Engine performs all domain-state mutations and
     //    returns a typed view-only outcome the App applies). --
+    /// A provider launch came up; the engine has done its part.
     AgentLaunchReadyView(Box<AgentLaunchReadyOutcome>),
+    /// A provider launch failed; the engine has done its part.
     AgentLaunchFailedView(Box<AgentLaunchFailedOutcome>),
 
     // -- Picker/browser prompts. --
+    /// A folder browser listing arrived.
     BrowserEntriesArrived {
+        /// The directory listed.
         dir: std::path::PathBuf,
+        /// Its rows.
         entries: Vec<BrowserEntry>,
     },
+    /// A project's worktrees arrived for the adopt picker.
     ProjectWorktreesArrived {
+        /// The project listed.
         project_id: String,
+        /// The worktrees, or why they could not be listed.
         result: Result<Vec<ProjectWorktreeEntry>, String>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler. `None` for the web/wire path.
@@ -273,13 +288,18 @@ pub enum EventReaction {
     /// The worktree manager's listing arrived (TUI only; the web reads the
     /// same core function through its REST route).
     ManageableWorktreesArrived {
+        /// The project listed.
         project_id: String,
+        /// The managed worktrees, or why they could not be listed.
         result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        /// The op whose final the handler resolves, if any.
         status_op_id: Option<String>,
     },
 
     // -- PR / refs follow-ups. --
+    /// A pull request resolved for a new agent: name the agent, or create it.
     OpenNewAgentPromptForPr {
+        /// The pull request resolved.
         pr: Box<ResolvedPullRequest>,
         /// Correlation id for a web PR-lookup `HandlerStatusOp`. `Some` on the web
         /// handoff path (the followup clears this op's busy once the create
@@ -288,25 +308,37 @@ pub enum EventReaction {
     },
 
     // -- Worktree delete follow-up. --
+    /// A deleted agent's worktree was removed.
     WorktreeRemoveSucceeded {
+        /// The agent deleted.
         session_id: String,
+        /// What happened to each branch.
         branches: RemovedBranches,
+        /// The busy this delete put on the status line, so only that one is
+        /// cleared.
         our_busy_message: Option<StatusText>,
     },
+    /// A deleted agent's worktree could not be removed; its record is kept.
     WorktreeRemoveFailed {
+        /// The agent being deleted.
         session_id: String,
+        /// Why the removal failed.
         message: String,
     },
     /// A deleted agent's worktree removal is waiting for operations still
     /// running in the worktree. Each surface re-emits its own delete op's busy
     /// with `message`, so the spinner says what it is waiting for.
     WorktreeRemoveWaiting {
+        /// The agent being deleted.
         session_id: String,
+        /// What the removal is waiting for.
         message: StatusText,
     },
 
     // -- Deletion `Command` view follow-ups (E4a). --
+    /// The engine half of a delete finished.
     FinishDeleteSessionView(Box<FinishDeleteSessionView>),
+    /// A delete began, inline or with its worktree removal deferred.
     BeginDeleteSessionView(Box<BeginDeleteSessionView>),
 
     // -- Resource monitor. --
@@ -315,10 +347,15 @@ pub enum EventReaction {
     ResourceStatsArrived(Vec<ResourceStats>, bool),
 
     // -- Add-project / branch-checkout follow-ups (App helpers). --
+    /// A checkout switched off a non-default branch: register the project.
     AddProjectAfterBranchCheckout {
+        /// The folder to register.
         path: String,
+        /// The project's display name.
         name: String,
+        /// The branch the checkout was switched to.
         target_branch: String,
+        /// The branch the project leads with.
         leading_branch: String,
         /// Correlation id for a web add-project `HandlerStatusOp`. `Some` on the
         /// web path, resolved in `drive_add_project_followup` after the inline
@@ -329,10 +366,13 @@ pub enum EventReaction {
     /// register the project on its now-born branch. Mirrors
     /// `AddProjectAfterBranchCheckout` but with no branch switch.
     AddProjectAfterInitialCommit {
+        /// The folder to register.
         path: String,
+        /// The project's display name.
         name: String,
         /// The branch the commit landed on (the repo's real current branch).
         branch: String,
+        /// The branch the project leads with.
         leading_branch: String,
         /// This add ran `git init` first (the adopt-a-folder flow).
         initialized_repo: bool,
@@ -350,12 +390,18 @@ pub enum EventReaction {
     AddProjectAfterClone(Box<crate::clone_project::ClonedProject>),
 
     // -- Branch inspection follow-ups (App helpers). --
+    /// A project checkout was read: open the New Agent prompt on it.
     ContinueCreateAgentAfterInspection {
+        /// The project inspected.
         project: Project,
+        /// What its checkout is on.
         inspection: CreateAgentBranchInspection,
     },
+    /// A project checkout is off its default branch: switch it.
     DispatchProjectDefaultBranchCheckout {
+        /// The project switched.
         project: Project,
+        /// The branch to switch to.
         default_branch: String,
         /// Correlation id for a web checkout `HandlerStatusOp`, forwarded by
         /// `drive_checkout_followup` into worker 2 so the eventual
@@ -365,7 +411,9 @@ pub enum EventReaction {
     },
 
     // -- Config reload (App helpers). --
+    /// A reloaded config is ready for the surface to apply.
     ApplyReloadedConfig(Box<Config>),
+    /// A config reload failed; say why and offer recovery.
     OpenConfigReloadFailedModal(String),
     /// The engine adopted a reloaded config it could not fully apply (its
     /// own apply of a coalesced reload failed): `engine.config` is the new
@@ -380,12 +428,16 @@ pub enum EventReaction {
     /// asks for the fresh answer a reload owes (see
     /// [`crate::engine::Engine::probe_gh_after_reload`]).
     ConfigAdopted {
+        /// The config the reload replaced.
         before: Box<Config>,
+        /// Whether the GitHub integration was on before the reload.
         github_was_enabled: bool,
+        /// Why the apply failed.
         error: String,
     },
 
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
+    /// A project change was saved; the engine has mirrored it in memory.
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
     // -- Startup command / log picker (App opens the overlay). --
@@ -393,13 +445,17 @@ pub enum EventReaction {
     /// emitted when the listing is NON-empty: an empty scope is reported by the
     /// load's keyed status and opens nothing.
     StartupLogsArrived {
+        /// Whose startup command runs were listed.
         scope_label: String,
+        /// The runs, newest first, with the newest one's contents.
         listing: StartupCommandLogListing,
     },
     /// A run the picker moved onto finished reading. The App applies it only if
     /// `path` is still the selected run.
     StartupLogContentArrived {
+        /// The run file that was read.
         path: std::path::PathBuf,
+        /// Its contents, or why it could not be read.
         result: Result<String, String>,
     },
 
@@ -424,7 +480,9 @@ pub enum EventReaction {
     /// which stashes `pending_server_flip` (on `Ok`) or surfaces the error, and
     /// shows the non-fatal `warning` when present.
     ServerFlipPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
         /// The pre-flight's warnings and Tailscale facts, for the flip's log.
         startup: crate::serve_log::StartupNotes,
@@ -434,14 +492,19 @@ pub enum EventReaction {
     /// and the engine has nothing to mutate. Distinct from it because the flip
     /// ends a TUI session and this starts a serve beside one.
     BackgroundServerPreflightReady {
+        /// The bound listeners and their display URLs, or why binding failed.
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        /// A non-fatal note to show beside the result.
         warning: Option<String>,
+        /// The pre-flight's warnings and Tailscale facts, for the serve's log.
         startup: crate::serve_log::StartupNotes,
     },
     /// The background web server finished applying a live `[server] tailscale`
     /// change. The terminal UI resolves its pending status op with it.
     TailscaleModeApplied {
+        /// The mode asked for.
         mode: crate::config::TailscaleMode,
+        /// What applying it did.
         outcome: crate::config::TailscaleModeOutcome,
     },
     /// Whether GitHub features work has CHANGED (a probe answered differently
@@ -453,6 +516,7 @@ pub enum EventReaction {
     /// fetched once at connect, so without a nudge it keeps hiding the
     /// pull-request entries until reloaded.
     GhAvailabilityChanged {
+        /// Whether GitHub features work now.
         available: bool,
     },
 }
@@ -463,6 +527,7 @@ pub enum EventReaction {
 #[derive(Clone, Debug)]
 pub struct DetachedSession {
     pub(crate) id: String,
+    /// The detached agent's label, for the status.
     pub label: String,
 }
 
@@ -475,11 +540,14 @@ pub struct DetachedSession {
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 #[derive(Debug)]
 pub struct AgentLaunchReadyOutcome {
+    /// The agent the launched tab belongs to.
     pub session: AgentSession,
     /// The tab whose launch completed (the slot tab id for the session-slot tab). Lets a
     /// surface route an extra-tab ready to the correct pane without re-deriving.
     pub tab_id: String,
+    /// The terminal size the provider was spawned at, as rows and columns.
     pub pty_size: (u16, u16),
+    /// The agent detached because it held the same worktree's live PTY, if any.
     pub detached_session_id: Option<String>,
     /// Copied from `AgentLaunchRequest::wants_fullscreen`: the TUI lands this
     /// completion fullscreen when `true` and focused-but-minimized otherwise.
@@ -488,19 +556,26 @@ pub struct AgentLaunchReadyOutcome {
     /// Copied from `AgentLaunchRequest::status_quiet`: which surfaces withhold
     /// this launch's completion message. Each surface honours its own half.
     pub status_quiet: QuietSurfaces,
+    /// What the surface does with the launch.
     pub view: AgentLaunchReadyView,
 }
 
+/// What a surface does once a provider launch came up.
 #[derive(Debug)]
 pub enum AgentLaunchReadyView {
     /// Create-kind launch: `session_store.upsert_session` failed before the
     /// session could be committed. App surfaces the error; no view rebuild.
-    CreatePersistFailed { error: String },
+    CreatePersistFailed {
+        /// The store's error.
+        error: String,
+    },
     /// Create-kind launch committed. App rebuilds left items, selects the
     /// new session, reloads changed files, shows the agent surface, and
     /// surfaces either the startup-command error or the create status.
     CreateCommitted {
+        /// The create's success line.
         status_message: crate::status_text::StatusText,
+        /// The startup command's error, when it failed.
         startup_result_error: Option<String>,
     },
     /// Non-Create launch found the session vanished. App does nothing
@@ -508,12 +583,15 @@ pub enum AgentLaunchReadyView {
     SessionMissing,
     /// Reconnect / `ForceReconnect`: App shows the agent surface + sets info.
     Reconnect {
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
     /// `ResumeFallback`: App shows the agent surface only if `session_id` is
     /// the currently selected session, and always sets info.
     ResumeFallback {
+        /// The agent relaunched.
         session_id: String,
+        /// The line the relaunch reports.
         status_message: crate::status_text::StatusText,
     },
     /// `StartupAutoReopen`: App does nothing.
@@ -527,18 +605,21 @@ pub enum AgentLaunchReadyView {
 /// sessions Detached. The App only formats the status message.
 #[derive(Debug)]
 pub enum AgentLaunchFailedOutcome {
+    /// A create's first launch failed.
     Create {
         /// The project the failed create belonged to, or `None` when it was a
         /// standalone agent, which belongs to no project. Carried as an option
         /// rather than an empty string so a consumer that keys work by project
         /// cannot silently key it under one that does not exist.
         project_id: Option<String>,
+        /// Why the launch failed.
         message: String,
     },
     /// Reconnect-family failure. `session_id` is the pre-existing session that
     /// was being relaunched, used by the wire layer to key the failure status
     /// so it replaces the corresponding "launching…" busy toast.
     Reconnect {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -546,11 +627,13 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// Force-reconnect failure. `session_id` carries the pre-existing session
     /// id for the same keying purpose as `Reconnect`.
     ForceReconnect {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -558,6 +641,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// Engine logged + marked Detached; App has nothing to do.
@@ -565,6 +649,7 @@ pub enum AgentLaunchFailedOutcome {
     /// Startup-auto-reopen failure. `session_id` carries the pre-existing
     /// session id for the same keying purpose as `Reconnect`.
     StartupAutoReopen {
+        /// The agent whose launch failed.
         session_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -572,6 +657,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// A tab launch failed. `tab_id` keys the failure toast to the specific tab.
@@ -580,7 +666,9 @@ pub enum AgentLaunchFailedOutcome {
     /// a dormant relaunch, or for a tab a promotion put in the slot while the
     /// launch was in flight, the row is kept so the user can retry.
     Tab {
+        /// The agent the tab belongs to.
         session_id: String,
+        /// The tab whose launch failed.
         tab_id: String,
         /// The agent's DISPLAY LABEL, not a branch: its title when it has one,
         /// otherwise the branch it tracks, and for a standalone agent its folder's
@@ -588,6 +676,7 @@ pub enum AgentLaunchFailedOutcome {
         /// agent has no branch to print, so naming this field for a branch would
         /// be a lie the surfaces render.
         agent_label: String,
+        /// Why the launch failed.
         message: String,
     },
     /// A launch failure for an extra tab whose row was deleted while the
@@ -605,7 +694,9 @@ pub enum AgentLaunchFailedOutcome {
 /// binary-only `RuntimeBindings` and `save_config`.
 #[derive(Debug)]
 pub struct ProjectPersistenceOutcome {
+    /// The change that was saved, or failed to be.
     pub action: ProjectPersistenceAction,
+    /// What the surface reports.
     pub view: ProjectPersistenceView,
     /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in the
     /// completion handler (the post-worker config write is fallible, producing a
@@ -614,36 +705,60 @@ pub struct ProjectPersistenceOutcome {
     pub status_op_id: Option<String>,
 }
 
+/// What a surface reports once a project change was saved, or failed to be.
 #[derive(Debug)]
 pub enum ProjectPersistenceView {
+    /// The save failed.
     PersistenceFailed {
+        /// Why it failed.
         error: String,
     },
+    /// A project was registered.
     Added {
+        /// The project registered.
         project_id: String,
+        /// The line to report.
         status_message: crate::status_text::StatusText,
     },
+    /// A project was forgotten, its worktrees kept.
     Removed {
+        /// Its display name.
         project_name: String,
     },
+    /// A project and its worktrees were deleted.
     Deleted {
+        /// Its display name.
         project_name: String,
     },
+    /// A project's default provider changed.
     DefaultProviderUpdated {
+        /// Its display name.
         project_name: String,
+        /// The provider it now defaults to, or `None` to follow the global
+        /// default.
         provider: Option<ProviderKind>,
+        /// The global default, named when the project follows it.
         global_default: ProviderKind,
     },
+    /// Whether a project's agents reopen at startup changed.
     AutoReopenUpdated {
+        /// Its display name.
         project_name: String,
+        /// The project's choice, or `None` to follow the global setting.
         auto_reopen_agents: Option<bool>,
     },
+    /// A project's startup command changed.
     StartupCommandUpdated {
+        /// Its display name.
         project_name: String,
+        /// The command new agents run, or `None` for none.
         startup_command: Option<String>,
     },
+    /// A project's environment variables changed.
     EnvUpdated {
+        /// Its display name.
         project_name: String,
+        /// How many variables the project now sets.
         env_count: usize,
     },
 }
@@ -1347,14 +1462,20 @@ pub enum WorktreeRemoval {
     /// report for BOTH branches the removal targeted (the one the worktree was
     /// on and, when the agent drifted, the one it was born on), or that they
     /// were deliberately kept because they were not dux's to delete.
-    Performed { branches: RemovedBranches },
+    Performed {
+        /// What became of each branch the removal targeted.
+        branches: RemovedBranches,
+    },
     /// There was no worktree, because this was a STANDALONE agent: it ran in a
     /// folder the user already had, and deleting the agent removed dux's record
     /// of it and nothing else. Its own variant rather than one of the
     /// "preserved" ones above, because those all describe a worktree dux
     /// decided not to remove, and there was never one here to decide about.
     /// The folder is carried so the message can name it.
-    NothingToRemove { folder_label: String },
+    NothingToRemove {
+        /// The folder the agent ran in, home-shortened.
+        folder_label: String,
+    },
 }
 
 impl WorktreeRemoval {
@@ -1435,9 +1556,13 @@ enum WorktreeSharing {
 /// and to format the 4-branch status message.
 #[derive(Debug)]
 pub struct FinishDeleteSessionOutcome {
+    /// The agent deleted.
     pub session: AgentSession,
+    /// Its project, when it had one dux still knows.
     pub project: Option<Project>,
+    /// Whether another agent still works in the same worktree.
     pub other_sessions_on_worktree: bool,
+    /// Whether the project still has agents.
     pub project_still_has_sessions: bool,
 }
 
@@ -1465,25 +1590,38 @@ pub enum BeginDeleteSessionOutcome {
     /// `busy_message`. Once the PTY is reaped, `reap_terminating_ptys` hands the
     /// removal to `dispatch_deferred_worktree_removal`, whose worker posts
     /// `WorktreeRemoveCompleted` and resolves that op.
-    AsyncStarted { busy_message: StatusText },
+    AsyncStarted {
+        /// The busy the caller shows while the removal waits.
+        busy_message: StatusText,
+    },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
     /// `finish_delete_session` wrapper to complete cleanup + emit status.
-    Inline { removal: WorktreeRemoval },
+    Inline {
+        /// What happened to the worktree.
+        removal: WorktreeRemoval,
+    },
     /// The caller asked to remove a directory dux may not remove: a standalone
     /// agent's folder. Nothing was deleted, not even the agent record, and the
     /// message says why. Distinct from every other arm because it is the one
     /// where the DELETE ITSELF did not happen.
-    Refused { message: StatusText },
+    Refused {
+        /// Why the delete was refused.
+        message: StatusText,
+    },
 }
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
 /// engine outcome with the App-context fields needed for status formatting.
 #[derive(Debug)]
 pub struct FinishDeleteSessionView {
+    /// The agent deleted.
     pub session_id: String,
+    /// What the engine removed.
     pub outcome: FinishDeleteSessionOutcome,
+    /// What happened to its worktree.
     pub removal: WorktreeRemoval,
+    /// Whether the surface reports a status; `false` when it keys its own.
     pub update_status: bool,
 }
 
@@ -1492,7 +1630,9 @@ pub struct FinishDeleteSessionView {
 /// formatting and the inline cleanup follow-up.
 #[derive(Debug)]
 pub struct BeginDeleteSessionView {
+    /// The agent being deleted.
     pub session_id: String,
+    /// How the delete began.
     pub outcome: BeginDeleteSessionOutcome,
 }
 
@@ -1503,10 +1643,13 @@ pub struct BeginDeleteSessionView {
 /// correlate the dispatch with its session without re-deriving it.
 #[derive(Debug)]
 pub struct DispatchAgentLaunchView {
+    /// The agent the launch was for.
     pub session_id: String,
     /// The tab whose launch was dispatched (the slot tab id for the session-slot tab).
     pub tab_id: String,
+    /// Whether a launch worker was started.
     pub launched: bool,
+    /// The status to show when no launch started.
     pub status: Option<StatusUpdate>,
 }
 
@@ -1516,7 +1659,9 @@ pub struct DispatchAgentLaunchView {
 /// cursor.
 #[derive(Debug)]
 pub struct DeleteTerminalView {
+    /// The terminal closed.
     pub terminal_id: String,
+    /// Its label, or `None` when no such terminal was open.
     pub label: Option<String>,
 }
 
