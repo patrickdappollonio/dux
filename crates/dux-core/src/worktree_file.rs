@@ -47,16 +47,20 @@ impl std::fmt::Display for SaveTooLarge {
 
 impl std::error::Error for SaveTooLarge {}
 
+/// A file of a worktree as the web editor opens it: its text, how it is encoded and the stamp a
+/// save must match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent facts about a file sent to the web editor as JSON booleans"
 )]
 pub struct WorktreeFile {
+    /// The path, relative to the worktree.
     pub path: String,
     /// True when the working copy is binary (see [`crate::text_encoding::decode`]);
     /// `content` is then empty and the editor refuses to open it.
     pub binary: bool,
+    /// The decoded text; empty for a binary file.
     pub content: String,
     /// The WHATWG name of the encoding `content` was decoded from, which a save
     /// sends back so the file is written in it again. `None` for binary.
@@ -122,7 +126,9 @@ pub struct WorktreeFile {
 /// unconditional write it replaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct FileStamp {
+    /// The modification time from the shared formatter, or `None` when the filesystem reports none.
     pub modified: Option<String>,
+    /// The size in bytes.
     pub size: u64,
 }
 
@@ -707,7 +713,9 @@ pub(crate) fn write_file_checked(
 /// chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveEncoding {
+    /// The encoding.
     pub encoding: &'static encoding_rs::Encoding,
+    /// Whether the bytes start with a byte-order mark.
     pub bom: bool,
     /// The encoding (and mark) the client read the file in, which tells an
     /// ordinary save (the same pair) from a conversion (any other). `None`
@@ -1223,8 +1231,11 @@ pub fn delete_entry<'c>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
+    /// A regular file.
     File,
+    /// A directory.
     Dir,
+    /// A symbolic link, never the thing it points at.
     Symlink,
     /// A fifo, socket, or device node. Rare inside a worktree, but real, and
     /// calling one a file would be wrong.
@@ -1256,8 +1267,11 @@ pub enum GitStatusView {
     Ignored,
     /// Tracked, with nothing pending.
     Clean,
+    /// Tracked, with changes pending.
     Changed {
+        /// The staged change's status letter, when there is one.
         staged: Option<String>,
+        /// The unstaged change's status letter, when there is one.
         unstaged: Option<String>,
     },
 }
@@ -1269,6 +1283,7 @@ pub struct WorktreeEntryInfo {
     /// Echoed back exactly as the caller wrote it, never re-encoded or
     /// normalized, so a non-Latin name survives the round trip.
     pub path: String,
+    /// What kind of entry it is.
     pub kind: EntryKind,
     /// `None` for a directory: the on-disk size of a directory entry is an
     /// implementation detail of the filesystem, not something a user wants.
@@ -1298,6 +1313,7 @@ pub struct WorktreeEntryInfo {
     /// instant.
     pub(crate) target_modified: Option<String>,
     pub(crate) target_size: Option<u64>,
+    /// What git says about it.
     pub git: GitStatusView,
 }
 

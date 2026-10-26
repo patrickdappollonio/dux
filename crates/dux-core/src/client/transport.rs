@@ -37,15 +37,21 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// command-line client.
 pub const USER_AGENT: &str = "dux CLI";
 
+/// An HTTP method the API is called with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
+    /// `GET`.
     Get,
+    /// `POST`.
     Post,
+    /// `PUT`.
     Put,
+    /// `DELETE`.
     Delete,
 }
 
 impl Method {
+    /// The method's name as HTTP spells it.
     pub fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
@@ -60,15 +66,20 @@ impl Method {
 /// the CLI sign-in token for a remote that asks for one.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// The HTTP method.
     pub method: Method,
+    /// The API path, with its query.
     pub path: String,
+    /// The JSON body, when there is one.
     pub body: Option<Vec<u8>>,
+    /// The CLI sign-in token, for a remote that asks for one.
     pub bearer: Option<String>,
     /// The longest the whole exchange may take; at most [`REPLY_TIMEOUT`].
     pub timeout: Option<Duration>,
 }
 
 impl Request {
+    /// A `GET` of `path` with no body, token or timeout of its own.
     pub fn get(path: impl Into<String>) -> Self {
         Self {
             method: Method::Get,
@@ -83,7 +94,9 @@ impl Request {
 /// A reply: its status and its whole body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
+    /// The HTTP status code.
     pub status: u16,
+    /// The whole body.
     pub body: Vec<u8>,
 }
 
@@ -113,6 +126,11 @@ impl std::fmt::Display for TransportError {
 
 /// The one interface the client reaches a dux through.
 pub trait Transport {
+    /// Sends `request` and waits for the whole reply.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached or the exchange breaks off or times out.
     fn send(&self, request: &Request) -> Result<Response, TransportError>;
 
     /// Send `request` and hand its reply's body to `on_body` as it arrives, with

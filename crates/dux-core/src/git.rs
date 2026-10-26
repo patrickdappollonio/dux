@@ -9827,7 +9827,7 @@ mod tests {
 
     /// The `-b` slot is positional too, so a dash-leading NEW branch name
     /// reaches `worktree add`'s internal `git branch` as a flag. Measured on
-    /// git 2.55: exit 255, "unknown switch `x'", and nothing left on disk. Loud
+    /// git 2.55: exit 255, ``unknown switch `x'``, and nothing left on disk. Loud
     /// rather than silent, so there is nothing to fix; pinned so a later git
     /// that starts obeying the flag is a failing test rather than a surprise.
     #[test]

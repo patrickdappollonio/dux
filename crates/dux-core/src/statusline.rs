@@ -149,6 +149,7 @@ impl LiveStatusKeys {
         });
     }
 
+    /// Whether an operation is registered as running behind `key`.
     pub fn is_live(&self, key: &str) -> bool {
         self.with(|set| set.contains(key))
     }
@@ -159,6 +160,7 @@ impl LiveStatusKeys {
         self.with(|set| set.len())
     }
 
+    /// Whether no operation is registered.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -234,11 +236,16 @@ fn anon_storage_key(n: u64) -> String {
     format!("\u{1}anon:{n}")
 }
 
+/// How a status reads: its severity, or that it is still in progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
+    /// A plain confirmation.
     Info,
+    /// An operation still running.
     Busy,
+    /// Something went partly wrong or needs the user.
     Warning,
+    /// Something failed.
     Error,
 }
 
@@ -387,8 +394,11 @@ pub(crate) struct KeyedStatus {
 /// The wire-safe projection of one open keyed status (snapshot + broadcast).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyedWireStatus {
+    /// The status's key, or `None` for the anonymous slot.
     pub key: Option<String>,
+    /// The tone, as the wire spells it.
     pub tone: String, // StatusTone::as_wire()
+    /// The sentence shown.
     pub message: String,
     /// The parts `message` was built from, carried so a replayed status still
     /// draws its names as chips. `None` for a plain sentence.
@@ -414,7 +424,9 @@ pub struct KeyedWireStatus {
 /// status frames and the TUI can re-render.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusTickChanges {
+    /// The keys whose statuses cleared; `None` for the anonymous slot.
     pub cleared_keys: Vec<Option<String>>, // None = the anonymous slot cleared
+    /// The busy statuses replaced by a warning.
     pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
     /// Busy entries whose operation is still registered as running, re-stamped
     /// instead of upgraded. The caller must re-broadcast each one as a live
@@ -666,6 +678,7 @@ impl KeyedStatusController {
         self.anon.as_ref()
     }
 
+    /// Sets the base window statuses clear after.
     pub fn set_clear_after(&mut self, clear_after: Duration) {
         self.clear_after = clear_after;
     }

@@ -9,20 +9,31 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
+/// An editor dux knows how to detect and launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorKind {
+    /// Cursor.
     Cursor,
+    /// Visual Studio Code.
     VsCode,
+    /// Zed.
     Zed,
+    /// VSCodium.
     VsCodium,
+    /// Sublime Text.
     SublimeText,
 }
 
+/// An editor found on PATH, with the command that launches it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetectedEditor {
+    /// Which editor it is.
     pub kind: EditorKind,
+    /// Its display name.
     pub label: &'static str,
+    /// The name `[editor] default` uses for it.
     pub config_key: &'static str,
+    /// The command found on PATH.
     pub command: String,
 }
 
@@ -129,6 +140,7 @@ pub fn detect_editors_on_path(path: &OsStr) -> Vec<DetectedEditor> {
     detect_editors_from_names(executable_names.iter().map(String::as_str))
 }
 
+/// The detected editor `configured` names, else the first one detected, else `None`.
 pub fn preferred_editor(detected: &[DetectedEditor], configured: &str) -> Option<DetectedEditor> {
     let configured = normalize_editor_name(configured);
     if !configured.is_empty()
@@ -141,6 +153,8 @@ pub fn preferred_editor(detected: &[DetectedEditor], configured: &str) -> Option
     detected.first().cloned()
 }
 
+/// Whether `configured` names `editor`, by its config key, an alias or one of its commands,
+/// ignoring case and reading spaces and underscores as dashes.
 pub fn matches_configured_editor(editor: &DetectedEditor, configured: &str) -> bool {
     let configured = normalize_editor_name(configured);
     if configured.is_empty() {
@@ -191,6 +205,11 @@ fn spec_matches(spec: &EditorSpec, configured: &str) -> bool {
         || spec.commands.contains(&configured)
 }
 
+/// Opens `path` in `editor`, detached from dux.
+///
+/// # Errors
+///
+/// Fails when `path` does not exist or the editor's command cannot be started.
 pub fn launch_editor(editor: &DetectedEditor, path: &Path) -> Result<()> {
     if !path.exists() {
         return Err(anyhow!("Path does not exist: {}", path.display()));

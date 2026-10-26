@@ -118,10 +118,10 @@ pub enum Action {
     /// while dux chords stay active; fullscreen, keys go to the agent verbatim.
     ToggleFullscreen,
     /// Scroll up one page in the agent output. Forwarded to the app itself when it owns the screen
-    /// (see each provider's forward_scroll).
+    /// (see each provider's `forward_scroll`).
     ScrollPageUp,
     /// Scroll down one page in the agent output. Forwarded to the app itself when it owns the
-    /// screen (see each provider's forward_scroll).
+    /// screen (see each provider's `forward_scroll`).
     ScrollPageDown,
     /// Scroll up one line in any scrollable view. In a typing agent pane this key reaches the agent
     /// until the view is scrolled back.
