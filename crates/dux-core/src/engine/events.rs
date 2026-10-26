@@ -3632,29 +3632,7 @@ impl Engine {
     ) -> EventReaction {
         match &result {
             Ok(()) => {
-                // A rename moves a branch rather than switching to another one, so
-                // the branch dux minted is still the one dux minted under its new
-                // name, and the pull-request age guard must keep holding for it.
-                let renamed_from = self.minted_branch_rename(session_id);
-                let was_minted = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
-                    .is_some();
-                // A rename of any other branch is not the minted one moving, and
-                // a marker left from an earlier rename must not carry over to it.
-                let recorded = if was_minted {
-                    self.session_store
-                        .set_minted_branch_rename(session_id, new_branch)
-                } else {
-                    self.session_store.delete_minted_branch_rename(session_id)
-                };
-                if let Err(err) = recorded {
-                    logger::error(&format!(
-                        "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
-                    ));
-                }
+                self.record_minted_branch_rename(session_id, new_branch);
                 if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                     let saved = session.clone();
                     let label = session.display_label();
@@ -3710,34 +3688,13 @@ impl Engine {
                 self.request_branch_pr_check(session_id);
             }
             Err(err) => {
-                logger::warn(&format!(
-                    "[{session_id}] agent rename to {new_branch} failed: {err}"
-                ));
-                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                    let saved = session.clone();
-                    session.title = previous_title;
-                    session.updated_at = Utc::now();
-                    if let Err(save_err) = self.session_store.upsert_session(session) {
-                        logger::error(&format!(
-                            "failed to persist branch-rename revert for {}: {save_err}",
-                            session.id,
-                        ));
-                        // The optimistic name is still what the database
-                        // holds, so it is what the agent keeps showing.
-                        *session = saved;
-                        status.outcome = crate::engine::Final::error(crate::status_text![
-                            "Could not rename the agent's git branch to ",
-                            q(new_branch),
-                            format!(
-                                ": {err}. dux could not put the agent's old name back either: \
-                                 {save_err:#}, so it keeps showing "
-                            ),
-                            q(new_branch),
-                            ". Rename it again once dux can write its database; check that \
-                             the disk has room, and see dux.log."
-                        ]);
-                    }
-                }
+                self.revert_failed_branch_rename(
+                    session_id,
+                    new_branch,
+                    previous_title,
+                    err,
+                    &mut status,
+                );
             }
         }
         // A removal of this worktree that began while the rename ran captured
@@ -3772,6 +3729,76 @@ impl Engine {
             EventReaction::RebuildLeftItems,
             status.into_reaction(),
         ])
+    }
+
+    /// Record whether the renamed branch is still the one dux minted. A rename
+    /// moves a branch rather than switching to another one, so the minted
+    /// branch stays minted under its new name; a failed write is logged.
+    fn record_minted_branch_rename(&self, session_id: &str, new_branch: &str) {
+        // A rename moves a branch rather than switching to another one, so
+        // the branch dux minted is still the one dux minted under its new
+        // name, and the pull-request age guard must keep holding for it.
+        let renamed_from = self.minted_branch_rename(session_id);
+        let was_minted = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.branch_minted_at(renamed_from.as_deref()))
+            .is_some();
+        // A rename of any other branch is not the minted one moving, and
+        // a marker left from an earlier rename must not carry over to it.
+        let recorded = if was_minted {
+            self.session_store
+                .set_minted_branch_rename(session_id, new_branch)
+        } else {
+            self.session_store.delete_minted_branch_rename(session_id)
+        };
+        if let Err(err) = recorded {
+            logger::error(&format!(
+                "failed to record whether {session_id}'s branch {new_branch} is the one dux minted: {err}"
+            ));
+        }
+    }
+
+    /// A branch rename git refused: the optimistic title goes back to what it
+    /// was, and when even that cannot be saved, `status` says the agent keeps
+    /// showing the new name.
+    fn revert_failed_branch_rename(
+        &mut self,
+        session_id: &str,
+        new_branch: &str,
+        previous_title: Option<String>,
+        err: &str,
+        status: &mut ResolvedFinal,
+    ) {
+        logger::warn(&format!(
+            "[{session_id}] agent rename to {new_branch} failed: {err}"
+        ));
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            let saved = session.clone();
+            session.title = previous_title;
+            session.updated_at = Utc::now();
+            if let Err(save_err) = self.session_store.upsert_session(session) {
+                logger::error(&format!(
+                    "failed to persist branch-rename revert for {}: {save_err}",
+                    session.id,
+                ));
+                // The optimistic name is still what the database
+                // holds, so it is what the agent keeps showing.
+                *session = saved;
+                status.outcome = crate::engine::Final::error(crate::status_text![
+                    "Could not rename the agent's git branch to ",
+                    q(new_branch),
+                    format!(
+                        ": {err}. dux could not put the agent's old name back either: \
+                         {save_err:#}, so it keeps showing "
+                    ),
+                    q(new_branch),
+                    ". Rename it again once dux can write its database; check that \
+                     the disk has room, and see dux.log."
+                ]);
+            }
+        }
     }
 
     fn process_gh_status_checked(
@@ -4742,6 +4769,10 @@ impl Engine {
 
     /// Apply engine mutations for a worker event and return any view reaction.
     /// The engine never mutates view state directly.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per WorkerEvent variant, each handing the event's fields to the handler that applies it"
+    )]
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
             WorkerEvent::CommandWorkerStarted(status) | WorkerEvent::PollerStatus(status) => {
