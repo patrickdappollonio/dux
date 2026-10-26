@@ -283,10 +283,19 @@ impl ExposureCell {
 mod tests {
     use super::*;
 
-    fn route(url: &str, funnel: bool) -> ServeRoute {
+    /// A `tailscale serve` route at `url`, not funneled.
+    fn route(url: &str) -> ServeRoute {
         ServeRoute {
             url: url.to_string(),
-            funnel,
+            funnel: false,
+        }
+    }
+
+    /// A `tailscale serve` route at `url` funneled to the internet.
+    fn funnel_route(url: &str) -> ServeRoute {
+        ServeRoute {
+            url: url.to_string(),
+            funnel: true,
         }
     }
 
@@ -338,9 +347,9 @@ mod tests {
     #[test]
     fn a_route_is_confirmed_by_its_name_and_port_and_never_through_funnel() {
         let exposure = with_routes(vec![
-            route("https://box.tail.ts.net", false),
-            route("https://box.tail.ts.net:8443", true),
-            route("http://box.tail.ts.net:8080", false),
+            route("https://box.tail.ts.net"),
+            funnel_route("https://box.tail.ts.net:8443"),
+            route("http://box.tail.ts.net:8080"),
         ]);
         assert!(exposure.confirmed_route("box.tail.ts.net").is_some());
         assert!(exposure.confirmed_route("BOX.tail.ts.net.:443").is_some());

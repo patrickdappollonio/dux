@@ -7,6 +7,8 @@
 //! [`dux_core::logger`], whose entry points take `&str`, so these return `String`
 //! and the call site logs them.
 
+use dux_core::pty_owners::ResizeIntent;
+
 /// Why a resize frame was refused. A small enum rather than a free-text reason
 /// so a third refusal cannot be added without the formatter being taught about
 /// it: the match below is exhaustive.
@@ -53,20 +55,24 @@ fn device_label(device: Option<&str>) -> &str {
 /// way the claim won, because a press and a self-succession are the same flag on
 /// the wire: a press is a person taking a terminal from another device, a
 /// self-succession is a blipped owner taking its own pty back on reconnect. They
-/// are told apart by `expected_owner`, which only a self-succession names.
+/// are told apart by the take-over's `expected_owner`, which only a
+/// self-succession names.
 pub fn describe_claim_granted(
     pty_id: &str,
     conn_id: u64,
     device: Option<&str>,
-    takeover: bool,
-    expected_owner: Option<u64>,
+    intent: ResizeIntent,
 ) -> String {
-    let how = match (takeover, expected_owner) {
-        (true, Some(ghost)) => {
+    let how = match intent {
+        ResizeIntent::TakeOver {
+            expected_owner: Some(ghost),
+        } => {
             format!("a self-succession over its own dead connection {ghost}")
         }
-        (true, None) => "an explicit take-over".to_string(),
-        (false, _) => "a plain claim of a pty nobody was driving".to_string(),
+        ResizeIntent::TakeOver {
+            expected_owner: None,
+        } => "an explicit take-over".to_string(),
+        ResizeIntent::Plain => "a plain claim of a pty nobody was driving".to_string(),
     };
     format!(
         "PTY {pty_id}: input and sizing ownership granted to connection {conn_id} \
@@ -132,12 +138,19 @@ mod tests {
     #[test]
     fn a_granted_claim_names_the_pty_the_connection_the_device_and_how_it_won() {
         assert_eq!(
-            describe_claim_granted("s1", 7, Some("Chrome UA"), true, None),
+            describe_claim_granted(
+                "s1",
+                7,
+                Some("Chrome UA"),
+                ResizeIntent::TakeOver {
+                    expected_owner: None
+                }
+            ),
             "PTY s1: input and sizing ownership granted to connection 7 (Chrome UA) \
              by an explicit take-over"
         );
         assert_eq!(
-            describe_claim_granted("term-2", 0, None, false, None),
+            describe_claim_granted("term-2", 0, None, ResizeIntent::Plain),
             "PTY term-2: input and sizing ownership granted to connection 0 \
              (no device label) by a plain claim of a pty nobody was driving"
         );
@@ -152,7 +165,14 @@ mod tests {
     #[test]
     fn a_granted_claim_tells_a_self_succession_from_a_press() {
         assert_eq!(
-            describe_claim_granted("s1", 7, Some("Chrome UA"), true, Some(4)),
+            describe_claim_granted(
+                "s1",
+                7,
+                Some("Chrome UA"),
+                ResizeIntent::TakeOver {
+                    expected_owner: Some(4)
+                }
+            ),
             "PTY s1: input and sizing ownership granted to connection 7 (Chrome UA) \
              by a self-succession over its own dead connection 4"
         );

@@ -211,7 +211,6 @@ impl BackgroundServeCompanion for WebCompanion {
         claims: dux_core::background_serve::ServeClaims,
         startup: dux_core::serve_log::StartupNotes,
     ) -> Result<Vec<String>, String> {
-        let claim_before_serving = claims == dux_core::background_serve::ServeClaims::UndrivenPtys;
         if self.is_serving() {
             return Err("The web UI is already serving in the background.".to_string());
         }
@@ -221,7 +220,7 @@ impl BackgroundServeCompanion for WebCompanion {
         // adoption problem rather than a busy port; either way nothing has been
         // taken away from the terminal UI, and dropping `listeners` with the error
         // releases the addresses again.
-        match BackgroundServer::start(engine, listeners, urls, claim_before_serving, startup) {
+        match BackgroundServer::start(engine, listeners, urls, claims, &startup) {
             Ok(server) => {
                 let urls = server.urls();
                 self.server = Some(server);

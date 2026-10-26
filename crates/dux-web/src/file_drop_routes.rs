@@ -432,22 +432,22 @@ mod tests {
 
     /// A real router with agent "s1" pointed at a fresh worktree, and file drop
     /// configured with the given limits.
-    async fn router_with_limits(
+    fn router_with_limits(
         max_bytes: usize,
         max_concurrency: u32,
     ) -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
-        router_with(max_bytes, max_concurrency, None).await
+        router_with(max_bytes, max_concurrency, None)
     }
 
     /// The same router with `ui.upload_directory` written into the config the
     /// engine boots from, so a test can prove the setting reaches the drop.
-    async fn router_with_upload_directory(
+    fn router_with_upload_directory(
         directory: &str,
     ) -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
-        router_with(1024 * 1024, 4, Some(directory)).await
+        router_with(1024 * 1024, 4, Some(directory))
     }
 
-    async fn router_with(
+    fn router_with(
         max_bytes: usize,
         max_concurrency: u32,
         upload_directory: Option<&str>,
@@ -502,8 +502,8 @@ mod tests {
         (tmp, wt, app)
     }
 
-    async fn router() -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
-        router_with_limits(1024 * 1024, 4).await
+    fn router() -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
+        router_with_limits(1024 * 1024, 4)
     }
 
     fn drop_req(query: &str, body: Vec<u8>) -> Request<axum::body::Body> {
@@ -906,7 +906,7 @@ mod tests {
         // file goes to the agent's upload directory, out of the way of git, and
         // the route hands back the path, because the path is what the browser
         // pastes.
-        let (_tmp, wt, app) = router().await;
+        let (_tmp, wt, app) = router();
         let resp = app
             .oneshot(drop_req(
                 "pty=s1-slot&filename=Screen%20Shot.png",
@@ -956,7 +956,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_pane_drop_lands_in_the_upload_directory() {
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             let resp = app
                 .oneshot(drop_req("pty=s1&filename=shot.png", b"png".to_vec()))
                 .await
@@ -977,7 +977,7 @@ mod tests {
         async fn a_tree_drop_lands_in_the_folder_that_was_dropped_on() {
             // The editor's file tree addresses an agent root by its session id
             // too (`rootPtyId`), so it regressed with the pane.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::create_dir_all(wt.join("assets")).unwrap();
             let resp = app
                 .oneshot(drop_req(
@@ -1073,7 +1073,7 @@ mod tests {
         // The content is deliberately awkward: non-Latin text, an emoji outside
         // the BMP, a CRLF and a lone LF. Any re-encoding, newline normalization
         // or BOM on the way through would show up here as different bytes.
-        let (_tmp, wt, app) = router().await;
+        let (_tmp, wt, app) = router();
         let text = "エラーログ\r\nline two\n🙂 done";
         let resp = app
             .oneshot(drop_req(
@@ -1107,7 +1107,7 @@ mod tests {
         // the walk that creates the directory could have been ignoring it and
         // every one of them would still pass. A nested, multi-component,
         // non-hidden path so the parent-creating walk is exercised too.
-        let (_tmp, wt, app) = router_with_upload_directory("tmp/dux/drops").await;
+        let (_tmp, wt, app) = router_with_upload_directory("tmp/dux/drops");
         let resp = app
             .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"png".to_vec()))
             .await
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_same_name_twice_is_reported_with_the_new_name() {
-        let (_tmp, _wt, app) = router().await;
+        let (_tmp, _wt, app) = router();
         let first = app
             .clone()
             .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"one".to_vec()))
@@ -1184,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_traversing_filename_is_refused_and_writes_nothing() {
-        let (tmp, _wt, app) = router().await;
+        let (tmp, _wt, app) = router();
         let resp = app
             .oneshot(drop_req(
                 "pty=s1-slot&filename=..%2F..%2Fescaped.png",
@@ -1206,7 +1206,7 @@ mod tests {
         // A terse framework rejection ("length limit exceeded") tells the user
         // nothing they can act on, so the route replaces it with one that names
         // the limit and the setting that moves it.
-        let (_tmp, wt, app) = router_with_limits(16, 4).await;
+        let (_tmp, wt, app) = router_with_limits(16, 4);
         let resp = app
             .oneshot(drop_req("pty=s1-slot&filename=big.png", vec![0u8; 4096]))
             .await
@@ -1224,7 +1224,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zero_size_cap_switches_file_drop_off() {
-        let (_tmp, wt, app) = router_with_limits(0, 4).await;
+        let (_tmp, wt, app) = router_with_limits(0, 4);
         let resp = app
             .oneshot(drop_req("pty=s1-slot&filename=shot.png", b"x".to_vec()))
             .await
@@ -1237,7 +1237,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_pty_is_not_found() {
-        let (_tmp, _wt, app) = router().await;
+        let (_tmp, _wt, app) = router();
         let resp = app
             .oneshot(drop_req("pty=nobody&filename=shot.png", b"x".to_vec()))
             .await
@@ -1367,7 +1367,7 @@ mod tests {
         async fn a_tree_drop_keeps_its_exact_name() {
             // Only the agent's upload folder slugifies; a file added to the
             // project keeps the name the user gave it.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "Report%20Q3%20(draft).PDF", ""))
                 .await
@@ -1381,7 +1381,7 @@ mod tests {
 
         #[tokio::test]
         async fn dropping_on_a_folder_row_saves_a_visible_file_in_that_folder() {
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::create_dir_all(wt.join("assets")).unwrap();
 
             let resp = app
@@ -1412,7 +1412,7 @@ mod tests {
         async fn dropping_on_empty_tree_space_saves_at_the_worktree_root() {
             // Empty space is the ROOT, and the root travels as the empty
             // string, so this also pins that encoding.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "notes.md", ""))
                 .await
@@ -1430,7 +1430,7 @@ mod tests {
         async fn a_drop_of_several_files_saves_every_one_of_them() {
             // One request per file, which is what the browser sends, and the
             // point is that the second does not disturb the first.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::create_dir_all(wt.join("docs")).unwrap();
             for name in ["one.md", "two.md", "three.md"] {
                 let resp = app
@@ -1453,7 +1453,7 @@ mod tests {
             // instead. Both promises are the same where it counts: the file
             // already there is never overwritten, and the browser is told
             // which name was actually used.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::write(wt.join("notes.md"), "mine\n").unwrap();
 
             let resp = app
@@ -1479,7 +1479,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_non_latin_name_survives_a_tree_drop_exactly_as_dropped() {
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             let resp = app
                 .oneshot(tree_drop(
                     "s1-slot",
@@ -1496,7 +1496,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_directory_escaping_the_worktree_is_refused_and_writes_nothing() {
-            let (tmp, wt, app) = router().await;
+            let (tmp, wt, app) = router();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "escaped.png", "..%2F.."))
                 .await
@@ -1510,7 +1510,7 @@ mod tests {
 
         #[tokio::test]
         async fn the_git_directory_is_refused() {
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::create_dir_all(wt.join(".git/hooks")).unwrap();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "pre-commit", ".git%2Fhooks"))
@@ -1528,7 +1528,7 @@ mod tests {
             // so a file arriving here means a stale tree or a made-up request.
             // Writing into it is impossible, so say so rather than failing
             // opaquely.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             std::fs::write(wt.join("README.md"), "x").unwrap();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "logo.png", "README.md"))
@@ -1545,7 +1545,7 @@ mod tests {
             // is a lazy cache, so this is the ordinary stale-tree journey: a raw
             // `No such file or directory (os error 2)` would pass a status-only
             // assertion, while every other refusal on this path is a sentence.
-            let (_tmp, wt, app) = router().await;
+            let (_tmp, wt, app) = router();
             let resp = app
                 .oneshot(tree_drop("s1-slot", "logo.png", "nope"))
                 .await
@@ -1750,7 +1750,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1).await;
+        let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1);
 
         // The first upload's body yields one chunk and then never completes, so
         // its handler stays parked inside the buffering step, holding the permit.
@@ -1850,7 +1850,7 @@ mod tests {
              between the constant and a wait nobody would sit through."
         );
 
-        let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1).await;
+        let (_tmp, _wt, app) = router_with_limits(1024 * 1024, 1);
 
         let (holding_tx, holding_rx) = tokio::sync::oneshot::channel::<()>();
         let (_blocker_tx, blocker_rx) = tokio::sync::oneshot::channel::<()>();

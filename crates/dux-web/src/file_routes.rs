@@ -134,12 +134,18 @@ struct WriteResult {
     /// so the editor takes a conversion's outcome from the server rather than
     /// assuming it (see `WorktreeFile`). Absent for a save that stated no
     /// encoding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    unwritable: Option<Option<&'static str>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mixed_line_endings: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    eol: Option<&'static str>,
+    #[serde(flatten)]
+    verdict: Option<WriteVerdict>,
+}
+
+/// What a save that stated an encoding wrote, as [`WriteResult`] carries it.
+#[derive(Serialize)]
+struct WriteVerdict {
+    /// Why the text cannot be written back unchanged in this encoding, or
+    /// `null` when it can.
+    unwritable: Option<&'static str>,
+    mixed_line_endings: bool,
+    eol: &'static str,
 }
 
 /// A 409's body. `deleted` is its own field rather than being inferred from a
@@ -182,14 +188,10 @@ struct RawQuery {
     path: String,
 }
 
-fn is_false(v: &bool) -> bool {
-    !v
-}
-
 #[derive(Serialize)]
 struct FileList {
     files: Vec<String>,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
 }
 
@@ -793,7 +795,7 @@ async fn write_file<R: EditorRoot>(
     // user can actually provoke by opening a large file and typing in it.
     let Json(op) = match op {
         Ok(op) => op,
-        Err(rejection) => return write_rejection(rejection),
+        Err(rejection) => return write_rejection(&rejection),
     };
     let worktree = root.path().to_path_buf();
     let wt = worktree.clone();
@@ -906,12 +908,13 @@ async fn write_file<R: EditorRoot>(
     Json(WriteResult {
         modified: stamp.modified,
         size: stamp.size,
-        unwritable: verdict.map(|v| {
-            v.unwritable
-                .map(dux_core::text_encoding::Unwritable::as_str)
+        verdict: verdict.map(|v| WriteVerdict {
+            unwritable: v
+                .unwritable
+                .map(dux_core::text_encoding::Unwritable::as_str),
+            mixed_line_endings: v.line_endings.mixed,
+            eol: v.line_endings.saves_as.label(),
         }),
-        mixed_line_endings: verdict.map(|v| v.line_endings.mixed),
-        eol: verdict.map(|v| v.line_endings.saves_as.label()),
     })
     .into_response()
 }
@@ -919,7 +922,7 @@ async fn write_file<R: EditorRoot>(
 /// Turn a save-route body rejection into a response the user can act on. Only the
 /// size case is reworded, reporting the cap in MB and saying the file can still be
 /// edited outside dux; everything else keeps the framework's own accurate wording.
-fn write_rejection(rejection: JsonRejection) -> Response {
+fn write_rejection(rejection: &JsonRejection) -> Response {
     let too_large = matches!(rejection, JsonRejection::BytesRejection(_))
         || rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
     if too_large {
@@ -1271,6 +1274,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_file_list_omits_truncated_unless_it_is_true() {
+        let list = |truncated| FileList {
+            files: vec!["a".to_string()],
+            truncated,
+        };
+        assert_eq!(
+            serde_json::to_string(&list(false)).unwrap(),
+            r#"{"files":["a"]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&list(true)).unwrap(),
+            r#"{"files":["a"],"truncated":true}"#
+        );
+    }
+
+    #[test]
     fn mime_for_path_maps_image_extensions_case_insensitively() {
         assert_eq!(mime_for_path("assets/logo.png"), "image/png");
         assert_eq!(mime_for_path("a/b/Photo.JPG"), "image/jpeg");
@@ -1546,7 +1565,7 @@ mod tests {
         /// Boots a real router with session "s1" pointed at a fresh worktree
         /// directory containing `hello.txt`. Returns the temp root (kept alive
         /// for the test), the worktree path, and the router.
-        async fn router_with_session() -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
+        fn router_with_session() -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path().to_path_buf();
             let wt = root.join("wt");
@@ -1591,7 +1610,7 @@ mod tests {
         /// after the folder went would otherwise bring it back.
         #[tokio::test]
         async fn editor_writes_are_refused_once_the_worktree_removal_has_begun() {
-            let (_tmp, wt, app, ops) = router_with_session_and_ops().await;
+            let (_tmp, wt, app, ops) = router_with_session_and_ops();
             let _removal = ops.announce_removal(&wt);
             for (route, body) in [
                 (
@@ -1610,7 +1629,7 @@ mod tests {
                     .clone()
                     .oneshot(json_req(
                         &format!("/api/v1/sessions/s1/files/{route}"),
-                        body,
+                        &body,
                     ))
                     .await
                     .unwrap();
@@ -1634,11 +1653,11 @@ mod tests {
         /// waits for it instead of racing it.
         #[tokio::test]
         async fn an_editor_write_is_released_once_it_has_finished() {
-            let (_tmp, wt, app, ops) = router_with_session_and_ops().await;
+            let (_tmp, wt, app, ops) = router_with_session_and_ops();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "new.txt", "content": "x" }),
+                    &serde_json::json!({ "path": "new.txt", "content": "x" }),
                 ))
                 .await
                 .unwrap();
@@ -1646,13 +1665,13 @@ mod tests {
             assert!(ops.holders(&wt).is_empty(), "the hold ends with the write");
         }
 
-        async fn router_with_session_and_ops() -> (
+        fn router_with_session_and_ops() -> (
             tempfile::TempDir,
             std::path::PathBuf,
             axum::Router,
             dux_core::worktree_ops::WorktreeOps,
         ) {
-            let (tmp, wt, _) = router_with_session().await;
+            let (tmp, wt, _) = router_with_session();
             let paths = DuxPaths {
                 root: tmp.path().to_path_buf(),
                 config_path: tmp.path().join("config.toml"),
@@ -1667,7 +1686,7 @@ mod tests {
             (tmp, wt, crate::server::router(handle), ops)
         }
 
-        fn json_req(uri: &str, body: serde_json::Value) -> Request<axum::body::Body> {
+        fn json_req(uri: &str, body: &serde_json::Value) -> Request<axum::body::Body> {
             Request::builder()
                 .method("POST")
                 .uri(uri)
@@ -1678,11 +1697,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_file_endpoint_creates_an_empty_file() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-file",
-                    serde_json::json!({ "path": "new.txt" }),
+                    &serde_json::json!({ "path": "new.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1692,11 +1711,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_file_endpoint_rejects_overwrite_with_400() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-file",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1705,11 +1724,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_file_endpoint_rejects_git_path() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-file",
-                    serde_json::json!({ "path": ".git/evil" }),
+                    &serde_json::json!({ "path": ".git/evil" }),
                 ))
                 .await
                 .unwrap();
@@ -1718,11 +1737,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_dir_endpoint_creates_a_directory() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-dir",
-                    serde_json::json!({ "path": "a/b/c" }),
+                    &serde_json::json!({ "path": "a/b/c" }),
                 ))
                 .await
                 .unwrap();
@@ -1732,11 +1751,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_dir_endpoint_rejects_existing_entry_with_400() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-dir",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1745,11 +1764,11 @@ mod tests {
 
         #[tokio::test]
         async fn rename_endpoint_renames_a_file() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/rename",
-                    serde_json::json!({ "from": "hello.txt", "to": "renamed.txt" }),
+                    &serde_json::json!({ "from": "hello.txt", "to": "renamed.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1760,12 +1779,12 @@ mod tests {
 
         #[tokio::test]
         async fn rename_endpoint_rejects_existing_destination_with_400() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("dst.txt"), "already here\n").unwrap();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/rename",
-                    serde_json::json!({ "from": "hello.txt", "to": "dst.txt" }),
+                    &serde_json::json!({ "from": "hello.txt", "to": "dst.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1780,11 +1799,11 @@ mod tests {
 
         #[tokio::test]
         async fn rename_endpoint_rejects_git_destination_with_400() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/rename",
-                    serde_json::json!({ "from": "hello.txt", "to": ".git/evil" }),
+                    &serde_json::json!({ "from": "hello.txt", "to": ".git/evil" }),
                 ))
                 .await
                 .unwrap();
@@ -1793,11 +1812,11 @@ mod tests {
 
         #[tokio::test]
         async fn delete_endpoint_deletes_a_file() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/delete",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1807,11 +1826,11 @@ mod tests {
 
         #[tokio::test]
         async fn delete_endpoint_rejects_worktree_root_with_400() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/delete",
-                    serde_json::json!({ "path": "." }),
+                    &serde_json::json!({ "path": "." }),
                 ))
                 .await
                 .unwrap();
@@ -1821,13 +1840,13 @@ mod tests {
 
         #[tokio::test]
         async fn delete_endpoint_rejects_git_path_with_400() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::create_dir(wt.join(".git")).unwrap();
             std::fs::write(wt.join(".git/config"), "[core]\n").unwrap();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/delete",
-                    serde_json::json!({ "path": ".git/config" }),
+                    &serde_json::json!({ "path": ".git/config" }),
                 ))
                 .await
                 .unwrap();
@@ -1837,11 +1856,11 @@ mod tests {
 
         #[tokio::test]
         async fn create_file_endpoint_unknown_session_is_404() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/does-not-exist/files/create-file",
-                    serde_json::json!({ "path": "new.txt" }),
+                    &serde_json::json!({ "path": "new.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1855,11 +1874,11 @@ mod tests {
         /// empty (the documented no-content success contract every route shares).
         #[tokio::test]
         async fn create_file_endpoint_returns_no_content_body_on_success() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/create-file",
-                    serde_json::json!({ "path": "empty-body.txt" }),
+                    &serde_json::json!({ "path": "empty-body.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -1873,12 +1892,12 @@ mod tests {
         /// raised limit a 3 MB file opens and then fails to save.
         #[tokio::test]
         async fn a_file_larger_than_the_framework_default_still_saves() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let content = "a".repeat(3 * 1024 * 1024);
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "big.txt", "content": content }),
+                    &serde_json::json!({ "path": "big.txt", "content": content }),
                 ))
                 .await
                 .unwrap();
@@ -1903,14 +1922,14 @@ mod tests {
             body: serde_json::Value,
         ) -> axum::response::Response {
             app.clone()
-                .oneshot(json_req("/api/v1/sessions/s1/files/read", body))
+                .oneshot(json_req("/api/v1/sessions/s1/files/read", &body))
                 .await
                 .unwrap()
         }
 
         #[tokio::test]
         async fn read_reports_the_encoding_and_whether_it_was_a_fallback() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let plain =
                 body_json(read_json(&app, serde_json::json!({ "path": "hello.txt" })).await).await;
             assert_eq!(plain["encoding"], "UTF-8");
@@ -1943,7 +1962,7 @@ mod tests {
                 .clone()
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "nec.txt",
                         "content": nec["content"],
                         "expected_modified": nec["modified"],
@@ -1967,7 +1986,7 @@ mod tests {
 
         #[tokio::test]
         async fn read_in_a_requested_encoding_or_refuse_it() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("jp.txt"), [0x93, 0xfa, 0x96, 0x7b]).unwrap();
             let resp = read_json(
                 &app,
@@ -2001,14 +2020,14 @@ mod tests {
 
         #[tokio::test]
         async fn a_save_in_the_read_encoding_writes_those_bytes() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("latin1.txt"), b"caf\xe9\r\n").unwrap();
             let stamp =
                 body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "latin1.txt",
                         "content": "th\u{e9}\r\n",
                         "expected_modified": stamp["modified"],
@@ -2027,11 +2046,11 @@ mod tests {
         /// where it is, and the file is left exactly as it was.
         #[tokio::test]
         async fn a_near_fit_character_is_422_and_nothing_is_written() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "yen.txt",
                         "content": "\u{a5}100\n",
                         "encoding": "Shift_JIS",
@@ -2049,11 +2068,11 @@ mod tests {
         /// client must not assume otherwise.
         #[tokio::test]
         async fn a_save_answers_with_the_verdict_on_what_it_wrote() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "ok.txt",
                         "content": "a\r\nb\r\n",
                         "encoding": "UTF-8",
@@ -2067,16 +2086,52 @@ mod tests {
             assert_eq!(body["eol"], "CRLF");
         }
 
+        /// The verdict's three keys are all there (a writable save says
+        /// `unwritable: null`) when the save stated an encoding, and all absent
+        /// when it did not.
+        #[tokio::test]
+        async fn a_save_carries_its_verdict_keys_only_when_it_stated_an_encoding() {
+            let (_tmp, _wt, app) = router_with_session();
+            let save = |body: serde_json::Value| {
+                let app = app.clone();
+                async move {
+                    let resp = app
+                        .oneshot(json_req("/api/v1/sessions/s1/files/write", &body))
+                        .await
+                        .unwrap();
+                    let body = body_json(resp).await;
+                    let object = body.as_object().unwrap().clone();
+                    ["unwritable", "mixed_line_endings", "eol"].map(|key| object.get(key).cloned())
+                }
+            };
+            let stated = save(serde_json::json!({
+                "path": "ok.txt",
+                "content": "a\n",
+                "encoding": "UTF-8",
+            }))
+            .await;
+            assert_eq!(
+                stated,
+                [
+                    Some(serde_json::Value::Null),
+                    Some(serde_json::Value::Bool(false)),
+                    Some(serde_json::json!("LF")),
+                ]
+            );
+            let unstated = save(serde_json::json!({ "path": "ok2.txt", "content": "a\n" })).await;
+            assert_eq!(unstated, [None, None, None]);
+        }
+
         #[tokio::test]
         async fn an_unmappable_character_is_422_with_its_details() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
             let stamp =
                 body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "latin1.txt",
                         "content": "caf\u{e9}\n\u{20ac}\u{65e5}\n",
                         "expected_modified": stamp["modified"],
@@ -2100,14 +2155,14 @@ mod tests {
         /// save over bytes that are not UTF-8 is still refused.
         #[tokio::test]
         async fn a_save_with_no_encoding_over_a_non_utf8_file_is_still_refused() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("latin1.txt"), b"caf\xe9\n").unwrap();
             let stamp =
                 body_json(read_json(&app, serde_json::json!({ "path": "latin1.txt" })).await).await;
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "latin1.txt",
                         "content": "typed over nothing\n",
                         "expected_modified": stamp["modified"],
@@ -2124,11 +2179,11 @@ mod tests {
         /// back, or the guard below has nothing to compare against.
         #[tokio::test]
         async fn read_returns_the_files_stamp() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/read",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -2146,11 +2201,11 @@ mod tests {
         /// then believe somebody else edited the file.
         #[tokio::test]
         async fn a_successful_write_returns_the_fresh_stamp() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "hello.txt", "content": "typed\n" }),
+                    &serde_json::json!({ "path": "hello.txt", "content": "typed\n" }),
                 ))
                 .await
                 .unwrap();
@@ -2162,12 +2217,12 @@ mod tests {
 
         #[tokio::test]
         async fn a_write_with_a_matching_stamp_is_accepted() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let read = app
                 .clone()
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/read",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -2175,7 +2230,7 @@ mod tests {
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "hello.txt",
                         "content": "mine\n",
                         "expected_modified": stamp["modified"],
@@ -2196,12 +2251,12 @@ mod tests {
         /// the browser needs to offer a choice.
         #[tokio::test]
         async fn a_write_with_a_stale_stamp_is_409_with_the_current_stamp() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let read = app
                 .clone()
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/read",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -2211,7 +2266,7 @@ mod tests {
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "hello.txt",
                         "content": "clobber\n",
                         "expected_modified": stamp["modified"],
@@ -2234,12 +2289,12 @@ mod tests {
 
         #[tokio::test]
         async fn a_write_onto_a_file_deleted_underneath_is_409_and_creates_nothing() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let read = app
                 .clone()
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/read",
-                    serde_json::json!({ "path": "hello.txt" }),
+                    &serde_json::json!({ "path": "hello.txt" }),
                 ))
                 .await
                 .unwrap();
@@ -2249,7 +2304,7 @@ mod tests {
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "hello.txt",
                         "content": "back\n",
                         "expected_modified": stamp["modified"],
@@ -2269,12 +2324,12 @@ mod tests {
         /// page: it must behave exactly as it did before the guard existed.
         #[tokio::test]
         async fn a_write_with_no_stamp_still_overwrites_unconditionally() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("hello.txt"), "changed by someone else\n").unwrap();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "hello.txt", "content": "overwritten\n" }),
+                    &serde_json::json!({ "path": "hello.txt", "content": "overwritten\n" }),
                 ))
                 .await
                 .unwrap();
@@ -2289,11 +2344,11 @@ mod tests {
         /// other way round) would compare against a value nobody supplied.
         #[tokio::test]
         async fn a_half_specified_stamp_is_ignored_rather_than_half_enforced() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "hello.txt",
                         "content": "written\n",
                         "expected_size": 999_999,
@@ -2312,12 +2367,12 @@ mod tests {
         /// limit, rather than the framework's bare length message.
         #[tokio::test]
         async fn an_over_limit_save_is_refused_with_a_message_naming_the_limit() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let content = "a".repeat(crate::file_routes::MAX_EDIT_WRITE_BYTES + 1);
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "huge.txt", "content": content }),
+                    &serde_json::json!({ "path": "huge.txt", "content": content }),
                 ))
                 .await
                 .unwrap();
@@ -2347,7 +2402,7 @@ mod tests {
         /// 12 MiB of UTF-8 in the request, and 4 MiB on disk.
         #[tokio::test]
         async fn a_code_page_file_the_editor_opened_saves_however_its_text_grows() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("euro.txt"), vec![0x80u8; 4 * 1024 * 1024]).unwrap();
             let read =
                 body_json(read_json(&app, serde_json::json!({ "path": "euro.txt" })).await).await;
@@ -2355,7 +2410,7 @@ mod tests {
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "euro.txt",
                         "content": read["content"],
                         "expected_modified": read["modified"],
@@ -2376,12 +2431,12 @@ mod tests {
         /// refusal says so.
         #[tokio::test]
         async fn a_save_whose_file_would_be_too_large_is_refused_naming_that_limit() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             let content = "a".repeat(dux_core::worktree_file::MAX_SAVED_BYTES as usize + 1);
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({ "path": "huge.txt", "content": content, "encoding": "UTF-8" }),
+                    &serde_json::json!({ "path": "huge.txt", "content": content, "encoding": "UTF-8" }),
                 ))
                 .await
                 .unwrap();
@@ -2399,7 +2454,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_conversion_states_the_encoding_it_was_read_in() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             std::fs::write(wt.join("j.txt"), "\u{3042}\u{71d0}").unwrap();
             let read =
                 body_json(read_json(&app, serde_json::json!({ "path": "j.txt" })).await).await;
@@ -2407,7 +2462,7 @@ mod tests {
                 .clone()
                 .oneshot(json_req(
                     "/api/v1/sessions/s1/files/write",
-                    serde_json::json!({
+                    &serde_json::json!({
                         "path": "j.txt",
                         "content": read["content"],
                         "expected_modified": read["modified"],
@@ -2433,13 +2488,13 @@ mod tests {
 
         #[tokio::test]
         async fn a_save_whose_text_starts_with_a_mark_character_is_refused() {
-            let (_tmp, wt, app) = router_with_session().await;
+            let (_tmp, wt, app) = router_with_session();
             for (encoding, bom) in [("UTF-8", false), ("UTF-16LE", true)] {
                 let resp = app
                     .clone()
                     .oneshot(json_req(
                         "/api/v1/sessions/s1/files/write",
-                        serde_json::json!({
+                        &serde_json::json!({
                             "path": "m.txt",
                             "content": "\u{feff}a",
                             "encoding": encoding,
@@ -2470,12 +2525,12 @@ mod tests {
         /// the extractor-first ordering the `write_file` doc comment names.
         #[tokio::test]
         async fn a_bad_id_beats_the_body_diagnostic() {
-            let (_tmp, _wt, app) = router_with_session().await;
+            let (_tmp, _wt, app) = router_with_session();
             let content = "a".repeat(crate::file_routes::MAX_EDIT_WRITE_BYTES + 1);
             let resp = app
                 .oneshot(json_req(
                     "/api/v1/sessions/ghost/files/write",
-                    serde_json::json!({ "path": "huge.txt", "content": content }),
+                    &serde_json::json!({ "path": "huge.txt", "content": content }),
                 ))
                 .await
                 .unwrap();

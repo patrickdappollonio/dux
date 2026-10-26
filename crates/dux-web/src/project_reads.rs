@@ -398,7 +398,11 @@ async fn delete_worktree(
         return (StatusCode::BAD_REQUEST, "path is too long").into_response();
     }
     let requested = PathBuf::from(&query.path);
-    let delete_branch = query.delete_branch;
+    let branch = if query.delete_branch {
+        dux_core::worktree_manager::BranchRemoval::Delete
+    } else {
+        dux_core::worktree_manager::BranchRemoval::Keep
+    };
     // Admitted by the engine against its LIVE state at this moment (the agents
     // now, an agent being created on the folder now, a removal of it already
     // under way), never against the listing the client last saw, and announced
@@ -408,7 +412,7 @@ async fn delete_worktree(
     // only maps the answers onto statuses.
     let result = match state
         .engine
-        .admit_manager_removal(id, requested, delete_branch)
+        .admit_manager_removal(id, requested, branch)
         .await
     {
         None => return (StatusCode::NOT_FOUND, "unknown project").into_response(),

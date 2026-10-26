@@ -238,7 +238,11 @@ fn parse_create_session_body(raw: serde_json::Value) -> Result<CreateSessionBody
     serde_json::from_value(raw).map_err(|error| format!("invalid create body: {error}"))
 }
 
-async fn replay_created_session(state: &AppState, key: &str, followed: bool) -> Option<Response> {
+async fn replay_created_session(
+    state: &AppState,
+    key: &str,
+    operation: &OperationQuery,
+) -> Option<Response> {
     let previous_id = state.idempotency.get(key)?;
     // A followed create keeps its key under its operation: a retry answers that
     // record, or, unfollowed, the agent it made once it is there (the record
@@ -248,7 +252,7 @@ async fn replay_created_session(state: &AppState, key: &str, followed: bool) -> 
         .operations()
         .view(&previous_id, std::time::Instant::now())
     {
-        if followed {
+        if operation.asked() {
             return Some(operation_accepted(&record));
         }
         let Some(created) = record.created.first().cloned() else {
@@ -327,10 +331,10 @@ async fn dispatch_create(
     state: &AppState,
     body: CreateSessionBody,
     headers: &HeaderMap,
-    operation: bool,
+    operation: &OperationQuery,
 ) -> Result<dux_core::wire::WireCommandOutcome, (StatusCode, String)> {
     let scope = scope_from_headers(headers, &state.connections);
-    let outcome = if operation {
+    let outcome = if operation.asked() {
         state
             .engine
             .apply_wire_operation(body.into_wire(), scope, OperationKind::AgentCreate)
@@ -393,7 +397,7 @@ async fn create_session(
     // exists, return it without creating another.
     let key = idempotency_key(&headers);
     if let Some(key) = &key
-        && let Some(response) = replay_created_session(&state, key, operation.asked()).await
+        && let Some(response) = replay_created_session(&state, key, &operation).await
     {
         return response;
     }
@@ -409,7 +413,7 @@ async fn create_session(
     // Followed as an operation: the record answers at once, and its id is the
     // create op (or, for a from-PR create, the lookup that hands off to it).
     if operation.asked() {
-        return match dispatch_create(&state, body, &headers, true).await {
+        return match dispatch_create(&state, body, &headers, &operation).await {
             Ok(outcome) => match &outcome.operation {
                 Some(record) => {
                     if let Some(key) = key {
@@ -431,7 +435,11 @@ async fn create_session(
     // (inside the PR-lookup followup), so it has no synchronous `created_op_id` and
     // must fall back to the set-difference await with a longer window (the
     // `gh pr view` network call routinely exceeds the default 20s).
-    let is_from_pr = matches!(body, CreateSessionBody::FromPr { .. });
+    let default_window = if matches!(body, CreateSessionBody::FromPr { .. }) {
+        FROM_PR_CREATE_AWAIT_TIMEOUT
+    } else {
+        CREATE_AWAIT_TIMEOUT
+    };
 
     // Snapshot the existing session ids for the from-PR fallback await. The
     // synchronous variants use the race-free op-id path instead and ignore this.
@@ -440,12 +448,12 @@ async fn create_session(
         None => return engine_unavailable(),
     };
 
-    let outcome = match dispatch_create(&state, body, &headers, false).await {
+    let outcome = match dispatch_create(&state, body, &headers, &operation).await {
         Ok(outcome) => outcome,
         Err(refusal) => return refusal.into_response(),
     };
 
-    resolve_created_session(&state, outcome, is_from_pr, &pre, key).await
+    resolve_created_session(&state, outcome, default_window, &pre, key).await
 }
 
 /// Wait for the dispatched create to produce its session and answer with it.
@@ -480,7 +488,7 @@ async fn create_session(
 async fn resolve_created_session(
     state: &AppState,
     outcome: dux_core::wire::WireCommandOutcome,
-    is_from_pr: bool,
+    default_window: std::time::Duration,
     pre: &std::collections::HashSet<String>,
     key: Option<String>,
 ) -> Response {
@@ -501,11 +509,6 @@ async fn resolve_created_session(
             .into_response();
     };
 
-    let default_window = if is_from_pr {
-        FROM_PR_CREATE_AWAIT_TIMEOUT
-    } else {
-        CREATE_AWAIT_TIMEOUT
-    };
     let window = state.create_await_timeout.unwrap_or(default_window);
     match await_new_session(&state.engine, pre, status.key.as_deref(), window).await {
         AwaitedCreate::Resolved(id) => created_response(state, id, key).await,

@@ -39,6 +39,16 @@ pub(crate) fn system_clock() -> Clock {
     })
 }
 
+/// Whether a session check counts as a use of the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LastUse {
+    /// Refresh the session's last use: a request made with it.
+    Refresh,
+    /// Leave it as it is: a check that is not a use, such as a socket's
+    /// re-check before its opening frames.
+    Keep,
+}
+
 /// How long a session may sit unused before it ends, per kind, in milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Idle {
@@ -257,13 +267,13 @@ impl Sessions {
     }
 
     /// Whether `digest` names a usable session under `generation`, refreshing
-    /// its last use when `touch` is set. An idle one is forgotten.
+    /// its last use as `last_use` says. An idle one is forgotten.
     pub(crate) fn check(
         &self,
         digest: &TokenDigest,
         generation: &str,
         idle: Idle,
-        touch: bool,
+        last_use: LastUse,
     ) -> bool {
         let now = self.now();
         let mut map = self.map();
@@ -278,7 +288,7 @@ impl Sessions {
             map.remove(digest);
             return false;
         }
-        if touch {
+        if last_use == LastUse::Refresh {
             live.last_seen_ms = live.last_seen_ms.max(now);
             live.dirty = true;
         }
@@ -444,17 +454,17 @@ mod tests {
         let (clock, now) = clock_at(1_000_000);
         let sessions = Sessions::in_memory(clock);
         let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
-        assert!(sessions.check(&token.digest, "g", idle(60_000), true));
+        assert!(sessions.check(&token.digest, "g", idle(60_000), LastUse::Refresh));
         now.fetch_add(59_000, Ordering::SeqCst);
         assert!(
-            sessions.check(&token.digest, "g", idle(60_000), true),
+            sessions.check(&token.digest, "g", idle(60_000), LastUse::Refresh),
             "refreshed"
         );
         now.fetch_add(59_000, Ordering::SeqCst);
-        assert!(sessions.check(&token.digest, "g", idle(60_000), false));
+        assert!(sessions.check(&token.digest, "g", idle(60_000), LastUse::Keep));
         now.fetch_add(2_000, Ordering::SeqCst);
         assert!(
-            !sessions.check(&token.digest, "g", idle(60_000), true),
+            !sessions.check(&token.digest, "g", idle(60_000), LastUse::Refresh),
             "a check that does not touch refreshes nothing"
         );
         assert_eq!(sessions.len(), 0);
@@ -465,10 +475,10 @@ mod tests {
         let (clock, _) = clock_at(0);
         let sessions = Sessions::in_memory(clock);
         let token = sessions.issue("old", SessionKind::Browser).await.unwrap();
-        assert!(!sessions.check(&token.digest, "new", idle(60_000), true));
+        assert!(!sessions.check(&token.digest, "new", idle(60_000), LastUse::Refresh));
         let token = sessions.issue("old", SessionKind::Browser).await.unwrap();
         assert!(sessions.retain_generation("new"));
-        assert!(!sessions.check(&token.digest, "old", idle(60_000), true));
+        assert!(!sessions.check(&token.digest, "old", idle(60_000), LastUse::Refresh));
     }
 
     #[tokio::test]
@@ -479,7 +489,7 @@ mod tests {
         let lease = sessions.lease(token.digest).expect("known");
         now.store(10 * 60_000, Ordering::SeqCst);
         assert!(
-            sessions.check(&token.digest, "g", idle(3_000), false),
+            sessions.check(&token.digest, "g", idle(3_000), LastUse::Keep),
             "leased"
         );
         sessions.flush(idle(3_000)).await;
@@ -487,11 +497,11 @@ mod tests {
         drop(lease);
         now.fetch_add(2_000, Ordering::SeqCst);
         assert!(
-            sessions.check(&token.digest, "g", idle(3_000), false),
+            sessions.check(&token.digest, "g", idle(3_000), LastUse::Keep),
             "idle from the release"
         );
         now.fetch_add(2_000, Ordering::SeqCst);
-        assert!(!sessions.check(&token.digest, "g", idle(3_000), false));
+        assert!(!sessions.check(&token.digest, "g", idle(3_000), LastUse::Keep));
         assert!(sessions.lease([9; 32]).is_none());
     }
 
@@ -524,7 +534,7 @@ mod tests {
         let sessions = Sessions::in_memory(clock);
         let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
         sessions.revoke(token.digest).await;
-        assert!(!sessions.check(&token.digest, "g", idle(60_000), true));
+        assert!(!sessions.check(&token.digest, "g", idle(60_000), LastUse::Refresh));
     }
 
     #[tokio::test]
@@ -538,7 +548,7 @@ mod tests {
         let other = first.issue("g", SessionKind::Browser).await.unwrap();
         let lease = first.lease(other.digest).unwrap();
         now.fetch_add(5_000, Ordering::SeqCst);
-        first.check(&kept.digest, "g", idle(8_000), true);
+        first.check(&kept.digest, "g", idle(8_000), LastUse::Refresh);
         first.flush(idle(8_000)).await;
         drop(lease);
         drop(first);
@@ -548,15 +558,15 @@ mod tests {
         let second = Sessions::new(Arc::clone(&clock));
         second.load(db.clone(), "g".into(), idle(8_000)).await;
         second.ready().await;
-        assert!(second.check(&kept.digest, "g", idle(8_000), false));
-        assert!(second.check(&other.digest, "g", idle(8_000), false));
+        assert!(second.check(&kept.digest, "g", idle(8_000), LastUse::Keep));
+        assert!(second.check(&other.digest, "g", idle(8_000), LastUse::Keep));
         drop(second);
 
         // A long outage: gone, and gone from the table too.
         now.fetch_add(20_000, Ordering::SeqCst);
         let third = Sessions::new(Arc::clone(&clock));
         third.load(db.clone(), "g".into(), idle(8_000)).await;
-        assert!(!third.check(&kept.digest, "g", idle(8_000), false));
+        assert!(!third.check(&kept.digest, "g", idle(8_000), LastUse::Keep));
         assert!(
             WebSessionStore::open(&db)
                 .unwrap()
@@ -578,8 +588,8 @@ mod tests {
         drop(first);
         let second = Sessions::new(clock);
         second.load(db, "after".into(), idle(60_000)).await;
-        assert!(!second.check(&token.digest, "after", idle(60_000), false));
-        assert!(!second.check(&token.digest, "before", idle(60_000), false));
+        assert!(!second.check(&token.digest, "after", idle(60_000), LastUse::Keep));
+        assert!(!second.check(&token.digest, "before", idle(60_000), LastUse::Keep));
     }
 
     #[tokio::test]
@@ -593,7 +603,7 @@ mod tests {
             .await;
         sessions.ready().await;
         let token = sessions.issue("g", SessionKind::Browser).await.unwrap();
-        assert!(sessions.check(&token.digest, "g", idle(60_000), true));
+        assert!(sessions.check(&token.digest, "g", idle(60_000), LastUse::Refresh));
     }
 
     /// A session issued before the stored sessions finished loading is still
@@ -606,7 +616,7 @@ mod tests {
         let sessions = Sessions::new(Arc::clone(&clock));
         let early = sessions.issue("g", SessionKind::Browser).await.unwrap();
         sessions.load(db.clone(), "g".into(), idle(60_000)).await;
-        assert!(sessions.check(&early.digest, "g", idle(60_000), false));
+        assert!(sessions.check(&early.digest, "g", idle(60_000), LastUse::Keep));
         let stored = WebSessionStore::open(&db).unwrap().load().unwrap();
         assert!(
             stored.iter().any(|row| row.digest == early.digest),
@@ -626,14 +636,14 @@ mod tests {
         let cli = sessions.issue("g", SessionKind::Cli).await.unwrap();
         let windows = idle_of(60_000, 30 * 86_400_000);
         now.store(10 * 60_000, Ordering::SeqCst);
-        assert!(!sessions.check(&browser.digest, "g", windows, false));
-        assert!(sessions.check(&cli.digest, "g", windows, true));
+        assert!(!sessions.check(&browser.digest, "g", windows, LastUse::Keep));
+        assert!(sessions.check(&cli.digest, "g", windows, LastUse::Refresh));
         // A flush keeps what is still inside its own window.
         sessions.flush(windows).await;
         assert_eq!(sessions.len(), 1);
         // Thirty days and a millisecond with no use ends it.
         now.fetch_add(30 * 86_400_000 + 1, Ordering::SeqCst);
-        assert!(!sessions.check(&cli.digest, "g", windows, false));
+        assert!(!sessions.check(&cli.digest, "g", windows, LastUse::Keep));
     }
 
     #[tokio::test]
@@ -654,8 +664,8 @@ mod tests {
         second
             .load(db.clone(), "g".into(), idle_of(8_000, 100_000))
             .await;
-        assert!(!second.check(&browser.digest, "g", idle_of(8_000, 100_000), false));
-        assert!(second.check(&cli.digest, "g", idle_of(8_000, 100_000), false));
+        assert!(!second.check(&browser.digest, "g", idle_of(8_000, 100_000), LastUse::Keep));
+        assert!(second.check(&cli.digest, "g", idle_of(8_000, 100_000), LastUse::Keep));
         let stored = WebSessionStore::open(&db).unwrap().load().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].kind, SessionKind::Cli);

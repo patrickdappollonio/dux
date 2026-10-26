@@ -309,7 +309,7 @@ mod tests {
             axum::Router::new(),
             crate::server::RouterParams::plain_http().with_console(
                 crate::console::Console::server_log_only(std::sync::Arc::new(log)),
-                false,
+                crate::server::AccessLog::Off,
             ),
         )
     }

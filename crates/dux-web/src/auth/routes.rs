@@ -48,6 +48,10 @@ pub(crate) enum BrokenDoc {
 
 /// `GET /api/v1/auth/status`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the asking device sent to the web client as JSON booleans"
+)]
 pub(crate) struct StatusDoc {
     pub(crate) password_set: bool,
     pub(crate) required_here: bool,
@@ -148,7 +152,7 @@ fn too_long(maximum: u32) -> Response {
     )
 }
 
-fn server_error(message: String) -> Response {
+fn server_error(message: &str) -> Response {
     refusal(
         StatusCode::INTERNAL_SERVER_ERROR,
         json!({ "error": "internal", "message": message }),
@@ -191,14 +195,15 @@ async fn login(
         SignIn::Refused(refusal) => return refusal,
     };
     let a = &auth.0;
-    let secure = cookie::secure(
-        a.snapshot.config.cookie_secure,
-        a.classification.https_serve_route,
-    );
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        cookie::set(a.cookie_port, &token.cookie_value, secure),
+        cookie::set(
+            a.cookie_port,
+            &token.cookie_value,
+            a.snapshot.config.cookie_secure,
+            a.classification.https_route(),
+        ),
     );
     response
 }
@@ -279,13 +284,16 @@ async fn sign_in(
     }
     let a = &auth.0;
     match state.auth.verify(&a.classification, password).await {
-        Verify::Right { generation, weak } => {
-            state.auth.note_strength(&generation, weak);
+        Verify::Right {
+            generation,
+            strength,
+        } => {
+            state.auth.note_strength(&generation, strength);
             match state.auth.issue_session(&a.facts, &generation, kind).await {
                 Ok(super::Issued::Session(token)) => SignIn::Token(token, body.label),
                 Ok(super::Issued::Blocked) => SignIn::Refused(super::middleware::blocked()),
                 Ok(super::Issued::Stale) => SignIn::Refused(password_changed_meanwhile()),
-                Err(error) => SignIn::Refused(server_error(format!(
+                Err(error) => SignIn::Refused(server_error(&format!(
                     "Could not start a session: {error:#}"
                 ))),
             }
@@ -299,7 +307,7 @@ async fn sign_in(
         Verify::Busy => SignIn::Refused(busy()),
         Verify::NoPassword => SignIn::Refused(no_password()),
         Verify::Stale => SignIn::Refused(password_changed_meanwhile()),
-        Verify::Failed(error) => SignIn::Refused(server_error(format!(
+        Verify::Failed(error) => SignIn::Refused(server_error(&format!(
             "Could not check the password: {error}"
         ))),
     }
@@ -340,14 +348,15 @@ async fn logout(
     for digest in &a.presented {
         state.auth.end_session(*digest).await;
     }
-    let secure = cookie::secure(
-        a.snapshot.config.cookie_secure,
-        a.classification.https_serve_route,
-    );
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, cookie::clear(a.cookie_port, secure));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie::clear(
+            a.cookie_port,
+            a.snapshot.config.cookie_secure,
+            a.classification.https_route(),
+        ),
+    );
     response
 }
 
@@ -443,7 +452,7 @@ async fn change_password(
     let current = body.current.map(Password::new);
     let a = &auth.0;
     let Some(config_path) = state.auth.config_path().cloned() else {
-        return server_error("This server has no config file to write the password to.".into());
+        return server_error("This server has no config file to write the password to.");
     };
 
     // Which hash the write may replace: none for a first password, else the
@@ -507,7 +516,7 @@ async fn change_password(
                     );
                 }
                 Verify::Failed(error) => {
-                    return server_error(format!("Could not check the current password: {error}"));
+                    return server_error(&format!("Could not check the current password: {error}"));
                 }
             }
         }
@@ -581,10 +590,14 @@ async fn change_password(
                 None => state.auth.applied(|_| {}, file_write),
             }
             let mut response = StatusCode::NO_CONTENT.into_response();
-            let secure = cookie::secure(config.cookie_secure, a.classification.https_serve_route);
-            response
-                .headers_mut()
-                .insert(header::SET_COOKIE, cookie::clear(a.cookie_port, secure));
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                cookie::clear(
+                    a.cookie_port,
+                    config.cookie_secure,
+                    a.classification.https_route(),
+                ),
+            );
             response
         }
         Ok(Err(dux_core::config_keys::SetPasswordError::BelowMinimums(check))) => {
@@ -598,9 +611,9 @@ async fn change_password(
             }),
         ),
         Ok(Err(dux_core::config_keys::SetPasswordError::Failed(error))) => {
-            server_error(format!("Could not write the password: {error:#}"))
+            server_error(&format!("Could not write the password: {error:#}"))
         }
-        Err(error) => server_error(format!("The password change stopped: {error}")),
+        Err(error) => server_error(&format!("The password change stopped: {error}")),
     }
 }
 
@@ -614,7 +627,7 @@ async fn change_password(
 /// terminal's own warnings are not silenced by it.
 async fn dismiss_no_auth_warning(State(state): State<AppState>) -> Response {
     let Some(path) = state.auth.config_path().cloned() else {
-        return server_error("This server has no config file to save that choice to.".into());
+        return server_error("This server has no config file to save that choice to.");
     };
     let written = tokio::task::spawn_blocking(
         move || -> anyhow::Result<Option<dux_core::config_write::FileWrite>> {
@@ -632,8 +645,8 @@ async fn dismiss_no_auth_warning(State(state): State<AppState>) -> Response {
                 .applied(|config| config.disable_no_auth_warning = true, file_write);
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(Err(error)) => server_error(format!("Could not save that choice: {error:#}")),
-        Err(error) => server_error(format!("Saving that choice stopped: {error}")),
+        Ok(Err(error)) => server_error(&format!("Could not save that choice: {error:#}")),
+        Err(error) => server_error(&format!("Saving that choice stopped: {error}")),
     }
 }
 

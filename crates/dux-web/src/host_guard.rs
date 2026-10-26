@@ -259,14 +259,44 @@ impl LiveHostNames {
 /// listener. Tests and callers with no serve behind them use the fixed form.
 #[derive(Debug, Clone)]
 enum TailscaleLiterals {
-    Fixed(bool),
+    Fixed(TailscaleLiteralRule),
     Live(Arc<std::sync::atomic::AtomicBool>),
+}
+
+/// Whether rule 5 admits an IP literal in Tailscale's own ranges, as a serve
+/// mode decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TailscaleLiteralRule {
+    /// Admit them: the mode wants Tailscale, whether or not the leg is bound.
+    Admit,
+    /// Refuse them: the mode is `no`.
+    Refuse,
+}
+
+impl TailscaleLiteralRule {
+    /// The rule a serve's live literals cell holds right now.
+    pub(crate) fn of_cell(cell: &std::sync::atomic::AtomicBool) -> Self {
+        if cell.load(std::sync::atomic::Ordering::SeqCst) {
+            Self::Admit
+        } else {
+            Self::Refuse
+        }
+    }
+
+    /// The rule `mode` asks for.
+    pub fn for_mode(mode: dux_core::config::TailscaleMode) -> Self {
+        if mode.wants_tailscale() {
+            Self::Admit
+        } else {
+            Self::Refuse
+        }
+    }
 }
 
 impl TailscaleLiterals {
     fn allowed(&self) -> bool {
         match self {
-            Self::Fixed(value) => *value,
+            Self::Fixed(rule) => *rule == TailscaleLiteralRule::Admit,
             Self::Live(cell) => cell.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
@@ -279,7 +309,11 @@ impl HostAllowlist {
     /// from what bound, because the leg may be bound and unbound many times behind
     /// one allowlist; a serve that can change the mode while running follows this
     /// with [`Self::with_live_tailscale_literals`].
-    pub fn new(bound_ips: &[IpAddr], configured: &[String], tailscale_literals: bool) -> Self {
+    pub fn new(
+        bound_ips: &[IpAddr],
+        configured: &[String],
+        tailscale_literals: TailscaleLiteralRule,
+    ) -> Self {
         let has_unspecified = bound_ips.iter().any(std::net::IpAddr::is_unspecified);
         Self {
             bound_ips: bound_ips.to_vec(),
@@ -295,6 +329,7 @@ impl HostAllowlist {
 
     /// Skip the Host rules. For a router with no bound address to pin Hosts
     /// to; no serve path builds one.
+    #[must_use]
     pub fn without_host_rules(mut self) -> Self {
         self.host_rules = false;
         self
@@ -303,6 +338,7 @@ impl HostAllowlist {
     /// Read whether a Funnel is on from the serve's exposure, and whether a
     /// password is set from `password_set`: together they decide whether rule
     /// 6's name is withdrawn.
+    #[must_use]
     pub fn with_exposure(
         mut self,
         cell: crate::exposure::ExposureCell,
@@ -325,6 +361,7 @@ impl HostAllowlist {
 
     /// Read rule 4 from a set a config reload rewrites, instead of the list
     /// given at construction.
+    #[must_use]
     pub fn with_live_configured_hosts(mut self, names: LiveHostNames) -> Self {
         self.configured = names;
         self
@@ -332,6 +369,7 @@ impl HostAllowlist {
 
     /// Read rule 6 from the set the serve loop writes this machine's `MagicDNS`
     /// name into. Without it the guard admits no tailnet name of its own accord.
+    #[must_use]
     pub fn with_live_own_magicdns_name(mut self, names: LiveHostNames) -> Self {
         self.own_magicdns_name = names;
         self
@@ -340,6 +378,7 @@ impl HostAllowlist {
     /// Read rule 5 from a live cell instead of the constructed value, so a
     /// `[server] tailscale` change applied while dux serves moves the Host guard
     /// with the listener rather than waiting for a restart.
+    #[must_use]
     pub fn with_live_tailscale_literals(
         mut self,
         cell: Arc<std::sync::atomic::AtomicBool>,
@@ -485,7 +524,7 @@ mod tests {
     #[test]
     fn loopback_always_allowed() {
         // No bound IPs, no configured hosts -- still allows loopback.
-        let al = HostAllowlist::new(&[], &[], false);
+        let al = HostAllowlist::new(&[], &[], TailscaleLiteralRule::Refuse);
         assert!(al.allows_host("localhost"), "localhost");
         assert!(al.allows_host("localhost:8080"), "localhost with port");
         assert!(al.allows_host("127.0.0.1"), "ipv4 loopback");
@@ -500,7 +539,11 @@ mod tests {
     /// Tailscale 100.x literal and any explicit --bind address).
     #[test]
     fn bound_ip_literal_allowed() {
-        let al = HostAllowlist::new(&ips(&["100.64.0.1", "10.0.0.5"]), &[], false);
+        let al = HostAllowlist::new(
+            &ips(&["100.64.0.1", "10.0.0.5"]),
+            &[],
+            TailscaleLiteralRule::Refuse,
+        );
         assert!(al.allows_host("100.64.0.1"), "tailscale ip");
         assert!(al.allows_host("100.64.0.1:8080"), "tailscale ip with port");
         assert!(al.allows_host("10.0.0.5"), "lan ip");
@@ -512,7 +555,11 @@ mod tests {
     /// port suffixes are stripped before comparison.
     #[test]
     fn configured_hostname_case_insensitive_with_and_without_port() {
-        let al = HostAllowlist::new(&[], &["box.tailnet.ts.net".to_string()], false);
+        let al = HostAllowlist::new(
+            &[],
+            &["box.tailnet.ts.net".to_string()],
+            TailscaleLiteralRule::Refuse,
+        );
         assert!(al.allows_host("box.tailnet.ts.net"), "exact match");
         assert!(al.allows_host("BOX.TAILNET.TS.NET"), "uppercase");
         assert!(al.allows_host("Box.Tailnet.Ts.Net"), "mixed case");
@@ -531,7 +578,7 @@ mod tests {
     #[test]
     fn unspecified_bind_accepts_any_ip_literal() {
         // 0.0.0.0 bind -- any IP literal allowed.
-        let al = HostAllowlist::new(&ips(&["0.0.0.0"]), &[], false);
+        let al = HostAllowlist::new(&ips(&["0.0.0.0"]), &[], TailscaleLiteralRule::Refuse);
         assert!(
             al.allows_host("192.168.1.5"),
             "lan ip allowed via 0.0.0.0 bind"
@@ -545,7 +592,7 @@ mod tests {
         );
 
         // :: bind (IPv6 wildcard) -- same rule applies.
-        let al6 = HostAllowlist::new(&ips(&["::"]), &[], false);
+        let al6 = HostAllowlist::new(&ips(&["::"]), &[], TailscaleLiteralRule::Refuse);
         assert!(al6.allows_host("192.168.1.5"), "lan ip via :: bind");
     }
 
@@ -554,7 +601,7 @@ mod tests {
     #[test]
     fn non_unspecified_bind_does_not_accept_arbitrary_ip() {
         // Bound to 127.0.0.1 only.
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Refuse);
         // Loopback still passes (rule 1), but a foreign IP is rejected.
         assert!(al.allows_host("127.0.0.1"), "loopback bound ip");
         assert!(!al.allows_host("192.168.1.5"), "arbitrary lan ip rejected");
@@ -568,7 +615,7 @@ mod tests {
         let al = HostAllowlist::new(
             &ips(&["127.0.0.1"]),
             &["good.example.com".to_string()],
-            false,
+            TailscaleLiteralRule::Refuse,
         );
         assert!(!al.allows_host("evil.example.com"), "unknown hostname");
         assert!(
@@ -585,7 +632,7 @@ mod tests {
     /// it (which no browser or legitimate client sends).
     #[test]
     fn no_wildcard_behavior() {
-        let al = HostAllowlist::new(&[], &["*".to_string()], false);
+        let al = HostAllowlist::new(&[], &["*".to_string()], TailscaleLiteralRule::Refuse);
         // `"*"` does not match any real hostname -- no wildcard expansion.
         assert!(
             !al.allows_host("anything.example.com"),
@@ -607,7 +654,7 @@ mod tests {
     /// up at this instant.
     #[test]
     fn a_tailscale_cgnat_literal_is_allowed_while_the_leg_is_unbound() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit);
         assert!(
             al.allows_host("100.101.102.103"),
             "a CGNAT literal must pass even though only loopback is bound"
@@ -624,7 +671,7 @@ mod tests {
     /// The IPv6 half, including the bracketed form a browser actually sends.
     #[test]
     fn a_tailscale_ula_literal_is_allowed_bracketed_or_bare() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit);
         assert!(al.allows_host("[fd7a:115c:a1e0::1234]"), "bracketed");
         assert!(al.allows_host("[fd7a:115c:a1e0::1234]:8080"), "with a port");
         // One past the /48, and a plain ULA, are not Tailscale addresses.
@@ -638,7 +685,7 @@ mod tests {
     #[test]
     fn a_live_flag_moves_the_tailscale_literal_rule_while_the_server_serves() {
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false)
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Refuse)
             .with_live_tailscale_literals(Arc::clone(&flag));
         assert!(
             !al.allows_host("100.101.102.103"),
@@ -666,7 +713,7 @@ mod tests {
     /// off the tailnet does not get a tailnet-shaped exemption.
     #[test]
     fn tailscale_literals_are_refused_when_the_mode_is_no() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Refuse);
         assert!(!al.allows_host("100.101.102.103"));
         assert!(!al.allows_host("[fd7a:115c:a1e0::1234]"));
     }
@@ -676,7 +723,7 @@ mod tests {
     /// without it a `MagicDNS` name needs `allowed_hosts`.
     #[test]
     fn the_tailscale_rule_does_not_admit_any_hostname() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit);
         assert!(!al.allows_host("box.tailnet.ts.net"), "magicdns name");
         assert!(!al.allows_host("evil.example.com"), "unknown name");
         assert!(!al.allows_host("192.168.1.5"), "an unrelated LAN literal");
@@ -688,7 +735,7 @@ mod tests {
     fn with_own_name(own: &str) -> (HostAllowlist, LiveHostNames, Arc<AtomicBool>) {
         let names = LiveHostNames::new(&[own.to_string()]);
         let mode = Arc::new(AtomicBool::new(true));
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true)
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit)
             .with_live_tailscale_literals(Arc::clone(&mode))
             .with_live_own_magicdns_name(names.clone());
         (al, names, mode)
@@ -747,7 +794,7 @@ mod tests {
         use tower::ServiceExt;
         let router = host_allowlist_layer(
             Router::new().route("/x", axum::routing::get(|| async { "ok" })),
-            HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true),
+            HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit),
         );
         let response = router
             .oneshot(
@@ -816,7 +863,7 @@ mod tests {
 
     #[test]
     fn a_guard_with_no_own_name_cell_allows_no_tailnet_name() {
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], true);
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Admit);
         assert!(!al.allows_host("box.tail.ts.net"));
     }
 
@@ -825,7 +872,7 @@ mod tests {
     #[test]
     fn a_reloaded_allowed_hosts_list_applies_to_the_running_guard() {
         let configured = LiveHostNames::new(&["old.example.com:443".to_string()]);
-        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], false)
+        let al = HostAllowlist::new(&ips(&["127.0.0.1"]), &[], TailscaleLiteralRule::Refuse)
             .with_live_configured_hosts(configured.clone());
         assert!(
             al.allows_host("old.example.com"),
@@ -845,7 +892,11 @@ mod tests {
     /// A Host with a trailing dot (FQDN notation) is normalized before comparison.
     #[test]
     fn trailing_dot_normalized() {
-        let al = HostAllowlist::new(&[], &["dux.example.com".to_string()], false);
+        let al = HostAllowlist::new(
+            &[],
+            &["dux.example.com".to_string()],
+            TailscaleLiteralRule::Refuse,
+        );
         assert!(al.allows_host("dux.example.com."), "trailing dot stripped");
     }
 }

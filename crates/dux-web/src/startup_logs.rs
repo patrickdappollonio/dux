@@ -210,7 +210,7 @@ async fn read_project_startup_log(
 /// So only `root_cause()` is kept, the OS error that tells the user something, with
 /// a prefix naming what dux was trying to do. The full chain still reaches
 /// `dux.log` from the code that logs these failures.
-fn listing_failed(e: anyhow::Error) -> String {
+fn listing_failed(e: &anyhow::Error) -> String {
     format!(
         "Could not list this project's startup command logs: {}",
         e.root_cause()
@@ -218,7 +218,7 @@ fn listing_failed(e: anyhow::Error) -> String {
 }
 
 /// The read half of [`listing_failed`], for one log file. See its docs.
-fn read_failed(e: anyhow::Error) -> String {
+fn read_failed(e: &anyhow::Error) -> String {
     format!("Could not read the startup command log: {}", e.root_cause())
 }
 
@@ -229,11 +229,12 @@ fn collect_logs(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,
 ) -> Result<StartupLogsReply, String> {
-    let entries = dux_core::startup::list_logs_for_scope(paths, scope).map_err(listing_failed)?;
+    let entries =
+        dux_core::startup::list_logs_for_scope(paths, scope).map_err(|e| listing_failed(&e))?;
     let selected = match entries.first() {
         Some(entry) => Some(StartupLogContentView {
             name: entry.display_name.clone(),
-            content: dux_core::startup::read_log(&entry.path).map_err(read_failed)?,
+            content: dux_core::startup::read_log(&entry.path).map_err(|e| read_failed(&e))?,
         }),
         None => None,
     };
@@ -260,7 +261,8 @@ fn read_named_log(
     scope: StartupCommandLogScope,
     name: &str,
 ) -> Result<Option<StartupLogContentView>, String> {
-    let entries = dux_core::startup::list_logs_for_scope(paths, scope).map_err(listing_failed)?;
+    let entries =
+        dux_core::startup::list_logs_for_scope(paths, scope).map_err(|e| listing_failed(&e))?;
     let entry = if name.is_empty() {
         entries.first()
     } else {
@@ -270,7 +272,7 @@ fn read_named_log(
         None => Ok(None),
         Some(entry) => Ok(Some(StartupLogContentView {
             name: entry.display_name.clone(),
-            content: dux_core::startup::read_log(&entry.path).map_err(read_failed)?,
+            content: dux_core::startup::read_log(&entry.path).map_err(|e| read_failed(&e))?,
         })),
     }
 }

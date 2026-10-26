@@ -298,6 +298,10 @@ fn parse_forwarded_address(part: &str) -> Option<IpAddr> {
 
 /// What classification concluded about a request.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts classification derives about one request, each read on its own"
+)]
 pub struct Classification {
     pub class: ClientClass,
     /// Every address the request names: the peer, every `X-Forwarded-For`
@@ -337,6 +341,18 @@ pub struct Classification {
     /// (an interface's, a Tailscale address's, or the one it reached): dux's
     /// own network, which is never grouped into a /64 for slow-downs or bans.
     pub own_network: bool,
+}
+
+impl Classification {
+    /// Whether this request came over a route dux knows is HTTPS, as the
+    /// session cookie's `Secure` flag asks it.
+    pub(crate) fn https_route(&self) -> crate::auth::cookie::HttpsRoute {
+        if self.https_serve_route {
+            crate::auth::cookie::HttpsRoute::Confirmed
+        } else {
+            crate::auth::cookie::HttpsRoute::Unconfirmed
+        }
+    }
 }
 
 /// How a request reached dux. Unverified requests are slowed in one bucket
@@ -702,11 +718,11 @@ mod tests {
     use crate::exposure::{FunnelState, IdentityFacts};
     use dux_core::tailscale::ServeRoute;
 
-    fn arrival(peer: &str, local: &str) -> Option<Arrival> {
-        Some(Arrival::Tcp {
+    fn arrival(peer: &str, local: &str) -> Arrival {
+        Arrival::Tcp {
             peer: peer.parse().unwrap(),
             local: local.parse().unwrap(),
-        })
+        }
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -728,14 +744,28 @@ mod tests {
         classify(&RequestFacts::of(arrival, &headers(pairs)), exposure, &[])
     }
 
-    fn served(url: &str, funnel: bool) -> Exposure {
+    /// A look that found this machine's address and one `tailscale serve`
+    /// route at `url`, not funneled.
+    fn served(url: &str) -> Exposure {
+        exposing(ServeRoute {
+            url: url.to_string(),
+            funnel: false,
+        })
+    }
+
+    /// [`served`], with the route funneled to the internet.
+    fn funneled(url: &str) -> Exposure {
+        exposing(ServeRoute {
+            url: url.to_string(),
+            funnel: true,
+        })
+    }
+
+    fn exposing(route: ServeRoute) -> Exposure {
         Exposure {
             funnel: FunnelState::Open,
             identity: Some(IdentityFacts {
-                routes: vec![ServeRoute {
-                    url: url.to_string(),
-                    funnel,
-                }],
+                routes: vec![route],
                 own_ips: vec![OWN_TAILSCALE.parse().unwrap()],
                 ..IdentityFacts::default()
             }),
@@ -761,7 +791,7 @@ mod tests {
     #[test]
     fn plain_loopback_is_this_machine_and_encrypted() {
         let c = class_of(
-            arrival("127.0.0.1:50000", LOOPBACK),
+            Some(arrival("127.0.0.1:50000", LOOPBACK)),
             &[("host", "localhost")],
             &Exposure::default(),
         );
@@ -769,14 +799,14 @@ mod tests {
         assert!(c.transport_encrypted);
         assert!(c.verified_this_machine());
         let v6 = class_of(
-            arrival("[::1]:50000", "[::1]:3890"),
+            Some(arrival("[::1]:50000", "[::1]:3890")),
             &[],
             &Exposure::default(),
         );
         assert_eq!(v6.class, ClientClass::ThisMachine);
         // A wildcard listener reached over loopback.
         let mapped = class_of(
-            arrival("[::ffff:127.0.0.1]:5", "[::ffff:127.0.0.1]:3890"),
+            Some(arrival("[::ffff:127.0.0.1]:5", "[::ffff:127.0.0.1]:3890")),
             &[],
             &Exposure::default(),
         );
@@ -796,7 +826,7 @@ mod tests {
                 funnel,
                 identity: None,
             };
-            let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &exposure);
+            let c = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &[], &exposure);
             assert_eq!(c.class, ClientClass::Network, "{funnel:?}");
             assert!(!c.verified_this_machine());
         }
@@ -808,7 +838,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &forward).class,
+            class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &[], &forward).class,
             ClientClass::Network
         );
     }
@@ -819,7 +849,7 @@ mod tests {
             funnel: FunnelState::Unchecked,
             identity: None,
         };
-        let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &unchecked);
+        let c = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &[], &unchecked);
         assert_eq!(c.class, ClientClass::Network);
         assert!(!c.transport_encrypted);
         assert!(
@@ -827,14 +857,18 @@ mod tests {
                 .unwrap()
                 .contains("cannot check for a Tailscale Funnel")
         );
-        let trusted = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &Exposure::default());
+        let trusted = class_of(
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
+            &[],
+            &Exposure::default(),
+        );
         assert_eq!(trusted.loopback_distrusted, None);
     }
 
     #[test]
     fn the_tailscale_listener_is_the_tailnet_only_from_a_tailscale_peer() {
         let c = class_of(
-            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            Some(arrival("100.101.102.104:5", "100.101.102.103:3890")),
             &[],
             &looked(),
         );
@@ -842,16 +876,24 @@ mod tests {
         assert!(c.transport_encrypted);
         assert_eq!(c.verified_ip, Some("100.101.102.104".parse().unwrap()));
         let spoofed = class_of(
-            arrival("192.168.1.9:5", "100.101.102.103:3890"),
+            Some(arrival("192.168.1.9:5", "100.101.102.103:3890")),
             &[],
             &looked(),
         );
         assert_eq!(spoofed.class, ClientClass::Network);
-        let lan = class_of(arrival("192.168.1.9:5", "192.168.1.2:3890"), &[], &looked());
+        let lan = class_of(
+            Some(arrival("192.168.1.9:5", "192.168.1.2:3890")),
+            &[],
+            &looked(),
+        );
         assert_eq!(lan.class, ClientClass::Network);
         assert!(!lan.transport_encrypted);
         // A tailnet address claimed by a LAN client through a wildcard listener.
-        let wildcard_lan = class_of(arrival("100.64.0.9:5", "192.168.1.2:3890"), &[], &looked());
+        let wildcard_lan = class_of(
+            Some(arrival("100.64.0.9:5", "192.168.1.2:3890")),
+            &[],
+            &looked(),
+        );
         assert_eq!(wildcard_lan.class, ClientClass::Network);
     }
 
@@ -859,7 +901,7 @@ mod tests {
     fn the_tailscale_ranges_alone_never_make_the_tailnet() {
         // No current look: nothing is the tailnet by range.
         let no_look = class_of(
-            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            Some(arrival("100.101.102.104:5", "100.101.102.103:3890")),
             &[],
             &Exposure::default(),
         );
@@ -872,7 +914,11 @@ mod tests {
         );
         // A carrier-grade NAT interface that is not this machine's Tailscale
         // address, with a current look.
-        let cgnat = class_of(arrival("100.72.9.9:5", "100.64.20.5:3890"), &[], &looked());
+        let cgnat = class_of(
+            Some(arrival("100.72.9.9:5", "100.64.20.5:3890")),
+            &[],
+            &looked(),
+        );
         assert_eq!(cgnat.class, ClientClass::Network);
     }
 
@@ -885,7 +931,7 @@ mod tests {
             ("192.168.1.2:5", "10.0.0.4:3890"),
         ] {
             let c = classify(
-                &RequestFacts::of(arrival(peer, local), &HeaderMap::new()),
+                &RequestFacts::of(Some(arrival(peer, local)), &HeaderMap::new()),
                 &looked(),
                 &interfaces,
             );
@@ -902,21 +948,21 @@ mod tests {
             ("tailscale-funnel-request", "?1"),
             ("tailscale-user-login", "x@example.com"),
         ];
-        let exposure = served("https://box.tail.ts.net", false);
-        let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &marked, &exposure);
+        let exposure = served("https://box.tail.ts.net");
+        let c = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &marked, &exposure);
         assert_eq!(c.class, ClientClass::Internet);
         assert!(c.transport_encrypted, "Funnel is always HTTPS");
         assert!(c.https_serve_route);
         assert_eq!(c.verified_ip, None);
 
         let tailnet = class_of(
-            arrival("100.64.0.9:1", "100.101.102.103:3890"),
+            Some(arrival("100.64.0.9:1", "100.101.102.103:3890")),
             &marked,
             &exposure,
         );
         assert_eq!(tailnet.class, ClientClass::Tailnet);
         let lan = class_of(
-            arrival("198.51.100.9:1", "192.168.1.2:3890"),
+            Some(arrival("198.51.100.9:1", "192.168.1.2:3890")),
             &marked,
             &exposure,
         );
@@ -954,15 +1000,19 @@ mod tests {
                 }),
             };
             let what = format!("{funnel:?} forward={forward}");
-            let serve = class_of(arrival("127.0.0.1:1", LOOPBACK), &serve_headers, &exposure);
+            let serve = class_of(
+                Some(arrival("127.0.0.1:1", LOOPBACK)),
+                &serve_headers,
+                &exposure,
+            );
             assert_eq!(serve.class, ClientClass::Network, "{what}");
             assert_eq!(serve.verified_ip, None, "a claim, never banned: {what}");
             assert_eq!(serve.claimed_ip, Some("100.64.0.9".parse().unwrap()));
             assert!(serve.loopback_distrusted.is_some(), "{what}");
-            let plain = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &exposure);
+            let plain = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &[], &exposure);
             assert_eq!(plain.class, ClientClass::Network, "{what}");
             let peer = class_of(
-                arrival("100.64.0.9:1", "100.101.102.103:3890"),
+                Some(arrival("100.64.0.9:1", "100.101.102.103:3890")),
                 &[],
                 &exposure,
             );
@@ -971,11 +1021,15 @@ mod tests {
         // A Funnel over HTTP marks its requests, so a serve route still works.
         let funnel = Exposure {
             funnel: FunnelState::Funnel,
-            ..served("https://box.tail.ts.net", false)
+            ..served("https://box.tail.ts.net")
         };
-        let serve = class_of(arrival("127.0.0.1:1", LOOPBACK), &serve_headers, &funnel);
+        let serve = class_of(
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
+            &serve_headers,
+            &funnel,
+        );
         assert_eq!(serve.class, ClientClass::Tailnet);
-        let plain = class_of(arrival("127.0.0.1:1", LOOPBACK), &[], &funnel);
+        let plain = class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &[], &funnel);
         assert_eq!(
             plain.class,
             ClientClass::Network,
@@ -985,20 +1039,24 @@ mod tests {
 
     #[test]
     fn a_forwarded_request_is_the_network_unless_a_confirmed_serve_route_vouches_for_it() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let through_serve = [
             ("host", "box.tail.ts.net"),
             ("x-forwarded-for", "100.64.0.9"),
             ("tailscale-user-login", "owner@example.com"),
         ];
-        let c = class_of(arrival("127.0.0.1:1", LOOPBACK), &through_serve, &exposure);
+        let c = class_of(
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
+            &through_serve,
+            &exposure,
+        );
         assert_eq!(c.class, ClientClass::Tailnet);
         assert!(c.transport_encrypted && c.https_serve_route);
         assert_eq!(c.verified_ip, Some("100.64.0.9".parse().unwrap()));
 
         // No identity headers: not provably Tailscale serve.
         let bare = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
                 ("host", "box.tail.ts.net"),
                 ("x-forwarded-for", "100.64.0.9"),
@@ -1010,7 +1068,7 @@ mod tests {
 
         // The right headers on the wrong Host (an ordinary proxy).
         let other = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
                 ("host", "127.0.0.1:9443"),
                 ("x-forwarded-for", "100.64.0.9"),
@@ -1023,15 +1081,15 @@ mod tests {
 
         // A Funnel route is never the tailnet.
         let funnelled = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &through_serve,
-            &served("https://box.tail.ts.net", true),
+            &funneled("https://box.tail.ts.net"),
         );
         assert_eq!(funnelled.class, ClientClass::Network);
 
         // No route confirmed at all.
         let unconfirmed = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &through_serve,
             &Exposure::default(),
         );
@@ -1043,7 +1101,7 @@ mod tests {
         // Claiming loopback through a proxy: the rightmost address is the one
         // the proxy saw, and the request is the network either way.
         let c = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[("x-forwarded-for", "127.0.0.1, 198.51.100.7")],
             &Exposure::default(),
         );
@@ -1052,7 +1110,7 @@ mod tests {
         assert_eq!(c.verified_ip, None, "a claim is not verified");
         // Duplicate headers: the last element of the last one.
         let dup = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
                 ("x-forwarded-for", "10.0.0.1"),
                 ("x-forwarded-for", "198.51.100.8"),
@@ -1063,7 +1121,7 @@ mod tests {
         // A header from a client that reached a non-loopback listener directly is
         // not a proxy's: the peer is the client.
         let direct = class_of(
-            arrival("198.51.100.9:1", "192.168.1.2:3890"),
+            Some(arrival("198.51.100.9:1", "192.168.1.2:3890")),
             &[("x-forwarded-for", "127.0.0.1")],
             &Exposure::default(),
         );
@@ -1071,7 +1129,7 @@ mod tests {
         assert_eq!(direct.verified_ip, Some("198.51.100.9".parse().unwrap()));
         // Unreadable: no address to count against.
         let junk = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[("x-forwarded-for", "not-an-address")],
             &Exposure::default(),
         );
@@ -1084,7 +1142,7 @@ mod tests {
             ("[2001:db8::2]", "2001:db8::2"),
         ] {
             let c = class_of(
-                arrival("127.0.0.1:1", LOOPBACK),
+                Some(arrival("127.0.0.1:1", LOOPBACK)),
                 &[("x-forwarded-for", value)],
                 &Exposure::default(),
             );
@@ -1092,9 +1150,9 @@ mod tests {
         }
         // Tailscale identity headers alone, from anywhere, mean nothing.
         let posing = class_of(
-            arrival("198.51.100.9:1", "192.168.1.2:3890"),
+            Some(arrival("198.51.100.9:1", "192.168.1.2:3890")),
             &[("tailscale-user-login", "owner@example.com")],
-            &served("https://box.tail.ts.net", false),
+            &served("https://box.tail.ts.net"),
         );
         assert_eq!(posing.class, ClientClass::Network);
     }
@@ -1103,7 +1161,7 @@ mod tests {
     fn any_forwarding_header_marks_a_loopback_request_as_forwarded() {
         for name in ["forwarded", "x-real-ip"] {
             let c = class_of(
-                arrival("127.0.0.1:1", LOOPBACK),
+                Some(arrival("127.0.0.1:1", LOOPBACK)),
                 &[(name, "for=198.51.100.1")],
                 &Exposure::default(),
             );
@@ -1123,7 +1181,7 @@ mod tests {
     #[test]
     fn this_machine_own_tailscale_address_is_the_network() {
         let to_self = class_of(
-            arrival("100.101.102.103:5", "100.101.102.103:3890"),
+            Some(arrival("100.101.102.103:5", "100.101.102.103:3890")),
             &[],
             &Exposure::default(),
         );
@@ -1145,13 +1203,13 @@ mod tests {
             }),
         };
         let other_own = class_of(
-            arrival("[fd7a:115c:a1e0::1]:5", "[fd7a:115c:a1e0::9]:3890"),
+            Some(arrival("[fd7a:115c:a1e0::1]:5", "[fd7a:115c:a1e0::9]:3890")),
             &[],
             &own,
         );
         assert_eq!(other_own.class, ClientClass::Network);
         let peer = class_of(
-            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            Some(arrival("100.101.102.104:5", "100.101.102.103:3890")),
             &[],
             &own,
         );
@@ -1169,7 +1227,7 @@ mod tests {
             }),
         };
         let c = class_of(
-            arrival("100.101.102.104:5", "100.101.102.103:3890"),
+            Some(arrival("100.101.102.104:5", "100.101.102.103:3890")),
             &[],
             &forward,
         );
@@ -1179,14 +1237,14 @@ mod tests {
 
     #[test]
     fn serve_is_proven_only_when_the_nearest_hop_names_a_tailscale_address() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let with = |extra: &[(&'static str, &'static str)]| {
             let mut headers = vec![
                 ("host", "box.tail.ts.net"),
                 ("tailscale-user-login", "owner@example.com"),
             ];
             headers.extend_from_slice(extra);
-            class_of(arrival("127.0.0.1:1", LOOPBACK), &headers, &exposure)
+            class_of(Some(arrival("127.0.0.1:1", LOOPBACK)), &headers, &exposure)
         };
         assert_eq!(
             with(&[("x-forwarded-for", "192.168.1.9")]).class,
@@ -1224,9 +1282,9 @@ mod tests {
 
     #[test]
     fn this_machine_through_its_own_serve_url_is_the_network_and_unverified() {
-        let exposure = served("https://box.tail.ts.net", false);
+        let exposure = served("https://box.tail.ts.net");
         let c = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
                 ("host", "box.tail.ts.net"),
                 ("tailscale-user-login", "owner@example.com"),
@@ -1243,7 +1301,7 @@ mod tests {
     #[test]
     fn every_address_a_request_names_is_collected() {
         let c = class_of(
-            arrival("127.0.0.1:1", LOOPBACK),
+            Some(arrival("127.0.0.1:1", LOOPBACK)),
             &[
                 ("x-forwarded-for", "198.51.100.1, 198.51.100.2"),
                 ("x-real-ip", "198.51.100.3"),
@@ -1342,11 +1400,11 @@ mod tests {
     /// a blocked address named anywhere stays blocked.
     #[test]
     fn random_header_bytes_never_raise_trust_or_hide_an_address() {
-        let serve = served("https://box.tail.ts.net", false);
+        let serve = served("https://box.tail.ts.net");
         let text = |value: &str| value.as_bytes().to_vec();
         let scenarios: Vec<Scenario<'_>> = vec![
             (
-                arrival("127.0.0.1:1", LOOPBACK),
+                Some(arrival("127.0.0.1:1", LOOPBACK)),
                 vec![
                     ("host", text("box.tail.ts.net")),
                     ("tailscale-user-login", text("owner@example.com")),
@@ -1355,14 +1413,14 @@ mod tests {
                 ],
                 &serve,
             ),
-            (arrival("127.0.0.1:1", LOOPBACK), vec![], &serve),
+            (Some(arrival("127.0.0.1:1", LOOPBACK)), vec![], &serve),
             (
-                arrival("100.101.102.104:5", "100.101.102.103:3890"),
+                Some(arrival("100.101.102.104:5", "100.101.102.103:3890")),
                 vec![("x-forwarded-for", text("203.0.113.9"))],
                 &serve,
             ),
             (
-                arrival("127.0.0.1:1", LOOPBACK),
+                Some(arrival("127.0.0.1:1", LOOPBACK)),
                 vec![
                     ("x-forwarded-for", text("10.0.0.1, 203.0.113.9")),
                     ("forwarded", text("for=198.51.100.77")),
@@ -1415,7 +1473,7 @@ mod tests {
             value.extend_from_slice(b", 203.0.113.9");
             let c = classify(
                 &facts(
-                    arrival("127.0.0.1:1", LOOPBACK),
+                    Some(arrival("127.0.0.1:1", LOOPBACK)),
                     &[("x-forwarded-for", value.clone())],
                 ),
                 &serve,

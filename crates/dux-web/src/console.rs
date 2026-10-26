@@ -80,17 +80,31 @@ pub fn unknown_color_warning(setting: &str) -> String {
     format!("[server] color = \"{setting}\" is not auto/always/never. Using \"auto\".")
 }
 
+/// Whether a console stream's lines carry color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Coloring {
+    /// Each line's colored spelling.
+    Colored,
+    /// Each line's plain ASCII spelling.
+    Plain,
+}
+
 /// Read the real environment and decide whether to color, given the configured
 /// `[server] color` setting. The thin caller over [`decide_color`].
-pub fn detect(setting: &str) -> bool {
+pub fn detect(setting: &str) -> Coloring {
     let no_color = std::env::var("NO_COLOR").ok();
     let term = std::env::var("TERM").ok();
-    decide_color(&ColorInputs {
+    let colored = decide_color(&ColorInputs {
         setting,
         stdout_is_terminal: std::io::stdout().is_terminal(),
         no_color: no_color.as_deref(),
         term: term.as_deref(),
-    })
+    });
+    if colored {
+        Coloring::Colored
+    } else {
+        Coloring::Plain
+    }
 }
 
 // ── Writer seam ────────────────────────────────────────────────────────────
@@ -134,32 +148,36 @@ struct LineWriter {
     /// only gates a human-facing note, so exact ordering does not matter.
     dropped: AtomicU64,
     /// Whether this stream's lines carry color.
-    color: bool,
+    coloring: Coloring,
     /// The stream, for its drop note.
     name: &'static str,
 }
 
 impl LineWriter {
-    fn spawn(writer: Box<dyn Write + Send>, bound: usize, color: bool, name: &'static str) -> Self {
+    fn spawn(
+        writer: Box<dyn Write + Send>,
+        bound: usize,
+        coloring: Coloring,
+        name: &'static str,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(bound);
         std::thread::Builder::new()
             .name(format!("dux-console-{name}"))
-            .spawn(move || writer_loop(writer, rx))
+            .spawn(move || writer_loop(writer, &rx))
             .expect("spawn console writer thread");
         Self {
             tx,
             dropped: AtomicU64::new(0),
-            color,
+            coloring,
             name,
         }
     }
 
     /// `line` as this stream prints it: colored or plain.
     fn render(&self, line: &LogLine) -> String {
-        if self.color {
-            line.render_colored()
-        } else {
-            line.render_plain()
+        match self.coloring {
+            Coloring::Colored => line.render_colored(),
+            Coloring::Plain => line.render_plain(),
         }
     }
 
@@ -279,13 +297,22 @@ struct ConsoleInner {
 /// screen's side margins, the panel's border and its padding.
 const VIEWER_CHROME: usize = 8;
 
+/// Whether a line also goes to the echo stream, when the console has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Echo {
+    /// Echo it, if it is a warning or an error.
+    Echoed,
+    /// The caller already printed it to stderr itself.
+    AlreadyOnStderr,
+}
+
 impl Console {
-    /// A real console writing to stdout. `color` comes from [`detect`];
+    /// A real console writing to stdout. `coloring` comes from [`detect`];
     /// warning and error lines also go to stderr when `streams` says they would
     /// otherwise go unseen.
-    pub fn stdout(color: bool, streams: dux_core::serve_log::StdStreams) -> Self {
+    pub fn stdout(coloring: Coloring, streams: dux_core::serve_log::StdStreams) -> Self {
         let mut console = Self::with_writer(
-            color,
+            coloring,
             Box::new(std::io::stdout()),
             WRITER_CHANNEL_BOUND,
             now_hms,
@@ -303,7 +330,7 @@ impl Console {
             inner.echo = Some(LineWriter::spawn(
                 writer,
                 ECHO_CHANNEL_BOUND,
-                false,
+                Coloring::Plain,
                 "stderr",
             ));
         }
@@ -316,19 +343,23 @@ impl Console {
         self
     }
 
-    /// A buffer-backed console stamped at a fixed time whose warnings are or are
-    /// not echoed, plus handles on what it printed to stdout and to stderr.
+    /// A plain buffer-backed console stamped at a fixed time, as `dux server`
+    /// builds it with stdout redirected: its warnings are echoed. Also hands
+    /// back what it printed to stdout and to stderr.
     #[cfg(test)]
-    pub(crate) fn test_capture_echoing(
-        color: bool,
-        stdout_is_terminal: bool,
-    ) -> (Self, TestSink, SharedBuffer) {
-        let (mut console, sink) = Self::test_capture(color);
+    pub(crate) fn test_capture_redirected() -> (Self, TestSink, SharedBuffer) {
+        let (mut console, sink) = Self::test_capture(Coloring::Plain);
         let stderr = SharedBuffer::new();
-        if !stdout_is_terminal {
-            console.set_echo(Box::new(stderr.clone()));
-        }
+        console.set_echo(Box::new(stderr.clone()));
         (console, sink, stderr)
+    }
+
+    /// [`Self::test_capture_redirected`] with stdout on a terminal: nothing is
+    /// echoed, so stderr stays empty.
+    #[cfg(test)]
+    pub(crate) fn test_capture_on_terminal() -> (Self, TestSink, SharedBuffer) {
+        let (console, sink) = Self::test_capture(Coloring::Plain);
+        (console, sink, SharedBuffer::new())
     }
 
     /// Queue a warning or error line on the echo, if there is one. Never blocks.
@@ -342,9 +373,14 @@ impl Console {
     }
 
     /// Build a writer-backed console over an owned writer.
-    fn with_writer(color: bool, writer: Box<dyn Write + Send>, bound: usize, clock: Clock) -> Self {
+    fn with_writer(
+        coloring: Coloring,
+        writer: Box<dyn Write + Send>,
+        bound: usize,
+        clock: Clock,
+    ) -> Self {
         Self(Arc::new(ConsoleInner {
-            sink: Sink::Writer(LineWriter::spawn(writer, bound, color, "stdout")),
+            sink: Sink::Writer(LineWriter::spawn(writer, bound, coloring, "stdout")),
             capture: None,
             file: None,
             stamp: now_rfc3339,
@@ -371,6 +407,7 @@ impl Console {
 
     /// This console, also writing every line to `log`. Only while building: the
     /// console is not shared yet.
+    #[must_use]
     pub fn with_server_log(mut self, log: Arc<ServerLog>) -> Self {
         if let Some(inner) = Arc::get_mut(&mut self.0) {
             inner.file = Some(log);
@@ -422,10 +459,10 @@ impl Console {
     /// A buffer-backed console stamped at a fixed time, plus a handle to read
     /// what it printed. Test-only.
     #[cfg(test)]
-    pub(crate) fn test_capture(color: bool) -> (Self, TestSink) {
+    pub(crate) fn test_capture(coloring: Coloring) -> (Self, TestSink) {
         let buf = SharedBuffer::new();
         let console = Self::with_writer(
-            color,
+            coloring,
             Box::new(buf.clone()),
             WRITER_CHANNEL_BOUND,
             fixed_test_clock,
@@ -456,7 +493,7 @@ impl Console {
                 Ok(())
             }
         }
-        let console = Self::with_writer(false, Box::new(Stuck), 1, fixed_test_clock);
+        let console = Self::with_writer(Coloring::Plain, Box::new(Stuck), 1, fixed_test_clock);
         // One line wedges the writer, the next fills the queue behind it.
         console.info("wedged");
         console.info("queued");
@@ -465,8 +502,12 @@ impl Console {
 
     /// A writer-backed console with a custom channel bound and writer.
     #[cfg(test)]
-    fn test_capture_bounded(color: bool, bound: usize, writer: Box<dyn Write + Send>) -> Self {
-        Self::with_writer(color, writer, bound, fixed_test_clock)
+    fn test_capture_bounded(
+        coloring: Coloring,
+        bound: usize,
+        writer: Box<dyn Write + Send>,
+    ) -> Self {
+        Self::with_writer(coloring, writer, bound, fixed_test_clock)
     }
 
     #[cfg(test)]
@@ -521,21 +562,21 @@ impl Console {
     /// Send one line to every sink this console has. The one place a line
     /// leaves the console, which is what keeps the two surfaces identical.
     fn line(&self, line: LogLine) {
-        self.line_echoed(line, true);
+        self.line_echoed(line, Echo::Echoed);
     }
 
     /// [`Self::line`], with the stderr copy left out when the caller already
     /// printed this line there.
-    fn line_echoed(&self, line: LogLine, echo: bool) {
+    fn line_echoed(&self, line: LogLine, echo: Echo) {
         self.write_to_file(&line);
         self.deliver(line, echo);
     }
 
     /// Everything [`Self::line_echoed`] does except the file.
-    fn deliver(&self, line: LogLine, echo: bool) {
+    fn deliver(&self, line: LogLine, echo: Echo) {
         if let Sink::Writer(writer) = &self.0.sink {
             writer.send(&line, self.0.clock);
-            if echo {
+            if echo == Echo::Echoed {
                 self.echo(&line);
             }
         }
@@ -595,7 +636,7 @@ impl Console {
         }
         self.line_echoed(
             LogLine::event(&(self.0.clock)(), LogTone::Warn, message),
-            false,
+            Echo::AlreadyOnStderr,
         );
     }
 
@@ -629,13 +670,13 @@ impl Console {
         }
     }
 
-    /// Turn the QR codes on or off for this console, from `[server] qr_codes`.
-    /// `dux server` passes the setting AND whether stdout is a terminal, so a
-    /// piped log is never filled with blocks.
-    pub fn set_qr_codes(&self, enabled: bool) {
+    /// Turn the QR codes on for this console, from `[server] qr_codes`. They
+    /// start off. `dux server` asks for them only when the setting is on AND
+    /// stdout is a terminal, so a piped log is never filled with blocks.
+    pub fn show_qr_codes(&self) {
         self.0
             .qr_codes
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Lay the codes out in exactly `columns` columns instead of asking the
@@ -666,7 +707,7 @@ impl Console {
         };
         // A drawing for the screen, so it stays out of `server.log`.
         for line in dux_core::serve_log::qr_lines(&(self.0.clock)(), urls, columns) {
-            self.deliver(line, true);
+            self.deliver(line, Echo::Echoed);
         }
     }
 
@@ -756,7 +797,7 @@ impl Console {
 /// The dedicated writer thread body: own the writer, drain the channel, write +
 /// flush each line, acknowledge each barrier once everything before it has been
 /// written. The loop ends, and the thread exits, when the channel closes.
-fn writer_loop(mut writer: Box<dyn Write + Send>, rx: std::sync::mpsc::Receiver<WriterMsg>) {
+fn writer_loop(mut writer: Box<dyn Write + Send>, rx: &std::sync::mpsc::Receiver<WriterMsg>) {
     while let Ok(msg) = rx.recv() {
         match msg {
             WriterMsg::Line(line) => {
@@ -1043,7 +1084,7 @@ mod tests {
 
     #[test]
     fn console_emits_event_lines_to_the_buffer() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         console.client_connected(ip("10.0.0.1"));
         console.client_disconnected(ip("10.0.0.1"));
         let out = sink.contents();
@@ -1053,7 +1094,7 @@ mod tests {
 
     #[test]
     fn console_access_line_goes_to_the_buffer() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         console.access("POST", "/api/login", 401, 250);
         assert_eq!(sink.contents(), "12:00:00 POST /api/login 401 250ms\n");
         console.access_over_control_socket("GET", "/api/v1/workspace", 200, 3);
@@ -1067,7 +1108,7 @@ mod tests {
 
     #[test]
     fn console_banner_writes_every_line() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         console.banner(&sample_banner());
         assert_eq!(
             sink.contents(),
@@ -1077,7 +1118,10 @@ mod tests {
 
     #[test]
     fn stdout_console_is_active() {
-        assert!(Console::stdout(false, dux_core::serve_log::StdStreams::current()).is_active());
+        assert!(
+            Console::stdout(Coloring::Plain, dux_core::serve_log::StdStreams::current())
+                .is_active()
+        );
     }
 
     // ── The flip's capture console ─────────────────────────────────────────
@@ -1146,7 +1190,7 @@ mod tests {
 
     #[test]
     fn a_colored_stdout_console_and_the_capture_record_the_same_text() {
-        let (stdout, sink) = Console::test_capture(true);
+        let (stdout, sink) = Console::test_capture(Coloring::Colored);
         let ring = ActivityRing::new(100);
         let dir = tempfile::tempdir().unwrap();
         let log_in = |name: &str| {
@@ -1161,7 +1205,7 @@ mod tests {
         // one that prints, the flip's that captures, and the background server's
         // that does only this.
         let capture = Console::test_ring_capture(ring.clone()).with_server_log(log_in("flip.log"));
-        let printing = Console::test_capture(false)
+        let printing = Console::test_capture(Coloring::Plain)
             .0
             .with_server_log(log_in("printing.log"));
         let file_only = Console::test_file_only(log_in("file-only.log"));
@@ -1196,7 +1240,7 @@ mod tests {
     /// and the flip's viewer as the same lines.
     #[test]
     fn qr_codes_and_tailnet_rows_reach_both_surfaces_as_the_same_lines() {
-        let (stdout, sink) = Console::test_capture(true);
+        let (stdout, sink) = Console::test_capture(Coloring::Colored);
         let ring = ActivityRing::new(200);
         let dir = tempfile::tempdir().unwrap();
         let server = dux_core::config::ServerConfig {
@@ -1211,7 +1255,7 @@ mod tests {
             url: QR_NAME.to_string(),
         }];
         for console in [&stdout, &capture] {
-            console.set_qr_codes(true);
+            console.show_qr_codes();
             console.set_qr_columns(120);
             console.tailnet_rows(&rows);
             console.qr_codes(&[QR_IP.to_string(), QR_NAME.to_string()]);
@@ -1237,19 +1281,19 @@ mod tests {
 
     #[test]
     fn qr_codes_switched_off_or_with_nothing_to_show_print_nothing() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         console.set_qr_columns(120);
         console.qr_codes(&[QR_IP.to_string()]);
         assert_eq!(sink.contents(), "", "off unless a serve path turns it on");
-        console.set_qr_codes(true);
+        console.show_qr_codes();
         console.qr_codes(&[]);
         assert_eq!(sink.contents(), "", "no address, no code");
     }
 
     #[test]
     fn qr_codes_stack_on_a_narrow_terminal() {
-        let (console, sink) = Console::test_capture(false);
-        console.set_qr_codes(true);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
+        console.show_qr_codes();
         console.set_qr_columns(60);
         console.qr_codes(&[QR_IP.to_string(), QR_NAME.to_string()]);
         let out = sink.contents();
@@ -1273,14 +1317,14 @@ mod tests {
         let ring = ActivityRing::new(10);
         Console::test_ring_capture(ring.clone()).serve_urls(&urls);
         assert_eq!(ring.serve_urls(), urls);
-        let (stdout, sink) = Console::test_capture(false);
+        let (stdout, sink) = Console::test_capture(Coloring::Plain);
         stdout.serve_urls(&urls);
         assert_eq!(sink.contents(), "");
     }
 
     #[test]
     fn flush_waits_for_every_queued_line() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         for n in 0..50 {
             console.info(&format!("line {n}"));
         }
@@ -1299,7 +1343,7 @@ mod tests {
             gate,
             entered: entered_tx,
         };
-        let console = Console::test_capture_bounded(false, 2, Box::new(writer));
+        let console = Console::test_capture_bounded(Coloring::Plain, 2, Box::new(writer));
         console.info("stuck");
         entered_rx.recv().expect("the writer is wedged in write");
         // Fill the channel too, so even queueing the barrier would block.
@@ -1342,7 +1386,7 @@ mod tests {
     /// stderr, and ordinary lines stay on stdout alone.
     #[test]
     fn with_stdout_redirected_warnings_and_errors_also_reach_stderr() {
-        let (console, sink, stderr) = Console::test_capture_echoing(false, false);
+        let (console, sink, stderr) = Console::test_capture_redirected();
         warn_and_info(&console);
         console.flush();
         let stdout = sink.contents();
@@ -1380,7 +1424,7 @@ mod tests {
             gate,
             entered,
         };
-        let (console, _sink) = Console::test_capture(false);
+        let (console, _sink) = Console::test_capture(Coloring::Plain);
         let console = console.with_test_echo(Box::new(stuck));
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1410,7 +1454,8 @@ mod tests {
             }
         }
         let buf = SharedBuffer::new();
-        let console = Console::test_capture_bounded(false, 2, Box::new(Slow(buf.clone())));
+        let console =
+            Console::test_capture_bounded(Coloring::Plain, 2, Box::new(Slow(buf.clone())));
         // The writer takes the first line and sits in its slow write; the next
         // two fill the queue, so the flush's barrier has to wait for room.
         console.info("shutdown line 0");
@@ -1428,7 +1473,7 @@ mod tests {
     /// On a terminal the log line is enough: nothing goes to stderr.
     #[test]
     fn with_stdout_on_a_terminal_each_warning_prints_once() {
-        let (console, sink, stderr) = Console::test_capture_echoing(false, true);
+        let (console, sink, stderr) = Console::test_capture_on_terminal();
         warn_and_info(&console);
         console.flush();
         assert_eq!(stderr.contents(), "");
@@ -1442,7 +1487,7 @@ mod tests {
     /// so its log line must not print it there a second time.
     #[test]
     fn a_warning_already_on_stderr_is_not_echoed_again() {
-        let (console, sink, stderr) = Console::test_capture_echoing(false, false);
+        let (console, sink, stderr) = Console::test_capture_redirected();
         console.warn_already_on_stderr("dux is binding 0.0.0.0:3890 with NO login gate.");
         console.flush();
         assert_eq!(stderr.contents(), "");
@@ -1453,7 +1498,7 @@ mod tests {
 
     #[test]
     fn writer_thread_preserves_order_across_concurrent_senders() {
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(Coloring::Plain);
         const SENDERS: usize = 8;
         const PER_SENDER: usize = 50;
         let mut handles = Vec::new();
@@ -1518,7 +1563,7 @@ mod tests {
             gate: release_rx,
             entered: entered_tx,
         };
-        let console = Console::test_capture_bounded(false, 2, Box::new(writer));
+        let console = Console::test_capture_bounded(Coloring::Plain, 2, Box::new(writer));
 
         console.access("GET", "/1", 200, 1);
         entered_rx

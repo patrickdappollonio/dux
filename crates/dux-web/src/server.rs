@@ -147,7 +147,7 @@ pub struct AppState {
     /// Whether this run was started with `--no-tailscale`. Projected into the
     /// bootstrap document so the Preferences row can say the flag outranks the
     /// saved value for as long as this run lasts.
-    pub tailscale_forced_no: bool,
+    pub tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
     /// Overrides how long a create handler waits for its resource to surface
     /// before answering `202 Accepted`. `None` in every real serve, which uses
     /// [`crate::rest_common::CREATE_AWAIT_TIMEOUT`] and
@@ -338,17 +338,22 @@ impl SocketClient {
         self.address
     }
 
-    fn facts(
-        &self,
-        device: Option<String>,
-        events: bool,
-    ) -> dux_core::attachments::ConnectionFacts {
+    /// What an events socket from this client registers as.
+    fn events_facts(&self, device: Option<String>) -> dux_core::attachments::ConnectionFacts {
+        dux_core::attachments::ConnectionFacts {
+            events: true,
+            ..self.pty_facts(device)
+        }
+    }
+
+    /// What a terminal socket from this client registers as.
+    fn pty_facts(&self, device: Option<String>) -> dux_core::attachments::ConnectionFacts {
         dux_core::attachments::ConnectionFacts {
             surface: dux_core::attachments::Surface::Browser,
             device,
             address: self.address,
             verified: self.verified,
-            events,
+            events: false,
             browser: self.browser.clone(),
         }
     }
@@ -371,7 +376,7 @@ pub struct RouterParams {
     pub console: Console,
     /// Whether the per-request access log is on (`[server] access_log`). Off by
     /// default; `dux server` and the flip set it from config.
-    pub access_log: bool,
+    pub access_log: AccessLog,
     /// Cap on concurrent EVENTS `/ws/events` connections
     /// (`[server] max_websocket_events_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS`]; the serve
@@ -443,7 +448,7 @@ pub struct RouterParams {
     /// Whether the allowlist accepts IP literals in Tailscale's own ranges
     /// (`[server] tailscale` is not `"no"`). Only meaningful when the host guard
     /// is active (see [`bound_ips`]).
-    pub tailscale_host_literals: bool,
+    pub tailscale_host_literals: crate::host_guard::TailscaleLiteralRule,
     /// The serve's Tailscale-mode cell, when a serve is behind this router. The
     /// Host guard reads rule 5 from it per request, so a mode change applied
     /// while dux serves moves the guard with the listener. `None` in tests and on
@@ -471,7 +476,7 @@ pub struct RouterParams {
     /// tests.
     pub tailscale_mode_control: Option<crate::serve_legs::TailscaleModeControl>,
     /// Whether this run was started with `--no-tailscale`.
-    pub tailscale_forced_no: bool,
+    pub tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
     /// How long a create handler waits for its resource before answering `202`.
     /// `None` uses the real windows; overridden only by tests (see
     /// [`RouterParams::with_create_await_timeout`]).
@@ -502,6 +507,26 @@ pub struct RouterParams {
     pub(crate) hand_over: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
+/// Whether the per-request access log prints (`[server] access_log`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessLog {
+    /// Print a line per request.
+    On,
+    /// Print none.
+    Off,
+}
+
+impl AccessLog {
+    /// What `[server] access_log` says.
+    pub fn of(server: &dux_core::config::ServerConfig) -> Self {
+        if server.access_log {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+}
+
 impl RouterParams {
     /// Plain-HTTP defaults: a no-op console, no access log, host guard off.
     /// Used by the loopback/Tailscale/proxy serve paths and every test harness;
@@ -510,7 +535,7 @@ impl RouterParams {
     pub fn plain_http() -> Self {
         Self {
             console: Console::noop(),
-            access_log: false,
+            access_log: AccessLog::Off,
             max_websocket_events_connections:
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections:
@@ -528,14 +553,14 @@ impl RouterParams {
             file_drop_max_concurrency: dux_core::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
-            tailscale_host_literals: false,
+            tailscale_host_literals: crate::host_guard::TailscaleLiteralRule::Refuse,
             live_tailscale_host_literals: None,
             live_own_magicdns_name: None,
             live_exposure: None,
             auth_reload: None,
             socket_opening_hook: None,
             tailscale_mode_control: None,
-            tailscale_forced_no: false,
+            tailscale_forced_no: crate::serve_legs::NoTailscaleFlag::Absent,
             create_await_timeout: None,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
@@ -581,6 +606,7 @@ impl RouterParams {
     /// suite serves a canned release payload from a local listener and passes its
     /// base here. Production never calls this and keeps
     /// `dux_core::urls::GITHUB_API_BASE`.
+    #[must_use]
     pub fn with_release_notes_api_base(mut self, base: impl Into<String>) -> Self {
         self.release_notes_api_base = base.into();
         self
@@ -590,6 +616,7 @@ impl RouterParams {
     /// Exists for tests: the real windows are tens of seconds, and a test that
     /// wants the deferred reply would otherwise have to sit through one.
     /// Production never calls this and keeps the real windows.
+    #[must_use]
     pub fn with_create_await_timeout(mut self, window: std::time::Duration) -> Self {
         self.create_await_timeout = Some(window);
         self
@@ -598,6 +625,7 @@ impl RouterParams {
     /// Set the file-search index cap from `[server] search_index_max_files`.
     /// The serve paths call this so the configured value (not just the default)
     /// bounds the flat walk behind `/files/list`.
+    #[must_use]
     pub fn with_search_index_max_files(mut self, max_files: usize) -> Self {
         self.search_index_max_files = max_files;
         self
@@ -606,6 +634,7 @@ impl RouterParams {
     /// Set the opening-send deadline from `[server] pty_send_timeout_seconds`.
     /// The serve paths call this so the configured value (not just the default)
     /// bounds the handshake and the scrollback replay.
+    #[must_use]
     pub fn with_pty_send_timeout_seconds(mut self, seconds: u32) -> Self {
         self.pty_send_timeout_seconds = seconds;
         self
@@ -614,6 +643,7 @@ impl RouterParams {
     /// Set the browser's beat-answer deadline from
     /// `[server] heartbeat_deadline_seconds`. The serve paths call this so the
     /// beat echo's own bound follows the window the client actually waits in.
+    #[must_use]
     pub fn with_heartbeat_deadline_seconds(mut self, seconds: u32) -> Self {
         self.heartbeat_deadline_seconds = seconds;
         self
@@ -622,6 +652,7 @@ impl RouterParams {
     /// Set the concurrent tree-listing cap from `[server]
     /// tree_list_max_concurrency`. The serve paths call this so the
     /// configured value (not just the default) bounds `/files/tree`.
+    #[must_use]
     pub fn with_tree_list_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.tree_list_max_concurrency = max_concurrency;
         self
@@ -630,6 +661,7 @@ impl RouterParams {
     /// Set the concurrent release-notes-fetch cap from `[server]
     /// release_notes_max_concurrency`. The serve paths call this so the
     /// configured value (not just the default) bounds `/api/v1/release-notes`.
+    #[must_use]
     pub fn with_release_notes_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.release_notes_max_concurrency = max_concurrency;
         self
@@ -640,6 +672,7 @@ impl RouterParams {
     /// this so the configured values (not just the defaults) bound
     /// `/api/v1/file-drop`. Both are read here, at startup, which is why the
     /// documentation says changing either needs a restart.
+    #[must_use]
     pub fn with_file_drop_limits(mut self, max_bytes: usize, max_concurrency: u32) -> Self {
         self.file_drop_max_bytes = max_bytes;
         self.file_drop_max_concurrency = max_concurrency;
@@ -649,7 +682,8 @@ impl RouterParams {
     /// Attach a real console + the access-log toggle. The CLI serve paths call
     /// this so handler events and the access middleware reach stdout; the flip
     /// leaves the no-op console in place.
-    pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
+    #[must_use]
+    pub fn with_console(mut self, console: Console, access_log: AccessLog) -> Self {
         self.console = console;
         self.access_log = access_log;
         self
@@ -659,6 +693,7 @@ impl RouterParams {
     /// `[server] max_websocket_*_connections` settings. The serve paths call this
     /// so the configured values (not just the defaults) bound live sockets, each
     /// class independently.
+    #[must_use]
     pub fn with_max_websocket_connections(
         mut self,
         events: u32,
@@ -686,11 +721,12 @@ impl RouterParams {
     /// bound: on `auto` the Tailscale leg comes and goes behind this one
     /// immutable allowlist, and a rule derived from the startup bind set would
     /// 403 every tailnet device the moment the leg was re-bound.
+    #[must_use]
     pub fn with_host_allowlist(
         mut self,
         bound_ips: Vec<IpAddr>,
         configured: Vec<String>,
-        tailscale_host_literals: bool,
+        tailscale_host_literals: crate::host_guard::TailscaleLiteralRule,
     ) -> Self {
         self.bound_ips = bound_ips;
         self.configured_hosts = configured;
@@ -701,26 +737,32 @@ impl RouterParams {
     /// Set rule 5's constructed value on its own, for a caller whose EFFECTIVE
     /// mode differs from the configured one that [`crate::router_params`]
     /// derived (a run started with `--no-tailscale`).
-    pub fn with_tailscale_host_literals(mut self, allowed: bool) -> Self {
-        self.tailscale_host_literals = allowed;
+    #[must_use]
+    pub fn with_tailscale_host_literals(
+        mut self,
+        rule: crate::host_guard::TailscaleLiteralRule,
+    ) -> Self {
+        self.tailscale_host_literals = rule;
         self
     }
 
     /// Give the routes the handle that changes `[server] tailscale` while dux
     /// serves. Absent on any path with no serve loop behind it, which is what
     /// makes the route answer "nothing is serving" rather than hanging.
+    #[must_use]
     pub fn with_tailscale_mode_control(
         mut self,
         control: crate::serve_legs::TailscaleModeControl,
-        forced_no: bool,
+        no_tailscale: crate::serve_legs::NoTailscaleFlag,
     ) -> Self {
         self.tailscale_mode_control = Some(control);
-        self.tailscale_forced_no = forced_no;
+        self.tailscale_forced_no = no_tailscale;
         self
     }
 
     /// Let the Host guard read rule 5 from the serve's live Tailscale-mode cell,
     /// so a mode change applied while dux serves moves the guard with it.
+    #[must_use]
     pub fn with_live_tailscale_host_literals(
         mut self,
         cell: Arc<std::sync::atomic::AtomicBool>,
@@ -731,6 +773,7 @@ impl RouterParams {
 
     /// Let the Host guard admit this machine's own `MagicDNS` name from the set the
     /// serve loop keeps up to date, so a tailnet rename applies with no restart.
+    #[must_use]
     pub fn with_live_own_magicdns_name(mut self, names: crate::host_guard::LiveHostNames) -> Self {
         self.live_own_magicdns_name = Some(names);
         self
@@ -738,6 +781,7 @@ impl RouterParams {
 
     /// Classify requests and admit the `MagicDNS` name by the serve's live
     /// exposure.
+    #[must_use]
     pub fn with_live_exposure(mut self, cell: crate::exposure::ExposureCell) -> Self {
         self.live_exposure = Some(cell);
         self
@@ -745,12 +789,14 @@ impl RouterParams {
 
     /// See [`RouterParams::socket_opening_hook`].
     #[doc(hidden)]
+    #[must_use]
     pub fn with_socket_opening_hook(mut self, hook: crate::auth::OpeningHook) -> Self {
         self.socket_opening_hook = Some(hook);
         self
     }
 
     /// Replace what the auth layer calls after it writes `config.toml`.
+    #[must_use]
     pub fn with_auth_reload(mut self, reload: Arc<dyn Fn() + Send + Sync>) -> Self {
         self.auth_reload = Some(reload);
         self
@@ -1108,26 +1154,20 @@ pub fn build_app(
 /// response. Reads the console + toggle off [`AppState`] and delegates to the
 /// shared [`log_request`] core.
 async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    log_request(
-        &state.console,
-        state.live_limits.access_log(),
-        request,
-        next,
-    )
-    .await
+    log_request(&state.console, &state.live_limits, request, next).await
 }
 
 /// The shared access-log core, written to the console only and never to `dux.log`.
 async fn log_request(
     console: &Console,
-    access_log: bool,
+    limits: &crate::engine_actor::LiveServerLimits,
     request: Request,
     next: Next,
 ) -> Response {
     // Check the cheap gates BEFORE allocating anything: a disabled access log or a
     // no-op console pays nothing per request. /healthz is intentionally never
     // logged (probe noise). Compared against the borrowed path, no allocation.
-    let log = access_log && console.is_recording() && request.uri().path() != "/healthz";
+    let log = limits.access_log() && console.is_recording() && request.uri().path() != "/healthz";
     if !log {
         return next.run(request).await;
     }
@@ -1289,12 +1329,21 @@ fn provider_gone_close() -> Message {
 /// forwarder ended because the PTY was torn down (the provider crashed/exited, or
 /// a tab/agent was closed), which is a provider-gone close so the client does not
 /// relaunch it.
-fn forwarder_end_close(shutting_down: bool) -> Message {
-    if shutting_down {
-        Message::Close(None)
-    } else {
-        provider_gone_close()
+fn forwarder_end_close(why: ForwarderEnd) -> Message {
+    match why {
+        ForwarderEnd::ServerShutdown => Message::Close(None),
+        ForwarderEnd::PtyGone => provider_gone_close(),
     }
+}
+
+/// Why a PTY forwarder ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForwarderEnd {
+    /// The server is shutting down.
+    ServerShutdown,
+    /// The PTY was torn down: the provider crashed or exited, or a tab or agent
+    /// was closed.
+    PtyGone,
 }
 
 fn spawn_pty_forwarder(
@@ -2431,13 +2480,18 @@ impl AttachedPtySocket<'_> {
     /// Close with the code that tells the client whether to reconnect: the server
     /// shutting down is a different answer from the provider going away.
     async fn close_after_forwarder_end(&self) -> PtyLoopAction {
-        let shutting_down = self
+        let why = if self
             .engine
             .shutdown_flag()
-            .load(std::sync::atomic::Ordering::SeqCst);
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            ForwarderEnd::ServerShutdown
+        } else {
+            ForwarderEnd::PtyGone
+        };
         // The terminal is gone (or dux is): there is nothing left to protect.
         self.attachment.end_deliberately();
-        send_close(self.sink, forwarder_end_close(shutting_down)).await;
+        send_close(self.sink, forwarder_end_close(why)).await;
         PtyLoopAction::Break
     }
 
@@ -2512,8 +2566,7 @@ impl AttachedPtySocket<'_> {
                 pty_id,
                 self.conn_id,
                 self.user_agent,
-                false,
-                None,
+                dux_core::pty_owners::ResizeIntent::Plain,
             ));
             self.event_bus.emit(pty_owner_event(
                 pty_id,
@@ -2526,7 +2579,7 @@ impl AttachedPtySocket<'_> {
 
     async fn handle_text_frame(&self, text: &str) {
         if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text) {
-            self.handle_resize_frame(frame);
+            self.handle_resize_frame(&frame);
             return;
         }
         if let Ok(frame) = serde_json::from_str::<PtyBeatFrame>(text) {
@@ -2534,30 +2587,26 @@ impl AttachedPtySocket<'_> {
         }
     }
 
-    fn handle_resize_frame(&self, frame: PtyResizeFrame) {
+    fn handle_resize_frame(&self, frame: &PtyResizeFrame) {
         let pty_id = self.target.pty_id();
         let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
-        let outcome = self.owners.claim_for_resize(
-            pty_id,
-            self.conn_id,
-            if frame.takeover {
-                dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }
-            } else {
-                dux_core::pty_owners::ResizeIntent::Plain
-            },
-            self.user_agent,
-            |seq| {
-                self.engine
-                    .resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
-            },
-        );
+        let intent = if frame.takeover {
+            dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }
+        } else {
+            dux_core::pty_owners::ResizeIntent::Plain
+        };
+        let outcome =
+            self.owners
+                .claim_for_resize(pty_id, self.conn_id, intent, self.user_agent, |seq| {
+                    self.engine
+                        .resize_pty(pty_id.to_string(), frame.rows, frame.cols, seq);
+                });
         if let Some(epoch) = outcome.epoch {
             dux_core::logger::info(&crate::pty_log::describe_claim_granted(
                 pty_id,
                 self.conn_id,
                 self.user_agent,
-                frame.takeover,
-                expected_owner,
+                intent,
             ));
             self.event_bus.emit(pty_owner_event(
                 pty_id,
@@ -2586,7 +2635,11 @@ impl AttachedPtySocket<'_> {
     }
 
     async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
-        self.attachment.note_viewed(frame.viewed);
+        if frame.viewed {
+            self.attachment.note_viewed();
+        } else {
+            self.attachment.note_unviewed();
+        }
         if frame.viewed {
             self.engine.note_viewed(self.target.pty_id().to_string());
         }
@@ -3086,7 +3139,7 @@ async fn ws_events_upgrade(
     let changes = Arc::clone(&state.changes);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
-    let facts = client.facts(captured_user_agent(&headers), true);
+    let facts = client.events_facts(captured_user_agent(&headers));
     let after = client.after;
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -4148,11 +4201,7 @@ impl AttachmentGuard {
         let own_connection = if linked.is_some() {
             None
         } else {
-            attachments.register(
-                registry_id,
-                client.facts(device, false),
-                Some(heard.clone()),
-            );
+            attachments.register(registry_id, client.pty_facts(device), Some(heard.clone()));
             Some(registry_id.to_string())
         };
         let connection = linked.unwrap_or_else(|| registry_id.to_string());
@@ -4174,13 +4223,13 @@ impl AttachmentGuard {
         }
     }
 
-    fn note_viewed(&self, viewed: bool) {
-        if viewed {
-            self.attachments
-                .note_viewed(self.token, std::time::Instant::now());
-        } else {
-            self.attachments.note_unviewed(self.token);
-        }
+    fn note_viewed(&self) {
+        self.attachments
+            .note_viewed(self.token, std::time::Instant::now());
+    }
+
+    fn note_unviewed(&self) {
+        self.attachments.note_unviewed(self.token);
     }
 
     fn end_deliberately(&self) {
@@ -4396,11 +4445,11 @@ mod tests {
     fn forwarder_end_close_is_provider_gone_unless_shutting_down() {
         // A provider crash/exit (not shutting down) must tell the client to stop;
         // a shutdown must be a plain close so the client reconnects on restart.
-        match forwarder_end_close(false) {
+        match forwarder_end_close(ForwarderEnd::PtyGone) {
             Message::Close(Some(frame)) => assert_eq!(frame.code, PROVIDER_GONE_CLOSE_CODE),
             other => panic!("expected provider-gone close, got {other:?}"),
         }
-        match forwarder_end_close(true) {
+        match forwarder_end_close(ForwarderEnd::ServerShutdown) {
             Message::Close(None) => {}
             other => panic!("expected a plain close on shutdown, got {other:?}"),
         }
@@ -5663,8 +5712,8 @@ mod tests {
     async fn access_log_emits_request_lines_and_skips_healthz() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
-        let (console, sink) = Console::test_capture(false);
-        let params = RouterParams::plain_http().with_console(console, true);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::On);
         let app = build_app(handle, Router::new(), params);
 
         // A 200 on an open route is logged.
@@ -5759,9 +5808,9 @@ mod tests {
     async fn access_log_toggle_off_emits_nothing() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
         // access_log = false.
-        let params = RouterParams::plain_http().with_console(console, false);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::Off);
         let app = build_app(handle, Router::new(), params);
 
         let _ = app
@@ -5788,8 +5837,8 @@ mod tests {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
         let limits = handle.live_limits();
-        let (console, sink) = Console::test_capture(false);
-        let params = RouterParams::plain_http().with_console(console, false);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::Off);
         let app = build_app(handle, Router::new(), params);
 
         let _ = app
@@ -5804,7 +5853,7 @@ mod tests {
             .unwrap();
         assert!(sink.contents().is_empty(), "bound with the log off");
 
-        limits.set_access_log(true);
+        limits.set_access_log(AccessLog::On);
         let _ = app
             .oneshot(
                 axum::http::Request::builder()
@@ -5833,7 +5882,7 @@ mod tests {
         // to prove the console-activity gate (not just the toggle) suppresses it.
         let params = RouterParams {
             console: Console::noop(),
-            access_log: true,
+            access_log: AccessLog::On,
             ..RouterParams::plain_http()
         };
         // The router still builds; nothing should panic and nothing is observable
@@ -6982,7 +7031,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec![],
-                false,
+                crate::host_guard::TailscaleLiteralRule::Refuse,
             ),
         );
 
@@ -7037,7 +7086,11 @@ mod tests {
             handle,
             Router::new(),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Refuse,
+                )
                 .with_live_tailscale_host_literals(Arc::clone(&literals)),
         );
         let tailnet_probe = || {
@@ -7095,7 +7148,11 @@ mod tests {
             handle,
             Router::new(),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Admit,
+                )
                 .with_live_tailscale_host_literals(Arc::clone(&literals))
                 .with_live_own_magicdns_name(own_name.clone()),
         );
@@ -7153,7 +7210,11 @@ mod tests {
             handle,
             Router::new().route("/probe-mutation", axum::routing::post(|| async { "ok" })),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Admit,
+                )
                 .with_live_own_magicdns_name(own_name),
         );
         let relayed = axum::http::Request::builder()
@@ -7198,7 +7259,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec!["old.example.com".to_string()],
-                false,
+                crate::host_guard::TailscaleLiteralRule::Refuse,
             ),
         );
         let status = |host: &'static str| {
@@ -7237,7 +7298,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec![],
-                true,
+                crate::host_guard::TailscaleLiteralRule::Admit,
             ),
         );
 

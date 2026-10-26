@@ -143,15 +143,24 @@ async fn boot() -> Fixture {
     }
 }
 
+/// Whether the add-project box that checks the default branch out is ticked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Checkout {
+    /// Ticked: check the default branch out first.
+    Default,
+    /// Not ticked: add the repository on the branch it is on.
+    AsIs,
+}
+
 /// Add the repository through the real route and return the new project's id,
 /// waiting out the checkout worker when the box was ticked.
-async fn add_project(f: &Fixture, checkout_default: bool) -> String {
+async fn add_project(f: &Fixture, checkout: Checkout) -> String {
     let resp = reqwest::Client::new()
         .post(format!("http://{}/api/v1/projects", f.addr))
         .json(&serde_json::json!({
             "path": f.repo.to_string_lossy(),
             "name": "repo",
-            "checkout_default": checkout_default,
+            "checkout_default": checkout == Checkout::Default,
         }))
         .send()
         .await
@@ -244,7 +253,7 @@ fn stored_base(f: &Fixture, project_id: &str) -> Option<String> {
 async fn adding_without_the_checkout_branches_new_worktrees_from_the_current_branch() {
     let f = boot().await;
 
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
 
     assert_eq!(
         stored_base(&f, &project_id).as_deref(),
@@ -267,7 +276,7 @@ async fn adding_without_the_checkout_branches_new_worktrees_from_the_current_bra
 async fn adding_with_the_checkout_branches_new_worktrees_from_the_default_branch() {
     let f = boot().await;
 
-    let project_id = add_project(&f, true).await;
+    let project_id = add_project(&f, Checkout::Default).await;
 
     assert_eq!(
         git(&f.repo, &["symbolic-ref", "--short", "HEAD"]),
@@ -285,7 +294,7 @@ async fn adding_with_the_checkout_branches_new_worktrees_from_the_default_branch
 #[tokio::test]
 async fn checking_out_the_default_branch_later_moves_the_project_base_to_it() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     assert_eq!(stored_base(&f, &project_id).as_deref(), Some("feature"));
 
     let resp = reqwest::Client::new()
@@ -323,7 +332,7 @@ async fn the_checkout_confirmation_reaches_the_browser_with_its_names_as_parts()
     use futures_util::StreamExt;
 
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws/events", f.addr))
         .await
         .unwrap();
@@ -493,7 +502,7 @@ async fn changing_the_base_to_a_local_branch_switches_the_folder_and_new_worktre
 {
     let f = boot().await;
     let develop_commit = local_branch_off_main(&f.repo, "develop", "develop.txt");
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     assert_eq!(stored_base(&f, &project_id).as_deref(), Some("feature"));
 
     let (status, listing) = list_branches(&f, &project_id).await;
@@ -561,7 +570,7 @@ async fn changing_the_base_to_a_local_branch_switches_the_folder_and_new_worktre
 async fn changing_the_base_to_a_branch_only_origin_has_creates_the_local_branch_even_without_guessing()
  {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     // Someone pushes `release` after this clone was made, so only the listing's
     // fetch can bring it in; and guessing is off, so only an explicit tracking
     // branch can check it out.
@@ -606,7 +615,7 @@ async fn changing_the_base_to_a_branch_only_origin_has_creates_the_local_branch_
 async fn a_folder_with_conflicting_changes_refuses_the_switch_and_keeps_the_base() {
     let f = boot().await;
     local_branch_off_main(&f.repo, "develop", "README.md");
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     // An uncommitted edit to the very file `develop` changes: git will not
     // carry it across the switch.
     std::fs::write(f.repo.join("README.md"), "edited in the folder\n").unwrap();
@@ -636,7 +645,7 @@ async fn a_folder_with_conflicting_changes_refuses_the_switch_and_keeps_the_base
 #[tokio::test]
 async fn a_branch_an_agent_holds_is_listed_as_held_and_refused_if_posted() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     let worktree = create_agent(&f, &project_id).await;
 
     let (status, listing) = list_branches(&f, &project_id).await;
@@ -677,7 +686,7 @@ async fn a_branch_an_agent_holds_is_listed_as_held_and_refused_if_posted() {
 #[tokio::test]
 async fn the_branch_listing_survives_a_failed_fetch_and_says_so() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     // origin is gone: a local path that does not exist, so no network is tried.
     let gone = f.tmp.path().join("gone.git");
     git(
@@ -707,7 +716,7 @@ async fn the_branch_listing_survives_a_failed_fetch_and_says_so() {
 #[tokio::test]
 async fn both_base_branch_routes_refuse_a_project_whose_folder_is_gone() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     std::fs::rename(&f.repo, f.tmp.path().join("moved-away")).unwrap();
 
     let (status, body) = list_branches(&f, &project_id).await;
@@ -814,7 +823,7 @@ async fn change_base_succeeds(f: &Fixture, project_id: &str, branch: &str) {
 #[tokio::test]
 async fn deleting_the_agent_with_its_worktree_but_not_its_branch_frees_and_keeps_it() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     let worktree = create_agent(&f, &project_id).await;
 
     delete_agent_and_wait(&f, "?delete_worktree=true&delete_branch=false").await;
@@ -838,7 +847,7 @@ async fn deleting_the_agent_with_its_worktree_but_not_its_branch_frees_and_keeps
 #[tokio::test]
 async fn a_worktree_no_agent_holds_points_at_the_worktree_manager_and_that_way_out_works() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     let worktree = create_agent(&f, &project_id).await;
 
     // The delete dialog's default: worktree box unticked.
@@ -912,7 +921,7 @@ async fn a_worktree_no_agent_holds_points_at_the_worktree_manager_and_that_way_o
 #[tokio::test]
 async fn an_agent_whose_worktree_folder_is_gone_is_named_and_its_advice_frees_the_branch() {
     let f = boot().await;
-    let project_id = add_project(&f, false).await;
+    let project_id = add_project(&f, Checkout::AsIs).await;
     let worktree = create_agent(&f, &project_id).await;
     std::fs::remove_dir_all(&worktree).unwrap();
 

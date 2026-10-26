@@ -931,7 +931,7 @@ mod tests {
     /// reply body.
     fn tailscale_router(
         answer: dux_core::config::TailscaleModeOutcome,
-        forced_no: bool,
+        no_tailscale: crate::serve_legs::NoTailscaleFlag,
     ) -> (
         dux_core::test_scratch::ScratchDir,
         axum::Router,
@@ -956,7 +956,7 @@ mod tests {
             handle,
             axum::Router::new(),
             crate::server::RouterParams::plain_http()
-                .with_tailscale_mode_control(control, forced_no),
+                .with_tailscale_mode_control(control, no_tailscale),
         );
         (tmp, app, seen)
     }
@@ -983,7 +983,7 @@ mod tests {
         // reply has to say that AND that the choice is saved for the next one.
         let (_tmp, app, seen) = tailscale_router(
             dux_core::config::TailscaleModeOutcome::RefusedForcedNo,
-            true,
+            crate::serve_legs::NoTailscaleFlag::Given,
         );
         let reply = reply_of(app.clone(), "yes").await;
         assert_eq!(reply["mode"], "yes");
@@ -1025,7 +1025,7 @@ mod tests {
         let leg: std::net::SocketAddr = "100.64.0.5:8080".parse().unwrap();
         let (_tmp, app, seen) = tailscale_router(
             dux_core::config::TailscaleModeOutcome::Applied { bound: Some(leg) },
-            false,
+            crate::serve_legs::NoTailscaleFlag::Absent,
         );
 
         let reply = reply_of(app, "yes").await;
