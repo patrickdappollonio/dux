@@ -10,6 +10,7 @@ use dux_core::start_check_fixtures::{
     BINDING_VALUE_POSITIONS, BROKEN_PLAINTEXT_PASSWORD_FILES, NAME_POSITIONS as POSITIONS,
     PLAINTEXT_PASSWORD_POSITIONS, PROJECT_VALUE_POSITIONS, VALUE_POSITIONS, name_tokens as tokens,
 };
+use std::fmt::Write as _;
 
 /// Every table `get` is asked for.
 const TABLES: &[&str] = &[
@@ -79,7 +80,7 @@ fn printed(body: &str) -> Vec<(String, String)> {
         let mut text = String::from_utf8_lossy(&out).into_owned();
         text.push_str(&String::from_utf8_lossy(&err));
         if let Err(error) = result {
-            text.push_str(&format!("{error:#}"));
+            let _ = write!(text, "{error:#}");
         }
         said.push((format!("get {table}"), text));
     }
@@ -93,7 +94,7 @@ fn printed(body: &str) -> Vec<(String, String)> {
     );
     let mut text = String::from_utf8_lossy(&out).into_owned();
     if let Err(error) = result {
-        text.push_str(&format!("{error:#}"));
+        let _ = write!(text, "{error:#}");
     }
     said.push(("set".to_string(), text));
     // A set over a setting the file may have written as a table, or with a
@@ -108,7 +109,7 @@ fn printed(body: &str) -> Vec<(String, String)> {
     );
     let mut text = String::from_utf8_lossy(&out).into_owned();
     if let Err(error) = result {
-        text.push_str(&format!("{error:#}"));
+        let _ = write!(text, "{error:#}");
     }
     said.push(("set ui.theme".to_string(), text));
     if let Ok(mut config) = toml::from_str::<dux_core::config::Config>(body) {
@@ -518,7 +519,7 @@ fn printed_with_show(body: &str) -> Vec<(String, String)> {
         let mut text = String::from_utf8_lossy(&out).into_owned();
         text.push_str(&String::from_utf8_lossy(&err));
         if let Err(error) = result {
-            text.push_str(&format!("{error:#}"));
+            let _ = write!(text, "{error:#}");
         }
         said.push((format!("get {}", args.join(" ")), text));
     }

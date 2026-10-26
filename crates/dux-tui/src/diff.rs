@@ -831,6 +831,7 @@ pub(crate) fn wrap_diff_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
     use tempfile::tempdir;
 
     #[test]
@@ -1538,7 +1539,10 @@ mod tests {
         // Both sides rewritten line for line, so the pair is past the hard cap
         // AND git's own patch is far longer than the head cap.
         let lines = DIFF_REFUSE_ABOVE_LINES / 2 + 1;
-        let base: String = (0..lines).map(|i| format!("old {i}\n")).collect();
+        let base = (0..lines).fold(String::new(), |mut text, i| {
+            let _ = writeln!(text, "old {i}");
+            text
+        });
         // Every other line rewritten, so the patch interleaves its removals and
         // its additions rather than emitting one whole side before the other.
         let changed: String = (0..lines)

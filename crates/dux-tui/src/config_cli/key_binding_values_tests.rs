@@ -1,5 +1,6 @@
 //! A value written as a `[keys]` binding is never printed.
 use super::*;
+use std::fmt::Write as _;
 
 struct NoSecrets;
 impl SecretSource for NoSecrets {
@@ -40,7 +41,7 @@ fn get(p: &DuxPaths, args: &[&str]) -> (String, String) {
     let r = run_get(&args, p, &mut out, &mut err);
     let mut e = String::from_utf8(err).unwrap();
     if let Err(x) = r {
-        e.push_str(&format!("ERR: {x:#}"));
+        let _ = write!(e, "ERR: {x:#}");
     }
     (String::from_utf8(out).unwrap(), e)
 }

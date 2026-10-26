@@ -27785,10 +27785,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .map(|y| {
-                let line: String = (0..buffer.area.width)
+                let mut line: String = (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect();
-                format!("{line}\n")
+                line.push('\n');
+                line
             })
             .collect();
 

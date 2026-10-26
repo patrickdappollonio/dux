@@ -12657,6 +12657,7 @@ mod tests {
     use crate::numeric::usize_to_u16_wrapping;
     use dux_core::worker::ReviewCopyConsent;
     use std::collections::BTreeMap;
+    use std::fmt::Write as _;
 
     /// The commit success message advertises the push key only where pushing can
     /// succeed. A standalone agent has no branch, so the key it used to name
@@ -21897,7 +21898,7 @@ not_a_real_action = ["x"]
         install_feedable_pty(app);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         // 41 lines (40 fed plus the READY sentinel) through a 24-row grid,
         // with the trailing newline pushing the cursor onto a 42nd row, leaves
@@ -22055,7 +22056,7 @@ not_a_real_action = ["x"]
         install_feedable_pty_with_scrollback(&mut app, 5);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_row_present(&mut app, &fill, "L39");
         app.refresh_snapshot_buf();
@@ -23368,9 +23369,11 @@ not_a_real_action = ["x"]
     fn mouse_wheel_commit_text_scrolls_commit_viewport() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input =
-            TextInput::with_text((0..20).map(|i| format!("line {i}\n")).collect::<String>())
-                .with_multiline(4);
+        app.commit_input = TextInput::with_text((0..20).fold(String::new(), |mut text, i| {
+            let _ = writeln!(text, "line {i}");
+            text
+        }))
+        .with_multiline(4);
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, 80, 15));
 
@@ -26645,7 +26648,7 @@ cyan = "#00ffff"
         // Fill enough history that scrolling back 20 rows is possible.
         let mut fill = String::new();
         for i in 0..60 {
-            fill.push_str(&format!("line {i}\n"));
+            let _ = writeln!(fill, "line {i}");
         }
         client.write_bytes(fill.as_bytes()).expect("write fill");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -33723,7 +33726,7 @@ cyan = "#00ffff"
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         enter_scroll_mode(&mut app, 3);
@@ -33759,7 +33762,7 @@ cyan = "#00ffff"
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         enter_scroll_mode(&mut app, 3);
@@ -33828,7 +33831,7 @@ cyan = "#00ffff"
         set_forward_scroll(&mut app, ForwardScroll::Never);
         let mut fill = String::new();
         for n in 0..40 {
-            fill.push_str(&format!("L{n:02}\n"));
+            let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
         app.last_pty_size = (24, 80);

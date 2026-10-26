@@ -2406,7 +2406,7 @@ fn escape_toml_string(value: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                out.push_str(&format!("\\u{:04X}", u32::from(c)));
+                let _ = write!(out, "\\u{:04X}", u32::from(c));
             }
             c => out.push(c),
         }
@@ -2459,28 +2459,23 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
 
     for project in projects {
         out.push_str("[[projects]]\n");
-        out.push_str(&format!("id = \"{}\"\n", escape_toml_string(&project.id)));
-        out.push_str(&format!(
-            "path = \"{}\"\n",
-            escape_toml_string(&project.path)
-        ));
+        let _ = writeln!(out, "id = \"{}\"", escape_toml_string(&project.id));
+        let _ = writeln!(out, "path = \"{}\"", escape_toml_string(&project.path));
         if let Some(name) = &project.name {
-            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(name)));
+            let _ = writeln!(out, "name = \"{}\"", escape_toml_string(name));
         }
         if let Some(provider) = &project.default_provider {
-            out.push_str(&format!(
-                "default_provider = \"{}\"\n",
+            let _ = writeln!(
+                out,
+                "default_provider = \"{}\"",
                 escape_toml_string(provider)
-            ));
+            );
         }
         if let Some(auto_reopen_agents) = project.auto_reopen_agents {
-            out.push_str(&format!("auto_reopen_agents = {auto_reopen_agents}\n"));
+            let _ = writeln!(out, "auto_reopen_agents = {auto_reopen_agents}");
         }
         if let Some(command) = &project.startup_command {
-            out.push_str(&format!(
-                "startup_command = \"{}\"\n",
-                escape_toml_string(command)
-            ));
+            let _ = writeln!(out, "startup_command = \"{}\"", escape_toml_string(command));
         }
         if !project.env.is_empty() {
             out.push_str("env = { ");
@@ -2488,7 +2483,7 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&format!("{} = \"{}\"", key, escape_toml_string(value)));
+                let _ = write!(out, "{} = \"{}\"", key, escape_toml_string(value));
             }
             out.push_str(" }\n");
         }
@@ -2517,7 +2512,7 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
         return;
     }
     for (name, value) in env {
-        out.push_str(&format!("{} = \"{}\"\n", name, escape_toml_string(value)));
+        let _ = writeln!(out, "{} = \"{}\"", name, escape_toml_string(value));
     }
     out.push('\n');
 }
@@ -2527,17 +2522,15 @@ fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str(
         "# CLI command dux should use for the companion terminal bound to an agent session.\n",
     );
-    out.push_str(&format!(
-        "command = \"{}\"\n",
+    let _ = writeln!(
+        out,
+        "command = \"{}\"",
         escape_toml_string(&terminal.command)
-    ));
+    );
     out.push_str(
         "# Arguments for the companion terminal command. The default [\"-l\"] launches a login\n# shell so your profile, aliases, and prompt are loaded.\n",
     );
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&terminal.args)
-    ));
+    let _ = writeln!(out, "args = {}\n", render_string_list(&terminal.args));
 }
 
 fn render_startup_command_terminal_config(
@@ -2549,54 +2542,48 @@ fn render_startup_command_terminal_config(
         "# Shell used to run project startup commands before launching a new agent.\n\
          # \"$SHELL\" is expanded when the command runs and falls back to /bin/sh if unset.\n",
     );
-    out.push_str(&format!(
-        "command = \"{}\"\n",
+    let _ = writeln!(
+        out,
+        "command = \"{}\"",
         escape_toml_string(&terminal.command)
-    ));
+    );
     out.push_str(
         "# Arguments passed before the configured project startup command.\n\
          # The default [\"-l\", \"-c\"] runs a login shell without interactive job-control warnings.\n",
     );
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&terminal.args)
-    ));
+    let _ = writeln!(out, "args = {}\n", render_string_list(&terminal.args));
 }
 
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
-    out.push_str(&format!("[providers.{name}]\n"));
-    out.push_str(&format!("# CLI command for {name} sessions.\n"));
-    out.push_str(&format!(
-        "command = \"{}\"\n",
-        escape_toml_string(&config.command)
-    ));
+    let _ = writeln!(out, "[providers.{name}]");
+    let _ = writeln!(out, "# CLI command for {name} sessions.");
+    let _ = writeln!(out, "command = \"{}\"", escape_toml_string(&config.command));
     out.push_str(
         "# Arguments passed to the provider command when launching an interactive PTY session.\n",
     );
-    out.push_str(&format!("args = {}\n", render_string_list(&config.args)));
+    let _ = writeln!(out, "args = {}", render_string_list(&config.args));
     out.push_str(
         "# Optional args dux should use when reconnecting a detached session.\n\
          # Leave this empty for CLIs that do not support cwd/repo-scoped session resume.\n",
     );
-    out.push_str(&format!(
-        "resume_args = {}\n",
+    let _ = writeln!(
+        out,
+        "resume_args = {}",
         render_string_list(config.resume_args.as_deref().unwrap_or(&[]))
-    ));
+    );
     out.push_str(
         "# Optional timeout for resumed sessions that produce no visible output.\n\
          # If resume hangs before rendering anything, dux kills it and retries fresh after this many milliseconds.\n\
          # Set to 0 to disable the timeout.\n",
     );
-    out.push_str(&format!(
-        "resume_wait_timeout_ms = {}\n",
+    let _ = writeln!(
+        out,
+        "resume_wait_timeout_ms = {}",
         config.resume_wait_timeout_ms.unwrap_or(0)
-    ));
+    );
     if let Some(hint) = &config.install_hint {
         out.push_str("# Hint shown to the user when the provider command is not found on PATH.\n");
-        out.push_str(&format!(
-            "install_hint = \"{}\"\n",
-            escape_toml_string(hint)
-        ));
+        let _ = writeln!(out, "install_hint = \"{}\"", escape_toml_string(hint));
     }
     out.push_str(
         "# Controls whether the mouse wheel and PgUp/PgDn scroll dux's own host\n\
@@ -2611,7 +2598,9 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
          # Leave this key absent for auto. Uncomment to pin a value.\n",
     );
     match config.forward_scroll {
-        Some(value) => out.push_str(&format!("forward_scroll = {value}\n")),
+        Some(value) => {
+            let _ = writeln!(out, "forward_scroll = {value}");
+        }
         None => out.push_str("# forward_scroll = true\n"),
     }
     out.push_str(
@@ -2650,10 +2639,13 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
          # An absent key, or a value dux does not recognize, means bare.\n",
     );
     match &config.web_dragdrop_paste {
-        Some(value) => out.push_str(&format!(
-            "web_dragdrop_paste = \"{}\"\n",
-            escape_toml_string(value)
-        )),
+        Some(value) => {
+            let _ = writeln!(
+                out,
+                "web_dragdrop_paste = \"{}\"",
+                escape_toml_string(value)
+            );
+        }
         None => out.push_str("# web_dragdrop_paste = \"bare\"\n"),
     }
     out.push('\n');

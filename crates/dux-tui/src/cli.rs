@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -856,7 +857,7 @@ fn unified_diff(label_a: &str, label_b: &str, a: &str, b: &str) -> String {
     let diff = similar::TextDiff::from_lines(a, b);
     let mut out = format!("--- {label_a}\n+++ {label_b}\n");
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
-        out.push_str(&format!("{hunk}\n"));
+        let _ = writeln!(out, "{hunk}");
     }
     out
 }

@@ -33,6 +33,7 @@ use dux_core::worker::{
     CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget, WorkerEvent,
 };
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -929,9 +930,10 @@ impl App {
                     ),
                 };
                 if let Some(unavailable) = clone_unavailable {
-                    sentence.push_str(&format!(
+                    let _ = write!(
+                        sentence,
                         " dux could not look the pull request up to offer a clone: {unavailable}"
-                    ));
+                    );
                 }
                 self.set_warning(sentence);
                 {
