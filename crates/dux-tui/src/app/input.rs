@@ -538,16 +538,6 @@ impl ForwardedInput {
 }
 
 impl RawInputDispatch {
-    fn new(is_scrolled_back: bool, may_write_pty: bool) -> Self {
-        Self {
-            forward_batch: Vec::new(),
-            is_scrolled_back,
-            may_write_pty,
-            needs_selection_clear: false,
-            forwarded: ForwardedInput::default(),
-        }
-    }
-
     fn queue(&mut self, bytes: &[u8]) {
         self.forward_batch.extend_from_slice(bytes);
     }
@@ -574,12 +564,12 @@ impl RawInputDispatch {
         app.stamp_forwarded_input(&mut self.forwarded);
     }
 
-    fn finish(&mut self, app: &mut App, normalized_paste_forwarded: bool) {
+    fn finish(&mut self, app: &mut App, paste: NormalizedPaste) {
         self.flush(app);
         if self.needs_selection_clear {
             app.terminal_selection = None;
         }
-        if normalized_paste_forwarded
+        if paste == NormalizedPaste::Forwarded
             && !self.is_scrolled_back
             && app.selected_terminal_surface_client().is_some()
         {
@@ -589,11 +579,16 @@ impl RawInputDispatch {
     }
 }
 
-fn raw_action_can_reach_pty(
-    action: &RawSeqAction,
+/// What a scrolled-back pane can do with a scroll key right now.
+#[derive(Clone, Copy, Debug)]
+struct LocalScroll {
+    /// The pane is scrolled back from the live edge.
     has_scrollback: bool,
+    /// The pty has a known height to scroll by.
     has_page_height: bool,
-) -> bool {
+}
+
+fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
     match action {
         RawSeqAction::Forward(_) => true,
         RawSeqAction::Intercept(
@@ -605,15 +600,26 @@ fn raw_action_can_reach_pty(
             _,
         ) => false,
         RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
-        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, conditional, _) => {
-            !(*conditional && has_scrollback && has_page_height)
+        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
+            !(*scroll == RawScroll::WhenScrolledBack
+                && local.has_scrollback
+                && local.has_page_height)
         }
-        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, conditional, _) => {
-            !(*conditional && has_scrollback)
+        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, _) => {
+            !(*scroll == RawScroll::WhenScrolledBack && local.has_scrollback)
         }
         RawSeqAction::Intercept(..) => true,
         RawSeqAction::Mouse(..) => false,
     }
+}
+
+/// Whether the child asked for mouse reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseReporting {
+    /// It did, so it wants wheel events.
+    On,
+    /// It did not.
+    Off,
 }
 
 /// Decide whether a mouse-wheel event should be forwarded to the embedded
@@ -623,20 +629,20 @@ fn raw_action_can_reach_pty(
 /// or not. `Some(true)` always forwards, `Some(false)` never does. Page keys have
 /// their own rule below, keyed on the alt screen, because a normal-buffer app has
 /// host scrollback for them to page through.
-fn should_forward_wheel(forward_scroll: Option<bool>, _alt_screen: bool, mouse_mode: bool) -> bool {
+fn should_forward_wheel(forward_scroll: Option<bool>, mouse: MouseReporting) -> bool {
     match forward_scroll {
         Some(v) => v,
-        None => mouse_mode,
+        None => mouse == MouseReporting::On,
     }
 }
 
 /// Decide whether a page-scroll key (PgUp/PgDn) should be forwarded to the
 /// embedded child process. Page keys don't need mouse mode: in the alt screen
 /// there is no host scrollback, so forward them to the child.
-fn should_forward_page(forward_scroll: Option<bool>, alt_screen: bool) -> bool {
+fn should_forward_page(forward_scroll: Option<bool>, screen: dux_core::pty::ScreenBuffer) -> bool {
     match forward_scroll {
         Some(v) => v,
-        None => alt_screen,
+        None => screen == dux_core::pty::ScreenBuffer::Alternate,
     }
 }
 
@@ -777,7 +783,7 @@ pub(crate) fn decide_terminal_press(
     kind: MouseEventKind,
     modifiers: KeyModifiers,
     link_uri: Option<&str>,
-    child_wants_mouse: bool,
+    mouse_reporting: MouseReporting,
 ) -> TerminalPressAction {
     if !matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
         return TerminalPressAction::Unclaimed;
@@ -785,7 +791,7 @@ pub(crate) fn decide_terminal_press(
     let Some(uri) = link_uri else {
         return TerminalPressAction::Unclaimed;
     };
-    if !child_wants_mouse {
+    if mouse_reporting == MouseReporting::Off {
         // Nothing reaches a child that never asked for the mouse, so there is
         // nothing to withhold: the press keeps its ordinary meaning (focus, or
         // the start of a selection) and only the release can open. The hatch
@@ -1736,9 +1742,14 @@ impl App {
     /// policy (or the live alt-screen state) says the child owns page keys.
     fn should_forward_center_page(&self) -> bool {
         let fs = self.selected_surface_forward_scroll();
-        let alt = self
+        let alt = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen)
+        {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
         should_forward_page(fs, alt)
     }
 
@@ -3313,14 +3324,14 @@ impl App {
         if intercepts_allowed && patterns.palette.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
                 Action::OpenPalette,
-                false,
+                RawScroll::Never,
                 seq.to_vec(),
             ));
         }
         if intercepts_allowed && patterns.takeover.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
                 Action::FocusAgent,
-                false,
+                RawScroll::Never,
                 seq.to_vec(),
             ));
         }
@@ -3367,7 +3378,12 @@ impl App {
             return Some(RawSeqAction::Mouse(mouse_event, seq.to_vec()));
         }
         if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
-            return Some(RawSeqAction::Intercept(action, conditional, seq.to_vec()));
+            let scroll = if conditional {
+                RawScroll::WhenScrolledBack
+            } else {
+                RawScroll::Never
+            };
+            return Some(RawSeqAction::Intercept(action, scroll, seq.to_vec()));
         }
         Some(RawSeqAction::Forward(seq.to_vec()))
     }
@@ -3385,19 +3401,17 @@ impl App {
     /// write then asks again in its own critical section. A take-over landing
     /// between two stdin batches therefore cuts a host paste mid-sequence, which
     /// is what losing the pty mid-paste has always done.
-    fn raw_input_batch_may_write(
-        &mut self,
-        actions: &[RawSeqAction],
-        is_scrolled_back: bool,
-    ) -> bool {
-        let has_scrollback = self
-            .selected_terminal_surface_client()
-            .is_some_and(|provider| provider.scrollback_offset() > 0);
-        let has_page_height = self.last_pty_size.0 > 0;
+    fn raw_input_batch_may_write(&mut self, actions: &[RawSeqAction]) -> bool {
+        let local = LocalScroll {
+            has_scrollback: self
+                .selected_terminal_surface_client()
+                .is_some_and(|provider| provider.scrollback_offset() > 0),
+            has_page_height: self.last_pty_size.0 > 0,
+        };
         let batch_can_reach_pty = actions
             .iter()
-            .any(|action| raw_action_can_reach_pty(action, has_scrollback, has_page_height));
-        is_scrolled_back || !batch_can_reach_pty || self.may_type_into_focused_pty()
+            .any(|action| raw_action_can_reach_pty(action, local));
+        !batch_can_reach_pty || self.may_type_into_focused_pty()
     }
 
     fn route_raw_page_scroll(
@@ -3408,9 +3422,14 @@ impl App {
     ) {
         dispatch.flush(self);
         let forward_scroll = self.selected_surface_forward_scroll();
-        let alt_screen = self
+        let alt_screen = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::is_alt_screen);
+            .is_some_and(dux_core::pty::PtyClient::is_alt_screen)
+        {
+            dux_core::pty::ScreenBuffer::Alternate
+        } else {
+            dux_core::pty::ScreenBuffer::Primary
+        };
         if should_forward_page(forward_scroll, alt_screen) {
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
@@ -3423,14 +3442,14 @@ impl App {
     fn route_raw_line_scroll(
         &mut self,
         direction: ScrollDirection,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.last_pty_size.0 > 0 {
             dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
@@ -3440,14 +3459,14 @@ impl App {
 
     fn route_raw_scroll_to_bottom(
         &mut self,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback {
             dispatch.flush(self);
             self.reset_pty_scrollback();
         } else {
@@ -3457,14 +3476,14 @@ impl App {
 
     fn route_raw_scroll_to_top(
         &mut self,
-        conditional: bool,
+        scroll: RawScroll,
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if conditional && has_scrollback {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback {
             dispatch.flush(self);
             self.set_pty_scrollback_max();
         } else {
@@ -3503,12 +3522,15 @@ impl App {
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
         let forward_scroll = self.selected_surface_forward_scroll();
-        let (alt_screen, mouse_mode) = self
+        let mouse_mode = if self
             .selected_terminal_surface_client()
-            .map_or((false, false), |provider| {
-                (provider.is_alt_screen(), provider.has_mouse_mode())
-            });
-        if should_forward_wheel(forward_scroll, alt_screen, mouse_mode) {
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
+        if should_forward_wheel(forward_scroll, mouse_mode) {
             self.terminal_selection = None;
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
@@ -3536,10 +3558,15 @@ impl App {
             return RawInputFlow::Return(false);
         }
 
-        let child_wants_mouse = self
+        let child_wants_mouse = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
-        if self.handle_raw_terminal_press(mouse, child_wants_mouse, dispatch.is_scrolled_back) {
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
+        if self.handle_raw_terminal_press(mouse, child_wants_mouse, dispatch) {
             return RawInputFlow::Continue;
         }
         self.route_raw_terminal_pointer(mouse, raw, child_wants_mouse, dispatch);
@@ -3574,8 +3601,8 @@ impl App {
     fn handle_raw_terminal_press(
         &mut self,
         mouse: MouseEvent,
-        child_wants_mouse: bool,
-        is_scrolled_back: bool,
+        mouse_reporting: MouseReporting,
+        dispatch: &RawInputDispatch,
     ) -> bool {
         let link = self
             .link_at_screen_point(mouse.column, mouse.row)
@@ -3584,7 +3611,7 @@ impl App {
             mouse.kind,
             mouse.modifiers,
             link.as_deref(),
-            child_wants_mouse,
+            mouse_reporting,
         ) {
             TerminalPressAction::Link(decision) => {
                 let suppress = decision.suppress;
@@ -3592,7 +3619,7 @@ impl App {
                 suppress
             }
             TerminalPressAction::ForwardPlainClick => {
-                if !is_scrolled_back {
+                if !dispatch.is_scrolled_back {
                     let button_code = sgr_button_code(MouseButton::Left);
                     self.center_mouse_forward = Some(button_code);
                     self.write_center_mouse_report(button_code, b'M', mouse.column, mouse.row);
@@ -3607,13 +3634,13 @@ impl App {
         &mut self,
         mouse: MouseEvent,
         raw: &[u8],
-        child_wants_mouse: bool,
+        mouse_reporting: MouseReporting,
         dispatch: &mut RawInputDispatch,
     ) {
         let shift_held = mouse
             .modifiers
             .contains(crossterm::event::KeyModifiers::SHIFT);
-        if !child_wants_mouse || shift_held {
+        if mouse_reporting == MouseReporting::Off || shift_held {
             self.handle_terminal_selection_mouse(mouse);
         } else if !dispatch.is_scrolled_back {
             // SGR coordinates are screen-absolute; the child expects them
@@ -3681,17 +3708,17 @@ impl App {
                 RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
                     self.route_raw_page_scroll(ScrollDirection::Down, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Up, conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineUp, scroll, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Up, scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Down, conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineDown, scroll, raw) => {
+                    self.route_raw_line_scroll(ScrollDirection::Down, scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
-                    self.route_raw_scroll_to_bottom(conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToBottom, scroll, raw) => {
+                    self.route_raw_scroll_to_bottom(scroll, &raw, dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
-                    self.route_raw_scroll_to_top(conditional, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToTop, scroll, raw) => {
+                    self.route_raw_scroll_to_top(scroll, &raw, dispatch);
                 }
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
@@ -3719,18 +3746,28 @@ impl App {
         let sequences = self.parse_raw_input_sequences(bytes);
         let plan = self.classify_raw_input_sequences(&sequences);
         let actions = plan.actions;
-        let normalized_paste_forwarded = plan.normalized_paste_forwarded;
+        let paste = if plan.normalized_paste_forwarded {
+            NormalizedPaste::Forwarded
+        } else {
+            NormalizedPaste::None
+        };
 
         let is_scrolled_back = self.scroll_mode_active();
         self.reconcile_scroll_mode();
-        let may_write_pty = self.raw_input_batch_may_write(&actions, is_scrolled_back);
+        let may_write_pty = is_scrolled_back || self.raw_input_batch_may_write(&actions);
 
-        let mut dispatch = RawInputDispatch::new(is_scrolled_back, may_write_pty);
+        let mut dispatch = RawInputDispatch {
+            forward_batch: Vec::new(),
+            is_scrolled_back,
+            may_write_pty,
+            needs_selection_clear: false,
+            forwarded: ForwardedInput::default(),
+        };
 
         if let Some(should_exit) = self.execute_raw_input_actions(actions, &mut dispatch) {
             return Ok(should_exit);
         }
-        dispatch.finish(self, normalized_paste_forwarded);
+        dispatch.finish(self, paste);
 
         Ok(false)
     }
@@ -10679,11 +10716,16 @@ impl App {
         // `forward_scroll` policy (or live alt-screen + mouse-reporting state)
         // says so; otherwise scroll dux's own host scrollback.
         let fs = self.selected_surface_forward_scroll();
-        let (alt, mouse_mode) = self
+        let mouse_mode = if self
             .selected_terminal_surface_client()
-            .map_or((false, false), |p| (p.is_alt_screen(), p.has_mouse_mode()));
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
 
-        if should_forward_wheel(fs, alt, mouse_mode) {
+        if should_forward_wheel(fs, mouse_mode) {
             // Reconstruct the SGR wheel report the child expects, translated
             // from screen-absolute coordinates to child-relative ones via the
             // terminal content area's origin. ScrollUp = button 64, down = 65.
@@ -10920,9 +10962,14 @@ impl App {
         let link = self
             .link_at_screen_point(mouse.column, mouse.row)
             .map(str::to_string);
-        let child_wants_mouse = self
+        let child_wants_mouse = if self
             .selected_terminal_surface_client()
-            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
+            .is_some_and(dux_core::pty::PtyClient::has_mouse_mode)
+        {
+            MouseReporting::On
+        } else {
+            MouseReporting::Off
+        };
         match decide_terminal_press(
             mouse.kind,
             mouse.modifiers,
@@ -12485,31 +12532,55 @@ mod tests {
         use super::should_forward_wheel;
         // None = auto: mouse reporting alone decides. An app that asks for
         // the mouse owns the wheel whether or not it took the alt screen.
-        assert!(should_forward_wheel(None, true, true));
-        assert!(!should_forward_wheel(None, true, false));
-        assert!(should_forward_wheel(None, false, true));
-        assert!(!should_forward_wheel(None, false, false));
+        assert!(should_forward_wheel(None, super::MouseReporting::On));
+        assert!(!should_forward_wheel(None, super::MouseReporting::Off));
+        assert!(should_forward_wheel(None, super::MouseReporting::On));
+        assert!(!should_forward_wheel(None, super::MouseReporting::Off));
         // Some(true) = always forward, regardless of live signals.
-        assert!(should_forward_wheel(Some(true), false, false));
-        assert!(should_forward_wheel(Some(true), true, true));
-        assert!(should_forward_wheel(Some(true), false, true));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::Off));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
+        assert!(should_forward_wheel(Some(true), super::MouseReporting::On));
         // Some(false) = never forward, even in the alt screen with mouse.
-        assert!(!should_forward_wheel(Some(false), true, true));
-        assert!(!should_forward_wheel(Some(false), false, false));
+        assert!(!should_forward_wheel(
+            Some(false),
+            super::MouseReporting::On
+        ));
+        assert!(!should_forward_wheel(
+            Some(false),
+            super::MouseReporting::Off
+        ));
     }
 
     #[test]
     fn should_forward_page_matrix() {
         use super::should_forward_page;
         // None = auto: page keys forward in the alt screen (no mouse needed).
-        assert!(should_forward_page(None, true));
-        assert!(!should_forward_page(None, false));
+        assert!(should_forward_page(
+            None,
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
+        assert!(!should_forward_page(
+            None,
+            dux_core::pty::ScreenBuffer::Primary
+        ));
         // Some(true) = always forward.
-        assert!(should_forward_page(Some(true), false));
-        assert!(should_forward_page(Some(true), true));
+        assert!(should_forward_page(
+            Some(true),
+            dux_core::pty::ScreenBuffer::Primary
+        ));
+        assert!(should_forward_page(
+            Some(true),
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
         // Some(false) = never forward, even in the alt screen.
-        assert!(!should_forward_page(Some(false), true));
-        assert!(!should_forward_page(Some(false), false));
+        assert!(!should_forward_page(
+            Some(false),
+            dux_core::pty::ScreenBuffer::Alternate
+        ));
+        assert!(!should_forward_page(
+            Some(false),
+            dux_core::pty::ScreenBuffer::Primary
+        ));
     }
 
     fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
@@ -20969,7 +21040,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 link,
-                true
+                super::MouseReporting::On
             ),
             withheld,
             "a plain press on a link is dux's, and a tracking child sees none of it"
@@ -20979,7 +21050,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 link,
-                false
+                super::MouseReporting::Off
             ),
             passed_through,
             "with tracking off there is nothing to withhold"
@@ -20989,7 +21060,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::CONTROL,
                 link,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::ForwardPlainClick,
         );
@@ -20998,7 +21069,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::CONTROL,
                 link,
-                false
+                super::MouseReporting::Off
             ),
             passed_through,
             "with no app to hand the click to, the hatch chord opens like a plain click"
@@ -21008,7 +21079,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::SHIFT,
                 link,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::Unclaimed,
             "Shift is the selection modifier and the host's own link gesture"
@@ -21018,7 +21089,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::SHIFT,
                 link,
-                false
+                super::MouseReporting::Off
             ),
             TerminalPressAction::Unclaimed,
             "and it stays a selection with tracking off, where dux parts company with the web"
@@ -21028,7 +21099,7 @@ not_a_real_action = ["x"]
                 MouseEventKind::Down(MouseButton::Left),
                 KeyModifiers::empty(),
                 None,
-                true
+                super::MouseReporting::On
             ),
             TerminalPressAction::Unclaimed,
         );
@@ -21040,7 +21111,7 @@ not_a_real_action = ["x"]
             MouseEventKind::ScrollUp,
         ] {
             assert_eq!(
-                decide_terminal_press(kind, KeyModifiers::empty(), link, true),
+                decide_terminal_press(kind, KeyModifiers::empty(), link, super::MouseReporting::On),
                 TerminalPressAction::Unclaimed,
                 "only a left PRESS can start a link gesture; {kind:?} must not"
             );

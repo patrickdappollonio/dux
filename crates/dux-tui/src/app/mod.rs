@@ -135,8 +135,19 @@ pub(crate) struct PendingLinkClick {
     pub(crate) row: u16,
 }
 
+/// Whether an intercepted scroll key in raw input scrolls dux's own
+/// scrollback or always reaches the child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawScroll {
+    /// It scrolls only while the pane is already scrolled back; otherwise the
+    /// child gets the key.
+    WhenScrolledBack,
+    /// It never scrolls dux's scrollback here.
+    Never,
+}
+
 enum RawSeqAction {
-    Intercept(Action, bool, Vec<u8>),
+    Intercept(Action, RawScroll, Vec<u8>),
     Mouse(MouseEvent, Vec<u8>),
     Forward(Vec<u8>),
 }
@@ -145,6 +156,16 @@ enum RawSeqAction {
 struct DemotedInputPatterns {
     palette: Vec<Vec<u8>>,
     takeover: Vec<Vec<u8>>,
+}
+
+/// Whether a batch of raw input forwarded a bracketed paste whose line endings
+/// were normalized on the way, which counts as typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NormalizedPaste {
+    /// It did.
+    Forwarded,
+    /// It did not.
+    None,
 }
 
 struct RawInputPlan {
