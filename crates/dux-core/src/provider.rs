@@ -5,11 +5,14 @@ use crate::config::ProviderCommandConfig;
 
 /// A config-driven provider wrapping a CLI command and its launch configuration.
 pub struct GenericProvider {
+    /// The provider's name.
     pub name: String,
+    /// Its command and launch settings.
     pub config: ProviderCommandConfig,
 }
 
 impl GenericProvider {
+    /// The program dux runs for it.
     pub fn command(&self) -> &str {
         &self.config.command
     }

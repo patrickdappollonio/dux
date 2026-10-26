@@ -313,7 +313,9 @@ pub enum Writer<'a> {
     /// A running dux applies it. `wait` is how long to wait for its outcome;
     /// `None` returns the operation's id at once.
     Dux {
+        /// The client that reaches the running dux.
         client: &'a Client,
+        /// How long to wait for the outcome, or `None` to return the operation's id at once.
         wait: Option<Duration>,
     },
 }

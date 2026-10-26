@@ -38,6 +38,7 @@ pub enum FirstLoad {
 /// version as seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FirstLoadPlan {
+    /// The screen to show.
     pub screen: FirstLoad,
     /// Whether the running version should be written to `last_seen_version`.
     ///

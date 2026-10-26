@@ -200,6 +200,7 @@ pub fn effective_agent_sort(configured: &str) -> FlatSortMode {
 /// Where the pull-request banner sits in an agent's pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrBannerPosition {
+    /// At the top of the pane.
     Top,
     /// The default.
     #[default]
@@ -392,7 +393,9 @@ pub enum ServerColor {
     /// Color when the console is a terminal that wants it. The default.
     #[default]
     Auto,
+    /// Always color, even when the console is not a terminal.
     Always,
+    /// Never color.
     Never,
 }
 

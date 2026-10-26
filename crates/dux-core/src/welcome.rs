@@ -28,6 +28,8 @@ pub struct TuiTipContext<'a> {
 }
 
 impl<'a> TuiTipContext<'a> {
+    /// A context resolving key labels through `resolve`, drawing the standalone star as
+    /// `standalone_glyph`.
     pub fn new(resolve: KeyLabelResolver<'a>, standalone_glyph: &'a str) -> Self {
         Self {
             resolve,
@@ -41,6 +43,7 @@ impl<'a> TuiTipContext<'a> {
     }
 }
 
+/// One welcome tip, in the web's and the terminal UI's words.
 pub struct WelcomeTip {
     /// Web rendering. Keybinding-free: reference web affordances (the cog app
     /// menu, buttons, the ⋯ menu). The web has NO command palette and no
@@ -51,6 +54,7 @@ pub struct WelcomeTip {
     pub tui: Option<fn(&TuiTipContext) -> String>,
 }
 
+/// Every welcome tip.
 pub const WELCOME_TIPS: &[WelcomeTip] = &[
     // --- shared tips, plus the TUI-only ones (`web: None`) whose feature has
     // no web counterpart at all: a key-driven fullscreen, the help overlay,

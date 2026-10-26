@@ -35,6 +35,8 @@ enum WriteMsg {
     Shutdown,
 }
 
+/// The process's one ordered, off-thread config writer: each save is an atomic three-way patch
+/// against the text dux last read.
 pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,

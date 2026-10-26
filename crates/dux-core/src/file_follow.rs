@@ -66,6 +66,7 @@ impl std::error::Error for LogError {}
 /// What a log read found.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LogRead {
+    /// The complete lines read, in order.
     pub lines: Vec<String>,
     /// Where a later read picks up: `<generation>:<line>`, the file (renamed by a
     /// rotation) and the complete lines of it read so far.

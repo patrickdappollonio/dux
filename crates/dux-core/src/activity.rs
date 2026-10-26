@@ -23,7 +23,9 @@ use crate::serve_log::LogLine;
 pub struct ActivitySnapshot {
     /// How many lines were ever pushed, dropped ones included.
     pub generation: u64,
+    /// How many browsers were connected.
     pub browsers: usize,
+    /// Every line, the pinned startup lines first, then the rest oldest first.
     pub lines: Vec<LogLine>,
 }
 
@@ -180,6 +182,7 @@ impl ActivityRing {
         Arc::clone(&self.0.browsers)
     }
 
+    /// How many lines were ever pushed, dropped ones included.
     pub fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::Relaxed)
     }

@@ -574,6 +574,7 @@ impl ServeRoute {
     reason = "independent facts one look at the Tailscale CLI reports"
 )]
 pub struct TailscaleIdentity {
+    /// What Tailscale says about this machine's own node.
     pub status: SelfStatus,
     /// The `tailscale serve` routes that end at dux's port.
     pub serve: Vec<ServeRoute>,

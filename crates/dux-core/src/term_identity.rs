@@ -91,7 +91,9 @@ pub enum SurfaceKind {
 /// value always wins).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerminalIdentity {
+    /// Variables set, as name and value, after the removals.
     pub set: Vec<(String, String)>,
+    /// Variables removed first; a trailing `*` marks a prefix family.
     pub remove: Vec<String>,
 }
 

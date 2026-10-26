@@ -16,7 +16,9 @@ use std::path::Path;
 pub struct WelcomeStep {
     /// 1-based position, so a surface never has to derive it from an index.
     pub number: u8,
+    /// The step's title.
     pub title: &'static str,
+    /// What the step asks the user to do.
     pub detail: &'static str,
 }
 

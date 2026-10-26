@@ -38,11 +38,14 @@ pub enum Polarity {
 /// it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
+    /// Part of a QR code.
     Code(String),
+    /// Words and spacing around a code.
     Text(String),
 }
 
 impl Segment {
+    /// The run's text.
     pub fn text(&self) -> &str {
         match self {
             Segment::Code(text) | Segment::Text(text) => text,
