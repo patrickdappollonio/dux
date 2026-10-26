@@ -576,3 +576,115 @@ fn an_operation_is_shown_and_exits_with_the_code_of_its_outcome() {
     assert_eq!(run.code(), 1);
     assert!(run.stderr().contains("op-gone"), "{}", run.stderr());
 }
+
+#[test]
+fn a_server_start_on_a_config_it_cannot_use_says_why_and_exits_one() {
+    let dir = home("server-unloadable");
+    std::fs::write(dir.join("config.toml"), "[server\n").unwrap();
+    let run = dux_in(&dir, &["server"], &[]);
+    assert_eq!((run.code(), run.stdout().as_str()), (1, ""));
+    assert_eq!(
+        run.stderr(),
+        format!(
+            "error: dux server cannot start: {}/config.toml is not valid TOML, so dux cannot \
+             read [server.auth] and cannot tell whether a password protects the web UI. Fix it \
+             at line 1, column 8: unclosed table, expected `]`, then start dux or reload the \
+             config again.\n",
+            dir.display()
+        )
+    );
+
+    let dir = home("server-log-path");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "[logging]\npath = \"{}\"\n",
+            dir.join("config.toml").display()
+        ),
+    )
+    .unwrap();
+    let run = dux_in(&dir, &["server"], &[]);
+    assert_eq!((run.code(), run.stdout().as_str()), (1, ""));
+    assert_eq!(
+        run.stderr(),
+        "error: dux server cannot start: the terminal UI and dux server will not start with \
+         this file: [logging] path points at config.toml, a file dux keeps for itself, so the log \
+         would be written into it. Give the log a file of its own.\n"
+    );
+}
+
+/// Answer each HTTP request on a loopback port from `reply`, as a remote dux
+/// would. Returns the port.
+fn serve_as_remote(reply: fn(&str) -> (u16, &'static str)) -> u16 {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let mut reader = BufReader::new(stream);
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+            let (status, body) = reply(path);
+            let _ = write!(
+                reader.get_mut(),
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn a_sign_in_over_plain_http_warns_first_and_a_previous_one_it_could_not_end_is_named() {
+    let port = serve_as_remote(|path| match path {
+        "/api/v1/auth/status" => (
+            200,
+            r#"{"password_set":true,"required_here":true,"signed_in":false}"#,
+        ),
+        "/api/v1/auth/cli-login" => (200, r#"{"token":"T0K","expires_at":null}"#),
+        "/api/v1/auth/cli-logout" => (500, r#"{"message":"the session store is busy"}"#),
+        _ => (404, "{}"),
+    });
+    let dir = home("remote-login");
+    let url = format!("http://127.0.0.1:{port}");
+    let run = dux_in(&dir, &["remote", "add", "box", &url, "--insecure"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+
+    let run = dux_in(&dir, &["remote", "login", "box", "--stdin"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(
+        run.stderr(),
+        "warning: box is reached over plain HTTP, so this password crosses the network \
+         unencrypted\n"
+    );
+    assert_eq!(run.stdout(), "Signed in to box.\n");
+
+    let run = dux_in(&dir, &["remote", "login", "box", "--stdin"], &[]);
+    assert_eq!(run.code(), 0, "{}", run.stderr());
+    assert_eq!(
+        run.stderr(),
+        "warning: box is reached over plain HTTP, so this password crosses the network \
+         unencrypted\nSigned in again, but could not tell box to end the previous sign-in: the \
+         session store is busy. It ends on its own once it goes unused for [server.auth] \
+         cli_token_idle_days.\n"
+    );
+    assert_eq!(run.stdout(), "Signed in to box.\n");
+}
