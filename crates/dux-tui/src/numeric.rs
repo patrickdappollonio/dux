@@ -5,6 +5,13 @@
 //! replace did; every value the terminal UI passes them (a screen measure, a
 //! millisecond count since start) is far below the width that would wrap.
 
+// The conversions between usize and u64 below never truncate only because a
+// usize is exactly 64 bits wide; a build where it is not stops here.
+const _: () = assert!(
+    usize::BITS == 64,
+    "dux builds for 64-bit platforms only: the numeric conversions assume a 64-bit usize"
+);
+
 /// A count or position as a terminal cell coordinate, keeping its low 16 bits.
 pub(crate) fn usize_to_u16_wrapping(n: usize) -> u16 {
     u16::try_from(n & usize::from(u16::MAX)).expect("masked to 16 bits")

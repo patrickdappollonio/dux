@@ -3,6 +3,13 @@
 //! Each kind of conversion lives here once, so every call site gets the same
 //! rule and the reason it holds is written down in one place.
 
+// The conversions between usize and u64 below never truncate only because a
+// usize is exactly 64 bits wide; a build where it is not stops here.
+const _: () = assert!(
+    usize::BITS == 64,
+    "dux builds for 64-bit platforms only: the numeric conversions assume a 64-bit usize"
+);
+
 /// A length or count as a `u64`. Every platform dux builds for has a 64-bit
 /// or narrower `usize`, so the value always fits.
 pub(crate) fn usize_to_u64(n: usize) -> u64 {
