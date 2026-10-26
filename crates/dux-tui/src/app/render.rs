@@ -2006,7 +2006,7 @@ impl App {
             deleting,
             ..
         } = cues;
-        let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
+        let (steady_dot, steady_color) = self.theme.session_dot(session.status);
         let dot = self.agent_row_glyph(cues, steady_dot);
         let (base_color, glyph_color) = self.agent_row_colors(session.status, cues, steady_color);
         let italic = |style: Style| {
@@ -2402,7 +2402,7 @@ impl App {
                                 self.theme.session_active,
                             )
                         } else {
-                            let (glyph, color) = self.theme.session_dot(&session.status);
+                            let (glyph, color) = self.theme.session_dot(session.status);
                             (glyph.to_string(), color)
                         };
                     // Project warnings appear in the narrow rail; standalone
@@ -3564,7 +3564,7 @@ impl App {
         // word is static text and is deliberately not gated.
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
         let attention_on = self.engine.config.ui.attention_indicator && session_active;
-        let glyph_tone = self.theme.session_dot(&session.status).1;
+        let glyph_tone = self.theme.session_dot(session.status).1;
         let items: Vec<TabStripItem> = tab_ids
             .iter()
             .zip(labels)
@@ -18561,7 +18561,7 @@ mod tests {
 
         let sidebar_tone = app
             .theme
-            .session_dot(&crate::model::SessionStatus::Active)
+            .session_dot(crate::model::SessionStatus::Active)
             .1;
         // The premise this test exists for: on a focused pill the title color
         // collides with the attention accent.

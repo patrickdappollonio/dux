@@ -3460,7 +3460,7 @@ impl App {
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
         dispatch.flush(self);
-        if self.handle_takeover_card_mouse(&mouse) || self.handle_dormant_card_mouse(&mouse) {
+        if self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse) {
             return RawInputFlow::Continue;
         }
 
@@ -3506,13 +3506,13 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
-        if self.handle_pending_link_mouse(&mouse) {
+        if self.handle_pending_link_mouse(mouse) {
             return RawInputFlow::Continue;
         }
-        if self.continue_raw_mouse_forward(&mouse) {
+        if self.continue_raw_mouse_forward(mouse) {
             return RawInputFlow::Continue;
         }
-        if self.raw_mouse_is_outside_overlay(&mouse) {
+        if self.raw_mouse_is_outside_overlay(mouse) {
             self.exit_interactive_mode();
             return RawInputFlow::Return(false);
         }
@@ -3520,14 +3520,14 @@ impl App {
         let child_wants_mouse = self
             .selected_terminal_surface_client()
             .is_some_and(dux_core::pty::PtyClient::has_mouse_mode);
-        if self.handle_raw_terminal_press(&mouse, child_wants_mouse, dispatch.is_scrolled_back) {
+        if self.handle_raw_terminal_press(mouse, child_wants_mouse, dispatch.is_scrolled_back) {
             return RawInputFlow::Continue;
         }
         self.route_raw_terminal_pointer(mouse, raw, child_wants_mouse, dispatch);
         RawInputFlow::Continue
     }
 
-    fn continue_raw_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+    fn continue_raw_mouse_forward(&mut self, mouse: MouseEvent) -> bool {
         if self.center_mouse_forward.is_none() {
             return false;
         }
@@ -3544,7 +3544,7 @@ impl App {
         }
     }
 
-    fn raw_mouse_is_outside_overlay(&self, mouse: &MouseEvent) -> bool {
+    fn raw_mouse_is_outside_overlay(&self, mouse: MouseEvent) -> bool {
         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
@@ -3554,7 +3554,7 @@ impl App {
 
     fn handle_raw_terminal_press(
         &mut self,
-        mouse: &MouseEvent,
+        mouse: MouseEvent,
         child_wants_mouse: bool,
         is_scrolled_back: bool,
     ) -> bool {
@@ -9523,7 +9523,7 @@ impl App {
         }
     }
 
-    fn handle_first_load_prompt_mouse(&mut self, mouse: &MouseEvent) -> Option<bool> {
+    fn handle_first_load_prompt_mouse(&mut self, mouse: MouseEvent) -> Option<bool> {
         if !matches!(self.prompt, PromptState::FirstLoad(_)) {
             return None;
         }
@@ -9542,7 +9542,7 @@ impl App {
 
     fn handle_resource_monitor_mouse(
         &mut self,
-        mouse: &MouseEvent,
+        mouse: MouseEvent,
         outside_press: bool,
     ) -> Option<bool> {
         let PromptState::ResourceMonitor {
@@ -9597,7 +9597,7 @@ impl App {
 
     fn handle_debug_input_mouse(
         &mut self,
-        mouse: &MouseEvent,
+        mouse: MouseEvent,
         outside_press: bool,
     ) -> Option<bool> {
         let PromptState::DebugInput {
@@ -9685,7 +9685,7 @@ impl App {
 
     fn handle_prompt_mouse_down(&mut self, mouse: MouseEvent) -> bool {
         let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
-            self.dismiss_prompt_on_outside_click(&mouse);
+            self.dismiss_prompt_on_outside_click(mouse);
             return false;
         };
         if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
@@ -9699,7 +9699,7 @@ impl App {
         }
     }
 
-    fn handle_prompt_mouse_drag(&mut self, mouse: &MouseEvent) {
+    fn handle_prompt_mouse_drag(&mut self, mouse: MouseEvent) {
         let Some(target) = self.pressed_button.map(|pressed| pressed.target) else {
             return;
         };
@@ -9712,7 +9712,7 @@ impl App {
         }
     }
 
-    fn handle_prompt_mouse_up(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_prompt_mouse_up(&mut self, mouse: MouseEvent) -> bool {
         let Some(pressed) = self.pressed_button.take() else {
             return false;
         };
@@ -9736,18 +9736,18 @@ impl App {
     }
 
     fn dispatch_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if let Some(result) = self.handle_first_load_prompt_mouse(&mouse) {
+        if let Some(result) = self.handle_first_load_prompt_mouse(mouse) {
             return result;
         }
-        if let Some(result) = self.handle_confirm_body_wheel(&mouse) {
+        if let Some(result) = self.handle_confirm_body_wheel(mouse) {
             return result;
         }
         let outside_press =
-            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse);
-        if let Some(result) = self.handle_resource_monitor_mouse(&mouse, outside_press) {
+            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse);
+        if let Some(result) = self.handle_resource_monitor_mouse(mouse, outside_press) {
             return result;
         }
-        if let Some(result) = self.handle_debug_input_mouse(&mouse, outside_press) {
+        if let Some(result) = self.handle_debug_input_mouse(mouse, outside_press) {
             return result;
         }
         if let Some(result) = self.handle_startup_command_logs_mouse(mouse) {
@@ -9762,10 +9762,10 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.handle_prompt_mouse_down(mouse),
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.handle_prompt_mouse_drag(&mouse);
+                self.handle_prompt_mouse_drag(mouse);
                 false
             }
-            MouseEventKind::Up(MouseButton::Left) => self.handle_prompt_mouse_up(&mouse),
+            MouseEventKind::Up(MouseButton::Left) => self.handle_prompt_mouse_up(mouse),
             _ => false,
         }
     }
@@ -10691,7 +10691,7 @@ impl App {
 
     /// Record a press dux took an interest in. Nothing opens here: the press
     /// decides, the release acts.
-    fn note_link_press(&mut self, decision: LinkPressDecision, mouse: &MouseEvent) {
+    fn note_link_press(&mut self, decision: LinkPressDecision, mouse: MouseEvent) {
         // The second click of a double click is the select-a-word gesture, not
         // a second visit to the same page. Refused at press time, on the cell,
         // so it holds for both surfaces and for a child that tracks the mouse
@@ -10755,7 +10755,7 @@ impl App {
     /// The band the press claimed has to still be the band on screen: a lane that
     /// moved, went away or now belongs to another agent is not the control the
     /// gesture began on.
-    fn handle_pending_pr_banner_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_pending_pr_banner_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(pressed) = self.pending_pr_banner_press else {
             return false;
         };
@@ -10795,7 +10795,7 @@ impl App {
     /// A new press retires the record instead of being swallowed, so a release
     /// that never arrived cannot strand the next click. A surface change under
     /// the pending press retires it the same way.
-    fn handle_pending_link_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_pending_link_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(pending) = self.pending_link_click.clone() else {
             return false;
         };
@@ -10831,7 +10831,7 @@ impl App {
     /// A press over the WINDOWED agent grid, asked the link question first.
     /// Returns whether the press was consumed; `false` leaves it to today's
     /// behavior (focus, the double-click bookkeeping, a forward to the child).
-    fn handle_center_link_press(&mut self, mouse: &MouseEvent) -> bool {
+    fn handle_center_link_press(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -10886,7 +10886,7 @@ impl App {
     /// - a modal surface owns the pane (macro bar, resize mode), matching the
     ///   keyboard's `center_typeable()` gates,
     /// - the surface is dormant or the child has no mouse tracking on.
-    fn begin_center_mouse_forward(&mut self, mouse: &MouseEvent) -> bool {
+    fn begin_center_mouse_forward(&mut self, mouse: MouseEvent) -> bool {
         if !mouse.modifiers.is_empty() {
             return false;
         }
@@ -10901,7 +10901,7 @@ impl App {
     /// A refused gate is not a fall-through: the caller claims the press either
     /// way, so a hatch click on a scrolled-back pane does nothing rather than
     /// focusing the pane and half-arming a double click.
-    fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: &MouseEvent) -> bool {
+    fn begin_center_mouse_forward_ignoring_modifiers(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -10946,7 +10946,7 @@ impl App {
     /// when the child asked for them (DECSET 1002/1003), with coordinates
     /// clamped to the pane edge exactly as a real emulator clamps a drag that
     /// leaves the window.
-    fn continue_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+    fn continue_center_mouse_forward(&mut self, mouse: MouseEvent) {
         let Some(cb) = self.center_mouse_forward else {
             return;
         };
@@ -10966,7 +10966,7 @@ impl App {
     /// a child that dropped mouse tracking MID-DRAG: it no longer wants any
     /// report, so the state is simply cleared (writing one anyway would type
     /// the raw SGR bytes at whatever replaced the mouse-mode app).
-    fn finish_center_mouse_forward(&mut self, mouse: &MouseEvent) {
+    fn finish_center_mouse_forward(&mut self, mouse: MouseEvent) {
         let Some(cb) = self.center_mouse_forward.take() else {
             return;
         };
@@ -11229,7 +11229,7 @@ impl App {
             && self.center_mouse_forward.is_some()
             && matches!(mouse.kind, MouseEventKind::Up(_))
         {
-            self.finish_center_mouse_forward(&mouse);
+            self.finish_center_mouse_forward(mouse);
         }
         if !matches!(self.prompt, PromptState::None) {
             return Some(self.handle_prompt_mouse(mouse));
@@ -11241,7 +11241,7 @@ impl App {
         if self.help_scroll.is_none() {
             return false;
         }
-        if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
+        if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), mouse) {
             self.close_help_overlay();
             return true;
         }
@@ -11296,7 +11296,7 @@ impl App {
         true
     }
 
-    fn dismiss_noninteractive_fullscreen_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    fn dismiss_noninteractive_fullscreen_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
@@ -11310,7 +11310,7 @@ impl App {
         false
     }
 
-    fn intercept_mouse_before_targets(&mut self, mouse: &MouseEvent) -> bool {
+    fn intercept_mouse_before_targets(&mut self, mouse: MouseEvent) -> bool {
         if matches!(self.center_mode, CenterMode::Agent)
             && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
             && (self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse))
@@ -11323,7 +11323,7 @@ impl App {
         self.handle_pending_pr_banner_mouse(mouse)
     }
 
-    fn handle_pr_banner_press(&mut self, mouse: &MouseEvent, windowed: bool) -> bool {
+    fn handle_pr_banner_press(&mut self, mouse: MouseEvent, windowed: bool) -> bool {
         if windowed
             && let Some(band) = self.mouse_layout.pr_banner
             && contains_point(band, mouse.column, mouse.row)
@@ -11382,7 +11382,7 @@ impl App {
         true
     }
 
-    fn handle_files_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) -> bool {
+    fn handle_files_pointer_target(&mut self, target: MouseTarget, mouse: MouseEvent) -> bool {
         match target {
             MouseTarget::FilesPane => {
                 self.focus = FocusPane::Files;
@@ -11428,7 +11428,7 @@ impl App {
         true
     }
 
-    fn handle_pointer_target(&mut self, target: MouseTarget, mouse: &MouseEvent) {
+    fn handle_pointer_target(&mut self, target: MouseTarget, mouse: MouseEvent) {
         if self.handle_left_pointer_target(target) {
             return;
         }
@@ -11457,7 +11457,7 @@ impl App {
     /// The remaining gates are the forward's own: a surface that is not the agent
     /// grid, a dormant one, and the modal surfaces that suspend the pane have
     /// nothing to select.
-    fn begin_windowed_terminal_selection(&mut self, mouse: &MouseEvent) {
+    fn begin_windowed_terminal_selection(&mut self, mouse: MouseEvent) {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
             || !matches!(self.center_mode, CenterMode::Agent)
             || self.macro_bar.is_some()
@@ -11466,7 +11466,7 @@ impl App {
         {
             return;
         }
-        self.handle_terminal_selection_mouse(*mouse);
+        self.handle_terminal_selection_mouse(mouse);
     }
 
     fn terminal_selection_is_dragging(&self) -> bool {
@@ -11533,7 +11533,7 @@ impl App {
     /// section finds no row there. This is the promotion threshold's question
     /// ("is the pointer still on the row it pressed on?"), which is about the
     /// rect and not about whether a drop there would mean anything.
-    fn row_drag_target_row(&self, list: RowDragList, mouse: &MouseEvent) -> Option<usize> {
+    fn row_drag_target_row(&self, list: RowDragList, mouse: MouseEvent) -> Option<usize> {
         match (list, self.mouse_target(mouse.column, mouse.row)) {
             (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
             (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
@@ -11549,7 +11549,7 @@ impl App {
     /// a click changes nothing. Once promoted, `hover` follows the pointer and is
     /// `None` wherever a drop would mean nothing: over the source row, the
     /// Inactive tail, empty space, or outside the sidebar.
-    fn continue_row_drag(&mut self, mouse: &MouseEvent) {
+    fn continue_row_drag(&mut self, mouse: MouseEvent) {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
@@ -11616,7 +11616,7 @@ impl App {
         }
     }
 
-    fn handle_primary_mouse_down(&mut self, mouse: &MouseEvent, windowed: bool) {
+    fn handle_primary_mouse_down(&mut self, mouse: MouseEvent, windowed: bool) {
         // A new press retires any previous row drag, wherever it lands. A release
         // does not always come back: the take-over card swallows one that lands on
         // the covered pane, and a gesture left armed would be finished later by an
@@ -11670,16 +11670,16 @@ impl App {
     fn dispatch_mouse_event(&mut self, mouse: MouseEvent, windowed: bool) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_primary_mouse_down(&mouse, windowed);
+                self.handle_primary_mouse_down(mouse, windowed);
             }
             MouseEventKind::Down(MouseButton::Middle | MouseButton::Right) => {
-                self.begin_center_mouse_forward(&mouse);
+                self.begin_center_mouse_forward(mouse);
             }
             MouseEventKind::Drag(_) if self.center_mouse_forward.is_some() => {
-                self.continue_center_mouse_forward(&mouse);
+                self.continue_center_mouse_forward(mouse);
             }
             MouseEventKind::Up(_) if self.center_mouse_forward.is_some() => {
-                self.finish_center_mouse_forward(&mouse);
+                self.finish_center_mouse_forward(mouse);
             }
             MouseEventKind::Drag(MouseButton::Left) if self.mouse_drag.is_some() => {
                 self.update_dragged_panes(mouse.column, mouse.row);
@@ -11698,7 +11698,7 @@ impl App {
             // a pane resize and a row reorder can never be live at once; these
             // arms sit after it for exactly that reason.
             MouseEventKind::Drag(MouseButton::Left) if self.row_drag.is_some() => {
-                self.continue_row_drag(&mouse);
+                self.continue_row_drag(mouse);
             }
             MouseEventKind::Up(MouseButton::Left) if self.row_drag.is_some() => {
                 self.finish_row_drag();
@@ -11725,12 +11725,12 @@ impl App {
         if self.route_startup_log_mouse(mouse) {
             return false;
         }
-        if self.dismiss_noninteractive_fullscreen_mouse(&mouse) {
+        if self.dismiss_noninteractive_fullscreen_mouse(mouse) {
             return false;
         }
 
         let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
-        if self.intercept_mouse_before_targets(&mouse) {
+        if self.intercept_mouse_before_targets(mouse) {
             return false;
         }
         self.dispatch_mouse_event(mouse, windowed);
@@ -11762,7 +11762,7 @@ impl App {
     /// covers a live grid and swallows every event over it, while this one is
     /// drawn where there is no process, so only the button's own gesture is
     /// consumed. A drag off the button before release cancels it, as everywhere.
-    pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    pub(crate) fn handle_dormant_card_mouse(&mut self, mouse: MouseEvent) -> bool {
         let Some(button) = self.mouse_layout.dormant_tab_button else {
             // The card can vanish under the pointer: the tab launched, or the
             // selection moved. An in-flight press dies with its button rather
@@ -11774,7 +11774,7 @@ impl App {
             crate::app::modal::click_target(&[(button, ())], mouse.column, mouse.row).is_some()
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if on_button(mouse) => {
+            MouseEventKind::Down(MouseButton::Left) if on_button(&mouse) => {
                 self.focus = FocusPane::Center;
                 self.dormant_tab_press = Some(components::PressedButton {
                     target: ButtonPressedTarget::DormantTabCard,
@@ -11783,7 +11783,7 @@ impl App {
                 true
             }
             MouseEventKind::Drag(_) if self.dormant_tab_press.is_some() => {
-                let inside = on_button(mouse);
+                let inside = on_button(&mouse);
                 if let Some(press) = self.dormant_tab_press.as_mut() {
                     press.inside = inside;
                 }
@@ -11794,7 +11794,7 @@ impl App {
                     .dormant_tab_press
                     .take()
                     .is_some_and(|press| press.inside);
-                if held && on_button(mouse) {
+                if held && on_button(&mouse) {
                     self.start_focused_dormant_tab();
                 }
                 true
@@ -11827,7 +11827,7 @@ impl App {
     ///
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
-    pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: &MouseEvent) -> bool {
+    pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !self.focused_pty_is_covered_by_card() {
             // The card can vanish under the pointer: this surface takes over, or
             // a launch started here claims the pty, between press and release.
@@ -11844,7 +11844,7 @@ impl App {
             })
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) if on_button(self, mouse) => {
+            MouseEventKind::Down(MouseButton::Left) if on_button(self, &mouse) => {
                 self.focus = FocusPane::Center;
                 self.takeover_press = Some(components::PressedButton {
                     target: ButtonPressedTarget::TakeOverCard,
@@ -11853,7 +11853,7 @@ impl App {
                 true
             }
             MouseEventKind::Drag(_) if self.takeover_press.is_some() => {
-                let inside = on_button(self, mouse);
+                let inside = on_button(self, &mouse);
                 if let Some(press) = self.takeover_press.as_mut() {
                     press.inside = inside;
                 }
@@ -11861,7 +11861,7 @@ impl App {
             }
             MouseEventKind::Up(_) if self.takeover_press.is_some() => {
                 let held = self.takeover_press.take().is_some_and(|press| press.inside);
-                if held && on_button(self, mouse) {
+                if held && on_button(self, &mouse) {
                     self.take_over_focused_pty();
                 }
                 true

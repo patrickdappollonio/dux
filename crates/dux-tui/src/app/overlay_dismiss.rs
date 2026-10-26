@@ -70,7 +70,7 @@ pub(super) fn refusal_blink_is_running(elapsed_ms: u128) -> bool {
 ///
 /// `None` (no modal painted this frame) is not outside anything; see the
 /// fail-closed contract on [`OverlayMouseLayoutState::frame`].
-pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: &MouseEvent) -> bool {
+pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: MouseEvent) -> bool {
     let Some(rect) = frame else {
         return false;
     };
@@ -410,7 +410,7 @@ impl App {
     /// row, a checkbox, a text input, or a modal's deliberate blank
     /// misclick-safe spacer row. That also means a click INSIDE a refusing
     /// modal never arms the cue: it was handled by the control it hit.
-    pub(super) fn dismiss_prompt_on_outside_click(&mut self, mouse: &MouseEvent) -> bool {
+    pub(super) fn dismiss_prompt_on_outside_click(&mut self, mouse: MouseEvent) -> bool {
         if !click_outside_frame(self.overlay_layout.frame.get(), mouse) {
             return false;
         }
@@ -1050,33 +1050,33 @@ mod tests {
     #[test]
     fn click_outside_frame_requires_a_recorded_rect() {
         // Fail-closed: with nothing recorded, no click is "outside" anything.
-        assert!(!click_outside_frame(None, &left_down(0, 0)));
+        assert!(!click_outside_frame(None, left_down(0, 0)));
     }
 
     #[test]
     fn click_outside_frame_matches_only_a_left_press_outside_the_rect() {
         let rect = Some(Rect::new(10, 5, 20, 10));
 
-        assert!(click_outside_frame(rect, &left_down(0, 0)));
-        assert!(!click_outside_frame(rect, &left_down(15, 8)));
+        assert!(click_outside_frame(rect, left_down(0, 0)));
+        assert!(!click_outside_frame(rect, left_down(15, 8)));
         // A press that starts inside and releases outside is a drag off a
         // control, not a dismissal.
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Up(MouseButton::Left), 0, 0)
+            mouse(MouseEventKind::Up(MouseButton::Left), 0, 0)
         ));
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0)
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0)
         ));
         // A stray right-click is not a dismissal either.
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::Down(MouseButton::Right), 0, 0)
+            mouse(MouseEventKind::Down(MouseButton::Right), 0, 0)
         ));
         assert!(!click_outside_frame(
             rect,
-            &mouse(MouseEventKind::ScrollUp, 0, 0)
+            mouse(MouseEventKind::ScrollUp, 0, 0)
         ));
     }
 

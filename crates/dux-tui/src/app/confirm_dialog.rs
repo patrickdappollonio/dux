@@ -392,7 +392,7 @@ impl App {
 
     /// The mouse wheel over an open Confirm dialog whose body scrolls. `None`
     /// for every other event, so it reaches the dialog's own routing.
-    pub(crate) fn handle_confirm_body_wheel(&mut self, mouse: &MouseEvent) -> Option<bool> {
+    pub(crate) fn handle_confirm_body_wheel(&mut self, mouse: MouseEvent) -> Option<bool> {
         let delta = match mouse.kind {
             MouseEventKind::ScrollDown => WHEEL_ROWS,
             MouseEventKind::ScrollUp => -WHEEL_ROWS,

@@ -4236,7 +4236,7 @@ impl AgentSortMode {
     }
 
     /// The `config.ui.agent_sort` string for this mode (the shared wire value).
-    pub(crate) fn as_config_str(&self) -> &'static str {
+    pub(crate) fn as_config_str(self) -> &'static str {
         match self {
             AgentSortMode::Active => "active",
             AgentSortMode::Updated => "updated",
@@ -4249,8 +4249,8 @@ impl AgentSortMode {
 
     /// The next mode in the TUI cycle. If the current mode is not in the cycle
     /// (i.e. `Manual`, which the TUI never offers), start the cycle at `Active`.
-    pub(crate) fn next_in_tui_cycle(&self) -> AgentSortMode {
-        match Self::TUI_CYCLE.iter().position(|m| m == self) {
+    pub(crate) fn next_in_tui_cycle(self) -> AgentSortMode {
+        match Self::TUI_CYCLE.iter().position(|m| *m == self) {
             Some(i) => Self::TUI_CYCLE[(i + 1) % Self::TUI_CYCLE.len()],
             None => AgentSortMode::Active,
         }
