@@ -301,6 +301,10 @@ mod tests {
     /// naming who and from where; the terminal UI's own attachments are never
     /// in its way.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_terminal_ui_command_is_refused_while_a_followed_operation_holds_what_it_changes() {
         use crate::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
 

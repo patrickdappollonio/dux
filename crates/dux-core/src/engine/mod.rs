@@ -10014,6 +10014,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn config_reload_ready_drains_deferred_commands() {
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
@@ -11009,6 +11013,10 @@ mod tests {
     /// Every ending of a "Change base branch", in the words both surfaces
     /// print, with its tone, its stickiness and the names it chips.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of every change-base ending with its expected words, tone, stickiness and chips; the check over it is a short loop"
+    )]
     fn every_change_base_final_says_what_happened_and_chips_its_names() {
         use crate::base_branch::{BaseBranchChangeFailure, BranchHolder};
         use crate::prose::ProseSegment;

@@ -1121,6 +1121,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_failed_fallback_relaunch_leaves_no_tab_keyed_state_behind() {
         // The retry tears the stale attempt down BEFORE it dispatches the fresh
         // one, and the fresh one can fail (here: a provider binary that does not

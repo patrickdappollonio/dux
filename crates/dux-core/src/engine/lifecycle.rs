@@ -5159,6 +5159,10 @@ mod tests {
     /// sibling and closes the exited row, exactly as a user-initiated close
     /// does. Nothing about the survivor is re-keyed, and the agent stays up.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn prune_promotes_the_sibling_when_the_slot_tab_exits_cleanly() {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");

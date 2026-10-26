@@ -29,6 +29,10 @@ pub(crate) fn test_engine() -> (Engine, ScratchDir) {
 /// An engine over the state under `root`, as [`test_engine`] builds one: a
 /// second call on the same root, once the first engine is dropped, is the
 /// next start of dux on the same config directory.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one field initializer per Engine field, the test twin of the production constructor"
+)]
 pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
     let root = root.to_path_buf();
     let paths = DuxPaths {

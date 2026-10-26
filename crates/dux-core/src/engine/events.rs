@@ -10591,6 +10591,10 @@ mod tests {
     /// during the first waits for the follow-up, not for the reload that was
     /// already reading.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one engine, each step asserting on the state the previous step left"
+    )]
     fn a_reload_asked_for_during_a_reload_runs_right_after_it() {
         use crate::operations::{OperationKind, OperationState};
         let (mut engine, _tmp) = test_engine();
