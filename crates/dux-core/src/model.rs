@@ -8,12 +8,6 @@ use chrono::{DateTime, Utc};
 use crate::ids::TabIdRef;
 use crate::pty::PtyClient;
 
-/// GitHub CLI availability status.
-///
-/// First probed at startup, and RE-probed whenever the GitHub integration is
-/// switched from off to on and on every config reload, on both surfaces. It is
-/// last-known-good rather than a once-per-process value: a decisive probe
-/// replaces it, and a transient failure leaves the previous value standing.
 /// Whether an agent should be running: what auto-reopen brings back on the
 /// next start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +50,12 @@ impl ConversationStart {
     }
 }
 
+/// GitHub CLI availability status.
+///
+/// First probed at startup, and RE-probed whenever the GitHub integration is
+/// switched from off to on and on every config reload, on both surfaces. It is
+/// last-known-good rather than a once-per-process value: a decisive probe
+/// replaces it, and a transient failure leaves the previous value standing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GhStatus {
     /// Not yet checked.
