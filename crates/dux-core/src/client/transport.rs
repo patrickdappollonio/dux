@@ -7,6 +7,7 @@
 //! chunks, or up to the close. ureq reaches a Unix socket only through its
 //! semver-exempt transport API.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::os::unix::net::UnixStream;
@@ -410,13 +411,13 @@ fn request_bytes(request: &Request) -> Vec<u8> {
         request.path
     );
     if let Some(token) = &request.bearer {
-        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        let _ = write!(head, "Authorization: Bearer {token}\r\n");
     }
     let body = request.body.as_deref().unwrap_or_default();
     if request.body.is_some() {
         head.push_str("Content-Type: application/json\r\n");
     }
-    head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+    let _ = write!(head, "Content-Length: {}\r\n\r\n", body.len());
     let mut bytes = head.into_bytes();
     bytes.extend_from_slice(body);
     bytes

@@ -8,6 +8,7 @@
 //! by [`perform`].
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1231,9 +1232,10 @@ fn pull_request_anywhere(
             } else {
                 "."
             };
-            sentence.push_str(&format!(
+            let _ = write!(
+                sentence,
                 " dux could not look the pull request up to offer a clone: {why}{stop}"
-            ));
+            );
         }
         sentence.push_str(" Add --project to choose one.");
         return Err(CliError::new(Exit::Refused, sentence));
@@ -1411,7 +1413,7 @@ pub fn agents_rm(
         segment(&agent.id)
     );
     if delete_worktree {
-        question.push_str(&format!(" and its worktree {}", agent.directory()));
+        let _ = write!(question, " and its worktree {}", agent.directory());
     }
     match delete_branch {
         Some(true) => question.push_str(", deleting its branch"),
@@ -1419,7 +1421,7 @@ pub fn agents_rm(
         None => {}
     }
     if let Some(delete) = delete_branch {
-        path.push_str(&format!("&delete_branch={delete}"));
+        let _ = write!(path, "&delete_branch={delete}");
     }
     Ok(Planned::new(question, Method::Delete, path, None).forced(if_attached))
 }

@@ -852,6 +852,8 @@ pub fn notes_url(notes: Option<&ReleaseNotes>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     const SAMPLE: &str = include_str!("../tests/fixtures/sample_release_notes.md");
@@ -1252,8 +1254,8 @@ Its description.
         // The cap that matters is on the HTTP read (`MAX_BODY_BYTES`).
         let mut body = String::from("## Title\n\n");
         for i in 0..500 {
-            body.push_str(&format!("Paragraph {i} with some prose in it.\n\n"));
-            body.push_str(&format!("### Feature number {i}\n\n"));
+            let _ = write!(body, "Paragraph {i} with some prose in it.\n\n");
+            let _ = write!(body, "### Feature number {i}\n\n");
         }
         let n = parse_release_body(&body);
         assert_eq!(n.headline, "Title");

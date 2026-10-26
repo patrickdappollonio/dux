@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
@@ -1451,12 +1452,13 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
 
     let mut q = String::from("{\n  rateLimit { cost remaining resetAt }\n");
     for (k, ((owner, repo), positions)) in groups.iter().enumerate() {
-        q.push_str(&format!(
-            "  {}: repository(owner: {}, name: {}) {{\n",
+        let _ = writeln!(
+            q,
+            "  {}: repository(owner: {}, name: {}) {{",
             repo_alias(k),
             graphql_string(owner),
             graphql_string(repo),
-        ));
+        );
         for &pos in positions {
             let p = &planned[chunk[pos]];
             if p.emit_ref() {
@@ -1478,10 +1480,11 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                 // (measured on golang/go). Those are somebody else's pull
                 // requests and `parse_chunk_response` drops them.
                 let qname = graphql_string(&format!("refs/heads/{}", p.branch));
-                q.push_str(&format!(
-                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url repository {{ nameWithOwner }} }} }} }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url repository {{ nameWithOwner }} }} }} }}",
                     ref_alias(pos),
-                ));
+                );
             }
             if p.emit_head() {
                 // The same question asked by head NAME, which still answers
@@ -1489,20 +1492,22 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                 // came back null. A name is not an identity, so each node
                 // carries what `select_head_name_match` needs to refuse an
                 // older pull request that merely used the same name.
-                q.push_str(&format!(
-                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}",
                     head_alias(pos),
                     graphql_string(&p.branch),
-                ));
+                );
             }
             if p.emit_num()
                 && let Some(known) = &p.known
             {
-                q.push_str(&format!(
-                    "    {}: pullRequest(number: {}) {{ number state title url }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: pullRequest(number: {}) {{ number state title url }}",
                     num_alias(pos),
                     known.pr_number,
-                ));
+                );
             }
         }
         q.push_str("  }\n");

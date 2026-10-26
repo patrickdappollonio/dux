@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 #[cfg(test)]
@@ -279,7 +280,7 @@ pub(crate) fn synthesize_repaint(
     let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
     for cell in cells {
         if expected_next != Some((cell.row, cell.col)) {
-            out.push_str(&format!("\x1b[{};{}H", cell.row + 1, cell.col + 1));
+            let _ = write!(out, "\x1b[{};{}H", cell.row + 1, cell.col + 1);
         }
         let style = (cell.fg, cell.bg, cell.modifier);
         if last_style != Some(style) {
@@ -294,7 +295,7 @@ pub(crate) fn synthesize_repaint(
     out.push_str("\x1b[0m");
     out.push_str(&scroll_region.decstbm_sequence());
     if let Some(cursor) = &snapshot.cursor {
-        out.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
+        let _ = write!(out, "\x1b[{};{}H", cursor.row + 1, cursor.col + 1);
     }
     out.into_bytes()
 }
@@ -476,7 +477,7 @@ fn cursor_and_palette_restore_sequence(
     // the doc comment), so the current style goes out whether or not it is
     // alacritty's default.
     if let Some(code) = code {
-        out.push_str(&format!("\x1b[{code} q"));
+        let _ = write!(out, "\x1b[{code} q");
     }
 
     // The palette baseline first: a client-side reset does not scrub OSC
@@ -492,17 +493,17 @@ fn cursor_and_palette_restore_sequence(
     // diffed alongside the foreground and background.
     for index in 0..256usize {
         if let Some(rgb) = colors[index] {
-            out.push_str(&format!("\x1b]4;{index};{}\x1b\\", osc_color(rgb)));
+            let _ = write!(out, "\x1b]4;{index};{}\x1b\\", osc_color(rgb));
         }
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Foreground] {
-        out.push_str(&format!("\x1b]10;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]10;{}\x1b\\", osc_color(rgb));
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Background] {
-        out.push_str(&format!("\x1b]11;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]11;{}\x1b\\", osc_color(rgb));
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Cursor] {
-        out.push_str(&format!("\x1b]12;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]12;{}\x1b\\", osc_color(rgb));
     }
     out
 }
@@ -3182,7 +3183,7 @@ impl TerminalState {
         // before the cursor, because setting a region homes the cursor.
         out.push_str(&self.scroll_region.region().decstbm_sequence());
         if let Some(point) = cursor {
-            out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
+            let _ = write!(out, "\x1b[{};{}H", point.line + 1, point.column.0 + 1);
         }
         // Last, so the `?7h` this replay forced on above (to rebuild soft-wrapped
         // rows through the client's own autowrap) is put back to whatever the
@@ -7324,7 +7325,7 @@ mod tests {
 
         let mut input = String::new();
         for n in 11..=LINES {
-            input.push_str(&format!("{n}\r"));
+            let _ = write!(input, "{n}\r");
         }
         client
             .write_bytes(input.as_bytes())

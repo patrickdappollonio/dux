@@ -15,6 +15,7 @@
 //! The lockfile also contains the holder's PID, written after the lock is
 //! acquired, so a colliding launch can tell the user which process to close.
 
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -95,13 +96,10 @@ impl SingleInstanceLock {
         match &self.control_socket {
             ControlSocketState::NotOpened => {}
             ControlSocketState::Open(socket) => {
-                text.push_str(&format!(
-                    "{CONTROL_SOCKET_PREFIX}{}\n",
-                    socket.path().display()
-                ));
+                let _ = writeln!(text, "{CONTROL_SOCKET_PREFIX}{}", socket.path().display());
             }
             ControlSocketState::Unavailable(reason) => {
-                text.push_str(&format!("{CONTROL_SOCKET_UNAVAILABLE_PREFIX}{reason}\n"));
+                let _ = writeln!(text, "{CONTROL_SOCKET_UNAVAILABLE_PREFIX}{reason}");
             }
         }
         let _ = self.file.set_len(0);

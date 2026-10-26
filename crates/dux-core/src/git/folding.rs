@@ -8,6 +8,7 @@
 //! folder's contents a level at a time for a surface that expands it.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -910,14 +911,16 @@ pub fn nothing_in_folder(
     };
     let mut sentence = opening;
     if repositories > 0 {
-        sentence.push_str(&format!(
+        let _ = write!(
+            sentence,
             " {verb} a nested repository from its own row after expanding the folder."
-        ));
+        );
     }
     if worktrees > 0 {
-        sentence.push_str(&format!(
+        let _ = write!(
+            sentence,
             " {worktree_verb} a worktree of this repository from the worktree manager."
-        ));
+        );
     }
     sentence
 }

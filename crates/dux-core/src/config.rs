@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -4776,7 +4777,9 @@ pub(crate) fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
                     }
                     out.push_str(&dotted(&[(*key).to_string()]));
                 }
-                PathPart::Index(index) => out.push_str(&format!("[{index}]")),
+                PathPart::Index(index) => {
+                    let _ = write!(out, "[{index}]");
+                }
             }
         }
         out

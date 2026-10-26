@@ -9,6 +9,7 @@
 //! outcome is never lost. A wait that runs out says the outcome is unknown;
 //! it never claims the change stopped.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -402,7 +403,7 @@ pub fn describe(record: &OperationRecord) -> String {
 pub(crate) fn part_line(part: &RecordPart) -> String {
     let mut line = format!("{}: {} {}", part.part, part.subject, part.outcome);
     if let Some(reason) = &part.reason {
-        line.push_str(&format!(" ({reason})"));
+        let _ = write!(line, " ({reason})");
     }
     line
 }

@@ -2,6 +2,7 @@
 //! tabs, providers, changed files and the runtime state around them.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 
@@ -1240,7 +1241,7 @@ pub(crate) fn folder_contents_words(contents: &FolderContents) -> String {
         ));
     }
     if !not_staged.is_empty() {
-        words.push_str(&format!(" \u{b7} {} not staged", join_words(&not_staged)));
+        let _ = write!(words, " \u{b7} {} not staged", join_words(&not_staged));
     }
     words
 }

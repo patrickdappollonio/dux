@@ -1,6 +1,7 @@
 //! Runs a project's startup command in a new worktree and keeps, lists and
 //! reads the logs those runs write.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -887,21 +888,21 @@ fn write_log(path: &Path, run: &StartupCommandRun, outcome: &CommandOutcome) -> 
     }
     let mut body = String::new();
     body.push_str("dux startup command log\n");
-    body.push_str(&format!("started_at = {}\n", outcome.started.to_rfc3339()));
-    body.push_str(&format!("ended_at = {}\n", outcome.ended.to_rfc3339()));
-    body.push_str(&format!("duration_ms = {}\n", outcome.duration_ms));
-    body.push_str(&format!("project_id = {}\n", run.project.id));
-    body.push_str(&format!("project_name = {}\n", run.project.name));
-    body.push_str(&format!("project_path = {}\n", run.project.path));
-    body.push_str(&format!("agent_id = {}\n", run.session.id));
-    body.push_str(&format!("agent_branch = {}\n", run.managed.branch_name));
-    body.push_str(&format!("worktree_path = {}\n", run.managed.worktree_path));
-    body.push_str(&format!("provider = {}\n", run.session.provider.as_str()));
-    body.push_str(&format!("shell = {}\n", outcome.shell));
-    body.push_str(&format!("shell_args = {:?}\n", outcome.shell_args));
-    body.push_str(&format!("command = {}\n", run.command));
-    body.push_str(&format!("exit_code = {}\n", format_exit_code(outcome.code)));
-    body.push_str(&format!("success = {}\n", outcome.success));
+    let _ = writeln!(body, "started_at = {}", outcome.started.to_rfc3339());
+    let _ = writeln!(body, "ended_at = {}", outcome.ended.to_rfc3339());
+    let _ = writeln!(body, "duration_ms = {}", outcome.duration_ms);
+    let _ = writeln!(body, "project_id = {}", run.project.id);
+    let _ = writeln!(body, "project_name = {}", run.project.name);
+    let _ = writeln!(body, "project_path = {}", run.project.path);
+    let _ = writeln!(body, "agent_id = {}", run.session.id);
+    let _ = writeln!(body, "agent_branch = {}", run.managed.branch_name);
+    let _ = writeln!(body, "worktree_path = {}", run.managed.worktree_path);
+    let _ = writeln!(body, "provider = {}", run.session.provider.as_str());
+    let _ = writeln!(body, "shell = {}", outcome.shell);
+    let _ = writeln!(body, "shell_args = {:?}", outcome.shell_args);
+    let _ = writeln!(body, "command = {}", run.command);
+    let _ = writeln!(body, "exit_code = {}", format_exit_code(outcome.code));
+    let _ = writeln!(body, "success = {}", outcome.success);
     body.push_str("\n--- stdout ---\n");
     body.push_str(&outcome.stdout);
     if !outcome.stdout.ends_with('\n') {

@@ -9,6 +9,7 @@
 //! names there is tried first, and only when nothing answers on it is the
 //! lock itself examined, to say why.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
@@ -481,7 +482,7 @@ fn attached_blockers(reply: &Response) -> Option<Vec<crate::attachments::Blocker
 fn attached(blockers: &[crate::attachments::Blocker]) -> CliError {
     let mut message = String::from("Someone else is using this right now:\n");
     for blocker in blockers {
-        message.push_str(&format!("  {}\n", blocker.describe()));
+        let _ = writeln!(message, "  {}", blocker.describe());
     }
     message.push_str(
         "Nothing was changed. Ask them to close it first, or add \
