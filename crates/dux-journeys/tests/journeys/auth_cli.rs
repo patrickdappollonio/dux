@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use dux_journeys::dux::Exec;
 use dux_journeys::{Dux, DuxOptions, STRONG_PASSWORD, eventually, journey};
 use serde_json::json;
 
@@ -63,98 +64,15 @@ async fn journey_10_config_set_password_from_stdin_keeps_comments_and_refuses_we
             "a fresh dux has no password"
         );
 
-        let weak = dux
-            .config_set_secret("server.auth.password", "password1234")
-            .await;
-        assert_ne!(
-            weak.code,
-            0,
-            "a common password is refused: {}",
-            weak.output()
-        );
-        let said = weak.output().to_ascii_lowercase();
-        assert!(
-            said.contains("weak") || said.contains("score") || said.contains("strength"),
-            "the refusal says the password is too weak: {said}"
-        );
-
-        let short = dux
-            .config_set_secret("server.auth.password", "Qz7#vL9p")
-            .await;
-        assert_ne!(
-            short.code,
-            0,
-            "a short password is refused: {}",
-            short.output()
-        );
-        assert!(
-            short.output().contains("12"),
-            "the refusal names the minimum length: {}",
-            short.output()
-        );
-
-        let argument = dux
-            .config_set("server.auth.password", STRONG_PASSWORD)
-            .await;
-        assert_ne!(
-            argument.code, 0,
-            "a password on the command line is refused"
-        );
-        assert!(
-            argument.output().contains("--stdin"),
-            "the refusal points at --stdin: {}",
-            argument.output()
-        );
-
-        let typo = dux.config_set("server.auth.pasword", "x").await;
-        assert_ne!(typo.code, 0);
-        assert!(
-            typo.output().contains("server.auth.password"),
-            "an unknown key gets a suggestion: {}",
-            typo.output()
-        );
-
-        assert_eq!(
-            dux.config_text().await,
-            before,
-            "nothing refused changed the file"
-        );
+        let refused = unsafe_passwords_are_refused(&dux, &before).await;
 
         let set = dux
             .config_set_secret("server.auth.password", STRONG_PASSWORD)
             .await;
         assert_eq!(set.code, 0, "{}", set.output());
+        the_hash_is_written_and_read_back(&dux, &before).await;
 
-        let after = dux.config_text().await;
-        let hash = password_hash(&after).expect("a password_hash is written");
-        assert!(
-            hash.starts_with("$argon2id$v=19$"),
-            "an Argon2id PHC string: {hash}"
-        );
-        assert!(
-            !after.contains(STRONG_PASSWORD),
-            "the password is never written"
-        );
-        let (old, new) = (comments(&before), comments(&after));
-        let mut remaining = new.iter();
-        for line in &old {
-            assert!(
-                remaining.any(|l| l == line),
-                "the comment {line:?} survived the write, in order"
-            );
-        }
-
-        for key in ["server.auth.password_hash", "server.auth.password"] {
-            let got = dux.config_get(key).await;
-            assert_eq!(got.code, 0, "{}", got.output());
-            assert_eq!(
-                got.stdout.trim().trim_matches('"'),
-                hash,
-                "dux config get {key}"
-            );
-        }
-
-        for run in [&weak, &short, &argument, &typo, &set] {
+        for run in refused.iter().chain(std::iter::once(&set)) {
             assert!(
                 !run.output().contains(STRONG_PASSWORD) && !run.output().contains("password1234"),
                 "no command prints a password: {}",
@@ -162,19 +80,122 @@ async fn journey_10_config_set_password_from_stdin_keeps_comments_and_refuses_we
             );
         }
 
-        let client = dux.client().await;
-        eventually(
-            "the running dux to learn the password",
-            Duration::from_secs(20),
-            || async { (client.auth_status().await["password_set"] == json!(true)).then_some(()) },
-        )
-        .await;
-        assert_auth_required(
-            &client.get("/api/v1/projects").await,
-            "the network, once a password is set",
-        );
+        the_running_dux_learns_the_password(&dux).await;
     })
     .await;
+}
+
+/// Pipe a long but common password, pipe a short one, pass a strong one as an
+/// argument and misspell the key: each is refused, saying why, and the config
+/// file is still `before`. Returns what each printed.
+async fn unsafe_passwords_are_refused(dux: &Dux, before: &str) -> [Exec; 4] {
+    let weak = dux
+        .config_set_secret("server.auth.password", "password1234")
+        .await;
+    assert_ne!(
+        weak.code,
+        0,
+        "a common password is refused: {}",
+        weak.output()
+    );
+    let said = weak.output().to_ascii_lowercase();
+    assert!(
+        said.contains("weak") || said.contains("score") || said.contains("strength"),
+        "the refusal says the password is too weak: {said}"
+    );
+
+    let short = dux
+        .config_set_secret("server.auth.password", "Qz7#vL9p")
+        .await;
+    assert_ne!(
+        short.code,
+        0,
+        "a short password is refused: {}",
+        short.output()
+    );
+    assert!(
+        short.output().contains("12"),
+        "the refusal names the minimum length: {}",
+        short.output()
+    );
+
+    let argument = dux
+        .config_set("server.auth.password", STRONG_PASSWORD)
+        .await;
+    assert_ne!(
+        argument.code, 0,
+        "a password on the command line is refused"
+    );
+    assert!(
+        argument.output().contains("--stdin"),
+        "the refusal points at --stdin: {}",
+        argument.output()
+    );
+
+    let typo = dux.config_set("server.auth.pasword", "x").await;
+    assert_ne!(typo.code, 0);
+    assert!(
+        typo.output().contains("server.auth.password"),
+        "an unknown key gets a suggestion: {}",
+        typo.output()
+    );
+
+    assert_eq!(
+        dux.config_text().await,
+        before,
+        "nothing refused changed the file"
+    );
+    [weak, short, argument, typo]
+}
+
+/// The strong password is written as an Argon2id hash and never as itself,
+/// every comment line of `before` survives in order, and `dux config get`
+/// prints the hash for both keys.
+async fn the_hash_is_written_and_read_back(dux: &Dux, before: &str) {
+    let after = dux.config_text().await;
+    let hash = password_hash(&after).expect("a password_hash is written");
+    assert!(
+        hash.starts_with("$argon2id$v=19$"),
+        "an Argon2id PHC string: {hash}"
+    );
+    assert!(
+        !after.contains(STRONG_PASSWORD),
+        "the password is never written"
+    );
+    let (old, new) = (comments(before), comments(&after));
+    let mut remaining = new.iter();
+    for line in &old {
+        assert!(
+            remaining.any(|l| l == line),
+            "the comment {line:?} survived the write, in order"
+        );
+    }
+
+    for key in ["server.auth.password_hash", "server.auth.password"] {
+        let got = dux.config_get(key).await;
+        assert_eq!(got.code, 0, "{}", got.output());
+        assert_eq!(
+            got.stdout.trim().trim_matches('"'),
+            hash,
+            "dux config get {key}"
+        );
+    }
+}
+
+/// The running dux learns the password without a restart: the network is then
+/// asked for it.
+async fn the_running_dux_learns_the_password(dux: &Dux) {
+    let client = dux.client().await;
+    eventually(
+        "the running dux to learn the password",
+        Duration::from_secs(20),
+        || async { (client.auth_status().await["password_set"] == json!(true)).then_some(()) },
+    )
+    .await;
+    assert_auth_required(
+        &client.get("/api/v1/projects").await,
+        "the network, once a password is set",
+    );
 }
 
 /// Situation: the same password and `require = "everywhere"` in three

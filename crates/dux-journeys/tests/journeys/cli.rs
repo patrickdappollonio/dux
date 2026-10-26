@@ -116,199 +116,235 @@ async fn cli_projects_agents_tabs_and_terminals_over_the_socket() {
             set.output()
         );
 
-        let added = cli_ok(&dux, "projects add /repos/demo-api --yes").await;
-        let project = last_line(&added);
-        assert_eq!(
-            cli_ok(&dux, "projects ls -q").await.stdout,
-            format!("{project}\n")
-        );
-        let table = cli_ok(&dux, "projects ls").await.stdout;
-        assert!(
-            table.starts_with("ID") && table.contains("demo-api"),
-            "projects ls is a table naming the project: {table}"
-        );
-        let shown = cli_ok(&dux, "projects show demo-api").await.stdout;
-        assert!(shown.contains("/repos/demo-api"), "{shown}");
-
-        let created = cli_ok(&dux, "agents add --project demo-api --name cli-a --yes").await;
-        let agent = last_line(&created);
-        let listed = listed_agent(&dux, &agent)
-            .await
-            .unwrap_or_else(|| panic!("the new agent {agent} is listed"));
-        assert_eq!(listed["name"], "cli-a", "{listed}");
-        assert_eq!(listed["provider"], "fake", "{listed}");
-        let worktree = listed["worktree_path"]
-            .as_str()
-            .expect("a managed agent has a worktree")
-            .to_string();
-        let shown = cli_ok(&dux, "agents show cli-a").await.stdout;
-        assert!(shown.contains("branch: cli-a"), "{shown}");
-        let first_tab = cli_ok(&dux, "agents tabs ls cli-a -q")
-            .await
-            .stdout
-            .lines()
-            .next()
-            .expect("an agent has a first tab")
-            .to_string();
-
-        let tab = last_line(&cli_ok(&dux, "agents tabs add cli-a --yes").await);
-        let tabs = cli_ok(&dux, "agents tabs ls cli-a -q").await.stdout;
-        assert_eq!(tabs, format!("{first_tab}\n{tab}\n"));
-        cli_ok(&dux, &format!("agents tabs start cli-a {tab} --yes")).await;
-        eventually("the new tab to run", Duration::from_secs(30), || async {
-            tab_state(&dux, &agent, &tab)
-                .await
-                .filter(|state| state != "stopped")
-        })
-        .await;
-        cli_ok(&dux, &format!("agents tabs stop cli-a {tab} --yes")).await;
-        assert_eq!(
-            tab_state(&dux, &agent, &tab).await.as_deref(),
-            Some("stopped"),
-            "a waited stop has stopped the tab when it returns"
-        );
-        cli_ok(&dux, &format!("agents tabs rm cli-a {tab} --yes")).await;
-        assert_eq!(
-            cli_ok(&dux, "agents tabs ls cli-a -q").await.stdout,
-            format!("{first_tab}\n")
-        );
-
-        cli_ok(&dux, "agents stop cli-a --yes").await;
-        cli_ok(&dux, "agents start cli-a --yes").await;
-
-        let mut terminals = Vec::new();
-        for owner in ["--agent cli-a", "--project demo-api", ""] {
-            let opened = cli_ok(&dux, &format!("terminals add {owner} --yes")).await;
-            terminals.push(last_line(&opened));
-        }
-        let table = cli_ok(&dux, "terminals ls").await.stdout;
-        for owner in ["agent cli-a", "project demo-api", "standalone in"] {
-            assert!(table.contains(owner), "terminals ls names {owner}: {table}");
-        }
-        let mut ids: Vec<String> = cli_ok(&dux, "terminals ls -q")
-            .await
-            .stdout
-            .lines()
-            .map(str::to_string)
-            .collect();
-        ids.sort();
-        let mut expected = terminals.clone();
-        expected.sort();
-        assert_eq!(ids, expected);
-        for terminal in &terminals {
-            cli_ok(&dux, &format!("terminals rm {terminal} --yes")).await;
-        }
-        assert_eq!(cli_ok(&dux, "terminals ls -q").await.stdout, "");
-
-        let run = cli_ok(&dux, "projects worktrees ls demo-api --format json").await;
-        let entries: serde_json::Value = serde_json::from_str(&run.stdout).expect("JSON");
-        let held = entries
-            .as_array()
-            .expect("a list")
-            .iter()
-            .find(|e| e["worktree_path"].as_str() == Some(worktree.as_str()))
-            .unwrap_or_else(|| panic!("the agent's worktree is listed: {entries}"));
-        assert_eq!(held["agent_id"], agent.as_str(), "{held}");
-
-        // A browser on another machine watches the agent's terminal.
-        let browser = dux.client().await;
-        let mut watcher = connect_ok(
-            &browser,
-            &format!("/ws/sessions/{agent}/tabs/{first_tab}/pty"),
-        )
-        .await;
-        eventually(
-            "the agent to count the browser",
-            Duration::from_secs(20),
-            || async {
-                let listed = listed_agent(&dux, &agent).await?;
-                (listed["remote_viewers"] == 1).then_some(())
-            },
-        )
-        .await;
-
-        let refused = cli(
-            &dux,
-            "agents rm cli-a --delete-worktree --keep-branch --yes",
-        )
-        .await;
-        assert_eq!(refused.code, 3, "{}", refused.output());
-        assert!(
-            refused
-                .stderr
-                .contains("Someone else is using this right now")
-                && refused
-                    .stderr
-                    .contains(&format!("watching tab {first_tab}"))
-                && refused.stderr.contains("--dangerously-ignore-connected"),
-            "the refusal names the watcher and the way past it: {}",
-            refused.stderr
-        );
-        assert!(
-            listed_agent(&dux, &agent).await.is_some(),
-            "a refused delete changes nothing"
-        );
-        dux.exec_ok(&format!("test -d {}", shell_quote(&worktree)))
-            .await;
-
-        let deleted = cli_ok(
-            &dux,
-            "agents rm cli-a --delete-worktree --keep-branch --yes \
-             --dangerously-ignore-connected",
-        )
-        .await;
-        // Checked at once, with no polling: the command answers only once the
-        // removal has really happened.
-        let gone = dux
-            .exec(&format!("test -e {}", shell_quote(&worktree)))
-            .await;
-        assert_ne!(gone.code, 0, "the worktree is gone when the delete returns");
-        assert!(
-            deleted
-                .stdout
-                .contains(&format!("worktree: {worktree} removed"))
-                && deleted.stdout.contains("branch: cli-a kept"),
-            "the delete says what became of each piece: {}",
-            deleted.stdout
-        );
-        assert_eq!(
-            dux.exec_ok("git -C /repos/demo-api branch --list cli-a")
-                .await
-                .trim(),
-            "cli-a"
-        );
-        assert!(
-            watcher.wait_ended(Duration::from_secs(10)).await.is_some(),
-            "the browser's terminal ends with the agent"
-        );
-
-        let second =
-            last_line(&cli_ok(&dux, "agents add --project demo-api --name cli-b --yes").await);
-        let started = cli_ok(&dux, "agents rm cli-b --delete-worktree --yes --no-wait").await;
-        let operation = started.stdout.trim().to_string();
-        assert_eq!(
-            operation.lines().count(),
-            1,
-            "--no-wait prints the operation id alone: {}",
-            started.output()
-        );
-        let shown = eventually("the delete to finish", Duration::from_secs(60), || async {
-            let run = cli(&dux, &format!("operations show {operation}")).await;
-            (run.code != 6).then_some(run)
-        })
-        .await;
-        assert_eq!(shown.code, 0, "{}", shown.output());
-        assert!(
-            shown.stdout.contains("state:    succeeded"),
-            "{}",
-            shown.stdout
-        );
-        assert!(listed_agent(&dux, &second).await.is_none());
-
+        a_project_added_listed_and_shown(&dux).await;
+        let (agent, worktree, first_tab) = an_agent_created_listed_and_shown(&dux).await;
+        a_second_tab_runs_stops_and_closes(&dux, &agent, &first_tab).await;
+        every_kind_of_terminal_listed_and_closed(&dux).await;
+        the_worktree_names_its_agent(&dux, &agent, &worktree).await;
+        a_watched_delete_is_refused_until_forced(&dux, &agent, &first_tab, &worktree).await;
+        a_no_wait_delete_is_an_operation_to_look_up(&dux).await;
         cli_ok(&dux, "projects rm demo-api --yes").await;
         assert_eq!(cli_ok(&dux, "projects ls -q").await.stdout, "");
     })
     .await;
+}
+
+/// The demo repository added as a project: its id printed last, listed alone,
+/// in the table, and shown with its path.
+async fn a_project_added_listed_and_shown(dux: &Dux) {
+    let added = cli_ok(dux, "projects add /repos/demo-api --yes").await;
+    let project = last_line(&added);
+    assert_eq!(
+        cli_ok(dux, "projects ls -q").await.stdout,
+        format!("{project}\n")
+    );
+    let table = cli_ok(dux, "projects ls").await.stdout;
+    assert!(
+        table.starts_with("ID") && table.contains("demo-api"),
+        "projects ls is a table naming the project: {table}"
+    );
+    let shown = cli_ok(dux, "projects show demo-api").await.stdout;
+    assert!(shown.contains("/repos/demo-api"), "{shown}");
+}
+
+/// An agent created in the project, listed with its name and provider and shown
+/// on its branch. Returns its id, its worktree and its first tab.
+async fn an_agent_created_listed_and_shown(dux: &Dux) -> (String, String, String) {
+    let created = cli_ok(dux, "agents add --project demo-api --name cli-a --yes").await;
+    let agent = last_line(&created);
+    let listed = listed_agent(dux, &agent)
+        .await
+        .unwrap_or_else(|| panic!("the new agent {agent} is listed"));
+    assert_eq!(listed["name"], "cli-a", "{listed}");
+    assert_eq!(listed["provider"], "fake", "{listed}");
+    let worktree = listed["worktree_path"]
+        .as_str()
+        .expect("a managed agent has a worktree")
+        .to_string();
+    let shown = cli_ok(dux, "agents show cli-a").await.stdout;
+    assert!(shown.contains("branch: cli-a"), "{shown}");
+    let first_tab = cli_ok(dux, "agents tabs ls cli-a -q")
+        .await
+        .stdout
+        .lines()
+        .next()
+        .expect("an agent has a first tab")
+        .to_string();
+    (agent, worktree, first_tab)
+}
+
+/// A second tab added, started until it runs, stopped and closed, leaving the
+/// first tab alone; then the agent stopped and started again.
+async fn a_second_tab_runs_stops_and_closes(dux: &Dux, agent: &str, first_tab: &str) {
+    let tab = last_line(&cli_ok(dux, "agents tabs add cli-a --yes").await);
+    let tabs = cli_ok(dux, "agents tabs ls cli-a -q").await.stdout;
+    assert_eq!(tabs, format!("{first_tab}\n{tab}\n"));
+    cli_ok(dux, &format!("agents tabs start cli-a {tab} --yes")).await;
+    eventually("the new tab to run", Duration::from_secs(30), || async {
+        tab_state(dux, agent, &tab)
+            .await
+            .filter(|state| state != "stopped")
+    })
+    .await;
+    cli_ok(dux, &format!("agents tabs stop cli-a {tab} --yes")).await;
+    assert_eq!(
+        tab_state(dux, agent, &tab).await.as_deref(),
+        Some("stopped"),
+        "a waited stop has stopped the tab when it returns"
+    );
+    cli_ok(dux, &format!("agents tabs rm cli-a {tab} --yes")).await;
+    assert_eq!(
+        cli_ok(dux, "agents tabs ls cli-a -q").await.stdout,
+        format!("{first_tab}\n")
+    );
+
+    cli_ok(dux, "agents stop cli-a --yes").await;
+    cli_ok(dux, "agents start cli-a --yes").await;
+}
+
+/// An agent's, a project's and a standalone terminal, each listed with its owner
+/// and none left once closed.
+async fn every_kind_of_terminal_listed_and_closed(dux: &Dux) {
+    let mut terminals = Vec::new();
+    for owner in ["--agent cli-a", "--project demo-api", ""] {
+        let opened = cli_ok(dux, &format!("terminals add {owner} --yes")).await;
+        terminals.push(last_line(&opened));
+    }
+    let table = cli_ok(dux, "terminals ls").await.stdout;
+    for owner in ["agent cli-a", "project demo-api", "standalone in"] {
+        assert!(table.contains(owner), "terminals ls names {owner}: {table}");
+    }
+    let mut ids: Vec<String> = cli_ok(dux, "terminals ls -q")
+        .await
+        .stdout
+        .lines()
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    let mut expected = terminals.clone();
+    expected.sort();
+    assert_eq!(ids, expected);
+    for terminal in &terminals {
+        cli_ok(dux, &format!("terminals rm {terminal} --yes")).await;
+    }
+    assert_eq!(cli_ok(dux, "terminals ls -q").await.stdout, "");
+}
+
+/// The project's worktree list names the agent as the worktree's holder.
+async fn the_worktree_names_its_agent(dux: &Dux, agent: &str, worktree: &str) {
+    let run = cli_ok(dux, "projects worktrees ls demo-api --format json").await;
+    let entries: serde_json::Value = serde_json::from_str(&run.stdout).expect("JSON");
+    let held = entries
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|e| e["worktree_path"].as_str() == Some(worktree))
+        .unwrap_or_else(|| panic!("the agent's worktree is listed: {entries}"));
+    assert_eq!(held["agent_id"], agent, "{held}");
+}
+
+/// With a browser watching the agent's terminal, its delete exits 3 naming the
+/// browser and the flag and changes nothing; with the flag it removes the
+/// worktree before it returns, keeps the branch, and ends the browser's terminal.
+async fn a_watched_delete_is_refused_until_forced(
+    dux: &Dux,
+    agent: &str,
+    first_tab: &str,
+    worktree: &str,
+) {
+    // A browser on another machine watches the agent's terminal.
+    let browser = dux.client().await;
+    let mut watcher = connect_ok(
+        &browser,
+        &format!("/ws/sessions/{agent}/tabs/{first_tab}/pty"),
+    )
+    .await;
+    eventually(
+        "the agent to count the browser",
+        Duration::from_secs(20),
+        || async {
+            let listed = listed_agent(dux, agent).await?;
+            (listed["remote_viewers"] == 1).then_some(())
+        },
+    )
+    .await;
+
+    let refused = cli(dux, "agents rm cli-a --delete-worktree --keep-branch --yes").await;
+    assert_eq!(refused.code, 3, "{}", refused.output());
+    assert!(
+        refused
+            .stderr
+            .contains("Someone else is using this right now")
+            && refused
+                .stderr
+                .contains(&format!("watching tab {first_tab}"))
+            && refused.stderr.contains("--dangerously-ignore-connected"),
+        "the refusal names the watcher and the way past it: {}",
+        refused.stderr
+    );
+    assert!(
+        listed_agent(dux, agent).await.is_some(),
+        "a refused delete changes nothing"
+    );
+    dux.exec_ok(&format!("test -d {}", shell_quote(worktree)))
+        .await;
+
+    let deleted = cli_ok(
+        dux,
+        "agents rm cli-a --delete-worktree --keep-branch --yes \
+         --dangerously-ignore-connected",
+    )
+    .await;
+    // Checked at once, with no polling: the command answers only once the
+    // removal has really happened.
+    let gone = dux
+        .exec(&format!("test -e {}", shell_quote(worktree)))
+        .await;
+    assert_ne!(gone.code, 0, "the worktree is gone when the delete returns");
+    assert!(
+        deleted
+            .stdout
+            .contains(&format!("worktree: {worktree} removed"))
+            && deleted.stdout.contains("branch: cli-a kept"),
+        "the delete says what became of each piece: {}",
+        deleted.stdout
+    );
+    assert_eq!(
+        dux.exec_ok("git -C /repos/demo-api branch --list cli-a")
+            .await
+            .trim(),
+        "cli-a"
+    );
+    assert!(
+        watcher.wait_ended(Duration::from_secs(10)).await.is_some(),
+        "the browser's terminal ends with the agent"
+    );
+}
+
+/// A `--no-wait` delete prints its operation id alone, which `operations show`
+/// reports succeeded.
+async fn a_no_wait_delete_is_an_operation_to_look_up(dux: &Dux) {
+    let second = last_line(&cli_ok(dux, "agents add --project demo-api --name cli-b --yes").await);
+    let started = cli_ok(dux, "agents rm cli-b --delete-worktree --yes --no-wait").await;
+    let operation = started.stdout.trim().to_string();
+    assert_eq!(
+        operation.lines().count(),
+        1,
+        "--no-wait prints the operation id alone: {}",
+        started.output()
+    );
+    let shown = eventually("the delete to finish", Duration::from_secs(60), || async {
+        let run = cli(dux, &format!("operations show {operation}")).await;
+        (run.code != 6).then_some(run)
+    })
+    .await;
+    assert_eq!(shown.code, 0, "{}", shown.output());
+    assert!(
+        shown.stdout.contains("state:    succeeded"),
+        "{}",
+        shown.stdout
+    );
+    assert!(listed_agent(dux, &second).await.is_none());
 }
 
 /// Situation: a `dux server` on loopback with no password yet and
