@@ -28,14 +28,20 @@ pub enum Command {
     /// Complete a deletion that's already past its git step: the async
     /// `WorktreeRemoveCompleted` callback.
     FinishDeleteSession {
+        /// The agent being deleted.
         session_id: String,
+        /// What happened to its worktree, for the status the delete reports.
         removal: WorktreeRemoval,
+        /// Whether the finish reports a status; `false` when the caller keys
+        /// its own.
         update_status: bool,
     },
     /// Modal entrypoint: branches between async git-removal worker and
     /// inline finish.
     BeginDeleteSession {
+        /// The agent to delete.
         session_id: String,
+        /// Whether its worktree goes too.
         delete_worktree: bool,
         /// The delete dialog's "also delete the branch" answer. See
         /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
@@ -59,7 +65,9 @@ pub enum Command {
     /// `ProjectPersistenceOutcome`. `None` for callers that drive no
     /// handler-resolved status.
     PersistProject {
+        /// The change to save.
         action: Box<ProjectPersistenceAction>,
+        /// The op whose final the completion handler resolves, if any.
         status_op_id: Option<String>,
     },
 
@@ -72,11 +80,17 @@ pub enum Command {
     /// `add_existing` too, `path` is a folder that already holds a checkout of
     /// the repository, which becomes the project instead of a clone.
     CloneProject {
+        /// The address to clone from.
         url: String,
+        /// The folder to clone into, or to add with `add_existing`.
         path: String,
+        /// The agent's name, or `None` for a random one.
         agent_name: Option<String>,
+        /// Whether the New agent dialog asked for a random name.
         random_name: bool,
+        /// The pull request the agent is created from, if any.
         pull_request: Option<crate::pr_reference::PullRequestCloneTarget>,
+        /// Add the existing checkout at `path` instead of cloning.
         add_existing: bool,
         /// With `pull_request`: the agreement to a review copy given before
         /// the clone or the add.
@@ -89,7 +103,9 @@ pub enum Command {
     /// delete is a no-op. The record and config removal run in the persistence
     /// worker.
     RemoveProject {
+        /// The project to remove.
         project_id: String,
+        /// Its display name, for the status.
         project_name: String,
     },
 
@@ -101,7 +117,9 @@ pub enum Command {
     /// project up front against an in-flight worktree removal or a launching
     /// tab, so a partial delete cannot report success while stranding a session.
     DeleteProject {
+        /// The project to delete.
         project_id: String,
+        /// Its display name, for the status.
         project_name: String,
     },
 
@@ -113,8 +131,11 @@ pub enum Command {
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold.
     DispatchCreateAgentRequest {
+        /// What to create.
         request: Box<CreateAgentRequest>,
+        /// The busy shown while the create runs.
         busy_message: crate::status_text::StatusText,
+        /// The caller's terminal size, as columns and rows.
         term_size: (u16, u16),
     },
 
@@ -124,20 +145,27 @@ pub enum Command {
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold.
-    DispatchAgentLaunch { request: Box<AgentLaunchRequest> },
+    DispatchAgentLaunch {
+        /// The launch to run.
+        request: Box<AgentLaunchRequest>,
+    },
 
     /// Stage a single file. Synchronous git call (microseconds for the
     /// typical case). Returns `EventReaction::Nothing` on success; an `Err`
     /// propagates to the App caller which surfaces it.
     StageFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
     /// Unstage a single file. Same shape as `StageFile`: synchronous git
     /// call, `EventReaction::Nothing` on success, `Err` on failure.
     UnstageFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
@@ -148,8 +176,11 @@ pub enum Command {
     /// once (the folder being removed, something living at the path) is an
     /// `Err`.
     DiscardFile {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
+        /// Whether the file is untracked, so the discard deletes it.
         is_untracked: bool,
         /// What the row the user confirmed was: the discard is refused when
         /// the path is no longer that (a file a folder has replaced, a folder
@@ -161,7 +192,9 @@ pub enum Command {
     /// against LIVE git status on the worker, right before the discard,
     /// rather than by the caller: the surface's thread never runs git for it.
     DiscardFileLive {
+        /// The worktree the file is in.
         worktree_path: PathBuf,
+        /// The file, relative to the worktree.
         path: String,
     },
 
@@ -172,23 +205,32 @@ pub enum Command {
     /// and nothing is committed. The caller pre-formats `success_message`
     /// because it depends on view-side bindings the engine cannot resolve.
     CommitChanges {
+        /// The worktree to commit in.
         worktree_path: PathBuf,
+        /// The commit message.
         message: String,
+        /// The line reported when the commit lands.
         success_message: String,
     },
 
     /// Spawn a `git push` worker. Returns `EventReaction::Status(Busy("Pushing
     /// to remote\u{2026}"))` immediately; completion is reported via
     /// `WorkerEvent::PushCompleted`.
-    Push { worktree_path: PathBuf },
+    Push {
+        /// The worktree whose branch is pushed.
+        worktree_path: PathBuf,
+    },
 
     /// Spawn a `git pull` worker for either a project's leading branch or the
     /// current session's branch. Returns the busy status when the in-flight
     /// guard accepts, or a warning when another pull is already running for the
     /// same repo path. Completion arrives as `WorkerEvent::PullCompleted`.
     Pull {
+        /// The repository to pull.
         repo_path: PathBuf,
+        /// What the pull is of.
         target: PullTarget,
+        /// The busy shown while the pull runs.
         busy_message: crate::status_text::StatusText,
         /// The refusal while a pull of the same worktree runs. A SESSION pull's
         /// only: a project pull shares the project folder's lock with "Check
@@ -201,27 +243,39 @@ pub enum Command {
     /// Open a filesystem path via the user's OS handler. Fire-and-forget
     /// spawn; result posts back as `WorkerEvent::OpenPathCompleted` which the
     /// existing reaction handler surfaces as a status message.
-    OpenPath { path: PathBuf, target: String },
+    OpenPath {
+        /// The path to open.
+        path: PathBuf,
+        /// What the path is, for the status line ("session worktree", say).
+        target: String,
+    },
 
     /// Toggle a session's `auto_reopen_enabled` flag. The caller passes the new
     /// value and the branch name, captured before the mutation. The engine
     /// upserts in place, falling back to `session_store.set_auto_reopen_enabled`
     /// when the session was removed in flight.
     ToggleAgentAutoReopen {
+        /// The agent changed.
         session_id: String,
+        /// The agent's name as the caller showed it, for the status.
         branch_name: String,
+        /// Whether the agent now reopens at startup.
         new_enabled: bool,
     },
 
     /// Remove a companion terminal from the engine (drops `PtyClient`, killing
     /// the child). Returns a typed view carrying the terminal's label so the
     /// App can format status + reconcile `active_terminal_id` (view field).
-    DeleteTerminal { terminal_id: String },
+    DeleteTerminal {
+        /// The terminal to close.
+        terminal_id: String,
+    },
 
     /// Persist the global `env` block to the user config file. The engine
     /// eager-saves through `Engine::config_writer` and reports the result
     /// synchronously, rolling the in-memory env back if the write fails.
     PersistGlobalEnv {
+        /// The new global environment.
         env: std::collections::BTreeMap<String, String>,
     },
 
@@ -246,7 +300,9 @@ pub enum Command {
     /// reorders are high-frequency during a drag, so the refreshed view is the
     /// feedback.
     ReorderSessions {
+        /// The project whose agents are reordered.
         project_id: String,
+        /// Every agent of the project, in the new order.
         session_ids: Vec<String>,
     },
 
@@ -254,20 +310,29 @@ pub enum Command {
     /// exactly the full set of all session ids. On success it writes one global
     /// `sort_order` permutation and re-sorts `self.sessions` to match. Silent:
     /// the refreshed view is the feedback.
-    ReorderAgents { session_ids: Vec<String> },
+    ReorderAgents {
+        /// Every agent, in the new order.
+        session_ids: Vec<String>,
+    },
 
     /// Persist a custom display order for the workspace's projects.
     /// `project_ids` must be exactly the full set of known project ids, under
     /// the same strict validation as [`Command::ReorderSessions`]. On success it
     /// writes the order to storage and reorders `self.projects` to match.
-    ReorderProjects { project_ids: Vec<String> },
+    ReorderProjects {
+        /// Every project, in the new order.
+        project_ids: Vec<String>,
+    },
 
     /// Persist a global runtime order for every companion terminal, whatever its
     /// owner. `terminal_ids` must be exactly the full set of current terminal
     /// ids; each terminal's runtime `sort_order` is stamped to match, with no
     /// storage write, because terminals are runtime-only. Silent success: the
     /// refreshed view is the feedback.
-    ReorderTerminals { terminal_ids: Vec<String> },
+    ReorderTerminals {
+        /// Every terminal, in the new order.
+        terminal_ids: Vec<String>,
+    },
 
     /// Run a configured text macro against a live PTY target. `target_id` names
     /// either an agent session (surface `Agent`) or a companion terminal
@@ -275,7 +340,12 @@ pub enum Command {
     /// unknown macro name and a surface mismatch both return an error Status;
     /// otherwise the text is transformed by
     /// `dux_core::macros::macro_payload_bytes` and written to the target's PTY.
-    RunMacro { target_id: String, name: String },
+    RunMacro {
+        /// The agent tab or terminal the macro types into.
+        target_id: String,
+        /// The macro to run.
+        name: String,
+    },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
     /// into the running `config.macros` immediately, so the `ViewModel` refreshes
@@ -287,7 +357,10 @@ pub enum Command {
     /// pre-edit snapshot, so a save clobbers any hand-edit to the `[macros]`
     /// block made on disk in between. Acceptable under the single-operator
     /// model; a multi-writer setup would need read-modify-merge.
-    UpdateMacros { macros: crate::config::MacrosConfig },
+    UpdateMacros {
+        /// The whole new macro list.
+        macros: crate::config::MacrosConfig,
+    },
 
     /// A change to the macro list or the global environment, kept as asked so a
     /// change a reload deferred runs against the config as it is when it runs.
@@ -300,7 +373,10 @@ pub enum Command {
     /// unstaged lists and its `ChangedFilesReady` populates the pane on a later
     /// drain. Returns `EventReaction::Nothing`, because the refreshed `ViewModel`
     /// broadcast is the feedback rather than a toast on every selection.
-    WatchChangedFiles { session_id: Option<String> },
+    WatchChangedFiles {
+        /// The agent whose worktree is watched, or `None` to stop watching.
+        session_id: Option<String>,
+    },
 }
 
 /// The commit's refusal when its message is empty.
@@ -458,25 +534,44 @@ pub enum ConfigSetChange {
     /// Replace the whole list, refused with [`crate::wire::StaleSet::Macros`] when
     /// it has moved since the [`crate::wire::macros_version`] in `read_at`.
     ReplaceMacros {
+        /// The whole new list.
         macros: crate::config::MacrosConfig,
+        /// The list version the client read, or `None` to replace whatever is
+        /// there.
         read_at: Option<String>,
     },
     /// Add one macro, or replace it in place; every other macro stays as it is.
     SetMacro {
+        /// The macro's name.
         name: String,
+        /// What it types and where it is offered.
         entry: crate::config::MacroEntry,
     },
     /// Remove one macro; an unknown name is an error.
-    RemoveMacro { name: String },
+    RemoveMacro {
+        /// The macro to remove.
+        name: String,
+    },
     /// Replace the whole table, with the same `read_at` rule.
     ReplaceEnv {
+        /// The whole new table.
         env: std::collections::BTreeMap<String, String>,
+        /// The table version the client read, or `None` to replace whatever is
+        /// there.
         read_at: Option<String>,
     },
     /// Set one variable; every other stays as it is.
-    SetEnvVar { name: String, value: String },
+    SetEnvVar {
+        /// The variable's name.
+        name: String,
+        /// Its value.
+        value: String,
+    },
     /// Remove one variable; an unknown name is an error.
-    RemoveEnvVar { name: String },
+    RemoveEnvVar {
+        /// The variable to remove.
+        name: String,
+    },
 }
 
 impl Engine {
