@@ -2580,7 +2580,7 @@ impl DuxPaths {
         let root = resolve_root(
             env::var_os("DUX_HOME"),
             home::home_dir(),
-            env::var_os("XDG_CONFIG_HOME"),
+            env::var_os("XDG_CONFIG_HOME").as_deref(),
         )?;
         Ok(Self {
             config_path: root.join("config.toml"),
@@ -2649,7 +2649,7 @@ pub(crate) fn resolve_control_socket(root: &Path, setting: &str) -> PathBuf {
 pub(crate) fn resolve_root(
     dux_home: Option<std::ffi::OsString>,
     home: Option<PathBuf>,
-    xdg_config_home: Option<std::ffi::OsString>,
+    xdg_config_home: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf> {
     if let Some(dux_home) = dux_home.map(PathBuf::from) {
         if dux_home.is_absolute() {
@@ -2665,7 +2665,7 @@ pub(crate) fn resolve_root(
     Ok(discover_root(&home, xdg_config_home))
 }
 
-pub(crate) fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
+pub(crate) fn discover_root(home: &Path, xdg_config_home: Option<&std::ffi::OsStr>) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         let _ = xdg_config_home;
@@ -7054,14 +7054,20 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn config_root_uses_hidden_home_dir_on_macos() {
-        let root = discover_root(Path::new("/example/home"), Some("/tmp/ignored".into()));
+        let root = discover_root(
+            Path::new("/example/home"),
+            Some(std::ffi::OsStr::new("/tmp/ignored")),
+        );
         assert_eq!(root, PathBuf::from("/example/home/.dux"));
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn config_root_uses_xdg_config_home_when_absolute() {
-        let root = discover_root(Path::new("/example/home"), Some("/tmp/xdg".into()));
+        let root = discover_root(
+            Path::new("/example/home"),
+            Some(std::ffi::OsStr::new("/tmp/xdg")),
+        );
         assert_eq!(root, PathBuf::from("/tmp/xdg/dux"));
     }
 
@@ -7075,7 +7081,10 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn config_root_ignores_relative_xdg_config_home() {
-        let root = discover_root(Path::new("/example/home"), Some("relative/path".into()));
+        let root = discover_root(
+            Path::new("/example/home"),
+            Some(std::ffi::OsStr::new("relative/path")),
+        );
         assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
     }
 
