@@ -629,6 +629,16 @@ fn into_ratatui(color: OpalineColor) -> Color {
     }
 }
 
+/// Whether a pane, field or control has keyboard focus, which picks its
+/// focused or resting look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusState {
+    /// It has focus.
+    Focused,
+    /// It does not.
+    Unfocused,
+}
+
 impl Theme {
     /// Whether the app background is lighter than the body text, which is what
     /// decides how a QR code is drawn in the theme's own two colors: the darker
@@ -762,16 +772,16 @@ impl Theme {
         Style::default().fg(self.header_fg).bg(self.header_bg)
     }
 
-    pub(crate) fn border_style(&self, focused: bool) -> Style {
-        if focused {
+    pub(crate) fn border_style(&self, focused: FocusState) -> Style {
+        if focused == FocusState::Focused {
             Style::default().fg(self.border_focused)
         } else {
             Style::default().fg(self.border_normal)
         }
     }
 
-    pub(crate) fn title_style(&self, focused: bool) -> Style {
-        if focused {
+    pub(crate) fn title_style(&self, focused: FocusState) -> Style {
+        if focused == FocusState::Focused {
             Style::default()
                 .fg(self.title_focused)
                 .add_modifier(Modifier::BOLD)
@@ -791,8 +801,8 @@ impl Theme {
     /// so the two states differ in colour and weight even if a theme maps the
     /// colours together;
     /// `the_overlay_field_focus_is_visible_in_every_loadable_theme` pins it.
-    pub(crate) fn overlay_field_border_style(&self, focused: bool) -> Style {
-        if focused {
+    pub(crate) fn overlay_field_border_style(&self, focused: FocusState) -> Style {
+        if focused == FocusState::Focused {
             Style::default()
                 .fg(self.button_active_fg)
                 .add_modifier(Modifier::BOLD)
@@ -1104,8 +1114,8 @@ mod tests {
         for listing in listings {
             let theme = load(&listing.id, &paths)
                 .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
-            let focused = theme.overlay_field_border_style(true);
-            let unfocused = theme.overlay_field_border_style(false);
+            let focused = theme.overlay_field_border_style(FocusState::Focused);
+            let unfocused = theme.overlay_field_border_style(FocusState::Unfocused);
             assert_ne!(
                 focused, unfocused,
                 "theme {} renders a focused overlay field identically to an unfocused one \

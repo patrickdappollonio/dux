@@ -22,6 +22,7 @@ use super::confirm_dialog::{
 };
 use super::pty_ownership::PtyTakeoverCard;
 use super::*;
+use crate::theme::FocusState;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use dux_core::prose::Prose;
 use dux_core::text::{count_of, count_of_with};
@@ -2369,7 +2370,7 @@ impl App {
         }
     }
 
-    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
         self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
         let collapsed_left_items = self.left_items();
         let items = collapsed_left_items
@@ -2594,10 +2595,15 @@ impl App {
         &mut self,
         frame: &mut Frame,
         projects_area: Rect,
-        focused: bool,
+        focused: FocusState,
     ) -> bool {
         let left_items = self.left_items();
-        let projects_focused = focused && self.left_section == LeftSection::Projects;
+        let projects_focused =
+            if (focused == FocusState::Focused) && self.left_section == LeftSection::Projects {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
         let title = self.agent_sidebar_title(left_items);
         // Active agents always sort ahead of the Inactive toggle, so the list
         // leads with a Session iff any agent is active. The toggle only earns a
@@ -2626,7 +2632,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 search_area.width,
             ))
             .block(
@@ -2692,12 +2698,17 @@ impl App {
         &mut self,
         frame: &mut Frame,
         term_area: Rect,
-        focused: bool,
+        focused: FocusState,
         terminal_render_data: &[TerminalSidebarRow],
         total_terminal_count: usize,
         body_will_dim: bool,
     ) {
-        let terminals_focused = focused && self.left_section == LeftSection::Terminals;
+        let terminals_focused =
+            if (focused == FocusState::Focused) && self.left_section == LeftSection::Terminals {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
         let term_count = terminal_render_data.len();
         // The same visible-over-total count the Agents title carries while a
         // query is live, for the same reason: a pruned list must not read as
@@ -2769,7 +2780,7 @@ impl App {
         // row even after the list scrolls.
         let term_heights: Vec<u16> = vec![3; term_count];
         // No widget highlight: the selection is hand-painted below. The widget
-        // selection is still set (when focused) purely so the list scrolls to
+        // selection is still set (when (focused == FocusState::Focused)) purely so the list scrolls to
         // keep the selected terminal visible, exactly as the agent list does.
         let mut term_state =
             ListState::default().with_selected(if self.left_section == LeftSection::Terminals {
@@ -2813,7 +2824,11 @@ impl App {
     }
 
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Left;
+        let focused = if self.focus == FocusPane::Left {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
 
         if self.left_collapsed {
             self.render_collapsed_left(frame, area, focused);
@@ -2853,7 +2868,11 @@ impl App {
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Center;
+        let focused = if self.focus == FocusPane::Center {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
@@ -2926,7 +2945,7 @@ impl App {
         }
     }
 
-    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
         let (lines, scroll, gutter_width) = match &self.center_mode {
             CenterMode::Diff {
                 lines,
@@ -3691,7 +3710,11 @@ impl App {
                 }
                 break;
             }
-            let active = items[i].id == focused_id;
+            let active = if items[i].id == focused_id {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
             let border_style = self.theme.border_style(active);
             let label_style = self.theme.title_style(active);
             // The pill is two cells behind one frame: the ordinal cell, a
@@ -4624,14 +4647,20 @@ impl App {
         Line::from(Span::styled("No agent selected.", desc_style))
     }
 
-    fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+    fn render_agent_terminal(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        focused: FocusState,
+    ) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
         // Ratatui cannot detect damage to the physical terminal outside its
-        // previous-frame buffer, so resend the vulnerable focused edge.
-        if focused
+        // previous-frame buffer, so resend the vulnerable (focused == FocusState::Focused) edge.
+        if (focused == FocusState::Focused)
             && self.session_surface == SessionSurface::Agent
             && area.width > 0
             && area.height > 2
@@ -4712,7 +4741,11 @@ impl App {
         }
 
         if self.right_collapsed {
-            let focused = self.focus == FocusPane::Files;
+            let focused = if self.focus == FocusPane::Files {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
             let block = self.themed_block("", focused);
             let unstaged_rows = self.changes_row_count(RightSection::Unstaged);
             let total = unstaged_rows + self.changes_row_count(RightSection::Staged);
@@ -4762,7 +4795,11 @@ impl App {
         }
 
         let has_staged = !self.engine.staged_files.is_empty();
-        let focused = self.focus == FocusPane::Files;
+        let focused = if self.focus == FocusPane::Files {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
 
         if has_staged {
             let pct =
@@ -4788,7 +4825,12 @@ impl App {
 
     /// Render the "Staged Changes" file list and the commit input as two
     /// separate bordered blocks (bubbles).
-    fn render_staged_with_commit(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+    fn render_staged_with_commit(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        pane_focused: FocusState,
+    ) {
         let commit_pct =
             dux_core::config_effective::effective_pane_height_pct(self.commit_pane_height_pct);
         let staged_pct = 100u16.saturating_sub(commit_pct).max(20);
@@ -4849,7 +4891,11 @@ impl App {
     /// user nothing about what to do next. The card is untitled, since the pane
     /// frame already says "Changes".
     fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
-        let focused = self.focus == FocusPane::Files;
+        let focused = if self.focus == FocusPane::Files {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -4908,9 +4954,17 @@ impl App {
                 title_prefix,
                 files,
                 &self.theme,
-                self.theme.title_style(is_active_section),
+                self.theme.title_style(if is_active_section {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                }),
             ),
-            is_active_section,
+            if is_active_section {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
         );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -5146,8 +5200,8 @@ impl App {
 
     /// The hint row under the commit message box. `focused` is whether the box
     /// is taking typing.
-    pub(super) fn commit_hint_line(&self, focused: bool, width: u16) -> Line<'static> {
-        let hints = if focused {
+    pub(super) fn commit_hint_line(&self, focused: FocusState, width: u16) -> Line<'static> {
+        let hints = if focused == FocusState::Focused {
             vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "exit").pinned()]
         } else {
             vec![
@@ -5158,12 +5212,25 @@ impl App {
         pane_hint_line(&self.theme, &hints, width)
     }
 
-    fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+    fn render_commit_input_inner(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        pane_focused: FocusState,
+    ) {
         self.mouse_layout.commit_area = Some(area);
-        let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
+        let is_active_section = (pane_focused == FocusState::Focused)
+            && self.right_section == RightSection::CommitInput;
         let focused = self.input_target == InputTarget::CommitMessage;
 
-        let block = self.themed_block("Commit Message", is_active_section || focused);
+        let block = self.themed_block(
+            "Commit Message",
+            if is_active_section || focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
+        );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
@@ -5220,8 +5287,15 @@ impl App {
 
         // Hint bar.
         if hint_area.height > 0 {
-            Paragraph::new(self.commit_hint_line(focused, hint_area.width))
-                .render(hint_area, frame.buffer_mut());
+            Paragraph::new(self.commit_hint_line(
+                if focused {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
+                hint_area.width,
+            ))
+            .render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -5831,7 +5905,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -6174,7 +6248,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 input_inner.width,
             ))
             .block(input_block)
@@ -7155,7 +7229,7 @@ impl App {
                 list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 filter_input_rect.map_or(0, |rect| rect.width),
             ))
             .block(details_block)
@@ -7458,7 +7532,7 @@ impl App {
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 details_inner.width,
             )
         } else if let Some(note) = &prompt.fetch_note {
@@ -9270,7 +9344,11 @@ impl App {
         // checkbox focused the field takes no keystrokes, so a caret
         // there would be a lie (and the key handler already drops
         // every key on that basis).
-        let input_focused = *focus == RenameSessionFocus::Input;
+        let input_focused = if *focus == RenameSessionFocus::Input {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -9458,7 +9536,11 @@ impl App {
                 .render(label_area, frame.buffer_mut());
             // The caret only appears while the field has focus: a field that
             // takes no keystrokes must not look like it does.
-            let focused = *focus == field;
+            let focused = if *focus == field {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -9664,7 +9746,11 @@ impl App {
         ] {
             Paragraph::new(Line::from(Span::styled(label, label_style)))
                 .render(label_area, frame.buffer_mut());
-            let focused = *focus == field;
+            let focused = if *focus == field {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -9926,7 +10012,11 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(field_focused));
+            .border_style(self.theme.overlay_field_border_style(if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            }));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -9934,7 +10024,11 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            field_focused,
+            if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             input_inner.width,
         ))
         .block(input_block)
@@ -10045,7 +10139,7 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(true));
+            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -10053,7 +10147,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -10130,7 +10224,7 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(true));
+            .border_style(self.theme.overlay_field_border_style(FocusState::Focused));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_field(
             " ",
@@ -10138,7 +10232,7 @@ impl App {
             input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -10244,7 +10338,11 @@ impl App {
         let text_area = self.render_modal_text_field_frame(
             frame,
             input_area,
-            field_focused,
+            if field_focused {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             engaged.then(|| {
                 self.bindings
                     .label_for_reaching(Action::ExitCommitInput, |_| true)
@@ -10504,7 +10602,11 @@ impl App {
                 // See `Theme::overlay_field_border_style`: drawing the
                 // unfocused state from `overlay_border` and the focused
                 // one from `border_focused` is the same colour.
-                .border_style(self.theme.overlay_field_border_style(prompt.searching))
+                .border_style(self.theme.overlay_field_border_style(if prompt.searching {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                }))
                 .style(Style::default().bg(self.theme.overlay_bg));
             let filter_inner = filter_block.inner(filter_area);
             filter_input_rect = Some(filter_inner);
@@ -10527,7 +10629,11 @@ impl App {
                     prompt.filter.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
-                    prompt.searching,
+                    if prompt.searching {
+                        FocusState::Focused
+                    } else {
+                        FocusState::Unfocused
+                    },
                     filter_inner.width,
                 ))
                 .style(Style::default().fg(self.theme.text_fg))
@@ -10549,7 +10655,11 @@ impl App {
                 frame.set_cursor_position((cursor_x, filter_inner.y));
             }
         }
-        let list_focused = prompt.focus == StartupCommandLogFocus::List;
+        let list_focused = if prompt.focus == StartupCommandLogFocus::List {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let list_block = Block::default()
             .title(" Runs ")
             .borders(Borders::ALL)
@@ -10717,7 +10827,7 @@ impl App {
                 prompt.list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
                 input_inner.width,
             ))
             .block(input_block)
@@ -11246,7 +11356,11 @@ impl App {
 
         // Same rule as the rename modal: the caret only appears while
         // the field itself has focus.
-        let input_focused = *focus == NameNewAgentFocus::Input;
+        let input_focused = if *focus == NameNewAgentFocus::Input {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -11708,7 +11822,11 @@ impl App {
         let name_inner = self.render_modal_text_field_frame(
             frame,
             name_area,
-            focus == MacroEditFocus::Name,
+            if focus == MacroEditFocus::Name {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             None,
         );
         // The one single-line renderer, never a hand-rolled copy: it owns the
@@ -11719,7 +11837,11 @@ impl App {
             state.name_input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            focus == MacroEditFocus::Name,
+            if focus == MacroEditFocus::Name {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             name_inner.width,
         ))
         .render(name_inner, frame.buffer_mut());
@@ -11738,7 +11860,11 @@ impl App {
         let text_inner = self.render_modal_text_field_frame(
             frame,
             text_area,
-            focus == MacroEditFocus::Text,
+            if focus == MacroEditFocus::Text {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            },
             engaged.then(|| {
                 self.bindings
                     .label_for_reaching(Action::ExitCommitInput, |_| true)
@@ -11948,7 +12074,7 @@ impl App {
         &self,
         frame: &mut Frame,
         area: Rect,
-        focused: bool,
+        focused: FocusState,
         engaged_exit_key: Option<String>,
     ) -> Rect {
         let border_style = self.theme.overlay_field_border_style(focused);
@@ -12131,7 +12257,7 @@ impl App {
         // boxes would be dead chrome spending three rows of a surface whose
         // whole point is maximum terminal space. The windowed center pane is
         // where tabs render and switch.
-        self.render_agent_terminal(frame, area, &title, true);
+        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -12141,7 +12267,7 @@ impl App {
         self.paint_modal_surface(frame, area, self.theme.app_bg);
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
-        self.render_agent_terminal(frame, area, " Terminal ", true);
+        self.render_agent_terminal(frame, area, " Terminal ", FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -12159,7 +12285,7 @@ impl App {
                 )
             },
         );
-        let outer_block = self.themed_block(&title, true);
+        let outer_block = self.themed_block(&title, FocusState::Focused);
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
         if inner.height < 2 || inner.width < 4 {
@@ -12306,7 +12432,7 @@ impl App {
             cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -12387,7 +12513,7 @@ impl App {
             cursor,
             cursor_fg,
             cursor_bg,
-            true,
+            FocusState::Focused,
             input_inner.width,
         ))
         .block(input_block)
@@ -12458,7 +12584,7 @@ impl App {
         );
     }
 
-    fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
+    fn themed_block<'a>(&self, title: &'a str, focused: FocusState) -> Block<'a> {
         self.themed_block_line(
             Line::from(Span::styled(title, self.theme.title_style(focused))),
             focused,
@@ -12468,7 +12594,7 @@ impl App {
     /// The same block for a title that is already several styled pieces, such
     /// as the changes groups' recap, whose figures wear the diff colors rather
     /// than the title's.
-    fn themed_block_line<'a>(&self, title: Line<'a>, focused: bool) -> Block<'a> {
+    fn themed_block_line<'a>(&self, title: Line<'a>, focused: FocusState) -> Block<'a> {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -13506,7 +13632,7 @@ fn render_single_line_field(
     cursor: usize,
     cursor_fg: Color,
     cursor_bg: Color,
-    focused: bool,
+    focused: FocusState,
     width: u16,
 ) -> Line<'static> {
     let skip = single_line_scroll(text, cursor, usize::from(prefix.cell_width()), width);
@@ -13545,9 +13671,9 @@ fn render_single_line_cursor_input(
     cursor: usize,
     cursor_fg: Color,
     cursor_bg: Color,
-    focused: bool,
+    focused: FocusState,
 ) -> Line<'static> {
-    if !focused {
+    if focused == FocusState::Unfocused {
         return Line::from(Span::raw(format!("{prefix}{text}")));
     }
     use unicode_segmentation::UnicodeSegmentation;
@@ -19095,7 +19221,7 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
             .expect("render frame");
 
         let expected_grid = Rect::new(4, 3, 68, 10);
@@ -19131,7 +19257,7 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", false))
+            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
             .expect("render frame");
 
         assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
@@ -20253,8 +20379,14 @@ mod tests {
 
     #[test]
     fn render_single_line_cursor_input_supports_empty_prefix() {
-        let line =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
+        let line = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
 
         assert_eq!(line.spans.len(), 4);
         assert_eq!(line.spans[0].content.as_ref(), "");
@@ -22652,7 +22784,12 @@ mod tests {
         let mut inline = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
         inline
             .draw(|frame| {
-                app.render_agent_terminal(frame, Rect::new(2, 2, 96, 26), " Terminal ", true);
+                app.render_agent_terminal(
+                    frame,
+                    Rect::new(2, 2, 96, 26),
+                    " Terminal ",
+                    FocusState::Focused,
+                );
             })
             .expect("render inline terminal");
         assert!(
@@ -24873,7 +25010,7 @@ mod tests {
         (style.fg, style.add_modifier)
     }
 
-    fn expected_border_look(theme: &Theme, focused: bool) -> (Option<Color>, Modifier) {
+    fn expected_border_look(theme: &Theme, focused: FocusState) -> (Option<Color>, Modifier) {
         let style = theme.overlay_field_border_style(focused);
         (style.fg, style.add_modifier)
     }
@@ -24993,7 +25130,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, true),
+            expected_border_look(&app.theme, FocusState::Focused),
             "a focused field draws the focused border"
         );
 
@@ -25010,7 +25147,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, false),
+            expected_border_look(&app.theme, FocusState::Unfocused),
             "an unfocused field draws the unfocused border"
         );
     }
@@ -25031,7 +25168,7 @@ mod tests {
         assert_eq!(caret_columns(&buf, input, cursor_bg).len(), 1);
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, true)
+            expected_border_look(&app.theme, FocusState::Focused)
         );
 
         let mut app = test_app(default_bindings());
@@ -25047,7 +25184,7 @@ mod tests {
         );
         assert_eq!(
             field_border_look(&buf, input),
-            expected_border_look(&app.theme, false)
+            expected_border_look(&app.theme, FocusState::Unfocused)
         );
     }
 
@@ -25225,12 +25362,24 @@ mod tests {
 
     #[test]
     fn render_single_line_cursor_input_drops_the_caret_when_unfocused() {
-        let focused =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
+        let focused = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
         assert_eq!(focused.spans.len(), 4);
 
-        let unfocused =
-            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, false);
+        let unfocused = render_single_line_cursor_input(
+            "",
+            "macro",
+            2,
+            Color::White,
+            Color::Black,
+            FocusState::Unfocused,
+        );
         let text: String = unfocused
             .spans
             .iter()
@@ -25264,7 +25413,7 @@ mod tests {
                 0,
                 theme.input_cursor_fg,
                 theme.input_cursor_bg,
-                true,
+                FocusState::Focused,
             );
             let caret = field
                 .spans
@@ -25311,7 +25460,7 @@ mod tests {
                 cursor,
                 Color::White,
                 Color::Black,
-                true,
+                FocusState::Focused,
                 width,
             );
             let all: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -25348,8 +25497,14 @@ mod tests {
         let text = "👩\u{200d}💻a";
         // At the sequence, and at a byte inside it, the caret covers all of it.
         for cursor in [0, "👩".len()] {
-            let line =
-                render_single_line_cursor_input("", text, cursor, Color::White, Color::Black, true);
+            let line = render_single_line_cursor_input(
+                "",
+                text,
+                cursor,
+                Color::White,
+                Color::Black,
+                FocusState::Focused,
+            );
             let caret: Vec<&str> = line
                 .spans
                 .iter()
@@ -25366,7 +25521,14 @@ mod tests {
     fn render_single_line_cursor_input_clamps_a_caret_inside_a_character() {
         // A byte offset that is not a char boundary must not panic; it clamps
         // back to the start of the character it landed in.
-        let line = render_single_line_cursor_input("", "áb", 1, Color::White, Color::Black, true);
+        let line = render_single_line_cursor_input(
+            "",
+            "áb",
+            1,
+            Color::White,
+            Color::Black,
+            FocusState::Focused,
+        );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "áb");
     }
@@ -26828,7 +26990,12 @@ mod tests {
     }
 
     fn recap_title(app: &App, files: &[ChangedFile]) -> Line<'static> {
-        changed_files_group_title("Changes", files, &app.theme, app.theme.title_style(false))
+        changed_files_group_title(
+            "Changes",
+            files,
+            &app.theme,
+            app.theme.title_style(FocusState::Unfocused),
+        )
     }
 
     fn span_color(line: &Line<'_>, text: &str) -> Option<ratatui::style::Color> {
