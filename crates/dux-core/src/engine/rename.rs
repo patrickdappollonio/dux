@@ -120,6 +120,11 @@ impl Engine {
     /// Answers with the reaction to apply: a final for a rename that is already
     /// done, or the keyed busy of the branch rename now running. A refusal is an
     /// error carrying the sentence to show.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal sentence for an unknown session, a rejected name or
+    /// branch rename, or a new name the session database could not save.
     pub fn rename_agent(
         &mut self,
         session_id: &str,

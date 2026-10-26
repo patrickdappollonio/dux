@@ -58,6 +58,11 @@ impl Engine {
 
     /// Check `admission` without holding anything: refused when an open
     /// record other than the one being dispatched holds what it wants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`InTheWay`] naming the open record, other than the one
+    /// being dispatched, that holds something `admission` wants.
     pub fn check_admission(&self, admission: &Admission) -> Result<(), InTheWay> {
         self.operations
             .admit(self.operation_in_dispatch.as_deref(), &admission.wants, &[])
@@ -118,6 +123,11 @@ impl Engine {
     }
 
     /// Admit `admission`, holding its keys on `record` when there is one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`InTheWay`] naming the open record, other than `record`,
+    /// that holds something `admission` wants.
     pub fn admit(&self, record: Option<&str>, admission: &Admission) -> Result<(), InTheWay> {
         self.operations
             .admit(record, &admission.wants, &admission.takes)

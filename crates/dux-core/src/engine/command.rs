@@ -483,6 +483,13 @@ impl Engine {
     /// Single dispatch point for every engine-affecting operation, whether the
     /// `Command` came from a key event or off the wire. Returns an
     /// `EventReaction` the caller routes through its view-applier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is refused, because an open change
+    /// holds what it would change or somebody else is attached to what it would
+    /// end, or when carrying it out fails; the error is the sentence the
+    /// surfaces show.
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // Count every command taken, deferred ones included: the counter's
         // reader only asks whether anything happened this iteration. Counted at
@@ -2003,6 +2010,10 @@ impl Engine {
     /// sort action's chosen order survives a reload and matches every surface by
     /// construction. Does not re-sort the Vec, which is already in the desired
     /// order; it only writes each project's ordered id list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot store the order.
     pub fn persist_session_order(&self) -> anyhow::Result<()> {
         // Agents are one global list, so the in-memory Vec order is persisted
         // as a single global `sort_order` permutation rather than per project.

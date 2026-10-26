@@ -21,6 +21,11 @@ impl Engine {
     /// folder already known to be missing, an empty branch. Whether `branch`
     /// exists, is a valid branch name and is free is decided in the worker,
     /// because git must not run on a surface's thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown project, a project whose folder is known
+    /// to be missing, or an empty branch name.
     pub fn change_project_base_branch(
         &mut self,
         project_id: &str,

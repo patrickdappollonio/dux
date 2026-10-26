@@ -921,121 +921,16 @@ pub struct Engine {
     pub removal_coordination: RemovalCoordination,
 }
 
+/// Shows what the engine is managing (its paths, projects, agents and tabs);
+/// the runtime machinery around them (process handles, workers, caches) is
+/// left out.
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
-            .field("config", &self.config)
             .field("paths", &self.paths)
             .field("projects", &self.projects)
             .field("sessions", &self.sessions)
-            .field("staged_files", &self.staged_files)
-            .field("unstaged_files", &self.unstaged_files)
-            .field("changed_files_revision", &self.changed_files_revision)
-            .field("terminal_counter", &self.terminal_counter)
-            .field(
-                "github_integration_enabled",
-                &self.github_integration_enabled,
-            )
-            .field("single_instance_lock", &self.single_instance_lock)
-            .field("surface_kind", &self.surface_kind)
-            .field("host_env", &self.host_env)
-            .field("worker_tx", &self.worker_tx)
-            .field("worker_rx", &self.worker_rx)
-            .field("reloading", &self.reloading)
-            .field("deferred_commands", &self.deferred_commands)
-            .field("deferred_operations", &self.deferred_operations)
-            .field("deferred_policies", &self.deferred_policies)
-            .field("command_applies", &self.command_applies)
-            .field("reload_origin", &self.reload_origin)
-            .field("running_provider_pins", &self.running_provider_pins)
-            .field("launched_drop_paste", &self.launched_drop_paste)
             .field("agent_tabs", &self.agent_tabs)
-            .field("terminating_ptys", &self.terminating_ptys)
-            .field("removal_workers", &self.removal_workers)
-            .field("pending_group_removals", &self.pending_group_removals)
-            .field("pending_detachments", &self.pending_detachments)
-            .field("pending_tab_restarts", &self.pending_tab_restarts)
-            .field("gh_status", &self.gh_status)
-            .field("gh_probe", &self.gh_probe)
-            .field("pr_statuses", &self.pr_statuses)
-            .field("pr_overrides", &self.pr_overrides)
-            .field("pr_suppressions", &self.pr_suppressions)
-            .field("branch_sync_sessions", &self.branch_sync_sessions)
-            .field("pr_sync_sessions", &self.pr_sync_sessions)
-            .field("pr_sync", &self.pr_sync)
-            .field("pr_poll_interval_secs", &self.pr_poll_interval_secs)
-            .field(
-                "pr_poll_inactive_interval_secs",
-                &self.pr_poll_inactive_interval_secs,
-            )
-            .field("pr_inactive_sweep_at", &self.pr_inactive_sweep_at)
-            .field("pr_inactive_sessions", &self.pr_inactive_sessions)
-            .field("pr_return_checks_owed", &self.pr_return_checks_owed)
-            .field("pr_branch_generations", &self.pr_branch_generations)
-            .field("pr_branch_checks_owed", &self.pr_branch_checks_owed)
-            .field("branch_sync_interval_secs", &self.branch_sync_interval_secs)
-            .field("branch_sync_wait", &self.branch_sync_wait)
-            .field("pr_backoff", &self.pr_backoff)
-            .field(
-                "resume_fallback_candidates",
-                &self.resume_fallback_candidates,
-            )
-            .field("resumed_tab_runs", &self.resumed_tab_runs)
-            .field("pending_deletions", &self.pending_deletions)
-            .field("folder_repo_statuses", &self.folder_repo_statuses)
-            .field("changed_files_failures", &self.changed_files_failures)
-            .field("closing_sessions", &self.closing_sessions)
-            .field("deletion_busy_messages", &self.deletion_busy_messages)
-            .field("watched_worktree", &self.watched_worktree)
-            .field("changed_files_refresh", &self.changed_files_refresh)
-            .field("watched_session_id", &self.watched_session_id)
-            .field("has_active_processes", &self.has_active_processes)
-            .field("serve_memory", &self.serve_memory)
-            .field("current_origin", &self.current_origin)
-            .field("in_flight", &self.in_flight)
-            .field("rename_expected", &self.rename_expected)
-            .field("pr_last_checked", &self.pr_last_checked)
-            .field(
-                "changed_files_poller_started",
-                &self.changed_files_poller_started,
-            )
-            .field(
-                "branch_sync_worker_started",
-                &self.branch_sync_worker_started,
-            )
-            .field("pty_activity", &self.pty_activity)
-            .field("pty_input", &self.pty_input)
-            .field("pty_pointer", &self.pty_pointer)
-            .field("pty_used", &self.pty_used)
-            .field("needs_attention", &self.needs_attention)
-            .field("failed_tab_runs", &self.failed_tab_runs)
-            .field("pty_progress", &self.pty_progress)
-            .field("agent_viewed", &self.agent_viewed)
-            .field("last_foreground_refresh", &self.last_foreground_refresh)
-            .field("pending_web_checkout_ops", &self.pending_web_checkout_ops)
-            .field("pending_change_base_ops", &self.pending_change_base_ops)
-            .field(
-                "pending_web_add_project_ops",
-                &self.pending_web_add_project_ops,
-            )
-            .field("pending_web_pr_lookup_ops", &self.pending_web_pr_lookup_ops)
-            .field("pending_pr_attach_ops", &self.pending_pr_attach_ops)
-            .field("pending_recreate_ops", &self.pending_recreate_ops)
-            .field("pending_delete_ops_web", &self.pending_delete_ops_web)
-            .field(
-                "pending_delete_reports_web",
-                &self.pending_delete_reports_web,
-            )
-            .field("pending_create_ops", &self.pending_create_ops)
-            .field("pending_web_launch_ops", &self.pending_web_launch_ops)
-            .field("live_status_keys", &self.live_status_keys)
-            .field("last_created_op_id", &self.last_created_op_id)
-            .field("operations", &self.operations)
-            .field("operation_in_dispatch", &self.operation_in_dispatch)
-            .field("attachments", &self.attachments)
-            .field("dispatch_policy", &self.dispatch_policy)
-            .field("created_session_by_op", &self.created_session_by_op)
-            .field("removal_coordination", &self.removal_coordination)
             .finish_non_exhaustive()
     }
 }
@@ -3034,6 +2929,11 @@ impl Engine {
     /// and config/SQLite-sourced entries load through `load_projects`, whose
     /// looser `is_git_repo` probe is deliberately untouched so existing
     /// subfolder projects keep working.
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing sentence when the path is not a git repository,
+    /// sits inside one or inside its git directory, or is already a project.
     pub fn validate_project_add_path(
         &self,
         raw_path: &str,
@@ -3085,6 +2985,12 @@ impl Engine {
     /// not already be (or sit inside) a git repository, and must not already
     /// be registered. Unlike the add gate, `Indeterminate` fails closed here:
     /// this validation front-runs a mutation (`git init`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the user-facing sentence when the path is not an existing folder,
+    /// is or sits inside a git repository (or its git directory), cannot be
+    /// classified, or is already a project.
     pub fn validate_project_init_path(
         &self,
         raw_path: &str,
@@ -3144,6 +3050,10 @@ impl Engine {
     /// persistence so the portable config stays in sync with SQLite. (The TUI has
     /// its own config-sync path.) Eager synchronous write via the queue; blocks
     /// until the writer confirms or times out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config writer does not confirm the save.
     pub fn persist_projects_to_config(&mut self) -> anyhow::Result<()> {
         self.config.projects = self
             .projects
@@ -3160,6 +3070,11 @@ impl Engine {
     /// the store under the new config, swap the config, and refresh derived
     /// project/branch-sync state. View concerns (theme, keybindings, panes) are
     /// the surface's responsibility and are not touched here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot load the projects to
+    /// merge; the new config is still adopted.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
         self.apply_reloaded_config_probing(config, GhReprobe::Now)
     }
@@ -5459,6 +5374,11 @@ impl Engine {
     /// The suppression is durable: a restart is not the user changing their
     /// mind. It is lifted by a manual attach or by
     /// [`Self::resume_pr_autodetection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, a standalone agent, an attach
+    /// still running for the agent, or a session database write that fails.
     pub fn clear_pull_request_override(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
@@ -5515,6 +5435,11 @@ impl Engine {
     /// CLI that could have been uninstalled since. Without a usable `gh` the
     /// check is a no-op and the next cycle after the integration re-arms picks
     /// the session up.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, a standalone agent, an attach
+    /// still running for the agent, or a session database write that fails.
     pub fn resume_pr_autodetection(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             anyhow::bail!("unknown session: {session_id}");
@@ -5573,6 +5498,12 @@ impl Engine {
     /// id in the `202` body). The final is resolved engine-side in
     /// `process_worker_event`'s `PullRequestResolved` attach arm, so neither
     /// surface can drift on the outcome handling.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal when the GitHub integration or `gh` is unavailable,
+    /// the session is unknown or standalone, an attach is already running for
+    /// it, its project is gone, or the input is empty.
     pub fn dispatch_attach_pull_request(
         &mut self,
         session_id: &str,
@@ -5719,6 +5650,11 @@ impl Engine {
     /// and the TUI's folder browser cannot answer the same question
     /// differently. Also returns the Busy message, because a keyed busy and its
     /// final have to name the same thing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal for a relative folder, a folder another agent already
+    /// works in, an invalid agent name, or a provider that is not configured.
     pub fn plan_standalone_agent(
         &self,
         folder: &str,
@@ -5877,6 +5813,11 @@ impl Engine {
     ///
     /// `feature` and `remedy` are the two halves of the refusal sentence; see
     /// [`standalone_agent_refusal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, and the refusal sentence for an
+    /// agent with no managed working copy.
     pub fn branch_git_workspace(
         &self,
         session_id: &str,
@@ -5984,6 +5925,10 @@ impl Engine {
     /// The resume decision uses `tab_resume_decision` (collision-aware) for both
     /// the request and the announced `resume`, so a surface never announces a
     /// resume that the dispatch downgrades to fresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session.
     pub fn reconnect_plan(
         &mut self,
         session_id: &str,
@@ -6444,6 +6389,12 @@ impl Engine {
     /// this just-created row (it is `is_fresh`). The per-agent cap is enforced
     /// here, in one synchronous call (the single-threaded engine makes the
     /// check-then-insert atomic); it counts the session-slot tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, an agent being deleted, a
+    /// provider that is not configured, an agent already at its tab cap, a
+    /// session database failure, or a launch that cannot be dispatched.
     pub fn create_tab(
         &mut self,
         session_id: &str,
@@ -6704,6 +6655,12 @@ impl Engine {
     /// Either way the row goes first (a persistence failure leaves in-memory
     /// state untouched), then the PTY is torn down gracefully and every runtime
     /// map the tab keyed is cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the agent is being deleted (naming the delete when
+    /// one is followed), the tab is the agent's last, does not belong to the
+    /// session or is unknown, or the session database cannot delete its row.
     pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         // Mid-deletion every tab is already being torn down with the worktree;
         // closing one on its own would race that teardown.
@@ -6798,6 +6755,11 @@ impl Engine {
     /// this delegates to the untouched
     /// [`Engine::change_agent_provider`]; for an extra tab it updates only that
     /// tab's row, pinning the previously-running provider if it is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session or tab, a provider that is not
+    /// configured, or a session database write that fails.
     pub fn change_tab_provider(
         &mut self,
         session_id: &str,
@@ -6880,6 +6842,11 @@ impl Engine {
     /// persisted. DB-first (mirroring `ToggleAgentAutoReopen`): the storage
     /// write happens before the in-memory session is updated, so a persistence
     /// failure leaves memory and SQLite in sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session or a session database write that
+    /// fails.
     pub fn set_last_focused_tab(
         &mut self,
         session_id: &str,

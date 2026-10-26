@@ -2452,6 +2452,12 @@ impl Engine {
     /// A second press while the first is still working is refused here rather
     /// than left to git: the verdict that gates the action only refreshes when
     /// the recreate finishes, so the row stays on screen for the whole of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal sentence when a recreate is already running, the
+    /// agent has no managed working copy that is gone, its project is no longer
+    /// in dux, a removal holds the path, or the worker cannot be started.
     pub fn begin_recreate_working_copy(
         &mut self,
         session_id: &str,

@@ -192,6 +192,11 @@ impl Engine {
     /// Hold `worktree` for a git change made in it (stage, unstage, discard),
     /// for as long as the guard lives: a removal of the worktree waits for it,
     /// and one already under way refuses it with a sentence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal sentence when a removal of the worktree is already
+    /// under way.
     pub fn hold_for_git_change(
         &self,
         worktree: impl AsRef<Path>,
@@ -214,6 +219,11 @@ impl Engine {
     /// The two refusals cannot both apply to one request: the first is taken
     /// before the hold is asked for, and a refused hold gives the run claim
     /// back on the spot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sentence to show when the agent's startup command is already
+    /// running or a removal of its worktree is under way.
     pub fn claim_startup_rerun(
         &self,
         session_id: &str,

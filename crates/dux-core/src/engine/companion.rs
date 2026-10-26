@@ -20,6 +20,11 @@ impl Engine {
     ///
     /// The terminal runs `config.terminal.command` and `args` with the session's
     /// resolved environment, the global env merged with the owning project's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown session, a working copy whose directory
+    /// is gone, a folder a removal has claimed, or a shell that fails to spawn.
     pub fn create_companion_terminal(
         &mut self,
         session_id: &str,
@@ -78,6 +83,12 @@ impl Engine {
     /// terminal command and the global env merged with the project's, owned by
     /// the project instead of a session. It does not run the project's
     /// `startup_command`, which is worktree provisioning, not a shell rc.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown project, a project path that is not a
+    /// directory on disk, a folder a removal has claimed, or a shell that fails
+    /// to spawn.
     pub fn create_project_terminal(
         &mut self,
         project_id: &str,
@@ -120,6 +131,11 @@ impl Engine {
     ///
     /// Like a project terminal it does not run any `startup_command`: that is
     /// worktree provisioning for new agents, not a shell rc.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a removal has claimed the directory or the shell
+    /// fails to spawn.
     pub fn create_standalone_terminal(&mut self, rows: u16, cols: u16) -> Result<(String, String)> {
         let dir = crate::home_path::standalone_terminal_dir();
         // The global half only. `resolve_agent_env` merges a project's env over

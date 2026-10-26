@@ -2294,6 +2294,11 @@ impl Engine {
     /// and the caller then does view-side cleanup. In the gap, view-only maps
     /// still hold entries for the deleted session id, so an engine helper called
     /// from inside here must not read them for that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session database cannot delete the session; the
+    /// in-memory state is then left as it was.
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -4304,6 +4309,11 @@ impl Engine {
     ///
     /// `project_path` is the folder (the project's `path`), `project_name` the
     /// name the refusal chips.
+    ///
+    /// # Errors
+    ///
+    /// Returns the warning to show when another operation already holds the
+    /// project folder.
     pub fn begin_project_folder_action(
         &mut self,
         project_path: &str,
