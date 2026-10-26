@@ -476,6 +476,10 @@ fn load_from_str(toml_str: &str) -> Result<Theme> {
 /// them. This lets generic Opaline built-ins (Nord, Catppuccin, …) drive the
 /// dux UI without having to know the dux token namespace, while still letting
 /// dux-aware themes override every dux token explicitly.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one default per dux theme token, derived from the theme's semantic colors"
+)]
 fn register_dux_defaults(theme: &mut OpalineTheme) {
     // Resolve the standard Opaline semantic tokens once. `theme.color()`
     // returns OpalineColor::FALLBACK (gray) for missing tokens, which keeps

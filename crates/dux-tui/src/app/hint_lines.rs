@@ -220,6 +220,10 @@ fn fixed_keys(name: &str) -> &'static [&'static str] {
 }
 
 /// Everything that paints a hint line, painted with `bindings`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a table of every surface that paints a hint line, one entry each"
+)]
 fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> Vec<Painted> {
     // The footer in each focus context it has hints for.
     type Setup = fn(&mut App);

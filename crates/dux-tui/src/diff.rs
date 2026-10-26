@@ -297,6 +297,31 @@ fn count_lines(bytes: &[u8]) -> usize {
 /// the highlighting are each slow enough to freeze the run loop on a large
 /// file, so the only way in from the app is [`spawn_diff_job`], which runs it
 /// on a thread of its own.
+/// The syntax a file is highlighted with, chosen by its extension; plain text
+/// when nothing matches.
+fn syntax_for<'c>(cache: &'c SyntaxCache, rel_path: &str) -> &'c syntect::parsing::SyntaxReference {
+    cache
+        .syntax_set
+        .find_syntax_by_extension(
+            Path::new(rel_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        )
+        .unwrap_or_else(|| cache.syntax_set.find_syntax_plain_text())
+}
+
+/// The `--- a/` and `+++ b/` lines a diff opens with.
+fn file_header_lines(rel_path: &str, theme: &AppTheme) -> [Line<'static>; 2] {
+    let style = Style::default()
+        .fg(theme.diff_file_header)
+        .add_modifier(Modifier::BOLD);
+    [
+        Line::from(Span::styled(format!("--- a/{rel_path}"), style)),
+        Line::from(Span::styled(format!("+++ b/{rel_path}"), style)),
+    ]
+}
+
 fn diff_file(
     worktree_path: &Path,
     rel_path: &str,
@@ -343,15 +368,7 @@ fn diff_file(
 
     let syn_theme = &cache.theme_set.themes["base16-ocean.dark"];
 
-    let syntax = cache
-        .syntax_set
-        .find_syntax_by_extension(
-            Path::new(rel_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or(""),
-        )
-        .unwrap_or_else(|| cache.syntax_set.find_syntax_plain_text());
+    let syntax = syntax_for(cache, rel_path);
 
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -369,19 +386,7 @@ fn diff_file(
         highlight: verdict == DiffSizeVerdict::Full,
     };
 
-    // File header.
-    lines.push(Line::from(Span::styled(
-        format!("--- a/{rel_path}"),
-        Style::default()
-            .fg(theme.diff_file_header)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("+++ b/{rel_path}"),
-        Style::default()
-            .fg(theme.diff_file_header)
-            .add_modifier(Modifier::BOLD),
-    )));
+    lines.extend(file_header_lines(rel_path, theme));
 
     for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
         // Hunk header (@@ ... @@).

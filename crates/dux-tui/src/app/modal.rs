@@ -848,6 +848,10 @@ pub(super) mod tests {
     /// Every modal as the registry's fixtures build it. Shared with the confirm
     /// dialog's own journey tests, so a new Confirm-family modal is covered
     /// there the moment it has a fixture here.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of one fixture per prompt variant, one entry each"
+    )]
     pub(in crate::app) fn every_prompt(app: &App) -> Vec<(&'static str, PromptState)> {
         let project = app.engine.projects[0].clone();
         vec![

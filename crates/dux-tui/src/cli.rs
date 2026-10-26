@@ -2855,6 +2855,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one config folder, each step asserting on what the previous step left"
+    )]
     fn default_reset_removes_config_and_logs_but_keeps_agent_data() {
         let harness = ResetHarness::new();
         harness.write_config_with_log_path("logs/custom.log");
@@ -3530,6 +3534,10 @@ mod tests {
     /// bare `fs::remove_dir_all`) and never pruned, leaving a stale worktree ref
     /// that made the branch undeletable. This proves the branch is gone.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one repository, each step asserting on what the previous step left"
+    )]
     fn factory_reset_worktree_removal_prunes_and_deletes_the_branch() {
         let tempdir = TempDir::new().expect("tempdir");
         let repo = tempdir.path().join("repo");
@@ -3647,6 +3655,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one repository, each step asserting on what the previous step left"
+    )]
     fn factory_reset_of_a_locked_worktree_still_forgets_it_and_deletes_the_branch() {
         let tempdir = TempDir::new().expect("tempdir");
         let repo = tempdir.path().join("repo");

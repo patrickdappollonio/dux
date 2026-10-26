@@ -616,6 +616,10 @@ mod tests {
     /// Every Confirm-family dialog: the registry's own fixtures, so a new one is
     /// covered the moment it has a fixture, plus the heaviest real states of the
     /// dialogs whose bodies grow with their state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a table of every confirmation dialog, one entry each"
+    )]
     fn confirm_dialogs(app: &App) -> Vec<(&'static str, PromptState)> {
         let mut dialogs: Vec<(&'static str, PromptState)> = every_prompt(app)
             .into_iter()

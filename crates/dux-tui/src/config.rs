@@ -366,6 +366,10 @@ enum ConfigEntry {
 /// this table's `comment` text. A field's default, zero-value meaning or comment
 /// changing here needs the matching entry there checked, and vice versa; there
 /// is no codegen linking the two.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the config schema: one entry per setting, in the order the file prints them"
+)]
 fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
@@ -3293,6 +3297,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one assertion per line the default config must carry"
+    )]
     fn default_config_is_commented_and_complete() {
         let rendered = render_default_config();
         assert!(rendered.contains("# dux configuration"));

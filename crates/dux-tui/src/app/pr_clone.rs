@@ -476,16 +476,7 @@ impl App {
         if folder_changed || outlook_changed {
             form.review_copy_agreed = false;
         }
-        let asks_now = match &outlook_after {
-            ReviewCopyOutlook::Needed { .. } => Some(
-                "Tick Create a review copy, or type another name, then press the confirm key \
-                 again.",
-            ),
-            ReviewCopyOutlook::NoFreeName { .. } => {
-                Some("Every name a review copy could take is taken. Type another name.")
-            }
-            ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => None,
-        };
+        let asks_now = review_copy_ask(&outlook_after);
         let repository = form.repository();
         let overtaken = answer.edits != form.edits;
         let go_ahead = was_pressed && !overtaken && !folder_changed && !outlook_changed;
@@ -497,17 +488,7 @@ impl App {
                  Press {confirm_key} again."
             ))
         } else if folder_changed {
-            let lead = if matches!(form.folder, PrFolder::Checkout { .. }) {
-                format!(
-                    "That folder already holds a checkout of {repository}, so the form now adds \
-                     it as a project instead of cloning."
-                )
-            } else {
-                format!(
-                    "That folder holds nothing of {repository} now, so the form now clones into \
-                     it."
-                )
-            };
+            let lead = folder_change_lead(&form.folder, &repository);
             Some(match asks_now {
                 Some(ask) => format!("{lead} {}", ask.replace("the confirm key", &confirm_key)),
                 None => format!("{lead} Press {confirm_key} again to go ahead."),
@@ -903,5 +884,31 @@ impl App {
             focus: CloneProjectFocus::ReviewCopyCheckbox,
             pull_request: Some(Box::new(form)),
         };
+    }
+}
+
+/// The question a review-copy answer leaves for the user, worded with "the
+/// confirm key" for the caller to name; `None` when it asks nothing.
+fn review_copy_ask(outlook: &ReviewCopyOutlook) -> Option<&'static str> {
+    match outlook {
+        ReviewCopyOutlook::Needed { .. } => Some(
+            "Tick Create a review copy, or type another name, then press the confirm key again.",
+        ),
+        ReviewCopyOutlook::NoFreeName { .. } => {
+            Some("Every name a review copy could take is taken. Type another name.")
+        }
+        ReviewCopyOutlook::NotNeeded | ReviewCopyOutlook::Unknown => None,
+    }
+}
+
+/// What the form now does with the folder the check just classified.
+fn folder_change_lead(folder: &PrFolder, repository: &str) -> String {
+    if matches!(folder, PrFolder::Checkout { .. }) {
+        format!(
+            "That folder already holds a checkout of {repository}, so the form now adds it as a \
+             project instead of cloning."
+        )
+    } else {
+        format!("That folder holds nothing of {repository} now, so the form now clones into it.")
     }
 }

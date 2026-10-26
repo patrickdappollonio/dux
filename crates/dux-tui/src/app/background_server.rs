@@ -1735,6 +1735,10 @@ pub(crate) mod tests {
     /// its own agent is the one deleted, the cursor rests on no row rather than
     /// on a neighbour it was never on.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn a_change_made_elsewhere_rebuilds_the_sidebar_and_the_cursor_keeps_its_agent() {
         type Case = (
             &'static str,

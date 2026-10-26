@@ -37,6 +37,165 @@ pub(crate) trait SecretSource {
     ) -> Result<Option<(Password, Password)>>;
 }
 
+/// How `dux config get` words what it reports about one setting.
+struct GetWording<'a> {
+    /// The setting's path as printed.
+    path: &'a str,
+    /// Which surfaces use the value: "dux", "dux server" or "the terminal UI".
+    users: &'a str,
+    /// The value can hold secrets and `--show` was not given.
+    hide: bool,
+    /// The load changes the value, and a correction line says where it came from.
+    corrected: bool,
+}
+
+/// The value line of `dux config get`, with its note on standard error when the
+/// value is a default, unset or cannot be worked out.
+fn write_get_value(
+    value: GetValue,
+    key: &Key,
+    with_names: Option<String>,
+    wording: &GetWording<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let GetWording {
+        path,
+        users,
+        hide,
+        corrected,
+    } = *wording;
+    match value {
+        GetValue::Set(_) if hide => writeln!(
+            err,
+            "{path} is set; it can hold secrets, so its value is not printed. Add --show to \
+         print it."
+        )?,
+        GetValue::Set(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
+        GetValue::Default(value) if value.is_empty() => {
+            writeln!(out)?;
+            match key.path.as_slice() {
+                [section, name, field] if section == "providers" && field == "command" => writeln!(
+                    err,
+                    "(config.toml lists providers.{name} without a command, so as {users} reads \
+                 it the command is empty: that provider has no command and cannot start)"
+                )?,
+                _ => writeln!(
+                    err,
+                    "({path} is not in config.toml; as {users} reads the file it is empty)"
+                )?,
+            }
+        }
+        // Where the value came from is said by its correction (carried over
+        // from a deprecated key, or from a retired binding), not as a default.
+        GetValue::Default(value) if corrected => writeln!(out, "{value}")?,
+        GetValue::Default(value) => {
+            writeln!(out, "{value}")?;
+            writeln!(
+                err,
+                "({path} is not set in config.toml; {users} uses this value)"
+            )?;
+        }
+        GetValue::Unset if corrected => {}
+        GetValue::Unset => writeln!(err, "{path} is not set")?,
+        GetValue::Unknown { in_file, reason } => {
+            match in_file {
+                Some(_) if hide => writeln!(
+                    err,
+                    "{path} is set in config.toml; it can hold secrets, so its value is not \
+                 printed. Add --show to print it."
+                )?,
+                Some(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
+                None => writeln!(err, "{path} is not in config.toml")?,
+            }
+            writeln!(
+                err,
+                "(the value dux would use cannot be worked out, because {reason}; what is shown \
+             is what the file says)"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// One correction line of `dux config get`: what the load changes about the
+/// value, and which surface changes it.
+fn write_correction(
+    correction: &config_keys::Correction,
+    raw: &str,
+    wording: &GetWording<'_>,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let GetWording { users, hide, .. } = *wording;
+    let at = dux_core::config::shown_path(raw, &correction.path);
+    let reason = correction.reason.trim_end_matches('.');
+    // An entry the formatter does not name has no value printed, at it
+    // or below it (see `config_keys::printed_value`): only that the file
+    // has one there, and what dux does with it.
+    if correction.value_hidden {
+        let who = match correction.surface {
+            Some(Surface::TerminalUi) => "the terminal UI",
+            Some(Surface::DuxServer) => "dux server",
+            None => users,
+        };
+        match &correction.used {
+            None => writeln!(
+                err,
+                "({at}: config.toml has a value here, but {who} drops that entry when it \
+                 loads the file, so it is not set: {reason})"
+            )?,
+            Some(_) => writeln!(
+                err,
+                "({at}: config.toml has a value here; {who} uses another because {reason})"
+            )?,
+        }
+        return Ok(());
+    }
+    // A correction only one surface makes is said for that surface.
+    if let Some(surface) = correction.surface {
+        let name = match surface {
+            Surface::TerminalUi => "the terminal UI",
+            Surface::DuxServer => "dux server",
+        };
+        match (&correction.in_file, &correction.used) {
+            (Some(in_file), Some(used)) if !hide => writeln!(
+                err,
+                "({at}: config.toml says {in_file}; {name} uses {used} because {reason})"
+            )?,
+            (None, Some(used)) if !hide => {
+                writeln!(err, "({at}: {name} uses {used}: {reason})")?;
+            }
+            _ => writeln!(err, "({at}: {reason})")?,
+        }
+        return Ok(());
+    }
+    let Some(in_file) = &correction.in_file else {
+        // Left out of the file; the load writes it from a deprecated key.
+        match &correction.used {
+            Some(used) if !hide => writeln!(err, "({at}: {users} uses {used}, {reason})")?,
+            _ => writeln!(err, "({at}: {users} uses a value {reason})")?,
+        }
+        return Ok(());
+    };
+    let in_file = if hide { "a value" } else { in_file.as_str() };
+    match &correction.used {
+        Some(used) if !hide => writeln!(
+            err,
+            "({at}: config.toml says {in_file}; {users} uses {used} because {reason})"
+        )?,
+        Some(_) => writeln!(
+            err,
+            "({at}: config.toml says {in_file}; {users} uses another because {reason})"
+        )?,
+        None => writeln!(
+            err,
+            "({at}: config.toml says {in_file}, but {users} drops that entry when it loads \
+             the file, so it is not set: {reason})"
+        )?,
+    }
+    Ok(())
+}
+
 /// `dux config get <path>`: print the value config.toml holds for the
 /// setting, or its default when the file leaves it out (said on stderr, so
 /// stdout stays just the value for scripts).
@@ -111,125 +270,17 @@ pub(crate) fn run_get(
     // A table prints a name that breaks its map's rule as a marker naming
     // its line; only `--show` prints it as the file names it.
     let with_names = report.with_names.clone().filter(|_| show);
-    match report.value {
-        GetValue::Set(_) if hide => writeln!(
-            err,
-            "{path} is set; it can hold secrets, so its value is not printed. Add --show to \
-             print it."
-        )?,
-        GetValue::Set(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
-        GetValue::Default(value) if value.is_empty() => {
-            writeln!(out)?;
-            match key.path.as_slice() {
-                [section, name, field] if section == "providers" && field == "command" => writeln!(
-                    err,
-                    "(config.toml lists providers.{name} without a command, so as {users} reads \
-                     it the command is empty: that provider has no command and cannot start)"
-                )?,
-                _ => writeln!(
-                    err,
-                    "({path} is not in config.toml; as {users} reads the file it is empty)"
-                )?,
-            }
-        }
-        // Where the value came from is said by its correction (carried over
-        // from a deprecated key, or from a retired binding), not as a default.
-        GetValue::Default(value) if corrected => writeln!(out, "{value}")?,
-        GetValue::Default(value) => {
-            writeln!(out, "{value}")?;
-            writeln!(
-                err,
-                "({path} is not set in config.toml; {users} uses this value)"
-            )?;
-        }
-        GetValue::Unset if corrected => {}
-        GetValue::Unset => writeln!(err, "{path} is not set")?,
-        GetValue::Unknown { in_file, reason } => {
-            match in_file {
-                Some(_) if hide => writeln!(
-                    err,
-                    "{path} is set in config.toml; it can hold secrets, so its value is not \
-                     printed. Add --show to print it."
-                )?,
-                Some(value) => writeln!(out, "{}", with_names.unwrap_or(value))?,
-                None => writeln!(err, "{path} is not in config.toml")?,
-            }
-            writeln!(
-                err,
-                "(the value dux would use cannot be worked out, because {reason}; what is shown \
-                 is what the file says)"
-            )?;
-        }
-    }
+    let wording = GetWording {
+        path,
+        users,
+        hide,
+        corrected,
+    };
+    write_get_value(report.value, &key, with_names, &wording, out, err)?;
     // One line per value the load changes: the setting asked for, or each
     // entry inside the table asked for.
     for correction in &report.corrections {
-        let at = dux_core::config::shown_path(&raw, &correction.path);
-        let reason = correction.reason.trim_end_matches('.');
-        // An entry the formatter does not name has no value printed, at it
-        // or below it (see `config_keys::printed_value`): only that the file
-        // has one there, and what dux does with it.
-        if correction.value_hidden {
-            let who = match correction.surface {
-                Some(Surface::TerminalUi) => "the terminal UI",
-                Some(Surface::DuxServer) => "dux server",
-                None => users,
-            };
-            match &correction.used {
-                None => writeln!(
-                    err,
-                    "({at}: config.toml has a value here, but {who} drops that entry when it \
-                     loads the file, so it is not set: {reason})"
-                )?,
-                Some(_) => writeln!(
-                    err,
-                    "({at}: config.toml has a value here; {who} uses another because {reason})"
-                )?,
-            }
-            continue;
-        }
-        // A correction only one surface makes is said for that surface.
-        if let Some(surface) = correction.surface {
-            let name = match surface {
-                Surface::TerminalUi => "the terminal UI",
-                Surface::DuxServer => "dux server",
-            };
-            match (&correction.in_file, &correction.used) {
-                (Some(in_file), Some(used)) if !hide => writeln!(
-                    err,
-                    "({at}: config.toml says {in_file}; {name} uses {used} because {reason})"
-                )?,
-                (None, Some(used)) if !hide => {
-                    writeln!(err, "({at}: {name} uses {used}: {reason})")?;
-                }
-                _ => writeln!(err, "({at}: {reason})")?,
-            }
-            continue;
-        }
-        let Some(in_file) = &correction.in_file else {
-            // Left out of the file; the load writes it from a deprecated key.
-            match &correction.used {
-                Some(used) if !hide => writeln!(err, "({at}: {users} uses {used}, {reason})")?,
-                _ => writeln!(err, "({at}: {users} uses a value {reason})")?,
-            }
-            continue;
-        };
-        let in_file = if hide { "a value" } else { in_file.as_str() };
-        match &correction.used {
-            Some(used) if !hide => writeln!(
-                err,
-                "({at}: config.toml says {in_file}; {users} uses {used} because {reason})"
-            )?,
-            Some(_) => writeln!(
-                err,
-                "({at}: config.toml says {in_file}; {users} uses another because {reason})"
-            )?,
-            None => writeln!(
-                err,
-                "({at}: config.toml says {in_file}, but {users} drops that entry when it loads \
-                 the file, so it is not set: {reason})"
-            )?,
-        }
+        write_correction(correction, &raw, &wording, err)?;
     }
     for (surface, why) in &report.refused_by {
         let name = match surface {

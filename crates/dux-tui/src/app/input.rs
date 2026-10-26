@@ -318,6 +318,10 @@ impl ButtonPressedTarget {
     /// Returns `None` for non-button targets (text inputs, list rows,
     /// checkboxes) so the press machinery cannot accidentally arm them:
     /// those targets keep their existing on-Down behavior.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt mouse target, naming the button it presses"
+    )]
     fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
         match target {
             PromptMouseTarget::PullRequestChooseProject => {
@@ -1959,6 +1963,10 @@ impl App {
     /// reset). Exhaustive over `PromptState` with no `_` arm, like
     /// `modal::prompt_text_inputs`, so a new modal that grows a text field
     /// cannot silently become unpasteable.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt kind, each pasting into that prompt's own field"
+    )]
     fn handle_prompt_paste(&mut self, text: &str) {
         // Follow-ups that need `&mut self` after the prompt borrow ends.
         let mut refresh_path_completions = false;
@@ -7022,6 +7030,10 @@ impl App {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per published overlay layout, each handing its rects to that layout's hit test"
+    )]
     fn prompt_mouse_target(&self, column: u16, row: u16) -> Option<PromptMouseTarget> {
         match self.overlay_layout.active {
             OverlayMouseLayout::Command {
@@ -10208,6 +10220,10 @@ impl App {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per prompt mouse target, each handing it to the method that acts on it"
+    )]
     fn dispatch_prompt_target_action(
         &mut self,
         target: PromptMouseTarget,
@@ -10403,6 +10419,10 @@ impl App {
     /// Fire the action for a button that was both pressed and released
     /// over its own bounds. Mirrors the previous on-Down dispatch
     /// arms one-for-one; only the trigger event differs.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per button, each handing it to the method that acts on it"
+    )]
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
             // The take-over card is not a modal and never rides
@@ -30544,6 +30564,10 @@ cyan = "#00ffff"
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn clone_form_enter_dispatches_and_closes_a_refusal_keeps_it_open_and_a_failed_clone_hands_it_back()
      {
         let start = tempdir().expect("start folder");
@@ -31361,6 +31385,10 @@ cyan = "#00ffff"
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
@@ -40215,6 +40243,10 @@ cyan = "#00ffff"
     /// just written: flipping the REAL `begin_quit` site to
     /// `ConfirmFocus::Confirm` (Enter on the quit dialog would then kill every
     /// running agent) left the whole suite green.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per confirmation, each opening it through its production path"
+    )]
     fn open_two_button_confirmation(which: &str) -> App {
         let mut app = test_app(default_bindings());
         match which {

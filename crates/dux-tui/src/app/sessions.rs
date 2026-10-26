@@ -25,6 +25,7 @@ use anyhow::Result;
 use dux_core::clone_project::UpfrontReviewCopy;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
+use dux_core::model::CompanionTerminal;
 use dux_core::model::TerminalOwner;
 use dux_core::project_browser::leading_branch_for_project;
 use dux_core::worker::ReviewCopyConsent;
@@ -4617,6 +4618,56 @@ impl App {
     pub(crate) fn running_runtime_snapshot(&self) -> Vec<KillableRuntime> {
         let mut runtimes = Vec::new();
 
+        self.push_agent_runtimes(&mut runtimes);
+
+        // The UNFILTERED list: the kill overlay is its own surface with its own
+        // filter row, so a query typed into the sidebar must not decide which
+        // processes it offers to stop.
+        for (terminal_id, terminal) in self.sorted_terminal_items() {
+            let context_owner = self.terminal_runtime_context(terminal);
+            // Normalize the foreground through the shared core rule (trim + strip
+            // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
+            // and the web all agree on the app name. None (idle shell) reads
+            // "shell" in this list.
+            let label = dux_core::terminal_title::terminal_foreground_display(
+                terminal.foreground_cmd.as_deref(),
+            )
+            .unwrap_or_else(|| "shell".to_string());
+            let context = context_owner;
+            let search_text = format!(
+                "{} {} {} {}",
+                label,
+                context,
+                terminal.label,
+                KillableRuntimeKind::Terminal.noun()
+            );
+            runtimes.push(KillableRuntime {
+                id: RuntimeTargetId::Terminal(terminal_id.clone()),
+                kind: KillableRuntimeKind::Terminal,
+                label,
+                context,
+                search_text,
+            });
+        }
+
+        runtimes.sort_by(|a, b| {
+            (
+                a.context.to_lowercase(),
+                a.kind.noun(),
+                a.label.to_lowercase(),
+            )
+                .cmp(&(
+                    b.context.to_lowercase(),
+                    b.kind.noun(),
+                    b.label.to_lowercase(),
+                ))
+        });
+        runtimes
+    }
+
+    /// Every live provider process the kill overlay can stop: each agent's slot
+    /// tab and each running extra tab.
+    fn push_agent_runtimes(&self, runtimes: &mut Vec<KillableRuntime>) {
         for session in &self.engine.sessions {
             let main_running = self.engine.providers.contains_key(session.slot_tab_id());
             let has_live_support = self
@@ -4684,83 +4735,45 @@ impl App {
                 });
             }
         }
+    }
 
-        // The UNFILTERED list: the kill overlay is its own surface with its own
-        // filter row, so a query typed into the sidebar must not decide which
-        // processes it offers to stop.
-        for (terminal_id, terminal) in self.sorted_terminal_items() {
-            let context_owner = match &terminal.owner {
-                TerminalOwner::Session(session_id) => {
-                    let (project_name, session_label) = self
-                        .engine
-                        .sessions
-                        .iter()
-                        .find(|session| session.id == *session_id)
-                        .map_or_else(
-                            || ("unknown".to_string(), session_id.clone()),
-                            |session| {
-                                (
-                                    self.engine.project_name_for_session(session),
-                                    session.display_label(),
-                                )
-                            },
-                        );
-                    format!("on agent \"{session_label}\" under project \"{project_name}\"")
-                }
-                TerminalOwner::Project(project_id) => {
-                    let project_name = self
-                        .engine
-                        .projects
-                        .iter()
-                        .find(|project| project.id == *project_id)
-                        .map_or_else(|| project_id.clone(), |project| project.name.clone());
-                    format!("at the repo root of project \"{project_name}\"")
-                }
-                // No owner to name, so the kill overlay says where it is instead,
-                // which is the same thing its sidebar row says.
-                TerminalOwner::Standalone => format!(
-                    "standalone, in {}",
-                    dux_core::home_path::shorten_home(terminal.client.spawn_dir())
-                ),
-            };
-            // Normalize the foreground through the shared core rule (trim + strip
-            // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
-            // and the web all agree on the app name. None (idle shell) reads
-            // "shell" in this list.
-            let label = dux_core::terminal_title::terminal_foreground_display(
-                terminal.foreground_cmd.as_deref(),
-            )
-            .unwrap_or_else(|| "shell".to_string());
-            let context = context_owner;
-            let search_text = format!(
-                "{} {} {} {}",
-                label,
-                context,
-                terminal.label,
-                KillableRuntimeKind::Terminal.noun()
-            );
-            runtimes.push(KillableRuntime {
-                id: RuntimeTargetId::Terminal(terminal_id.clone()),
-                kind: KillableRuntimeKind::Terminal,
-                label,
-                context,
-                search_text,
-            });
+    /// Where a terminal in the kill overlay lives, in the words its sidebar row
+    /// uses.
+    fn terminal_runtime_context(&self, terminal: &CompanionTerminal) -> String {
+        match &terminal.owner {
+            TerminalOwner::Session(session_id) => {
+                let (project_name, session_label) = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+                    .map_or_else(
+                        || ("unknown".to_string(), session_id.clone()),
+                        |session| {
+                            (
+                                self.engine.project_name_for_session(session),
+                                session.display_label(),
+                            )
+                        },
+                    );
+                format!("on agent \"{session_label}\" under project \"{project_name}\"")
+            }
+            TerminalOwner::Project(project_id) => {
+                let project_name = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|project| project.id == *project_id)
+                    .map_or_else(|| project_id.clone(), |project| project.name.clone());
+                format!("at the repo root of project \"{project_name}\"")
+            }
+            // No owner to name, so the kill overlay says where it is instead,
+            // which is the same thing its sidebar row says.
+            TerminalOwner::Standalone => format!(
+                "standalone, in {}",
+                dux_core::home_path::shorten_home(terminal.client.spawn_dir())
+            ),
         }
-
-        runtimes.sort_by(|a, b| {
-            (
-                a.context.to_lowercase(),
-                a.kind.noun(),
-                a.label.to_lowercase(),
-            )
-                .cmp(&(
-                    b.context.to_lowercase(),
-                    b.kind.noun(),
-                    b.label.to_lowercase(),
-                ))
-        });
-        runtimes
     }
 
     pub(crate) fn visible_kill_running_indices(prompt: &KillRunningPrompt) -> Vec<usize> {
@@ -5101,6 +5114,10 @@ mod tests {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field initializer per App field, the test twin of the production constructor"
+    )]
     fn test_app_with_sessions(sessions: Vec<AgentSession>, projects: Vec<Project>) -> App {
         let tmp = tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
@@ -5491,6 +5508,10 @@ mod tests {
     /// An engine over a scratch config root, returned with the root's guard:
     /// the caller holds it for as long as the engine runs, and dropping it
     /// removes the directory.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field initializer per Engine field, the test twin of the production constructor"
+    )]
     fn test_engine_with_sessions(
         sessions: Vec<AgentSession>,
         projects: Vec<Project>,
@@ -10867,6 +10888,10 @@ mod tests {
     /// the project the list was opened on, never for whatever agent happens to
     /// be selected.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn every_project_action_row_runs_its_flow_for_the_picked_project() {
         let (_root, _repo, mut app) = project_based_on_develop();
         // A project terminal is a plain PTY; `cat` stands in for the shell.
@@ -11163,6 +11188,10 @@ mod tests {
     /// origin has; the held branch cannot be picked, and the origin-only one is
     /// created locally, checked out in the folder and saved as the base.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn changing_the_base_branch_runs_end_to_end_including_an_origin_only_branch() {
         let (root, mut app, _worktree) = project_with_a_real_agent();
         let id = app.engine.projects[0].id.clone();

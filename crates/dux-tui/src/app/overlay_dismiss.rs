@@ -227,6 +227,10 @@ impl App {
     /// announces some dismissals, and firing that on every stray click would be
     /// noise for something the user just watched happen. Helpers that own a
     /// message keep theirs, since parity with Esc is the point.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per prompt kind, so a new modal must decide how it cancels"
+    )]
     pub(crate) fn cancel_prompt(&mut self) -> bool {
         // A press cannot outlive the modal it was made in.
         self.pressed_button = None;

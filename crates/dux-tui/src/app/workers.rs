@@ -637,6 +637,10 @@ impl App {
         self.apply_routed_reaction(reaction, &routing);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per EventReaction variant, each handing its fields to the method that applies them"
+    )]
     pub(super) fn apply_routed_reaction(
         &mut self,
         reaction: EventReaction,
@@ -666,86 +670,7 @@ impl App {
             // the accompanying keyed status carries the explanation. The arm
             // exists so a surface that DOES need to react cannot forget to.
             | EventReaction::GhAvailabilityChanged { .. } => {}
-            EventReaction::Status(StatusUpdate {
-                tone,
-                message,
-                key,
-                quiet_on,
-                ask,
-                ..
-            }) => {
-                // A final ends whatever a change of this surface's still holds
-                // under its key, shown or not.
-                if tone != StatusTone::Busy
-                    && let Some(key) = &key
-                {
-                    self.engine.attachments.finish_key(key);
-                }
-                // A clone or add this surface started that stopped short of the
-                // agent for want of that agreement leaves its project behind. The
-                // name prompt for it opens with the question, and the sentence
-                // still goes on the status line below.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask {
-                    self.reopen_pull_request_after_clone(question);
-                }
-                // A refused create that asks for agreement to a review copy is
-                // answered in the name prompt, not on the status line, and the
-                // create's spinner is retired by it. One this surface did not
-                // dispatch has no request to reopen, and shows its sentence
-                // like any other refusal.
-                if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
-                    && let Some(key) = &key
-                    && self
-                        .pull_request_create
-                        .as_ref()
-                        .is_some_and(|(pending, _)| pending == key)
-                    && let Some((_, request)) = self.pull_request_create.take()
-                {
-                    self.status.clear(key, None);
-                    self.reopen_name_prompt_for_review_copy(
-                        request,
-                        question.warned,
-                        question.warning,
-                    );
-                    return;
-                }
-                // Only an INFO may be withheld: a warning, an error and a
-                // spinner all report something the screen cannot be standing in
-                // for, whatever the site asked for.
-                if quiet_on.tui && tone == StatusTone::Info {
-                    // A keyed final still has a spinner to take down: the
-                    // sentence goes, the busy must not be stranded behind it.
-                    // A sticky busy refuses to go, and there the sentence is
-                    // shown instead, because a spinner nothing retires is worse
-                    // than a line nobody needed.
-                    let stranded = match &key {
-                        Some(key) => !self.status.clear(key, None),
-                        None => false,
-                    };
-                    if !stranded {
-                        return;
-                    }
-                }
-                // A commit's final: a landed commit clears the typed message, a
-                // refused one leaves it for another try.
-                if tone != StatusTone::Busy
-                    && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
-                    && key == pending
-                {
-                    // Only the message that was committed is cleared: one typed
-                    // since, for the next commit, stays.
-                    if tone == StatusTone::Info && self.commit_input.text == *committed {
-                        self.commit_input.clear();
-                    }
-                    self.pending_commit = None;
-                }
-                // When a `StatusUpdate` carries a key (keyed operation), write it
-                // into the named slot so `most_recent_tui` can pick it up.
-                // Unkeyed updates (`key == None`) write the anonymous slot.
-                // Info entries auto-clear after `clear_after`; Busy persists until
-                // replaced; Warning/Error persist until the next status.
-                self.status.set(Instant::now(), key, tone, message);
-            }
+            EventReaction::Status(update) => self.apply_status_update(update),
             EventReaction::ClearStatus(key) => {
                 // The `Final::Clear` outcome of a StatusOp: dismiss the keyed
                 // entry with no replacement message.
@@ -971,6 +896,86 @@ impl App {
                 self.apply_background_server_preflight(result, warning, startup);
             }
         }
+    }
+
+    /// Show one status the engine raised, after the side effects its key or its
+    /// ask owes this surface first.
+    fn apply_status_update(&mut self, update: StatusUpdate) {
+        let StatusUpdate {
+            tone,
+            message,
+            key,
+            quiet_on,
+            ask,
+            ..
+        } = update;
+        // A final ends whatever a change of this surface's still holds
+        // under its key, shown or not.
+        if tone != StatusTone::Busy
+            && let Some(key) = &key
+        {
+            self.engine.attachments.finish_key(key);
+        }
+        // A clone or add this surface started that stopped short of the
+        // agent for want of that agreement leaves its project behind. The
+        // name prompt for it opens with the question, and the sentence
+        // still goes on the status line below.
+        if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = &ask {
+            self.reopen_pull_request_after_clone(question);
+        }
+        // A refused create that asks for agreement to a review copy is
+        // answered in the name prompt, not on the status line, and the
+        // create's spinner is retired by it. One this surface did not
+        // dispatch has no request to reopen, and shows its sentence
+        // like any other refusal.
+        if let Some(dux_core::status_text::StatusAsk::ReviewCopy(question)) = ask
+            && let Some(key) = &key
+            && self
+                .pull_request_create
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == key)
+            && let Some((_, request)) = self.pull_request_create.take()
+        {
+            self.status.clear(key, None);
+            self.reopen_name_prompt_for_review_copy(request, question.warned, question.warning);
+            return;
+        }
+        // Only an INFO may be withheld: a warning, an error and a
+        // spinner all report something the screen cannot be standing in
+        // for, whatever the site asked for.
+        if quiet_on.tui && tone == StatusTone::Info {
+            // A keyed final still has a spinner to take down: the
+            // sentence goes, the busy must not be stranded behind it.
+            // A sticky busy refuses to go, and there the sentence is
+            // shown instead, because a spinner nothing retires is worse
+            // than a line nobody needed.
+            let stranded = match &key {
+                Some(key) => !self.status.clear(key, None),
+                None => false,
+            };
+            if !stranded {
+                return;
+            }
+        }
+        // A commit's final: a landed commit clears the typed message, a
+        // refused one leaves it for another try.
+        if tone != StatusTone::Busy
+            && let (Some(key), Some((pending, committed))) = (&key, &self.pending_commit)
+            && key == pending
+        {
+            // Only the message that was committed is cleared: one typed
+            // since, for the next commit, stays.
+            if tone == StatusTone::Info && self.commit_input.text == *committed {
+                self.commit_input.clear();
+            }
+            self.pending_commit = None;
+        }
+        // When a `StatusUpdate` carries a key (keyed operation), write it
+        // into the named slot so `most_recent_tui` can pick it up.
+        // Unkeyed updates (`key == None`) write the anonymous slot.
+        // Info entries auto-clear after `clear_after`; Busy persists until
+        // replaced; Warning/Error persist until the next status.
+        self.status.set(Instant::now(), key, tone, message);
     }
 
     fn apply_add_project_after_branch_checkout(
@@ -1818,8 +1823,9 @@ impl App {
         }
     }
 
-    pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
-        self.last_pty_size = outcome.pty_size;
+    /// Whether this surface started the launch that just became ready, spending
+    /// the marks that said so, and claiming the pty it produced when it did.
+    fn note_launch_origin(&mut self, outcome: &AgentLaunchReadyOutcome) -> bool {
         // This arm runs on both surfaces (see `owner_of_reaction`), so a child
         // this surface started has to be recognised rather than assumed: an id
         // armed at dispatch for every ordinary launch, and the create flag for a
@@ -1842,11 +1848,6 @@ impl App {
             matches!(&outcome.view, AgentLaunchReadyView::ResumeFallback { .. })
                 && self.tui_fallback_tabs.remove(&outcome.tab_id);
         let started_here = armed || created_here || fell_back_from_here;
-        let view = if outcome.wants_fullscreen {
-            LaunchView::Fullscreen
-        } else {
-            LaunchView::Minimized
-        };
         if started_here
             && self
                 .engine
@@ -1869,6 +1870,17 @@ impl App {
         {
             self.claim_launched_pty(&outcome.tab_id);
         }
+        started_here
+    }
+
+    pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
+        self.last_pty_size = outcome.pty_size;
+        let started_here = self.note_launch_origin(&outcome);
+        let view = if outcome.wants_fullscreen {
+            LaunchView::Fullscreen
+        } else {
+            LaunchView::Minimized
+        };
         // The engine's `detach_conflicting_worktree_session` already cleared every
         // runtime map (incl. pty_activity/pty_input) for the detached agent's
         // tabs, so no follow-up clear is needed here.

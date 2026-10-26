@@ -4633,6 +4633,10 @@ impl App {
     /// created its directories, and acquired the single-instance lock.
     /// This ensures the lock covers every entrypoint (TUI + config
     /// subcommands) and that a losing process never touches shared state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the boot steps in the order they must run, then one field initializer per Engine field"
+    )]
     pub(crate) fn bootstrap_with_lock(
         paths: DuxPaths,
         mut single_instance_lock: SingleInstanceLock,
@@ -4837,6 +4841,7 @@ impl App {
     /// share one body. `restore` gates whether prior sessions are relaunched:
     /// first boot restores them; resume skips restoration because the providers
     /// handed back from the web server are already live.
+    #[expect(clippy::too_many_lines, reason = "one field initializer per App field")]
     fn assemble(
         engine: Engine,
         bindings: RuntimeBindings,
@@ -6070,6 +6075,10 @@ impl App {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one short arm per palette command, each handing the command to the method that carries it out"
+    )]
     pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
         match command {
@@ -6352,22 +6361,7 @@ impl App {
                 Ok(())
             }
             "toggle-diff-line-numbers" => {
-                self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
-                self.engine.config.ui.show_diff_line_numbers =
-                    self.view_prefs.show_diff_line_numbers;
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                self.refresh_current_diff();
-                let state = if self.view_prefs.show_diff_line_numbers {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
-                ));
+                self.toggle_diff_line_numbers();
                 Ok(())
             }
             "recheck-github" => {
@@ -6377,78 +6371,15 @@ impl App {
                 Ok(())
             }
             "toggle-github-integration" => {
-                self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
-                self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
-                if self.engine.github_integration_enabled {
-                    // Off-to-on: re-ask `gh` which hosts it can serve, and do
-                    // nothing else. The status held right now is the answer from
-                    // boot, which predates the login that enabled the
-                    // integration; the probe's completion arms the follow-up
-                    // work, exactly once.
-                    self.engine.spawn_gh_status_check();
-                } else {
-                    self.engine.pr_statuses.clear();
-                    self.engine.disarm_pr_sync();
-                    self.rebuild_left_items();
-                }
-                let state = if self.engine.github_integration_enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                if let Err(err) = self
-                    .engine
-                    .config_writer
-                    .save_eager(self.engine.config.clone())
-                {
-                    self.set_error(format!(
-                        "GitHub integration toggled this session, but saving to config failed: {err}"
-                    ));
-                } else {
-                    self.set_info(format!("GitHub integration {state}."));
-                }
+                self.toggle_github_integration();
                 Ok(())
             }
             "toggle-randomized-pet-name-default" => {
-                self.engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default = !self
-                    .engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default;
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                let state = if self
-                    .engine
-                    .config
-                    .defaults
-                    .enable_randomized_pet_name_by_default
-                {
-                    "enabled: new agent prompts start with a random pet name"
-                } else {
-                    "disabled: new agent prompts start empty"
-                };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Random pet-name defaults {state}. Press {palette_key} to toggle back."
-                ));
+                self.toggle_randomized_pet_name_default();
                 Ok(())
             }
             "toggle-pr-banner-position" => {
-                self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
-                let pos = if self.view_prefs.pr_banner_at_bottom {
-                    "bottom"
-                } else {
-                    "top"
-                };
-                self.engine.config.ui.pr_banner_position = pos.to_string();
-                self.engine
-                    .config_writer
-                    .save_lazy(self.engine.config.clone());
-                self.set_info(format!("PR banner moved to {pos} of agent pane."));
+                self.toggle_pr_banner_position();
                 Ok(())
             }
             "force-redraw" => {
@@ -6462,6 +6393,103 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    /// Show or hide the diff line numbers, save it, and redraw the diff.
+    fn toggle_diff_line_numbers(&mut self) {
+        self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
+        self.engine.config.ui.show_diff_line_numbers = self.view_prefs.show_diff_line_numbers;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        self.refresh_current_diff();
+        let state = if self.view_prefs.show_diff_line_numbers {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        self.set_info(format!(
+            "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
+        ));
+    }
+
+    /// Turn the GitHub integration on or off for this session and in the config.
+    fn toggle_github_integration(&mut self) {
+        self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
+        self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
+        if self.engine.github_integration_enabled {
+            // Off-to-on: re-ask `gh` which hosts it can serve, and do
+            // nothing else. The status held right now is the answer from
+            // boot, which predates the login that enabled the
+            // integration; the probe's completion arms the follow-up
+            // work, exactly once.
+            self.engine.spawn_gh_status_check();
+        } else {
+            self.engine.pr_statuses.clear();
+            self.engine.disarm_pr_sync();
+            self.rebuild_left_items();
+        }
+        let state = if self.engine.github_integration_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
+            self.set_error(format!(
+                "GitHub integration toggled this session, but saving to config failed: {err}"
+            ));
+        } else {
+            self.set_info(format!("GitHub integration {state}."));
+        }
+    }
+
+    /// Flip whether a new agent prompt starts with a random pet name, and save it.
+    fn toggle_randomized_pet_name_default(&mut self) {
+        self.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = !self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        let state = if self
+            .engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default
+        {
+            "enabled: new agent prompts start with a random pet name"
+        } else {
+            "disabled: new agent prompts start empty"
+        };
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        self.set_info(format!(
+            "Random pet-name defaults {state}. Press {palette_key} to toggle back."
+        ));
+    }
+
+    /// Move the PR banner between the top and the bottom of the agent pane, and save it.
+    fn toggle_pr_banner_position(&mut self) {
+        self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
+        let pos = if self.view_prefs.pr_banner_at_bottom {
+            "bottom"
+        } else {
+            "top"
+        };
+        self.engine.config.ui.pr_banner_position = pos.to_string();
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        self.set_info(format!("PR banner moved to {pos} of agent pane."));
     }
 
     /// Run the ordinary config reload when a SIGUSR1 has arrived since the

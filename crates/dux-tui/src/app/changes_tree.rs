@@ -788,11 +788,7 @@ impl App {
         } else {
             None
         };
-        let busy = match op {
-            FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
-            FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
-            FolderOp::Delete => format!("Deleting \"{label}\" ({count_words})\u{2026}"),
-        };
+        let busy = folder_op_busy(op, &label, &count_words);
         self.engine.register_status_key(&status_key);
         self.status.set(
             Instant::now(),
@@ -807,47 +803,13 @@ impl App {
         // project, something dux started) is asked of the engine's state
         // here; the blocking part of the answer is read on the worker.
         let destructive = self.engine.destructive_check(&target);
-        // What the user confirmed they were deleting; the delete refuses if the
-        // folder is no longer that when it runs.
-        // A folder carries the number of files the dialog said would go,
-        // which the delete refuses to exceed.
-        let confirmed = match &folder.kind {
-            ChangedFileKind::NestedRepository => git::ConfirmedEntry::Repository,
-            ChangedFileKind::Directory(contents) => git::ConfirmedEntry::Folder {
-                files: contents.deletable_files(),
-            },
-            ChangedFileKind::File | ChangedFileKind::LinkedWorktree => {
-                git::ConfirmedEntry::Folder {
-                    files: folder.file_count(),
-                }
-            }
-        };
+        let confirmed = confirmed_entry(folder);
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
                 let _hold = hold;
-                let outcome = match op {
-                    FolderOp::Stage => {
-                        git::stage_with_report(&worktree, &[path]).map(|report| FolderOpDone {
-                            report,
-                            deleted_files: 0,
-                        })
-                    }
-                    FolderOp::Unstage => {
-                        git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
-                    }
-                    FolderOp::Delete => delete_untracked_folder(
-                        &worktree,
-                        &path,
-                        confirmed,
-                        &destructive,
-                        claim.as_ref(),
-                    )
-                    .map(|deleted_files| FolderOpDone {
-                        deleted_files,
-                        ..FolderOpDone::default()
-                    }),
-                };
+                let outcome =
+                    run_folder_op(op, &worktree, path, confirmed, &destructive, claim.as_ref());
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
         self.changes_tree.pending_ops.push(PendingFolderOp {
@@ -986,6 +948,54 @@ fn find_folder_row<'a>(
 /// classified when the dialog opened, and an agent may have staged or
 /// committed inside it since: deleting what is now tracked would destroy work
 /// that exists in no other place.
+/// The spinner's sentence while `op` runs on the folder `label`.
+fn folder_op_busy(op: FolderOp, label: &str, count_words: &str) -> String {
+    match op {
+        FolderOp::Stage => format!("Staging \"{label}\" ({count_words})\u{2026}"),
+        FolderOp::Unstage => format!("Unstaging \"{label}\" ({count_words})\u{2026}"),
+        FolderOp::Delete => format!("Deleting \"{label}\" ({count_words})\u{2026}"),
+    }
+}
+
+/// What the user confirmed they were deleting; the delete refuses if the
+/// folder is no longer that when it runs. A folder carries the number of files
+/// the dialog said would go, which the delete refuses to exceed.
+fn confirmed_entry(folder: &ChangedFile) -> git::ConfirmedEntry {
+    match &folder.kind {
+        ChangedFileKind::NestedRepository => git::ConfirmedEntry::Repository,
+        ChangedFileKind::Directory(contents) => git::ConfirmedEntry::Folder {
+            files: contents.deletable_files(),
+        },
+        ChangedFileKind::File | ChangedFileKind::LinkedWorktree => git::ConfirmedEntry::Folder {
+            files: folder.file_count(),
+        },
+    }
+}
+
+/// The worker's half of a folder operation: stage, unstage or delete `path`
+/// in `worktree`.
+fn run_folder_op(
+    op: FolderOp,
+    worktree: &Path,
+    path: String,
+    confirmed: git::ConfirmedEntry,
+    destructive: &dux_core::destructive::DestructiveCheck,
+    claim: Option<&dux_core::worktree_ops::DestructiveClaim>,
+) -> anyhow::Result<FolderOpDone> {
+    match op {
+        FolderOp::Stage => git::stage_with_report(worktree, &[path]).map(|report| FolderOpDone {
+            report,
+            deleted_files: 0,
+        }),
+        FolderOp::Unstage => git::unstage_file(worktree, &path).map(|()| FolderOpDone::default()),
+        FolderOp::Delete => delete_untracked_folder(worktree, &path, confirmed, destructive, claim)
+            .map(|deleted_files| FolderOpDone {
+                deleted_files,
+                ..FolderOpDone::default()
+            }),
+    }
+}
+
 fn delete_untracked_folder(
     worktree: &Path,
     path: &str,

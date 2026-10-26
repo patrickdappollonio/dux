@@ -89,6 +89,10 @@ pub(crate) fn init_test_repo(path: &std::path::Path) {
     run_git(path, &["commit", "--allow-empty", "-m", "init"]);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one field initializer per App field, the test twin of the production constructor"
+)]
 pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     let tmp = tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();

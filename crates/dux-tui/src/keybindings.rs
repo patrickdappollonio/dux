@@ -3334,6 +3334,10 @@ mod tests {
     /// command is a real user-facing change: update this list in the same
     /// commit, on purpose.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a hand-maintained table of every palette command; the check over it is two lines"
+    )]
     fn tui_palette_listing_is_the_expected_command_set() {
         let bindings = default_bindings();
         let mut listed: Vec<&str> = bindings
