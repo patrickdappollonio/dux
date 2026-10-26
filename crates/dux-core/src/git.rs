@@ -27,15 +27,21 @@ pub use folding::{
     rows_answering, untracked_directory_kind,
 };
 
+/// One entry of `git worktree list`: a working tree and what it has checked out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktree {
+    /// The worktree's path.
     pub path: PathBuf,
+    /// The commit its HEAD points at, when git reported one.
     pub head: Option<String>,
+    /// The branch it has checked out, or `None` when HEAD is detached.
     pub branch_name: Option<String>,
+    /// Whether HEAD is detached.
     pub detached: bool,
 }
 
 impl GitWorktree {
+    /// The branch name, or `detached` and a short commit id when HEAD is detached.
     pub fn label(&self) -> String {
         if let Some(branch_name) = &self.branch_name {
             return branch_name.clone();
@@ -66,7 +72,10 @@ pub enum CreateAgentBranchPlan {
     /// No branch of that name exists (local or remote): a new branch is created.
     Fresh,
     /// A branch of that name already exists; attaching would adopt its history.
-    ExistingBranch { location: BranchLocation },
+    ExistingBranch {
+        /// Where the existing branch lives.
+        location: BranchLocation,
+    },
 }
 
 /// Inspect whether creating an agent named `name` in the repo at `repo_path`
@@ -232,6 +241,8 @@ pub(crate) fn branch_status_from_warning(
     }
 }
 
+/// Whether git finds a repository at or above `path` (`git rev-parse --git-dir` succeeds);
+/// deliberately loose, a bare repository or a `.git` directory included.
 pub fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
         .args([
@@ -255,10 +266,16 @@ pub enum RepoPathKind {
     /// The root of a bare repository.
     BareRoot,
     /// A directory inside a work tree but not its root.
-    InsideWorkTree { root: PathBuf },
+    InsideWorkTree {
+        /// The work tree's root.
+        root: PathBuf,
+    },
     /// A directory inside git's internal directory (`.git/` of a normal repo,
     /// or the internals of a bare repo such as `objects/`).
-    InsideGitDir { git_dir: PathBuf },
+    InsideGitDir {
+        /// The git directory the path is inside.
+        git_dir: PathBuf,
+    },
     /// Not inside any git repository.
     NotARepo,
     /// Git could not be consulted (spawn failure, unparseable output). Gates
@@ -915,6 +932,11 @@ fn run_git_capture(path: &Path, args: &[&str], what: &str) -> Result<String> {
     Ok(stdout_without_line_ends(&out.stdout))
 }
 
+/// Every worktree of the repository at `repo_path`, the main one included.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git worktree list` fails.
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
     let output = Command::new("git")
         .args([
@@ -1376,6 +1398,7 @@ pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
     None
 }
 
+/// Whether the repository has a local branch named `name`.
 pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
     ref_exists(repo_path, &format!("refs/heads/{name}"))
 }
@@ -1735,6 +1758,7 @@ pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duratio
 /// about work that was never going anywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnpushedCommits {
+    /// How many commits on the branch no remote-tracking ref holds.
     pub count: u32,
     /// Whether `refs/remotes/` holds anything. It is about remote-tracking
     /// refs rather than configured remotes on purpose: a remote that has never
@@ -2193,6 +2217,7 @@ pub(crate) fn refs_exist_below(repo_path: &Path, name: &str) -> Result<bool> {
 /// A worktree that keeps a branch from being checked out anywhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchHolder {
+    /// The worktree holding the branch.
     pub worktree: GitWorktree,
     /// The worktree is the folder the caller asked about (the project's own
     /// path), compared by canonical path. That is the repository's own folder
@@ -2582,6 +2607,11 @@ fn same_worktree_path(registered: &Path, target: &Path) -> bool {
     }
 }
 
+/// Fetches pull request `pr_number`'s head from `origin` into the local branch `branch_name`.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or the fetch fails.
 pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &str) -> Result<()> {
     let repo = repo_path.to_string_lossy();
     let refspec = format!("pull/{pr_number}/head:refs/heads/{branch_name}");
@@ -2644,6 +2674,14 @@ pub(crate) fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -
     commit
 }
 
+/// Creates a branch from `start_point` (HEAD when `None`) and checks it out as a new worktree under
+/// `worktrees_root`, returning the branch name and the worktree's canonical path. A `custom_name`
+/// names the branch; without one a random name is generated.
+///
+/// # Errors
+///
+/// Fails when the worktree's folder cannot be created, the branch name is invalid or taken, the
+/// start point names nothing, or `git worktree add` fails.
 pub fn create_worktree_from_start_point(
     repo_path: &Path,
     worktrees_root: &Path,
@@ -3348,6 +3386,11 @@ fn registration_at(repo_path: &Path, worktree_path: &Path) -> Result<bool> {
         .any(|entry| same_worktree_path(&entry.path, worktree_path)))
 }
 
+/// The commit id HEAD points at in the repository at `repo_path`.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git rev-parse HEAD` fails.
 pub fn head_commit(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .args([
@@ -3368,9 +3411,12 @@ pub fn head_commit(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// What copying a checkout's uncommitted changes into a new worktree did.
 #[derive(Debug, Default)]
 pub struct UncommittedCopySummary {
+    /// How many files were copied.
     pub copied: usize,
+    /// How many paths gone from the source were removed from the new worktree too.
     pub deleted: usize,
     /// Records skipped because the source is not a regular file or symlink:
     /// dirty submodules (" M dir"), untracked embedded repos ("?? dir/"), and
@@ -3631,7 +3677,10 @@ pub enum BranchDeletion {
     AlreadyGone,
     /// git refused, and the branch is STILL THERE. Carries git's own reason
     /// line so the message can say why rather than guessing.
-    Refused { reason: String },
+    Refused {
+        /// git's own reason line.
+        reason: String,
+    },
 }
 
 impl BranchDeletion {
@@ -3842,6 +3891,7 @@ pub(crate) const WORKTREE_REMOVAL_RETRY_PAUSE: std::time::Duration =
 /// looked at again.
 #[derive(Debug)]
 pub struct RemovalWorthRetrying {
+    /// git's own error text from the failed removal.
     pub git_error: String,
 }
 
@@ -3971,6 +4021,7 @@ fn list_leftovers(folder: &Path, limit: usize) -> (Vec<String>, usize) {
 /// so the message tells the user what is left and how to finish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeftoverWorktreeFolder {
+    /// The worktree folder that was left behind.
     pub path: std::path::PathBuf,
     /// Up to a handful of what is left, relative to `path`.
     pub leftovers: Vec<String>,
@@ -4108,6 +4159,7 @@ pub fn remove_worktree(
 /// The file listing returned by [`worktree_files`].
 #[derive(Debug, Clone)]
 pub struct WorktreeFileList {
+    /// The worktree's files, relative to its root.
     pub files: Vec<String>,
     /// `true` when the walk hit the caller's `max_files` cap and some entries
     /// were omitted. The client may surface a subtle hint.
@@ -5313,8 +5365,11 @@ pub fn stage_with_report(worktree_path: &Path, file_paths: &[String]) -> Result<
 /// them on purpose, and each path it refused with the sentence that says why.
 #[derive(Debug, Default)]
 pub struct StagePartition {
+    /// The paths staged.
     pub staged: Vec<String>,
+    /// What staging left out of those paths on purpose.
     pub report: StageReport,
+    /// Each refused path, with the sentence that says why.
     pub refused: Vec<(String, String)>,
 }
 
@@ -5603,6 +5658,11 @@ pub(crate) fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     stage_with_report(worktree_path, &[file_path.to_string()]).map(|_| ())
 }
 
+/// Unstages one file, keeping its working-tree changes.
+///
+/// # Errors
+///
+/// Fails when the path is not in its plain spelling, git cannot be run, or `git reset` fails.
 pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     refuse_unplain_path(file_path, "unstage")?;
     let wt = worktree_path.to_string_lossy();
@@ -5741,7 +5801,10 @@ pub enum ConfirmedEntry {
     /// repositories inside it kept. `files` is how many files the user was
     /// told would go: the delete refuses when more would go now, and takes
     /// fewer without asking again.
-    Folder { files: usize },
+    Folder {
+        /// How many files the user was told would go.
+        files: usize,
+    },
     /// A repository of its own: removed whole, history included.
     Repository,
 }
@@ -6257,6 +6320,11 @@ fn git_failure(what: &str, worktree_path: &Path, output: &std::process::Output) 
     )
 }
 
+/// Commits the staged changes with `message`, returning git's report.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or the commit fails, with git's own reason.
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let output = git_without_auto_maintenance()
@@ -6268,6 +6336,11 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Pushes the checked-out branch to `origin`, setting it as the upstream, and returns git's report.
+///
+/// # Errors
+///
+/// Fails when HEAD is detached, git cannot be run, or the push fails, with git's own reason.
 pub fn push(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let branch = match current_branch_opt(worktree_path)? {
@@ -6384,6 +6457,7 @@ pub(crate) fn file_prefix_at_head(
     Ok(Some(prefix))
 }
 
+/// Whether `candidate` lies inside `base`, both canonicalized; `false` when either cannot be.
 pub fn is_under(base: &Path, candidate: &Path) -> bool {
     match (base.canonicalize(), candidate.canonicalize()) {
         (Ok(b), Ok(c)) => c.starts_with(b),
@@ -6716,6 +6790,7 @@ pub fn invalid_agent_name_refusal(name: &str) -> String {
     format!("Invalid agent name \"{name}\". {AGENT_NAME_RULE}")
 }
 
+/// A random two-word name joined by a dash, as a new agent's default name.
 pub fn docker_style_name() -> String {
     petname::petname(2, "-").expect("petname generation should not fail")
 }
