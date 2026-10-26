@@ -1,7 +1,16 @@
+//! Opens an address in the user's default browser through the platform
+//! launcher, reporting a launcher that fails at once.
+
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
+/// Opens `url` in the default browser through the platform's launcher.
+///
+/// # Errors
+///
+/// Fails when the launcher cannot be started, or exits unsuccessfully within its short grace
+/// window.
 pub fn open_url(url: &str) -> Result<()> {
     spawn_detached(default_browser_launcher(), url)
 }

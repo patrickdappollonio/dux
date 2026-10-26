@@ -634,6 +634,64 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     );
 }
 
+/// `after` is `before` as a reopen read it back, field by field.
+fn assert_reopened_unchanged(before: &AgentSession, after: &AgentSession) {
+    // Field-by-field: `AgentSession` has no `PartialEq`, and naming the
+    // fields is the point anyway (a new field added without a thought about
+    // reopen stability shows up here as a compile error, not a silent pass).
+    assert_eq!(before.id, after.id);
+    assert_eq!(
+        before
+            .project_id()
+            .expect("an upgraded row is a managed agent"),
+        after
+            .project_id()
+            .expect("an upgraded row is a managed agent")
+    );
+    assert_eq!(before.provider.as_str(), after.provider.as_str());
+    assert_eq!(
+        before
+            .source_branch()
+            .expect("an upgraded row is a managed agent"),
+        after
+            .source_branch()
+            .expect("an upgraded row is a managed agent")
+    );
+    assert_eq!(
+        before
+            .branch_name()
+            .expect("an upgraded row is a managed agent"),
+        after
+            .branch_name()
+            .expect("an upgraded row is a managed agent")
+    );
+    assert_eq!(
+        before
+            .initial_branch()
+            .expect("an upgraded row is a managed agent"),
+        after
+            .initial_branch()
+            .expect("an upgraded row is a managed agent")
+    );
+    assert_eq!(
+        before
+            .managed_worktree()
+            .expect("an upgraded row is a managed agent"),
+        after
+            .managed_worktree()
+            .expect("an upgraded row is a managed agent")
+    );
+    assert_eq!(before.title, after.title);
+    assert_eq!(before.project_path(), after.project_path());
+    assert_eq!(before.started_providers, after.started_providers);
+    assert_eq!(before.desired_running, after.desired_running);
+    assert_eq!(before.auto_reopen_enabled, after.auto_reopen_enabled);
+    assert_eq!(before.status, after.status);
+    assert_eq!(before.created_at, after.created_at);
+    assert_eq!(before.updated_at, after.updated_at);
+    assert_eq!(before.last_focused_tab, after.last_focused_tab);
+}
+
 #[test]
 fn old_state_survives_a_write_a_close_and_a_reopen() {
     let (_tmp, path) = old_database();
@@ -708,60 +766,7 @@ fn old_state_survives_a_write_a_close_and_a_reopen() {
         if before.id == "sess-2" || before.id == "sess-1" {
             continue; // deliberately written above
         }
-        // Field-by-field: `AgentSession` has no `PartialEq`, and naming the
-        // fields is the point anyway (a new field added without a thought about
-        // reopen stability shows up here as a compile error, not a silent pass).
-        assert_eq!(before.id, after.id);
-        assert_eq!(
-            before
-                .project_id()
-                .expect("an upgraded row is a managed agent"),
-            after
-                .project_id()
-                .expect("an upgraded row is a managed agent")
-        );
-        assert_eq!(before.provider.as_str(), after.provider.as_str());
-        assert_eq!(
-            before
-                .source_branch()
-                .expect("an upgraded row is a managed agent"),
-            after
-                .source_branch()
-                .expect("an upgraded row is a managed agent")
-        );
-        assert_eq!(
-            before
-                .branch_name()
-                .expect("an upgraded row is a managed agent"),
-            after
-                .branch_name()
-                .expect("an upgraded row is a managed agent")
-        );
-        assert_eq!(
-            before
-                .initial_branch()
-                .expect("an upgraded row is a managed agent"),
-            after
-                .initial_branch()
-                .expect("an upgraded row is a managed agent")
-        );
-        assert_eq!(
-            before
-                .managed_worktree()
-                .expect("an upgraded row is a managed agent"),
-            after
-                .managed_worktree()
-                .expect("an upgraded row is a managed agent")
-        );
-        assert_eq!(before.title, after.title);
-        assert_eq!(before.project_path(), after.project_path());
-        assert_eq!(before.started_providers, after.started_providers);
-        assert_eq!(before.desired_running, after.desired_running);
-        assert_eq!(before.auto_reopen_enabled, after.auto_reopen_enabled);
-        assert_eq!(before.status, after.status);
-        assert_eq!(before.created_at, after.created_at);
-        assert_eq!(before.updated_at, after.updated_at);
-        assert_eq!(before.last_focused_tab, after.last_focused_tab);
+        assert_reopened_unchanged(before, after);
     }
 
     assert_eq!(session(&sessions, "sess-2").status, SessionStatus::Active);

@@ -195,6 +195,10 @@ pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
 
 /// [`end_exactly`] with the process table handed in, as
 /// [`read_process_table_strict`] reads it.
+///
+/// # Errors
+///
+/// Fails when `read_table` fails.
 pub fn end_exactly_with(
     rows: &[ProcRow],
     grace: Duration,
@@ -209,7 +213,7 @@ pub fn end_exactly_with(
             .collect())
     };
     let signal = |pid: u32, signal: rustix::process::Signal| {
-        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
             let _ = rustix::process::kill_process(pid, signal);
         }
     };
@@ -249,6 +253,10 @@ pub(crate) struct MemberState {
 
 /// [`MemberState`] for `pid`, read now. `None` when it is gone or cannot be
 /// read.
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 pub(crate) fn member_state(pid: u32) -> Option<MemberState> {
     #[cfg(target_os = "linux")]
     {
@@ -308,6 +316,7 @@ pub(crate) const UNKNOWN_START: u64 = 0;
 /// with `setsid`, so the session id is the leader's pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSession {
+    /// The session id, which is the leader's pid.
     pub sid: u32,
     /// When the leader started, in nanoseconds since the machine booted (see
     /// [`process_start`]): a clock no wall-clock step can move, so a session
@@ -396,9 +405,9 @@ pub(crate) fn boot_nanos_now() -> u64 {
     #[cfg(target_os = "linux")]
     {
         let now = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
-        (now.tv_sec as u64)
+        (now.tv_sec.cast_unsigned())
             .saturating_mul(1_000_000_000)
-            .saturating_add(now.tv_nsec as u64)
+            .saturating_add(now.tv_nsec.cast_unsigned())
     }
     #[cfg(target_os = "macos")]
     {
@@ -439,6 +448,10 @@ fn clock_ticks_per_second() -> u64 {
 /// parentheses and may itself contain spaces and parentheses, so the fields
 /// after it are read from after the LAST closing parenthesis.
 #[cfg(any(target_os = "linux", test))]
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 fn parse_linux_stat_with(pid: u32, stat: &str, ticks_per_second: u64) -> Option<ProcRow> {
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;
@@ -454,8 +467,12 @@ fn parse_linux_stat_with(pid: u32, stat: &str, ticks_per_second: u64) -> Option<
         pid,
         ppid: (ppid != 0).then_some(ppid),
         sid: Some(sid),
-        start_time: (u128::from(ticks) * 1_000_000_000 / u128::from(ticks_per_second.max(1)))
-            as u64,
+        // Saturates rather than wraps: only a corrupt stat line could hold a
+        // start time past u64 nanoseconds (some 584 years of uptime).
+        start_time: u64::try_from(
+            u128::from(ticks) * 1_000_000_000 / u128::from(ticks_per_second.max(1)),
+        )
+        .unwrap_or(u64::MAX),
         name,
         exited: matches!(*state, "Z" | "X" | "x"),
     })
@@ -505,7 +522,9 @@ fn macos_start(pid: u32) -> Option<u64> {
 /// reused, a pid with its start time cannot (in practice).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProcessIdentity {
+    /// The process id.
     pub pid: u32,
+    /// When it started, in nanoseconds since boot; 0 when the platform would not say.
     pub start_time: u64,
     /// The machine boot it was recorded in ([`current_boot`]). An identity
     /// from another boot is void, exactly like a session: every pid and
@@ -519,19 +538,23 @@ pub struct ProcessIdentity {
 /// One row of the process table, as much of it as these questions need.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcRow {
+    /// The process id.
     pub pid: u32,
+    /// The parent's pid, when known.
     pub ppid: Option<u32>,
     /// `None` when the process exited between the listing and the question.
     pub sid: Option<u32>,
     /// When it started, in nanoseconds since boot (see [`process_start`]); 0
     /// when the platform would not say (another user's process on macOS).
     pub start_time: u64,
+    /// The process's name.
     pub name: String,
     /// A zombie has exited: it holds no files and writes nothing.
     pub exited: bool,
 }
 
 impl ProcRow {
+    /// The process as told apart from a later one that reuses its pid.
     pub fn identity(&self) -> ProcessIdentity {
         ProcessIdentity {
             pid: self.pid,
@@ -710,6 +733,10 @@ pub fn read_process_table() -> Vec<ProcRow> {
 
 /// [`read_process_table`] that fails when the table cannot be read, rather than
 /// answering no processes; a process vanishing mid-read is not a failure.
+///
+/// # Errors
+///
+/// Fails when the process table cannot be listed or a process's entry cannot be read or understood.
 pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
     crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
     #[cfg(target_os = "linux")]
@@ -759,13 +786,20 @@ fn non_empty_table(rows: Vec<ProcRow>) -> Result<Vec<ProcRow>, String> {
 /// [`occupants_of`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Occupant {
+    /// The process id.
     pub pid: u32,
+    /// The command it runs.
     pub command: String,
+    /// The directory it is working in.
     pub cwd: std::path::PathBuf,
 }
 
 /// Every inspectable process of the current user in `table` (this one excluded)
 /// working in or under one of `folders`. Blocking.
+///
+/// # Errors
+///
+/// Fails when a process's owner or working directory cannot be read.
 pub fn occupants_of(
     table: &[ProcRow],
     folders: &[std::path::PathBuf],
@@ -876,9 +910,13 @@ pub fn snapshot(sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
 /// What a purge has to work with. The real one reads the platform's process
 /// table and sends real signals; tests substitute a scripted one.
 pub trait ProcessOps {
+    /// The current process table.
     fn table(&mut self) -> Vec<ProcRow>;
+    /// Sends `signal` to `pid`; a process already gone is not an error.
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal);
+    /// The current time.
     fn now(&self) -> Instant;
+    /// Waits for `duration`.
     fn sleep(&mut self, duration: Duration);
 }
 
@@ -891,7 +929,7 @@ impl ProcessOps for SystemProcesses {
     }
 
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal) {
-        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed()) {
             // ESRCH (already gone) is the ordinary race with a process exiting
             // on its own; nothing else is actionable here either, because the
             // next look at the table says whether it went.
@@ -912,7 +950,10 @@ impl ProcessOps for SystemProcesses {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PurgeOutcome {
     /// Nothing is left. `stopped` counts the processes it had to ask.
-    Clean { stopped: usize },
+    Clean {
+        /// How many processes it had to ask to stop.
+        stopped: usize,
+    },
     /// These were still running after SIGKILL and the settle wait.
     Survivors(Vec<ProcRow>),
 }
@@ -988,6 +1029,16 @@ pub struct AgentProcessRegistry {
     inner: Arc<Mutex<RegistryInner>>,
 }
 
+impl std::fmt::Debug for AgentProcessRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The state sits behind a lock a Debug print must not take, so this
+        // says how many handles share it and nothing about what it holds.
+        f.debug_struct("AgentProcessRegistry")
+            .field("handles", &Arc::strong_count(&self.inner))
+            .finish_non_exhaustive()
+    }
+}
+
 /// A spawn under way (see [`AgentProcessRegistry::begin_spawn`]); dropping it
 /// says the spawn has registered its session or given up.
 pub struct SpawnTicket {
@@ -997,7 +1048,10 @@ pub struct SpawnTicket {
 
 impl std::fmt::Debug for SpawnTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnTicket").field("id", &self.id).finish()
+        f.debug_struct("SpawnTicket")
+            .field("registry", &self.registry)
+            .field("id", &self.id)
+            .finish()
     }
 }
 
@@ -1014,13 +1068,14 @@ impl Drop for SpawnTicket {
 /// itself to the process registry first ([`AgentProcessRegistry::begin_spawn`])
 /// and only then checks that no removal has claimed the folder. Every PTY and
 /// startup command dux starts goes through one.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct SpawnGate {
     registry: AgentProcessRegistry,
     ops: crate::worktree_ops::WorktreeOps,
 }
 
 impl SpawnGate {
+    /// A gate over `registry` that checks removals through `ops`.
     pub fn new(registry: AgentProcessRegistry, ops: crate::worktree_ops::WorktreeOps) -> Self {
         Self { registry, ops }
     }
@@ -1028,6 +1083,11 @@ impl SpawnGate {
     /// The ticket for a spawn in `folder`, or the refusal when a removal of it
     /// (or of a folder containing it) is under way. Keep the ticket until the
     /// new session is registered.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the refusal when a removal of `folder`, or of a folder containing it, is under
+    /// way.
     pub fn enter(
         &self,
         folder: &std::path::Path,
@@ -1335,8 +1395,11 @@ type StartupStopNotice = Arc<dyn Fn(String) + Send + Sync>;
 /// agent's sessions are never ended, live or retired, in this run or the next).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegistryEntry {
+    /// The session.
     pub session: ProcessSession,
+    /// The folder it was started in.
     pub folder: std::path::PathBuf,
+    /// Whether it belongs to a standalone agent, whose sessions are never ended.
     pub standalone: bool,
 }
 
@@ -1345,9 +1408,13 @@ pub struct RegistryEntry {
 pub struct StoredSession {
     /// The agent (or `UNOWNED_PTYS`) it belongs to; `None` once retired.
     pub owner: Option<String>,
+    /// The session.
     pub session: ProcessSession,
+    /// The folder it was started in.
     pub folder: std::path::PathBuf,
+    /// Whether it belongs to a standalone agent, whose sessions are never ended.
     pub standalone: bool,
+    /// Its processes still running after an attempt to end them.
     pub survivors: Vec<ProcessIdentity>,
     /// What its processes are called in a sentence, so a refusal after a
     /// restart still names what is standing in a folder.
@@ -1360,7 +1427,9 @@ pub struct StoredSession {
 /// start, so the resumed removal asks exactly the questions the live run would.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegistrySnapshot {
+    /// The registered sessions the removal depends on.
     pub entries: Vec<RegistryEntry>,
+    /// Each session's processes still running after an attempt to end them.
     pub survivors: Vec<(ProcessSession, Vec<ProcessIdentity>)>,
 }
 
@@ -1563,16 +1632,17 @@ impl AgentProcessRegistry {
         touches: &dyn Fn(&std::path::Path) -> bool,
         except: &[ProcessSession],
     ) -> Option<String> {
-        // A leader reaped a moment ago may still have its record in flight.
-        if let Err(reason) = self.recordings_settled() {
-            return Some(reason);
-        }
         type Tracked = (
             ProcessSession,
             std::path::PathBuf,
             Vec<ProcessIdentity>,
             Option<String>,
         );
+
+        // A leader reaped a moment ago may still have its record in flight.
+        if let Err(reason) = self.recordings_settled() {
+            return Some(reason);
+        }
         let tracked: Vec<Tracked> = {
             let inner = self.lock();
             let mut all: Vec<(ProcessSession, std::path::PathBuf)> = inner
@@ -2371,6 +2441,7 @@ impl AgentProcessRegistry {
 /// The claim on an agent's one startup-command run. Registers the run's
 /// session for the agent, says whether the agent was deleted while it ran, and
 /// releases the claim when dropped.
+#[derive(Debug)]
 pub struct StartupRunGuard {
     registry: AgentProcessRegistry,
     agent_id: String,
@@ -2513,6 +2584,10 @@ mod tests {
     /// One second on the boot-relative clock start times are kept in.
     const SEC: u64 = 1_000_000_000;
 
+    #[expect(
+        clippy::similar_names,
+        reason = "pid, ppid and pgid are the process table's own names for these ids"
+    )]
     fn row(pid: u32, ppid: u32, sid: u32) -> ProcRow {
         ProcRow {
             pid,
@@ -2603,7 +2678,7 @@ mod tests {
         };
         registry.register("a", first, &folder);
         registry.record_survivors(first, &[live]);
-        for n in 1..=SESSIONS_PER_AGENT as u32 + 10 {
+        for n in 1..=u32::try_from(SESSIONS_PER_AGENT).expect("a small cap") + 10 {
             registry.register(
                 "a",
                 ProcessSession {
@@ -3120,7 +3195,7 @@ mod tests {
         let outcome = purge(&mut ops, &[session(100)], &known, Duration::from_secs(1));
         match outcome {
             PurgeOutcome::Survivors(rows) => assert_eq!(pids(&rows), vec![101]),
-            other => panic!("expected survivors, got {other:?}"),
+            other @ PurgeOutcome::Clean { .. } => panic!("expected survivors, got {other:?}"),
         }
         let waited = ops.clock - start;
         assert!(
@@ -3355,6 +3430,8 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let mut command = std::process::Command::new("sleep");
         command.arg("30").current_dir(&folder);
+        // SAFETY: the hook only calls `setsid`, which is async-signal-safe and
+        // allocates nothing, as a pre-exec hook must.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;

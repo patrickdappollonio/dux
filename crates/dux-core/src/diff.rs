@@ -48,6 +48,7 @@ const BINARY_SAMPLE_BYTES: usize = 8 * 1024;
 pub struct DiffHead {
     /// The kept lines, newline-joined. Always ends at a line boundary.
     pub text: String,
+    /// How many lines were kept.
     pub shown_lines: usize,
     /// The patch's whole line count, or the point counting stopped when
     /// `total_is_at_least` is set.
@@ -76,6 +77,10 @@ pub struct DiffHead {
 /// ceiling would hold a dux worker for minutes, while git answers in well under
 /// a second and this only ever reads the first few thousand lines of what it
 /// says.
+///
+/// # Errors
+///
+/// Fails as [`diff_head_via_git_as`] does.
 pub fn diff_head_via_git(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffHead> {
     diff_head_via_git_as(worktree, rel_path, None)
 }
@@ -93,6 +98,11 @@ enum Reap {
 /// the editor's automatic rule (UTF-8 when the shown content is, otherwise
 /// windows-1252). A requested encoding the content is not valid in is refused
 /// rather than shown with replacement characters.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, the file is in neither the worktree
+/// nor HEAD, git cannot be run or fails, or the patch is not valid in `requested`.
 pub fn diff_head_via_git_as(
     worktree: &Path,
     rel_path: &str,
@@ -123,35 +133,12 @@ pub fn diff_head_via_git_as(
     // form alone answers "the two differ" with exit code 1.
     let no_index = head_prefix.is_none();
 
-    let mut command = Command::new("git");
-    command.args(["-C", worktree.to_string_lossy().as_ref()]);
-    // Pin every setting that changes the patch's shape or its length. A reader
-    // with `diff.context = 10` must not get different counts from the same
-    // file, and a textconv filter must not run a program of the user's choosing
-    // over a file dux is only trying to show the head of.
-    command.args([
-        "-c",
-        "core.quotePath=false",
-        "-c",
-        "diff.noprefix=false",
-        "-c",
-        "diff.algorithm=myers",
-        "-c",
-        "diff.context=3",
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-    ]);
-    if no_index {
-        command.args(["--no-index", "--", "/dev/null", rel_path]);
+    let against = if no_index {
+        DiffAgainst::EmptyFile
     } else {
-        command.args(["HEAD", "--", rel_path]);
-    }
-    // The binary marker below is one of the few git messages this READS rather
-    // than shows, so the child is pinned to the C locale: a translated build
-    // would otherwise print a sentence no prefix check recognises.
-    command.env("LC_ALL", "C").env("LANG", "C");
+        DiffAgainst::Head
+    };
+    let mut command = diff_head_command(worktree, rel_path, against);
 
     let mut child = command
         .stdout(Stdio::piped())
@@ -171,58 +158,21 @@ pub fn diff_head_via_git_as(
         buffer
     });
 
-    // Everything past the spawn goes through this, so no early return can leave
-    // a child behind.
-    fn reap(child: &mut std::process::Child, how: Reap) -> Option<i32> {
-        if how == Reap::KillFirst {
-            let _ = child.kill();
-        }
-        child.wait().ok().and_then(|status| status.code())
-    }
-
     let Some(stdout) = child.stdout.take() else {
-        reap(&mut child, Reap::KillFirst);
+        reap_child(&mut child, Reap::KillFirst);
         anyhow::bail!("git diff produced no output stream for {rel_path}");
     };
 
-    // The kept lines as git wrote them. The file's own bytes sit after a
-    // one-byte marker in each hunk line, and are decoded once the encoding
-    // is known; the byte cap is checked again on the decoded text.
-    let mut kept_lines: Vec<Vec<u8>> = Vec::new();
-    let mut kept_bytes = 0usize;
-    let mut shown_lines = 0usize;
-    let mut total_lines = 0usize;
-    let mut total_is_at_least = false;
-    let mut saw_hunk = false;
-    let mut saw_binary_marker = false;
-    let mut read_error = None;
-    for line in BufReader::new(stdout).split(b'\n') {
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => {
-                read_error = Some(e);
-                break;
-            }
-        };
-        total_lines += 1;
-        if !saw_hunk && line.starts_with(b"@@") {
-            saw_hunk = true;
-        }
-        if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
-            saw_binary_marker = true;
-        }
-        if shown_lines < DIFF_HEAD_MAX_LINES && kept_bytes + line.len() < DIFF_HEAD_MAX_BYTES {
-            kept_bytes += line.len() + 1;
-            kept_lines.push(line);
-            shown_lines += 1;
-        }
-        if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
-            total_is_at_least = true;
-            break;
-        }
-    }
+    let PatchHead {
+        kept_lines,
+        total_lines,
+        total_is_at_least,
+        saw_hunk,
+        saw_binary_marker,
+        read_error,
+    } = read_patch_head(stdout);
 
-    let code = reap(
+    let code = reap_child(
         &mut child,
         if total_is_at_least {
             Reap::KillFirst
@@ -277,11 +227,130 @@ pub fn diff_head_via_git_as(
     })
 }
 
+/// Wait for `child`, killing it first as `how` says, and answer its exit code.
+/// Everything past the spawn goes through this, so no early return can leave
+/// a child behind.
+fn reap_child(child: &mut std::process::Child, how: Reap) -> Option<i32> {
+    if how == Reap::KillFirst {
+        let _ = child.kill();
+    }
+    child.wait().ok().and_then(|status| status.code())
+}
+
+/// What [`diff_head_command`] diffs a file against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffAgainst {
+    /// Its version at HEAD.
+    Head,
+    /// The empty file, for a file HEAD does not have.
+    EmptyFile,
+}
+
+/// The `git diff` [`diff_head_via_git_as`] runs for `rel_path` in `worktree`,
+/// `against` HEAD or the empty file.
+fn diff_head_command(worktree: &Path, rel_path: &str, against: DiffAgainst) -> Command {
+    let mut command = Command::new("git");
+    command.args(["-C", worktree.to_string_lossy().as_ref()]);
+    // Pin every setting that changes the patch's shape or its length. A reader
+    // with `diff.context = 10` must not get different counts from the same
+    // file, and a textconv filter must not run a program of the user's choosing
+    // over a file dux is only trying to show the head of.
+    command.args([
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "diff.algorithm=myers",
+        "-c",
+        "diff.context=3",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]);
+    match against {
+        DiffAgainst::EmptyFile => command.args(["--no-index", "--", "/dev/null", rel_path]),
+        DiffAgainst::Head => command.args(["HEAD", "--", rel_path]),
+    };
+    // The binary marker below is one of the few git messages this READS rather
+    // than shows, so the child is pinned to the C locale: a translated build
+    // would otherwise print a sentence no prefix check recognises.
+    command.env("LC_ALL", "C").env("LANG", "C");
+    command
+}
+
+/// What [`read_patch_head`] kept of a patch, and what it saw while reading it.
+struct PatchHead {
+    /// The kept lines as git wrote them.
+    kept_lines: Vec<Vec<u8>>,
+    /// How many lines were read.
+    total_lines: usize,
+    /// Whether reading stopped at the counting cap, so the patch is longer.
+    total_is_at_least: bool,
+    /// Whether a hunk header was read.
+    saw_hunk: bool,
+    /// Whether git's binary summary was read.
+    saw_binary_marker: bool,
+    /// The error that stopped the read early, if one did.
+    read_error: Option<std::io::Error>,
+}
+
+/// Read the head of a patch from `stdout`, keeping lines within the shown caps
+/// and counting up to the counting cap.
+fn read_patch_head(stdout: impl Read) -> PatchHead {
+    // The kept lines as git wrote them. The file's own bytes sit after a
+    // one-byte marker in each hunk line, and are decoded once the encoding
+    // is known; the byte cap is checked again on the decoded text.
+    let mut kept_lines: Vec<Vec<u8>> = Vec::new();
+    let mut kept_bytes = 0usize;
+    let mut shown_lines = 0usize;
+    let mut total_lines = 0usize;
+    let mut total_is_at_least = false;
+    let mut saw_hunk = false;
+    let mut saw_binary_marker = false;
+    let mut read_error = None;
+    for line in BufReader::new(stdout).split(b'\n') {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                read_error = Some(e);
+                break;
+            }
+        };
+        total_lines += 1;
+        if !saw_hunk && line.starts_with(b"@@") {
+            saw_hunk = true;
+        }
+        if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
+            saw_binary_marker = true;
+        }
+        if shown_lines < DIFF_HEAD_MAX_LINES && kept_bytes + line.len() < DIFF_HEAD_MAX_BYTES {
+            kept_bytes += line.len() + 1;
+            kept_lines.push(line);
+            shown_lines += 1;
+        }
+        if total_lines >= DIFF_HEAD_MAX_COUNTED_LINES {
+            total_is_at_least = true;
+            break;
+        }
+    }
+    PatchHead {
+        kept_lines,
+        total_lines,
+        total_is_at_least,
+        saw_hunk,
+        saw_binary_marker,
+        read_error,
+    }
+}
+
 /// A requested encoding the patch's file lines are not valid in. Its own type,
 /// so a caller can answer with exactly this reason rather than wrap it in the
 /// story of how the diff head came to be asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchNotInEncoding {
+    /// The encoding that was asked for.
     pub encoding: &'static encoding_rs::Encoding,
     /// 1-based line of the patch that does not decode.
     pub line: usize,
@@ -393,7 +462,7 @@ fn read_prefix(path: &Path, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
         |e| anyhow::anyhow!("could not read {}: {e}", path.display()),
     )?;
     let mut buffer = Vec::new();
-    file.take(limit as u64)
+    file.take(crate::numeric::usize_to_u64(limit))
         .read_to_end(&mut buffer)
         .with_context(|| format!("could not read {}", path.display()))?;
     Ok(Some(buffer))
@@ -426,8 +495,10 @@ pub fn diff_head_banner(head: &DiffHead) -> String {
     )
 }
 
+/// Both sides of one file's diff, for the web's diff view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiffContents {
+    /// The file's path, relative to the worktree.
     pub path: String,
     /// File content at HEAD. Empty when the path is absent at HEAD (a newly
     /// added/untracked file); the client then renders an all-insert diff.
@@ -448,6 +519,7 @@ pub struct DiffContents {
 /// a reworded message quietly changes an HTTP status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffTooLarge {
+    /// The sentence the caller shows, unchanged.
     pub message: String,
 }
 
@@ -489,6 +561,10 @@ fn sniffs_as_utf8(bytes: &[u8]) -> bool {
 /// SECURITY: `rel_path` must be worktree-relative. Absolute paths, any `..`,
 /// root or prefix component, and symlinks that escape the worktree are rejected,
 /// since the web passes client-supplied paths here.
+///
+/// # Errors
+///
+/// Fails as [`file_diff_contents_as`] does.
 pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<DiffContents> {
     file_diff_contents_as(worktree, rel_path, None)
 }
@@ -496,6 +572,12 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
 /// [`file_diff_contents`] reading both sides in `encoding` where they decode in
 /// it: the encoding the person reopened the file in, so the diff and the
 /// editor tab show the same characters.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, either side is too large (a
+/// [`DiffTooLarge`]), the working copy is a symlink or cannot be read, the file is in neither the
+/// worktree nor HEAD, or git cannot be run.
 pub fn file_diff_contents_as(
     worktree: &Path,
     rel_path: &str,
@@ -849,7 +931,7 @@ mod tests {
     #[test]
     fn oversized_working_file_is_refused() {
         let repo = init_repo();
-        let big = vec![b'a'; (MAX_EDITABLE_BYTES + 1) as usize];
+        let big = vec![b'a'; crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES + 1)];
         std::fs::write(repo.path().join("big.txt"), &big).expect("write big");
         let err = file_diff_contents(repo.path(), "big.txt").unwrap_err();
         assert!(
@@ -876,14 +958,21 @@ mod tests {
         assert_eq!(c.modified, "");
     }
 
-    /// A path absent both at HEAD and on disk is a stale/typo path: it errors
-    /// rather than returning a confusing all-blank diff.
+    /// The lines `line` makes for `0..count`, each ended by a line break.
+    fn numbered_lines(count: usize, line: impl Fn(usize) -> String) -> String {
+        (0..count).fold(String::new(), |mut out, i| {
+            out.push_str(&line(i));
+            out.push('\n');
+            out
+        })
+    }
+
     /// Commit a file whose diff is far longer than the head cap, so the
     /// fallback has something real to cut.
     fn commit_and_rewrite_long_file(repo: &Path, rel: &str, lines: usize) {
-        let original: String = (0..lines).map(|i| format!("old line {i}\n")).collect();
+        let original: String = numbered_lines(lines, |i| format!("old line {i}"));
         commit_file(repo, rel, &original);
-        let rewritten: String = (0..lines).map(|i| format!("new line {i}\n")).collect();
+        let rewritten: String = numbered_lines(lines, |i| format!("new line {i}"));
         std::fs::write(repo.join(rel), rewritten).expect("rewrite");
     }
 
@@ -1080,7 +1169,7 @@ mod tests {
     #[test]
     fn a_readers_diff_context_setting_does_not_move_the_counts() {
         let repo = init_repo();
-        let base: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let base: String = numbered_lines(60, |i| format!("line {i}"));
         commit_file(repo.path(), "ctx.txt", &base);
         let changed = base.replace("line 30\n", "CHANGED\n");
         std::fs::write(repo.path().join("ctx.txt"), changed).expect("overwrite");
@@ -1114,9 +1203,9 @@ mod tests {
         // Ten lines of a quarter megabyte each: far under the line cap, far
         // over the byte cap.
         let long = "x".repeat(256 * 1024);
-        let base: String = (0..10).map(|i| format!("{long}{i}\n")).collect();
+        let base: String = numbered_lines(10, |i| format!("{long}{i}"));
         commit_file(repo.path(), "min.js", &base);
-        let changed: String = (0..10).map(|i| format!("{long}z{i}\n")).collect();
+        let changed: String = numbered_lines(10, |i| format!("{long}z{i}"));
         std::fs::write(repo.path().join("min.js"), changed).expect("overwrite");
 
         let head = diff_head_via_git(repo.path(), "min.js").expect("head");
@@ -1181,6 +1270,8 @@ mod tests {
         );
     }
 
+    /// A path absent both at HEAD and on disk is a stale/typo path: it errors
+    /// rather than returning a confusing all-blank diff.
     #[test]
     fn absent_on_both_sides_errors() {
         let repo = init_repo();

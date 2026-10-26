@@ -38,7 +38,7 @@ pub const TUI_DEVICE_LABEL: &str = "the dux TUI";
 /// it per gesture rather than caching it. That is what makes the toggle-off world
 /// byte-identical: nothing is serving, there is no seat, and every gate answers
 /// "allowed" without a registry existing at all.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TuiOwnership {
     /// The registry this serve built. One per serve: a stop/start cycle makes a
     /// new one, which is exactly why connection ids are process-global.
@@ -135,8 +135,11 @@ pub enum PtyOwnershipEvent {
     /// The terminal UI took (or was handed) input ownership of a pty: the
     /// `pty.owner` handover a browser's claim emits, with the same epoch.
     Claimed {
+        /// The pty claimed.
         pty_id: String,
+        /// The terminal UI's connection id.
         conn_id: u64,
+        /// The ownership epoch the claim was given.
         epoch: u64,
         /// The claimer's device label, which for this participant is always
         /// [`TUI_DEVICE_LABEL`]. Carried rather than assumed so the translation
@@ -146,15 +149,24 @@ pub enum PtyOwnershipEvent {
     /// The terminal UI let a pty go, and nobody has taken it: the owner-cleared
     /// `pty.owner`. Without it a watcher's card is a permanent lie about a
     /// terminal that stopped serving.
-    Released { pty_id: String, epoch: u64 },
+    Released {
+        /// The pty let go.
+        pty_id: String,
+        /// The ownership epoch the release was given.
+        epoch: u64,
+    },
     /// A resize the terminal UI owned and APPLIED, stamped with the seq the
     /// owners lock gave it. Web watchers adopt this grid, which is the whole
     /// point of the terminal UI joining the registry: one pty, one authoritative
     /// geometry, whoever is driving.
     GridApplied {
+        /// The pty resized.
         pty_id: String,
+        /// The new height, in rows.
         rows: u16,
+        /// The new width, in columns.
         cols: u16,
+        /// The resize sequence the owners lock stamped.
         seq: u64,
     },
 }
@@ -294,6 +306,10 @@ pub trait BackgroundServeCompanion {
     /// `claims` says whether every undriven running pty is claimed for the
     /// terminal UI before any listener accepts a connection; `startup` opens
     /// the log's banner.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a status-line message when serving cannot start.
     fn start(
         &mut self,
         engine: &mut Engine,

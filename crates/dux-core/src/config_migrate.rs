@@ -25,6 +25,10 @@ use crate::config_write::{ensure_table, remove_table_key_item};
 /// from the TUI's `ensure_config` (which then persists the change). Retired
 /// KEYBINDING actions are NOT handled here: they only matter to the TUI's
 /// `validate_keys`, so that pruning stays TUI-side.
+///
+/// # Errors
+///
+/// Fails when a deprecated key cannot be migrated.
 pub fn apply_load_migrations(doc: &mut DocumentMut) -> Result<bool> {
     let deprecations_changed = apply_config_deprecations(doc)?;
     let retired_changed = prune_retired_providers(doc);
@@ -38,7 +42,10 @@ struct DeprecatedConfigKey {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "today's rules only replace keys; Remove and Fail are the other actions a rule can take, and their handling stays ready for the next rule"
+)]
 enum DeprecatedConfigKeyAction {
     Replace {
         migrate: fn(&mut DocumentMut, DeprecatedConfigKey, &Item) -> Result<()>,

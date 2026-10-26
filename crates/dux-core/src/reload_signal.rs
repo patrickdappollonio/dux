@@ -37,6 +37,10 @@ static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
 /// every later call returns that first answer. Never unregistered, so a
 /// signal between one serving mode and the next (a flip back to the terminal
 /// UI) is recorded rather than killing the process.
+///
+/// # Errors
+///
+/// Fails with the reason when the handler cannot be registered.
 pub fn install() -> Result<(), String> {
     INSTALLED
         .get_or_init(|| {

@@ -59,13 +59,14 @@ impl std::fmt::Debug for CheckoutMoveGuard {
             .field("db_path", &self.db_path)
             .field("agents", &self.agents.len())
             .field("projects", &self.projects)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 /// Holds the claims on every folder a cleared move would remove, so nothing
 /// starts in one of them until git has moved the tree. Drop it after the move.
 #[must_use = "the move must run while the clearance is held"]
+#[derive(Debug)]
 pub struct MoveClearance {
     _claims: Vec<DestructiveClaim>,
 }

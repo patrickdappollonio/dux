@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 #[cfg(test)]
@@ -36,24 +37,43 @@ use crate::scroll_margins::{ScrollRegion, ScrollRegionTracker};
 /// 1:1 to `ratatui::Color`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CellColor {
+    /// The terminal's default color.
     Reset,
+    /// ANSI black (color 0).
     Black,
+    /// ANSI red (color 1).
     Red,
+    /// ANSI green (color 2).
     Green,
+    /// ANSI yellow (color 3).
     Yellow,
+    /// ANSI blue (color 4).
     Blue,
+    /// ANSI magenta (color 5).
     Magenta,
+    /// ANSI cyan (color 6).
     Cyan,
+    /// ANSI white (color 7), which renders as a light gray.
     Gray,
+    /// ANSI bright black (color 8), which renders as a dark gray.
     DarkGray,
+    /// ANSI bright red (color 9).
     LightRed,
+    /// ANSI bright green (color 10).
     LightGreen,
+    /// ANSI bright yellow (color 11).
     LightYellow,
+    /// ANSI bright blue (color 12).
     LightBlue,
+    /// ANSI bright magenta (color 13).
     LightMagenta,
+    /// ANSI bright cyan (color 14).
     LightCyan,
+    /// ANSI bright white (color 15).
     White,
+    /// A 24-bit color, as red, green and blue.
     Rgb(u8, u8, u8),
+    /// A color from the 256-color palette, by index.
     Indexed(u8),
 }
 
@@ -108,11 +128,17 @@ pub(crate) enum BellPolicy {
 pub struct CellModifier(u8);
 
 impl CellModifier {
+    /// Bold or increased intensity.
     pub const BOLD: Self = Self(1);
+    /// Faint or decreased intensity.
     pub const DIM: Self = Self(1 << 1);
+    /// Italic.
     pub const ITALIC: Self = Self(1 << 2);
+    /// Underlined.
     pub const UNDERLINED: Self = Self(1 << 3);
+    /// Reverse video: foreground and background swapped.
     pub const REVERSED: Self = Self(1 << 4);
+    /// Struck through.
     pub const CROSSED_OUT: Self = Self(1 << 5);
 
     /// Whether every attribute in `other` is set here.
@@ -134,19 +160,29 @@ impl std::ops::BitOr for CellModifier {
     }
 }
 
+/// Where the terminal's cursor sits in a snapshot, in cells from the top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapshotCursor {
+    /// The cursor's row, from 0.
     pub row: u16,
+    /// The cursor's column, from 0.
     pub col: u16,
 }
 
+/// One visible cell of a terminal snapshot, with its text and style.
 #[derive(Clone, Debug)]
 pub struct SnapshotCell {
+    /// The cell's row, from 0.
     pub row: u16,
+    /// The cell's column, from 0.
     pub col: u16,
+    /// The text the cell shows.
     pub symbol: CompactString,
+    /// The foreground color.
     pub fg: CellColor,
+    /// The background color.
     pub bg: CellColor,
+    /// The text attributes.
     pub modifier: CellModifier,
     /// Index into [`TerminalSnapshot::links`] when this cell is part of an OSC 8
     /// hyperlink, else `None`. The TUI wraps the cell symbol in an OSC 8 open/close
@@ -154,13 +190,21 @@ pub struct SnapshotCell {
     pub link: Option<u16>,
 }
 
+/// What a terminal shows at one moment: its size, its scrollback position, its cursor and its
+/// cells.
 #[derive(Clone, Debug)]
 pub struct TerminalSnapshot {
+    /// The visible height, in rows.
     pub rows: u16,
+    /// The visible width, in columns.
     pub cols: u16,
+    /// How many lines the view is scrolled back from the bottom.
     pub scrollback_offset: usize,
+    /// How many lines of scrollback there are in all.
     pub scrollback_total: usize,
+    /// The cursor, when it is visible.
     pub cursor: Option<SnapshotCursor>,
+    /// The visible cells, wide-character spacers left out.
     pub cells: Vec<SnapshotCell>,
     /// Interned OSC 8 hyperlink URIs referenced by `cells[..].link`. A per-snapshot
     /// table so a link spanning many cells stores its URI once.
@@ -236,7 +280,7 @@ pub(crate) fn synthesize_repaint(
     let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
     for cell in cells {
         if expected_next != Some((cell.row, cell.col)) {
-            out.push_str(&format!("\x1b[{};{}H", cell.row + 1, cell.col + 1));
+            let _ = write!(out, "\x1b[{};{}H", cell.row + 1, cell.col + 1);
         }
         let style = (cell.fg, cell.bg, cell.modifier);
         if last_style != Some(style) {
@@ -251,7 +295,7 @@ pub(crate) fn synthesize_repaint(
     out.push_str("\x1b[0m");
     out.push_str(&scroll_region.decstbm_sequence());
     if let Some(cursor) = &snapshot.cursor {
-        out.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
+        let _ = write!(out, "\x1b[{};{}H", cursor.row + 1, cursor.col + 1);
     }
     out.into_bytes()
 }
@@ -433,7 +477,7 @@ fn cursor_and_palette_restore_sequence(
     // the doc comment), so the current style goes out whether or not it is
     // alacritty's default.
     if let Some(code) = code {
-        out.push_str(&format!("\x1b[{code} q"));
+        let _ = write!(out, "\x1b[{code} q");
     }
 
     // The palette baseline first: a client-side reset does not scrub OSC
@@ -449,17 +493,17 @@ fn cursor_and_palette_restore_sequence(
     // diffed alongside the foreground and background.
     for index in 0..256usize {
         if let Some(rgb) = colors[index] {
-            out.push_str(&format!("\x1b]4;{index};{}\x1b\\", osc_color(rgb)));
+            let _ = write!(out, "\x1b]4;{index};{}\x1b\\", osc_color(rgb));
         }
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Foreground] {
-        out.push_str(&format!("\x1b]10;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]10;{}\x1b\\", osc_color(rgb));
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Background] {
-        out.push_str(&format!("\x1b]11;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]11;{}\x1b\\", osc_color(rgb));
     }
     if let Some(rgb) = colors[alacritty_terminal::vte::ansi::NamedColor::Cursor] {
-        out.push_str(&format!("\x1b]12;{}\x1b\\", osc_color(rgb)));
+        let _ = write!(out, "\x1b]12;{}\x1b\\", osc_color(rgb));
     }
     out
 }
@@ -731,6 +775,7 @@ fn fan_out_to_subscribers(subscribers: &SubscriberList, data: &[u8]) {
 /// RAII guard returned by [`PtyClient::subscribe`] and
 /// [`PtyClient::subscribe_with_repaint`]. Dropping it immediately removes the
 /// subscriber from the fan-out list without waiting for the next PTY output.
+#[derive(Debug)]
 pub struct PtyViewerGuard {
     id: u64,
     subs: SubscriberList,
@@ -770,7 +815,7 @@ static RESIZE_TEST_GATE: Mutex<Option<Arc<ResizeTestGate>>> = Mutex::new(None);
 fn resize_test_gate_for(terminal: &Arc<Mutex<TerminalState>>) -> Option<Arc<ResizeTestGate>> {
     let armed = RESIZE_TEST_GATE.lock().ok()?;
     let gate = armed.as_ref()?;
-    (gate.terminal == Arc::as_ptr(terminal) as usize).then(|| Arc::clone(gate))
+    (gate.terminal == Arc::as_ptr(terminal).addr()).then(|| Arc::clone(gate))
 }
 
 /// Called from inside the resize critical section, after the ioctl. Blocks until
@@ -812,7 +857,6 @@ impl Drop for ReaderWaiting {
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
-    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     /// Dedicated writer thread for the PTY master, fed over a bounded queue so a
     /// child that stops reading its input can never block the engine thread.
@@ -938,6 +982,17 @@ pub struct PtyClient {
     recorded_members: Mutex<Option<RecordedMembers>>,
 }
 
+impl std::fmt::Debug for PtyClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyClient")
+            .field("spawn_dir", &self.spawn_dir)
+            .field("scrollback_capacity", &self.scrollback_capacity)
+            .field("process_session", &self.process_session)
+            .field("spawned_at", &self.spawned_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Where a client reads the members recorded for its child's session.
 pub(crate) type RecordedMembers =
     Box<dyn Fn() -> Vec<crate::process_sessions::ProcessIdentity> + Send>;
@@ -957,7 +1012,9 @@ const PASSTHROUGH_SEQ_MAX: usize = 8 * 1024;
 /// mirrors [`crate::attention::AttentionEvent::Progress`].
 #[derive(Debug, Clone, Copy)]
 pub struct ProgressReport {
+    /// Whether the agent reported it is working.
     pub working: bool,
+    /// When the report arrived.
     pub at: Instant,
 }
 
@@ -1112,7 +1169,10 @@ impl ReaderLoopState {
 
 impl PtyClient {
     /// Spawn a CLI command in a new PTY with the given size.
-    #[allow(dead_code)]
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::spawn_with_env`] does.
     pub fn spawn(
         command: &str,
         args: &[String],
@@ -1129,6 +1189,10 @@ impl PtyClient {
     /// use. Companion terminals want it off and go through
     /// [`PtyClient::spawn_with_env_opts`]. No terminal-identity mutation is applied
     /// (the caller env is the only override).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the pseudo-terminal cannot be opened or the command cannot be spawned in it.
     pub fn spawn_with_env(
         command: &str,
         args: &[String],
@@ -1188,21 +1252,7 @@ impl PtyClient {
             })
             .context("failed to open PTY")?;
 
-        let mut cmd = CommandBuilder::new(command);
-        for arg in args {
-            cmd.arg(arg);
-        }
-        cmd.cwd(cwd);
-        apply_terminal_env(&mut cmd);
-        // Apply the resolved terminal identity between the baseline TERM/COLORTERM
-        // and the caller's `[env]`: remove first (a trailing `*` scrubs a whole
-        // prefix family against the real environment), then set, so the user's own
-        // `[env]` overrides below always win.
-        apply_identity_env(&mut cmd, identity);
-        for (name, value) in env {
-            cmd.env(name, value);
-        }
-
+        let cmd = pty_command(command, args, cwd, env, identity);
         let mut child = pair
             .slave
             .spawn_command(cmd)
@@ -1216,24 +1266,8 @@ impl PtyClient {
         // process leaks with no `PtyClient` (and no `providers` entry) to track
         // or terminate it: the tab-create failure cleanup relies on a spawn
         // `Err` meaning "no live process".
-        let reader = match pair
-            .master
-            .try_clone_reader()
-            .context("failed to clone PTY reader")
-        {
-            Ok(reader) => reader,
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(err);
-            }
-        };
-        let pty_writer = match pair
-            .master
-            .take_writer()
-            .context("failed to take PTY writer")
-        {
-            Ok(writer) => writer,
+        let (reader, pty_writer) = match master_reader_and_writer(pair.master.as_ref()) {
+            Ok(ends) => ends,
             Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -1347,7 +1381,7 @@ impl PtyClient {
         if self.reaped.is_some() {
             return None;
         }
-        rustix::process::Pid::from_raw(self.child.process_id()? as i32)
+        rustix::process::Pid::from_raw(self.child.process_id()?.cast_signed())
     }
 
     /// Whether the child has exited, asked WITHOUT reaping it (`WNOWAIT`), so
@@ -1356,7 +1390,7 @@ impl PtyClient {
     /// question cannot be asked (no pid, already reaped elsewhere, an error):
     /// the caller then reaps as before.
     fn child_exit_unreaped(&self, wait: ExitWait) -> Option<bool> {
-        let pid = rustix::process::Pid::from_raw(self.child.process_id()? as i32)?;
+        let pid = rustix::process::Pid::from_raw(self.child.process_id()?.cast_signed())?;
         let mut options =
             rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT;
         if wait == ExitWait::NoHang {
@@ -1366,7 +1400,7 @@ impl PtyClient {
             match rustix::process::waitid(rustix::process::WaitId::Pid(pid), options) {
                 Ok(Some(_)) => return Some(true),
                 Ok(None) => return Some(false),
-                Err(rustix::io::Errno::INTR) => continue,
+                Err(rustix::io::Errno::INTR) => {}
                 Err(_) => return None,
             }
         }
@@ -1463,6 +1497,10 @@ impl PtyClient {
     /// snapshot: the child process will echo or react to this input, and
     /// pre-marking dirty avoids a one-frame delay waiting for the reader
     /// thread to process the echo.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write to the PTY fails.
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
         // Hand the bytes to the dedicated writer thread and return immediately.
         // The write itself may block on a child that has stopped reading its
@@ -1492,7 +1530,10 @@ impl PtyClient {
     }
 
     /// Get an owned snapshot of the currently visible terminal viewport.
-    #[allow(dead_code)]
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     pub fn snapshot(&self) -> TerminalSnapshot {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot()
@@ -1520,6 +1561,10 @@ impl PtyClient {
     /// from now on. Dropping the guard immediately removes this subscriber from
     /// the fan-out list; the receiver will observe disconnection on the next
     /// `recv` or `try_recv` call after the guard is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the subscribers lock is poisoned by an earlier panic while it was held.
     pub fn subscribe(&self) -> (PtyViewerGuard, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
@@ -1574,6 +1619,11 @@ impl PtyClient {
     ///
     /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
     /// connection's lifetime; dropping it removes the subscriber immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal or subscribers lock is poisoned by an earlier panic while it was
+    /// held.
     pub fn subscribe_with_repaint(
         &self,
     ) -> (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
@@ -1596,6 +1646,10 @@ impl PtyClient {
     /// `target.links` (the TUI passes `config.capabilities.hyperlinks`): when
     /// `false` no cell carries a `link` and the interning work is skipped
     /// entirely, so a config that disables hyperlinks pays nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     pub fn snapshot_into(&self, target: &mut TerminalSnapshot, links: Hyperlinks) -> bool {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
@@ -1605,6 +1659,11 @@ impl PtyClient {
         true
     }
 
+    /// How many lines the view is scrolled back from the bottom.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     pub fn scrollback_offset(&self) -> usize {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.scrollback_offset()
@@ -1674,6 +1733,10 @@ impl PtyClient {
     /// holding the lock stretches it to tens of milliseconds. Taking the lock
     /// first closes it. `TIOCSWINSZ` does not block, so nothing long-running runs
     /// under the lock here.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the PTY cannot be resized.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         // A resize can move the scrollback offset (growing the viewport pulls
         // history into the grid and resets the display offset to 0). That is
@@ -2118,7 +2181,7 @@ fn foreground_pgid_of_fd(raw_fd: std::os::unix::io::RawFd) -> Option<u32> {
 /// and negatives (error returns) are not, and must never reach a
 /// `Pid`/`NonZero` construction.
 fn valid_pgid(raw: libc::pid_t) -> Option<u32> {
-    (raw > 0).then_some(raw as u32)
+    (raw > 0).then_some(raw.cast_unsigned())
 }
 
 /// What a batch of bytes written to a PTY represents, as far as the engine's
@@ -2384,7 +2447,7 @@ impl SignalTargets {
     /// group already went) is benign.
     pub(crate) fn send(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
         let signal_group = |pgid: u32| {
-            rustix::process::Pid::from_raw(pgid as i32).map_or(Ok(()), |group| {
+            rustix::process::Pid::from_raw(pgid.cast_signed()).map_or(Ok(()), |group| {
                 rustix::process::kill_process_group(group, sig)
             })
         };
@@ -2482,7 +2545,7 @@ fn run_deferred_group_signal(job: &DeferredGroupSignal) {
             &crate::process_sessions::member_state,
         )
     });
-    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group as i32) {
+    if kill && let Some(group) = rustix::process::Pid::from_raw(job.group.cast_signed()) {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
 }
@@ -2652,7 +2715,7 @@ impl TerminalState {
         // sequence, while a cursor-only move or an OSC status write leave it
         // identical.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let screen_lines = self.term.screen_lines() as i32;
+        let screen_lines = crate::numeric::grid_i32(self.term.screen_lines());
         for line in 0..screen_lines {
             for cell in &self.term.grid()[Line(line)] {
                 cell.c.hash(&mut hasher);
@@ -2868,8 +2931,8 @@ impl TerminalState {
         } else {
             term::point_to_viewport(display_offset, renderable.cursor.point).map(|point| {
                 SnapshotCursor {
-                    row: point.line as u16,
-                    col: point.column.0 as u16,
+                    row: crate::numeric::grid_u16(point.line),
+                    col: crate::numeric::grid_u16(point.column.0),
                 }
             })
         };
@@ -2934,8 +2997,8 @@ impl TerminalState {
             };
 
             target.cells.push(SnapshotCell {
-                row: point.line as u16,
-                col: point.column.0 as u16,
+                row: crate::numeric::grid_u16(point.line),
+                col: crate::numeric::grid_u16(point.column.0),
                 symbol,
                 fg: convert_terminal_color(cell.fg, colors),
                 bg: convert_terminal_color(cell.bg, colors),
@@ -3032,7 +3095,7 @@ impl TerminalState {
 
         // Pre-size to history+screen rows so a large scrollback doesn't reallocate
         // repeatedly while we hold the terminal lock.
-        let est_rows = (bottom - top + 1).max(0) as usize;
+        let est_rows = usize::try_from(bottom - top + 1).unwrap_or(0);
         let mut out = String::with_capacity(est_rows * (cols + 2) + 32);
         // Ensure the primary buffer and autowrap-on (so soft-wrapped rows can be
         // rebuilt by the client), widen the scrolling region back to the whole
@@ -3099,7 +3162,7 @@ impl TerminalState {
         // before the cursor, because setting a region homes the cursor.
         out.push_str(&self.scroll_region.region().decstbm_sequence());
         if let Some(point) = cursor {
-            out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
+            let _ = write!(out, "\x1b[{};{}H", point.line + 1, point.column.0 + 1);
         }
         // Last, so the `?7h` this replay forced on above (to rebuild soft-wrapped
         // rows through the client's own autowrap) is put back to whatever the
@@ -3118,8 +3181,8 @@ impl TerminalState {
 
     fn scroll(&mut self, direction: ScrollDirection, amount: usize) {
         let delta = match direction {
-            ScrollDirection::Up => amount as i32,
-            ScrollDirection::Down => -(amount as i32),
+            ScrollDirection::Up => crate::numeric::grid_i32(amount),
+            ScrollDirection::Down => -crate::numeric::grid_i32(amount),
         };
         self.term.scroll_display(Scroll::Delta(delta));
     }
@@ -3127,7 +3190,7 @@ impl TerminalState {
     fn set_scrollback(&mut self, rows: usize) {
         let current = self.term.grid().display_offset();
         let target = rows.min(self.term.grid().history_size());
-        let delta = target as i32 - current as i32;
+        let delta = crate::numeric::grid_i32(target) - crate::numeric::grid_i32(current);
         self.term.scroll_display(Scroll::Delta(delta));
     }
 
@@ -3339,7 +3402,7 @@ fn convert_terminal_color(
 ) -> CellColor {
     match color {
         TermColor::Spec(Rgb { r, g, b }) => CellColor::Rgb(r, g, b),
-        TermColor::Indexed(index) => palette[index as usize]
+        TermColor::Indexed(index) => palette[usize::from(index)]
             .map_or(CellColor::Indexed(index), |rgb| {
                 CellColor::Rgb(rgb.r, rgb.g, rgb.b)
             }),
@@ -3352,14 +3415,13 @@ fn convert_terminal_color(
 
 fn named_color_to_tui(color: NamedColor) -> CellColor {
     match color {
-        NamedColor::Black => CellColor::Indexed(0),
-        NamedColor::Red => CellColor::Indexed(1),
-        NamedColor::Green => CellColor::Indexed(2),
-        NamedColor::Yellow => CellColor::Indexed(3),
-        NamedColor::Blue => CellColor::Indexed(4),
-        NamedColor::Magenta => CellColor::Indexed(5),
-        NamedColor::Cyan => CellColor::Indexed(6),
-        NamedColor::White => CellColor::Indexed(7),
+        NamedColor::Red | NamedColor::DimRed => CellColor::Indexed(1),
+        NamedColor::Green | NamedColor::DimGreen => CellColor::Indexed(2),
+        NamedColor::Yellow | NamedColor::DimYellow => CellColor::Indexed(3),
+        NamedColor::Blue | NamedColor::DimBlue => CellColor::Indexed(4),
+        NamedColor::Magenta | NamedColor::DimMagenta => CellColor::Indexed(5),
+        NamedColor::Cyan | NamedColor::DimCyan => CellColor::Indexed(6),
+        NamedColor::White | NamedColor::DimWhite => CellColor::Indexed(7),
         NamedColor::BrightBlack => CellColor::Indexed(8),
         NamedColor::BrightRed => CellColor::Indexed(9),
         NamedColor::BrightGreen => CellColor::Indexed(10),
@@ -3368,14 +3430,7 @@ fn named_color_to_tui(color: NamedColor) -> CellColor {
         NamedColor::BrightMagenta => CellColor::Indexed(13),
         NamedColor::BrightCyan => CellColor::Indexed(14),
         NamedColor::BrightWhite => CellColor::Indexed(15),
-        NamedColor::DimBlack => CellColor::Indexed(0),
-        NamedColor::DimRed => CellColor::Indexed(1),
-        NamedColor::DimGreen => CellColor::Indexed(2),
-        NamedColor::DimYellow => CellColor::Indexed(3),
-        NamedColor::DimBlue => CellColor::Indexed(4),
-        NamedColor::DimMagenta => CellColor::Indexed(5),
-        NamedColor::DimCyan => CellColor::Indexed(6),
-        NamedColor::DimWhite => CellColor::Indexed(7),
+        NamedColor::Black | NamedColor::DimBlack => CellColor::Indexed(0),
         NamedColor::Foreground
         | NamedColor::Background
         | NamedColor::Cursor
@@ -3526,21 +3581,74 @@ fn default_palette_rgb(index: usize) -> Option<Rgb> {
         15 => Some(rgb(0xff, 0xff, 0xff)),
         16..=231 => Some(xterm_color_cube(index)),
         232..=255 => Some(xterm_grayscale(index)),
-        x if x == NamedColor::Foreground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::Background as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::Cursor as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimBlack as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::DimRed as usize => Some(rgb(0x80, 0x00, 0x00)),
-        x if x == NamedColor::DimGreen as usize => Some(rgb(0x00, 0x80, 0x00)),
-        x if x == NamedColor::DimYellow as usize => Some(rgb(0x80, 0x80, 0x00)),
-        x if x == NamedColor::DimBlue as usize => Some(rgb(0x00, 0x00, 0x80)),
-        x if x == NamedColor::DimMagenta as usize => Some(rgb(0x80, 0x00, 0x80)),
-        x if x == NamedColor::DimCyan as usize => Some(rgb(0x00, 0x80, 0x80)),
-        x if x == NamedColor::DimWhite as usize => Some(rgb(0x80, 0x80, 0x80)),
-        x if x == NamedColor::BrightForeground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimForeground as usize => Some(rgb(0x80, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::Foreground) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::Background) => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::Cursor) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::DimBlack) => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::DimRed) => Some(rgb(0x80, 0x00, 0x00)),
+        x if x == named_color_index(NamedColor::DimGreen) => Some(rgb(0x00, 0x80, 0x00)),
+        x if x == named_color_index(NamedColor::DimYellow) => Some(rgb(0x80, 0x80, 0x00)),
+        x if x == named_color_index(NamedColor::DimBlue) => Some(rgb(0x00, 0x00, 0x80)),
+        x if x == named_color_index(NamedColor::DimMagenta) => Some(rgb(0x80, 0x00, 0x80)),
+        x if x == named_color_index(NamedColor::DimCyan) => Some(rgb(0x00, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::DimWhite) => Some(rgb(0x80, 0x80, 0x80)),
+        x if x == named_color_index(NamedColor::BrightForeground) => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == named_color_index(NamedColor::DimForeground) => Some(rgb(0x80, 0x80, 0x80)),
         _ => None,
     }
+}
+
+/// The command a PTY runs: `command` with `args` in `cwd`, the baseline terminal
+/// variables, the resolved terminal identity, then the caller's `env`.
+fn pty_command(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    identity: &crate::term_identity::TerminalIdentity,
+) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(command);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.cwd(cwd);
+    apply_terminal_env(&mut cmd);
+    // Apply the resolved terminal identity between the baseline TERM/COLORTERM
+    // and the caller's `[env]`: remove first (a trailing `*` scrubs a whole
+    // prefix family against the real environment), then set, so the user's own
+    // `[env]` overrides below always win.
+    apply_identity_env(&mut cmd, identity);
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd
+}
+
+/// The read and write ends of a PTY's master.
+///
+/// # Errors
+///
+/// Fails when either end cannot be had.
+fn master_reader_and_writer(
+    master: &dyn MasterPty,
+) -> Result<(
+    Box<dyn std::io::Read + Send>,
+    Box<dyn std::io::Write + Send>,
+)> {
+    let reader = master
+        .try_clone_reader()
+        .context("failed to clone PTY reader")?;
+    let writer = master.take_writer().context("failed to take PTY writer")?;
+    Ok((reader, writer))
+}
+
+/// The palette index alacritty gives a named color, which is its discriminant.
+#[expect(
+    clippy::as_conversions,
+    reason = "NamedColor's discriminants are its palette indices, and an enum has no From to read them"
+)]
+fn named_color_index(color: NamedColor) -> usize {
+    color as usize
 }
 
 fn xterm_color_cube(index: usize) -> Rgb {
@@ -3554,7 +3662,7 @@ fn xterm_color_cube(index: usize) -> Rgb {
 }
 
 fn xterm_grayscale(index: usize) -> Rgb {
-    let level = 8 + ((index - 232) as u8 * 10);
+    let level = 8 + u8::try_from(index - 232).expect("a grayscale index is 232..=255") * 10;
     rgb(level, level, level)
 }
 
@@ -3787,7 +3895,7 @@ mod tests {
         );
 
         let gate = Arc::new(ResizeTestGate {
-            terminal: Arc::as_ptr(&client.terminal) as usize,
+            terminal: Arc::as_ptr(&client.terminal).addr(),
             waiting: AtomicUsize::new(0),
             entered: AtomicBool::new(false),
             release: Mutex::new(false),
@@ -4207,9 +4315,6 @@ mod tests {
     /// cursor report, and nothing may follow.
     #[test]
     fn termenv_background_probe_reads_the_osc_reply_before_its_fence() {
-        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
-        let replies = terminal.process(b"\x1b]11;?\x1b\\\x1b[6n");
-
         // termenv's readNextResponse: an OSC reply ends at ST or BEL, a CSI
         // reply at its final byte `R`.
         fn next_response(input: &[u8]) -> Option<(&[u8], bool, &[u8])> {
@@ -4228,6 +4333,9 @@ mod tests {
             };
             Some((&input[..end], is_osc, &input[end..]))
         }
+
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        let replies = terminal.process(b"\x1b]11;?\x1b\\\x1b[6n");
 
         let (first, first_is_osc, rest) =
             next_response(&replies).expect("termenv must read a first response");
@@ -5853,13 +5961,15 @@ mod tests {
 
     /// Build a reader-loop state around fresh flags, and hand back the flags the
     /// loop is expected to publish.
-    #[allow(clippy::type_complexity)]
-    fn reader_loop_probe() -> (
+    /// A probed reader-loop state and the flags and writer queue it publishes to.
+    type ReaderLoopProbe = (
         ReaderLoopState,
         Arc<AtomicBool>,
         Arc<OnceLock<String>>,
         std::sync::mpsc::Receiver<PtyWriteMsg>,
-    ) {
+    );
+
+    fn reader_loop_probe() -> ReaderLoopProbe {
         let exited = Arc::new(AtomicBool::new(false));
         let read_error: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
@@ -6065,9 +6175,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) else {
+            return;
         };
         let Some(child) = client.child_process_id() else {
             return;
@@ -6125,9 +6235,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, start.path(), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, start.path(), 24, 80, 100) else {
+            return;
         };
 
         // The marker is split in the typed text so the shell's ECHO of the
@@ -6166,9 +6276,9 @@ mod tests {
             "--noprofile".to_string(),
             "-i".to_string(),
         ];
-        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
-            Ok(c) => c,
-            Err(_) => return, // bash unavailable on this host; skip.
+        // bash unavailable on this host; skip.
+        let Ok(client) = PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) else {
+            return;
         };
 
         // Make sure the shell is up and responsive before signaling it.
@@ -6359,7 +6469,7 @@ mod tests {
         client.set_leader_exit_hook(Box::new(move || {
             // A child not yet reaped is still this process's to wait for; a
             // reaped one answers "no such child".
-            let unreaped = rustix::process::Pid::from_raw(pid as i32).is_some_and(|pid| {
+            let unreaped = rustix::process::Pid::from_raw(pid.cast_signed()).is_some_and(|pid| {
                 !matches!(
                     rustix::process::waitid(
                         rustix::process::WaitId::Pid(pid),
@@ -6429,7 +6539,7 @@ mod tests {
             Some(group),
             "a recorded member alive in the group holds its id"
         );
-        if let Some(pid) = rustix::process::Pid::from_raw(job as i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(job.cast_signed()) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -6478,7 +6588,7 @@ mod tests {
             client
                 .child_to_signal()
                 .map(rustix::process::Pid::as_raw_pid),
-            Some(pid as i32),
+            Some(pid.cast_signed()),
             "an unreaped child is signalled at its pid"
         );
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -6500,20 +6610,6 @@ mod tests {
     /// and a removal must still find the job.
     #[test]
     fn a_child_seen_to_exit_has_its_survivors_recorded_before_the_client_drops() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("job.pid");
-        let args = vec![
-            "-c".to_string(),
-            format!(
-                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
-                pidfile.display()
-            ),
-        ];
-        let mut client =
-            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
-        let session = client.process_session().expect("a session");
-        let registry = crate::process_sessions::AgentProcessRegistry::default();
-        client.set_leader_exit_hook(registry.leader_exit_hook(session));
         struct Kill(std::path::PathBuf);
         impl Drop for Kill {
             fn drop(&mut self) {
@@ -6528,6 +6624,21 @@ mod tests {
                 }
             }
         }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("job.pid");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                "trap '' HUP; sleep 300 & echo $! > '{}'; exit 0",
+                pidfile.display()
+            ),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, dir.path(), 5, 40, 100).expect("spawn pty");
+        let session = client.process_session().expect("a session");
+        let registry = crate::process_sessions::AgentProcessRegistry::default();
+        client.set_leader_exit_hook(registry.leader_exit_hook(session));
         let _job = Kill(pidfile.clone());
 
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -6769,10 +6880,12 @@ mod tests {
     /// that needs to prove nothing fell out of history has to read the grid.
     fn all_grid_lines(client: &PtyClient) -> Vec<String> {
         let terminal = client.terminal.lock().expect("terminal mutex poisoned");
-        let history = terminal.term.grid().history_size() as i32;
+        let history = crate::numeric::grid_i32(terminal.term.grid().history_size());
         let rows = i32::from(terminal.rows);
         let cols = usize::from(terminal.cols);
-        let mut out = Vec::with_capacity((history + rows) as usize);
+        let mut out = Vec::with_capacity(
+            usize::try_from(history + rows).expect("a grid has no negative size"),
+        );
         for line in -history..rows {
             let row = &terminal.term.grid()[Line(line)];
             let mut text = String::with_capacity(cols);
@@ -7241,7 +7354,7 @@ mod tests {
 
         let mut input = String::new();
         for n in 11..=LINES {
-            input.push_str(&format!("{n}\r"));
+            let _ = write!(input, "{n}\r");
         }
         client
             .write_bytes(input.as_bytes())
@@ -8177,7 +8290,7 @@ mod tests {
         let writer = PtyWriter::spawn(Box::new(NullWriter));
         // Clone the sender, simulating the reader thread's hold on it. Keep
         // this clone alive across the drop so it cannot cause a disconnect.
-        let _clone = writer.sender();
+        let sender = writer.sender();
 
         let start = std::time::Instant::now();
         drop(writer);
@@ -8192,8 +8305,8 @@ mod tests {
              remaining sender clones (no channel-disconnect deadlock)"
         );
         // Verify the clone is still alive (i.e. this was a real test of the hazard,
-        // not one where Rust happened to drop `_clone` before `writer`).
-        drop(_clone);
+        // not one where Rust happened to drop `sender` before `writer`).
+        drop(sender);
     }
 
     /// Dropping the guard removes the subscriber immediately, before any PTY

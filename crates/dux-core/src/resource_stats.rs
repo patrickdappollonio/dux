@@ -27,6 +27,7 @@ const STALE_BASELINE: Duration = Duration::from_secs(5);
 
 /// Samples CPU/RSS for dux and a set of target process trees, holding the
 /// `sysinfo::System` across calls so CPU deltas are real. See the module docs.
+#[derive(Debug)]
 pub struct ResourceCollector {
     sys: sysinfo::System,
     /// When the last refresh happened, or `None` before the first sample. Drives
@@ -269,7 +270,7 @@ mod tests {
             let mut x: u64 = 0;
             while !flag.load(Ordering::Relaxed) {
                 // Opaque to the optimizer so the loop is not elided.
-                x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
             }
         });
         (stop, handle)
@@ -341,7 +342,11 @@ mod tests {
 
         // Simulate the monitor being closed and reopened after a gap longer
         // than STALE_BASELINE, with no sampling in between.
-        collector.last_refresh = Some(Instant::now() - STALE_BASELINE - Duration::from_millis(1));
+        collector.last_refresh = Some(
+            Instant::now()
+                .checked_sub(STALE_BASELINE + Duration::from_millis(1))
+                .unwrap(),
+        );
         let (_, third_was_baseline) = collector.sample(&Vec::new());
         assert!(
             third_was_baseline,
@@ -403,15 +408,28 @@ mod tests {
         // Back-to-back (same instant, or a few ms later) -> retain, do NOT
         // re-baseline, so the prior reading is kept rather than zeroed.
         assert!(!needs_baseline(Some(now), now));
-        assert!(!needs_baseline(Some(now - Duration::from_millis(5)), now));
+        assert!(!needs_baseline(
+            Some(now.checked_sub(Duration::from_millis(5)).unwrap()),
+            now
+        ));
         // Recent but still within the stale window -> retain.
         assert!(!needs_baseline(
-            Some(now - (STALE_BASELINE - Duration::from_millis(1))),
+            Some(
+                now.checked_sub(
+                    STALE_BASELINE
+                        .checked_sub(Duration::from_millis(1))
+                        .unwrap()
+                )
+                .unwrap(),
+            ),
             now,
         ));
         // A gap longer than the stale window -> re-baseline.
         assert!(needs_baseline(
-            Some(now - (STALE_BASELINE + Duration::from_millis(1))),
+            Some(
+                now.checked_sub(STALE_BASELINE + Duration::from_millis(1))
+                    .unwrap()
+            ),
             now,
         ));
     }
@@ -642,12 +660,13 @@ mod tests {
     /// while the real bug (threads counted) blows the count past the band.
     #[test]
     fn aggregate_tree_over_a_threaded_process_excludes_threads() {
-        let _guard = CHILD_PROCESS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Spin many threads: if the adapter ever stopped flagging thread rows,
         // the count would jump to ~THREADS, far outside the asserted band.
         const THREADS: usize = 16;
+
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (stop, handles) = spin_threads(THREADS);
 
         let mut child = std::process::Command::new("sleep")
@@ -1013,11 +1032,11 @@ mod tests {
     /// a multi-threaded burn is never clamped at 100.
     #[test]
     fn cpu_reads_high_for_a_burning_tree_and_near_zero_for_an_idle_one() {
+        use std::os::unix::process::CommandExt;
+
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        use std::os::unix::process::CommandExt;
 
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         // Four spinning subshells under one `sh`: a real multi-process tree
@@ -1242,6 +1261,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "three exact 1.0s sum to exactly 3.0")]
     fn aggregate_proc_tree_counts_processes_not_threads() {
         // Root (100) with 3 threads, one real child (200) with 2 threads, and a
         // grandchild (300) under the child, a descendant reached THROUGH a

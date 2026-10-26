@@ -15,6 +15,7 @@
 //! The lockfile also contains the holder's PID, written after the lock is
 //! acquired, so a colliding launch can tell the user which process to close.
 
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -95,13 +96,10 @@ impl SingleInstanceLock {
         match &self.control_socket {
             ControlSocketState::NotOpened => {}
             ControlSocketState::Open(socket) => {
-                text.push_str(&format!(
-                    "{CONTROL_SOCKET_PREFIX}{}\n",
-                    socket.path().display()
-                ));
+                let _ = writeln!(text, "{CONTROL_SOCKET_PREFIX}{}", socket.path().display());
             }
             ControlSocketState::Unavailable(reason) => {
-                text.push_str(&format!("{CONTROL_SOCKET_UNAVAILABLE_PREFIX}{reason}\n"));
+                let _ = writeln!(text, "{CONTROL_SOCKET_UNAVAILABLE_PREFIX}{reason}");
             }
         }
         let _ = self.file.set_len(0);
@@ -117,9 +115,19 @@ pub enum AcquireError {
     /// Another live dux process already holds the lock. `pid` is the holder's
     /// PID as read from the lockfile. `None` if the file was empty or its
     /// contents could not be parsed.
-    AlreadyRunning { pid: Option<u32>, path: PathBuf },
+    AlreadyRunning {
+        /// The holder's pid, or `None` when the file was empty or unreadable.
+        pid: Option<u32>,
+        /// The lock file.
+        path: PathBuf,
+    },
     /// An unexpected filesystem error occurred (not contention).
-    Io { path: PathBuf, err: std::io::Error },
+    Io {
+        /// The lock file.
+        path: PathBuf,
+        /// The filesystem error.
+        err: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for AcquireError {
@@ -178,6 +186,11 @@ impl SingleInstanceLock {
     /// holder. The lock is held until the returned value is dropped.
     ///
     /// The parent directory of `path` must already exist.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`AcquireError::AlreadyRunning`] when another process holds the lock, or
+    /// [`AcquireError::Io`] when the file cannot be opened, locked or written.
     pub fn acquire(path: &Path) -> Result<Self, AcquireError> {
         // Opens for read+write so we can both rewrite the PID after acquiring
         // and read the PID of the holder if we lose the race.
@@ -304,13 +317,16 @@ pub(crate) const CONTROL_SOCKET_UNAVAILABLE_PREFIX: &str = "control-socket-unava
 /// file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockFileContents {
+    /// The holder's pid, when the first line is one.
     pub pid: Option<u32>,
     pub(crate) handles_reload_signal: bool,
+    /// Where the holder's control socket is bound, when it wrote one.
     pub control_socket: Option<PathBuf>,
     pub(crate) control_socket_unavailable: Option<String>,
 }
 
 impl LockFileContents {
+    /// Reads a lock file's text; anything it does not recognize is left out.
     pub fn parse(text: &str) -> Self {
         let mut lines = text.lines();
         let pid = lines
@@ -414,11 +430,11 @@ mod tests {
             std::io::Error::last_os_error()
         );
         if child == 0 {
-            // SAFETY: see above.
-            unsafe {
-                let code = i32::from(libc::listen(fd, 128) != 0);
-                libc::_exit(code);
-            }
+            // SAFETY: see above; `fd` is the bound socket this test opened.
+            let code = i32::from(unsafe { libc::listen(fd, 128) } != 0);
+            // SAFETY: see above; the child leaves without running any Rust
+            // teardown in a process that may hold another thread's locks.
+            unsafe { libc::_exit(code) };
         }
         let mut status = 0;
         // SAFETY: `child` is this process's own child and `status` is writable.

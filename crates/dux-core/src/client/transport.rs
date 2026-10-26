@@ -7,6 +7,7 @@
 //! chunks, or up to the close. ureq reaches a Unix socket only through its
 //! semver-exempt transport API.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::ops::ControlFlow;
 use std::os::unix::net::UnixStream;
@@ -37,15 +38,21 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// command-line client.
 pub const USER_AGENT: &str = "dux CLI";
 
+/// An HTTP method the API is called with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
+    /// `GET`.
     Get,
+    /// `POST`.
     Post,
+    /// `PUT`.
     Put,
+    /// `DELETE`.
     Delete,
 }
 
 impl Method {
+    /// The method's name as HTTP spells it.
     pub fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
@@ -60,15 +67,20 @@ impl Method {
 /// the CLI sign-in token for a remote that asks for one.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// The HTTP method.
     pub method: Method,
+    /// The API path, with its query.
     pub path: String,
+    /// The JSON body, when there is one.
     pub body: Option<Vec<u8>>,
+    /// The CLI sign-in token, for a remote that asks for one.
     pub bearer: Option<String>,
     /// The longest the whole exchange may take; at most [`REPLY_TIMEOUT`].
     pub timeout: Option<Duration>,
 }
 
 impl Request {
+    /// A `GET` of `path` with no body, token or timeout of its own.
     pub fn get(path: impl Into<String>) -> Self {
         Self {
             method: Method::Get,
@@ -83,7 +95,9 @@ impl Request {
 /// A reply: its status and its whole body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
+    /// The HTTP status code.
     pub status: u16,
+    /// The whole body.
     pub body: Vec<u8>,
 }
 
@@ -113,6 +127,13 @@ impl std::fmt::Display for TransportError {
 
 /// The one interface the client reaches a dux through.
 pub trait Transport {
+    /// Sends `request` and waits for the whole reply.
+    ///
+    /// # Errors
+    ///
+    /// Fails when nothing can be reached at the address, the connection ends
+    /// before a whole reply arrives, the request is refused before it is sent,
+    /// or the control socket's other end belongs to another user.
     fn send(&self, request: &Request) -> Result<Response, TransportError>;
 
     /// Send `request` and hand its reply's body to `on_body` as it arrives, with
@@ -179,7 +200,8 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
         uid: 0,
         gid: 0,
     };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
+        .expect("ucred's size fits in a socklen_t");
     // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
     // the descriptor is open for as long as `stream` is borrowed.
     let read = unsafe {
@@ -345,7 +367,8 @@ impl Transport for UnixTransport {
                 let mut left = length;
                 let mut buffer = [0u8; STREAM_PIECE];
                 while left > 0 {
-                    let want = left.min(STREAM_PIECE as u64) as usize;
+                    let want =
+                        usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
                     let read = reader
                         .read(&mut buffer[..want])
                         .map_err(|e| TransportError::Dropped(e.to_string()))?;
@@ -354,7 +377,7 @@ impl Transport for UnixTransport {
                             "the connection closed inside the reply's body".to_string(),
                         ));
                     }
-                    left -= read as u64;
+                    left -= crate::numeric::usize_to_u64(read);
                     if piece(&buffer[..read]).is_break() {
                         return Ok(());
                     }
@@ -390,13 +413,13 @@ fn request_bytes(request: &Request) -> Vec<u8> {
         request.path
     );
     if let Some(token) = &request.bearer {
-        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        let _ = write!(head, "Authorization: Bearer {token}\r\n");
     }
     let body = request.body.as_deref().unwrap_or_default();
     if request.body.is_some() {
         head.push_str("Content-Type: application/json\r\n");
     }
-    head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+    let _ = write!(head, "Content-Length: {}\r\n\r\n", body.len());
     let mut bytes = head.into_bytes();
     bytes.extend_from_slice(body);
     bytes
@@ -458,12 +481,12 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
             if length > BODY_LIMIT {
                 return Err(dropped("the reply was larger than the client reads"));
             }
-            let mut body = Vec::with_capacity(length as usize);
+            let mut body = Vec::with_capacity(crate::numeric::u64_to_usize(length));
             (&mut reader)
                 .take(length)
                 .read_to_end(&mut body)
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
-            if body.len() as u64 != length {
+            if crate::numeric::usize_to_u64(body.len()) != length {
                 return Err(dropped("the connection closed inside the reply's body"));
             }
             body
@@ -475,7 +498,7 @@ fn read_response(mut reader: impl BufRead) -> Result<Response, TransportError> {
                 .take(BODY_LIMIT + 1)
                 .read_to_end(&mut body)
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
-            if body.len() as u64 > BODY_LIMIT {
+            if crate::numeric::usize_to_u64(body.len()) > BODY_LIMIT {
                 return Err(dropped("the reply was larger than the client reads"));
             }
             body
@@ -508,7 +531,10 @@ fn read_chunks(reader: &mut impl BufRead) -> Result<Vec<u8>, TransportError> {
     let mut body = Vec::new();
     let mut too_large = false;
     each_chunk_piece(reader, &mut |piece| {
-        if (body.len() as u64).saturating_add(piece.len() as u64) > BODY_LIMIT {
+        if crate::numeric::usize_to_u64(body.len())
+            .saturating_add(crate::numeric::usize_to_u64(piece.len()))
+            > BODY_LIMIT
+        {
             too_large = true;
             return ControlFlow::Break(());
         }
@@ -550,14 +576,14 @@ fn each_chunk_piece(
         let mut left = size;
         let mut buffer = [0u8; STREAM_PIECE];
         while left > 0 {
-            let want = left.min(STREAM_PIECE as u64) as usize;
+            let want = usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
             let read = reader
                 .read(&mut buffer[..want])
                 .map_err(|e| TransportError::Dropped(e.to_string()))?;
             if read == 0 {
                 return Err(dropped("the connection closed inside a chunk"));
             }
-            left -= read as u64;
+            left -= crate::numeric::usize_to_u64(read);
             if on_piece(&buffer[..read]).is_break() {
                 return Ok(());
             }
@@ -815,7 +841,7 @@ impl Transport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::test_server::{FakeDux, Reply, private_dir};
+    use crate::client::test_server::{FakeDux, Reply, Seen, private_dir};
 
     #[test]
     fn a_request_reaches_the_socket_with_its_body_and_token() {
@@ -842,12 +868,11 @@ mod tests {
         assert_eq!(seen[0].header("user-agent"), Some("dux CLI"));
     }
 
-    #[test]
-    fn a_reply_is_read_whole_and_only_within_the_client_limits() {
-        let dir = private_dir();
-        let socket = dir.path().join("dux.sock");
-        let _fake = FakeDux::unix(&socket, |seen| {
-            match seen.path.as_str() {
+    /// The replies [`a_reply_is_read_whole_and_only_within_the_client_limits`]
+    /// reads, by path: framings to read whole, and ones past the client's
+    /// limits.
+    fn reply_at_the_limits(seen: &Seen) -> Reply {
+        match seen.path.as_str() {
             "/chunked" => Reply::Raw(
                 "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n7;x=1\r\n, world\r\n0\r\n\r\n"
                     .to_string(),
@@ -883,7 +908,13 @@ mod tests {
             ),
             _ => Reply::Raw("HTTP/1.1 404 Not Found\r\n\r\nunknown session".to_string()),
         }
-        });
+    }
+
+    #[test]
+    fn a_reply_is_read_whole_and_only_within_the_client_limits() {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, reply_at_the_limits);
         let transport = UnixTransport::new(&socket);
         let chunked = transport.send(&Request::get("/chunked")).unwrap();
         assert_eq!(

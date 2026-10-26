@@ -266,7 +266,7 @@ fn project(id: &str, path: &str, name: &str) -> crate::config::ProjectConfig {
         leading_branch: None,
         auto_reopen_agents: None,
         startup_command: None,
-        env: Default::default(),
+        env: std::collections::BTreeMap::default(),
     }
 }
 
@@ -799,7 +799,7 @@ fn hand_edits_and_dux_project_changes_mixed_over_several_saves() {
         leading_branch: None,
         auto_reopen_agents: None,
         startup_command: None,
-        env: Default::default(),
+        env: std::collections::BTreeMap::default(),
     });
     q.save_eager(m.clone()).unwrap();
     let t = read(&path);
@@ -1144,7 +1144,10 @@ fn an_inline_server_auth_keeps_its_password_and_bans() {
 
 /// The full patch (no base) keeps a file of inline sections readable.
 #[test]
-#[allow(deprecated)] // the full patch, the path a sync-direct writer takes
+#[expect(
+    deprecated,
+    reason = "the full patch is the path a sync-direct writer takes"
+)]
 fn the_full_patch_handles_inline_sections() {
     let text = "ui = { left_width_pct = 25 } # trailing\nproviders = { claude = { command = \"claude\" } }\nkeys = { quit = [\"q\"] }\nmacros = { hi = { text = \"hello\", surface = \"both\" } }\n";
     let dir = tempfile::TempDir::new().unwrap();
@@ -2296,9 +2299,9 @@ mod randomized_model {
     }
     fn mem_set(c: &mut Config, i: usize, rng: &mut Rng) {
         match i {
-            0 => c.ui.left_width_pct = 15 + rng.below(20) as u16,
-            1 => c.ui.right_width_pct = 15 + rng.below(20) as u16,
-            2 => c.server.port = 3000 + rng.below(900) as u16,
+            0 => c.ui.left_width_pct = 15 + u16::try_from(rng.below(20)).expect("below 20"),
+            1 => c.ui.right_width_pct = 15 + u16::try_from(rng.below(20)).expect("below 20"),
+            2 => c.server.port = 3000 + u16::try_from(rng.below(900)).expect("below 900"),
             _ => c.ui.copy_on_select = !c.ui.copy_on_select,
         }
     }
@@ -2344,11 +2347,34 @@ mod randomized_model {
         std::fs::write(path, doc.to_string()).unwrap();
     }
 
+    /// What a save of `memory` over `base` leaves on disk: every tracked key
+    /// and environment variable memory changed takes memory's value in
+    /// `expect` and `expect_env`.
+    fn expect_saved_changes(
+        memory: &Config,
+        base: &Config,
+        expect: &mut [Option<String>],
+        expect_env: &mut [Option<String>],
+    ) {
+        for (i, slot) in expect.iter_mut().enumerate() {
+            if mem_get(memory, i) != mem_get(base, i) {
+                *slot = Some(mem_get(memory, i));
+            }
+        }
+        for (i, k) in ENV.iter().enumerate() {
+            let m = memory.env.get(*k).cloned();
+            let b = base.env.get(*k).cloned();
+            if m != b {
+                expect_env[i] = m;
+            }
+        }
+    }
+
     #[test]
     fn random_hand_edits_saves_and_reloads_follow_the_three_way_rules() {
         let mut failures = Vec::new();
         for seed in 1..=SEEDS {
-            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let (_dir, path) = file(
                 "[ui]\nleft_width_pct = 20\nright_width_pct = 25\ncopy_on_select = true\n\n[server]\nport = 3890\n\n[env]\nAA = \"a\"\nBB = \"b\"\n",
             );
@@ -2367,7 +2393,7 @@ mod randomized_model {
             for step in 0..25 {
                 match rng.below(6) {
                     0 => {
-                        let i = rng.below(4) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(4));
                         let (s, k) = KEYS[i];
                         if rng.below(3) == 0 {
                             hand_set(&path, s, k, None);
@@ -2381,7 +2407,7 @@ mod randomized_model {
                         }
                     }
                     1 => {
-                        let i = rng.below(3) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(3));
                         if rng.below(3) == 0 {
                             hand_set(&path, "env", ENV[i], None);
                             expect_env[i] = None;
@@ -2394,12 +2420,12 @@ mod randomized_model {
                         }
                     }
                     2 => {
-                        let i = rng.below(4) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(4));
                         mem_set(&mut memory, i, &mut rng);
                         log.push(format!("mem set {}={}", KEYS[i].1, mem_get(&memory, i)));
                     }
                     3 => {
-                        let i = rng.below(3) as usize;
+                        let i = crate::numeric::u64_to_usize(rng.below(3));
                         if rng.below(3) == 0 {
                             memory.env.remove(ENV[i]);
                             log.push(format!("mem remove env.{}", ENV[i]));
@@ -2411,18 +2437,7 @@ mod randomized_model {
                     }
                     4 => {
                         q.save_eager(memory.clone()).unwrap();
-                        for (i, slot) in expect.iter_mut().enumerate() {
-                            if mem_get(&memory, i) != mem_get(&base, i) {
-                                *slot = Some(mem_get(&memory, i));
-                            }
-                        }
-                        for (i, k) in ENV.iter().enumerate() {
-                            let m = memory.env.get(*k).cloned();
-                            let b = base.env.get(*k).cloned();
-                            if m != b {
-                                expect_env[i] = m;
-                            }
-                        }
+                        expect_saved_changes(&memory, &base, &mut expect, &mut expect_env);
                         base = memory.clone();
                         log.push("save".into());
                     }
@@ -2514,7 +2529,7 @@ mod randomized_model {
         std::fs::create_dir_all(&r2).unwrap();
         let mut failures = Vec::new();
         for seed in 1..=SEEDS {
-            let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let initial = format!(
                 "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"one\"\nstartup_command = \"make\"\n\n[[projects]]\nid = \"p2\"\npath = \"{}\"\nname = \"two\"\ndefault_provider = \"codex\"\n",
                 r1.display(),
@@ -2531,8 +2546,8 @@ mod randomized_model {
                 .collect();
             let mut log = Vec::new();
             for step in 0..25 {
-                let p = rng.below(2) as usize;
-                let f = rng.below(3) as usize;
+                let p = crate::numeric::u64_to_usize(rng.below(2));
+                let f = crate::numeric::u64_to_usize(rng.below(3));
                 match rng.below(4) {
                     0 => {
                         let v = if rng.below(3) == 0 {

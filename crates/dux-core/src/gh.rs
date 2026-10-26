@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
@@ -448,7 +449,7 @@ fn run_entries(
     // cares about what is left, not what was spent), so the total is
     // accumulated here instead.
     let mut points = 0i64;
-    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = BTreeMap::default();
     for (i, p) in planned.iter().enumerate() {
         by_host.entry(p.host.clone()).or_default().push(i);
     }
@@ -472,9 +473,9 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
-            let cost = (planned[i].emit_ref() as usize)
-                + (planned[i].emit_num() as usize)
-                + (planned[i].emit_head() as usize);
+            let cost = usize::from(planned[i].emit_ref())
+                + usize::from(planned[i].emit_num())
+                + usize::from(planned[i].emit_head());
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
                 let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
@@ -762,8 +763,10 @@ impl GithubHostPolicy {
 /// unrecognised value is https, which is also what `gh repo clone` falls back to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GitProtocol {
+    /// Clone over HTTPS.
     #[default]
     Https,
+    /// Clone over SSH.
     Ssh,
 }
 
@@ -788,7 +791,9 @@ pub enum GhProbe {
     Transient(String),
     /// `gh` answered. `available` is whether any GitHub feature can work at all.
     Decided {
+        /// Whether any GitHub feature can work at all.
         available: bool,
+        /// Which hosts dux may ask about.
         policy: GithubHostPolicy,
         /// Each qualifying host's git protocol (lowercased host keys). Empty
         /// under the legacy policy, which reports none: https for every host.
@@ -1431,7 +1436,7 @@ fn looks_rate_limited(text: &str) -> bool {
 fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize>) {
     // Group the chunk's sessions by repo → one aliased `repository(...)` block
     // each. `pos` is the session's index within the chunk (its `s{pos}` alias).
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = Default::default();
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = BTreeMap::default();
     for (pos, &i) in chunk.iter().enumerate() {
         groups
             .entry((planned[i].owner.clone(), planned[i].repo.clone()))
@@ -1447,12 +1452,13 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
 
     let mut q = String::from("{\n  rateLimit { cost remaining resetAt }\n");
     for (k, ((owner, repo), positions)) in groups.iter().enumerate() {
-        q.push_str(&format!(
-            "  {}: repository(owner: {}, name: {}) {{\n",
+        let _ = writeln!(
+            q,
+            "  {}: repository(owner: {}, name: {}) {{",
             repo_alias(k),
             graphql_string(owner),
             graphql_string(repo),
-        ));
+        );
         for &pos in positions {
             let p = &planned[chunk[pos]];
             if p.emit_ref() {
@@ -1474,10 +1480,11 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                 // (measured on golang/go). Those are somebody else's pull
                 // requests and `parse_chunk_response` drops them.
                 let qname = graphql_string(&format!("refs/heads/{}", p.branch));
-                q.push_str(&format!(
-                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url repository {{ nameWithOwner }} }} }} }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url repository {{ nameWithOwner }} }} }} }}",
                     ref_alias(pos),
-                ));
+                );
             }
             if p.emit_head() {
                 // The same question asked by head NAME, which still answers
@@ -1485,20 +1492,22 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
                 // came back null. A name is not an identity, so each node
                 // carries what `select_head_name_match` needs to refuse an
                 // older pull request that merely used the same name.
-                q.push_str(&format!(
-                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}",
                     head_alias(pos),
                     graphql_string(&p.branch),
-                ));
+                );
             }
             if p.emit_num()
                 && let Some(known) = &p.known
             {
-                q.push_str(&format!(
-                    "    {}: pullRequest(number: {}) {{ number state title url }}\n",
+                let _ = writeln!(
+                    q,
+                    "    {}: pullRequest(number: {}) {{ number state title url }}",
                     num_alias(pos),
                     known.pr_number,
-                ));
+                );
             }
         }
         q.push_str("  }\n");
@@ -2061,7 +2070,10 @@ pub(crate) fn parse_pull_request_lookup(
 /// `custom_name` carries a caller-supplied display name through to the resolved
 /// PR (`None` for the TUI, which prompts for a name after resolution; `Some` for
 /// the web, which sends the name upfront).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the lookup job, handed over once by the surface that starts it"
+)]
 pub fn run_pull_request_lookup_job(
     project: Project,
     raw_input: &str,
@@ -2224,7 +2236,14 @@ pub(crate) fn run_attach_pull_request_lookup_job(
         };
 
     let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, None, Default::default(), None)
+        resolved_pull_request(
+            metadata,
+            project,
+            &lookup,
+            None,
+            crate::worker::ReviewCopyConsent::default(),
+            None,
+        )
     });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
@@ -2396,6 +2415,10 @@ pub mod probe_test_support {
     /// real, observed flake, not a theoretical one. The warmup swallows the
     /// window, and it answers [`WARMUP_ARG`] by exiting before the body so a
     /// stand-in that records its calls does not record this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stand-in cannot be written or made executable, or stays busy for a second.
     pub fn stand_in_gh(dir: &Path, body: &str) -> PathBuf {
         let script = dir.join("fake-gh");
         std::fs::write(
@@ -2656,7 +2679,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                    protocols: Default::default(),
+                    protocols: BTreeMap::default(),
                 },
                 "{decisive}",
             );
@@ -2759,7 +2782,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
 
@@ -3030,7 +3053,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3053,7 +3076,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
         let calls: Vec<String> = std::fs::read_to_string(&log)
@@ -3208,7 +3231,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3257,7 +3280,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3300,7 +3323,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3339,7 +3362,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                    protocols: Default::default(),
+                    protocols: BTreeMap::default(),
                 },
                 "a rejected credential decides",
             );
@@ -3372,7 +3395,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3831,6 +3854,39 @@ mod tests {
         })
     }
 
+    /// What the pull request lookup finds for the agent on `feat/x` whose
+    /// worktree is `worktree`, knowing `known`, when the branch's ref answers
+    /// `ref_value` and the search by head name answers `nodes`, for a branch dux
+    /// minted at `minted`.
+    fn deleted_branch_lookup(
+        worktree: &str,
+        known: Option<StoredPr>,
+        ref_value: &serde_json::Value,
+        nodes: &[serde_json::Value],
+        minted: Option<&str>,
+    ) -> Option<(u64, PrState)> {
+        let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
+        p.worktree_path = worktree.to_string();
+        p.branch_minted_at = minted.map(|t| t.parse().unwrap());
+        let ps = vec![p];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let data = serde_json::json!({
+            "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
+        });
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&data),
+            &head_commit_in_local_history,
+        );
+        results[0]
+            .1
+            .as_ref()
+            .map(|pr| (pr.number, pr.state.clone()))
+    }
+
     /// A merge that deletes the head branch leaves the ref lookup with nothing
     /// to answer, so a pull request dux never saw while the branch existed is
     /// found by its head name instead. Branch names get reused, so a match is
@@ -3841,33 +3897,9 @@ mod tests {
     fn a_pull_request_whose_branch_was_deleted_is_found_by_head_name_only_when_it_is_ours() {
         let (dir, tip, stray) = repo_with_feature_branch();
         let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup_with = |known: Option<StoredPr>,
-                           ref_value: serde_json::Value,
-                           nodes: Vec<serde_json::Value>,
-                           minted: Option<&str>|
-         -> Option<(u64, PrState)> {
-            let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
-            p.worktree_path = worktree.clone();
-            p.branch_minted_at = minted.map(|t| t.parse().unwrap());
-            let ps = vec![p];
-            let chunk = [0usize];
-            let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-            let data = serde_json::json!({
-                "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
-            });
-            let (results, _) = parse_chunk_response(
-                &ps,
-                &chunk,
-                &pos_repo,
-                Some(&data),
-                &head_commit_in_local_history,
-            );
-            results[0]
-                .1
-                .as_ref()
-                .map(|pr| (pr.number, pr.state.clone()))
+        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
         };
-        let lookup = |ref_value, nodes, minted| lookup_with(None, ref_value, nodes, minted);
         let ours = Some("octocat/Hello-World");
         let null = serde_json::Value::Null;
 
@@ -3950,6 +3982,20 @@ mod tests {
             newest.0, 72,
             "the most recently created pull request that passes wins"
         );
+    }
+
+    /// A pull request found by head name for a branch dux minted must have been
+    /// opened after the branch was born, and while the branch exists the ref
+    /// lookup is the answer.
+    #[test]
+    fn a_deleted_branchs_pull_request_is_dated_against_the_branch_and_the_ref_still_wins() {
+        let (dir, tip, _) = repo_with_feature_branch();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
+        };
+        let ours = Some("octocat/Hello-World");
+        let null = serde_json::Value::Null;
 
         assert_eq!(
             lookup(
@@ -3979,6 +4025,17 @@ mod tests {
             None,
             "while the branch exists the ref lookup is the answer"
         );
+    }
+
+    #[test]
+    fn a_known_merged_pull_request_gives_way_only_to_a_newer_one_that_is_ours() {
+        let (dir, tip, stray) = repo_with_feature_branch();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let lookup_with = |known, ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, known, &ref_value, &nodes, minted)
+        };
+        let ours = Some("octocat/Hello-World");
+        let null = serde_json::Value::Null;
 
         // A merged pull request dux already knows does not hide a follow-up on
         // the same branch that was merged and deleted between two checks: a
@@ -4686,15 +4743,15 @@ mod tests {
             "stand-in gh should have run, got {outcome:?}",
         );
 
-        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+        let recorded_args: Vec<String> = std::fs::read_to_string(&recorded)
             .expect("stand-in recorded its argv")
             .lines()
             .map(str::to_string)
             .collect();
-        let repo = argv
+        let repo = recorded_args
             .iter()
             .position(|a| a == "--repo")
-            .and_then(|i| argv.get(i + 1))
+            .and_then(|i| recorded_args.get(i + 1))
             .expect("--repo argument");
         assert_eq!(
             repo, "github.com/owner/repo",

@@ -339,23 +339,28 @@ async fn smoke_caddy_is_ready_only_once_its_sites_handshake() {
 /// Result: both pages load dux's single-page app (its root element renders).
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_a_browser_loads_the_web_ui_from_the_network_and_this_machine() {
-    journey("smoke-browser", Duration::from_secs(300), async {
-        let network = JourneyNetwork::create();
-        let dux = Dux::start(DuxOptions::exposed().with_network(&network)).await;
-        let browser = Browser::on_network(&network).await;
-        let address = dux.address().await;
-        browser.goto(&format!("http://{address}:{DUX_PORT}/")).await;
-        browser.wait_for("#root > *", "the web UI's root").await;
-        browser.quit().await;
+    // Boxed: the duxes and browsers it holds across awaits make a large future.
+    journey(
+        "smoke-browser",
+        Duration::from_secs(300),
+        Box::pin(async {
+            let network = JourneyNetwork::create();
+            let dux = Dux::start(DuxOptions::exposed().with_network(&network)).await;
+            let browser = Browser::on_network(&network).await;
+            let address = dux.address().await;
+            browser.goto(&format!("http://{address}:{DUX_PORT}/")).await;
+            browser.wait_for("#root > *", "the web UI's root").await;
+            browser.quit().await;
 
-        let local = Dux::start(DuxOptions::local().with_published(WEBDRIVER_PORT)).await;
-        let browser = Browser::beside(&local).await;
-        browser.goto(&format!("http://127.0.0.1:{DUX_PORT}/")).await;
-        browser
-            .wait_for("#root > *", "the web UI's root on loopback")
-            .await;
-        browser.quit().await;
-    })
+            let local = Dux::start(DuxOptions::local().with_published(WEBDRIVER_PORT)).await;
+            let browser = Browser::beside(&local).await;
+            browser.goto(&format!("http://127.0.0.1:{DUX_PORT}/")).await;
+            browser
+                .wait_for("#root > *", "the web UI's root on loopback")
+                .await;
+            browser.quit().await;
+        }),
+    )
     .await;
 }
 

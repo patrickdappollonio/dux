@@ -17,10 +17,10 @@ use crate::image::{Reaper, pinned_parts};
 use crate::util::eventually;
 
 /// One proxy container. Removed when dropped.
+#[derive(Debug)]
 pub struct Sidecar {
     container: ContainerAsync<GenericImage>,
     _reaper: Reaper,
-    name: String,
 }
 
 /// Start `image_key` (a pinned image from journey-images.env) with `config`
@@ -41,7 +41,6 @@ async fn start_in(dux: &Dux, image_key: &str, kind: &str, files: &[(String, Vec<
     Sidecar {
         container,
         _reaper: reaper,
-        name,
     }
 }
 
@@ -124,10 +123,6 @@ impl Sidecar {
         )
         .await
     }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
 }
 
 /// Wait until `host` on `port` completes a TLS handshake that verifies against
@@ -176,7 +171,7 @@ fn rfc3339_now() -> String {
     let secs = since.as_secs();
     let (days, rem) = (secs / 86_400, secs % 86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
+    let z = i64::try_from(days).expect("the days since 1970 fit in an i64") + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;

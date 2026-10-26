@@ -102,8 +102,11 @@ impl TypedReference {
 /// A pull request in a repository dux may clone, as requests carry it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullRequestCloneTarget {
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
 }
 
@@ -111,13 +114,18 @@ pub struct PullRequestCloneTarget {
 /// clone from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequestCloneOffer {
+    /// The address dux would clone from.
     pub address: String,
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
 }
 
 impl PullRequestCloneOffer {
+    /// The pull request this offer is for.
     pub fn target(&self) -> PullRequestCloneTarget {
         PullRequestCloneTarget {
             host: self.host.clone(),
@@ -176,12 +184,19 @@ pub fn pull_request_clone_offer(
 /// and the submit are built from. Serializes as the resolve answer's `clone`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PullRequestCloneFacts {
+    /// The address dux would clone from.
     pub address: String,
+    /// The GitHub host the repository lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's number.
     pub number: u64,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's state as `gh` reported it.
     pub state: String,
+    /// The pull request's head branch.
     pub head_branch: String,
     /// The pull request's head commit, when `gh` reported it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -192,6 +207,7 @@ pub struct PullRequestCloneFacts {
 }
 
 impl PullRequestCloneFacts {
+    /// The pull request these facts are about.
     pub fn target(&self) -> PullRequestCloneTarget {
         PullRequestCloneTarget {
             host: self.host.clone(),
@@ -203,6 +219,10 @@ impl PullRequestCloneFacts {
 
 /// Look the pull request up through `gh_program` and pair it with the offer.
 /// The error is the lookup's own sentence, unchanged. Blocking: it runs `gh`.
+///
+/// # Errors
+///
+/// Fails with the lookup's own sentence when `gh` cannot be run or cannot find the pull request.
 pub fn look_up_clone_offer(
     gh_program: &std::ffi::OsStr,
     offer: PullRequestCloneOffer,
@@ -322,6 +342,11 @@ fn ambiguous_scheme_separator(scheme: &str) -> String {
 }
 
 /// Parse typed text into the repository and/or pull request it names.
+///
+/// # Errors
+///
+/// Fails with the sentence to show when `raw` is empty or names no repository or pull request dux
+/// can read.
 pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
     let input = raw.trim();
     if input.is_empty() {
@@ -894,7 +919,9 @@ impl Uninspectable {
 /// One project dux could not inspect, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UninspectedProject {
+    /// The project's display name.
     pub name: String,
+    /// Why it could not be inspected.
     pub reason: Uninspectable,
 }
 
@@ -905,7 +932,9 @@ pub struct UninspectedProject {
 /// inspected licenses a surface to say there is no checkout.
 #[derive(Clone, Debug, Default)]
 pub struct ReferenceResolution {
+    /// The projects that are checkouts of the repository.
     pub matches: Vec<crate::model::Project>,
+    /// The projects dux could not ask about.
     pub uninspected: Vec<UninspectedProject>,
 }
 
@@ -1027,7 +1056,10 @@ pub fn resolve_reference_projects(
 /// pull request is looked up through `gh_program` in the same job, so the
 /// confirmation can show which pull request the user is agreeing to. A lookup
 /// that fails is carried as its own sentence beside the empty match list.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every input of the resolution job, handed over once by the surface that starts it"
+)]
 pub fn run_reference_resolution_job(
     reference: &TypedReference,
     raw_input: String,
@@ -1718,7 +1750,7 @@ mod resolution_tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

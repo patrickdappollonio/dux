@@ -99,6 +99,7 @@ pub struct ServerAuthConfig {
     /// Argon2id PHC string, or empty for no password. Validated by
     /// [`crate::auth::validate_password_hash`] when read.
     pub password_hash: String,
+    /// Where the password is asked for once one is set.
     pub require: AuthRequire,
     /// Characters a new password must have.
     pub minimum_password_length: u32,
@@ -121,7 +122,10 @@ pub struct ServerAuthConfig {
     pub session_idle_seconds: u32,
     /// Days a command-line sign-in survives without being used.
     pub cli_token_idle_days: u32,
+    /// Whether to hide the web warning shown when dux is reachable beyond this machine with no
+    /// password.
     pub disable_no_auth_warning: bool,
+    /// Whether the sign-in cookie is marked Secure.
     pub cookie_secure: CookieSecure,
     /// Password checks (Argon2id runs) at once, across every client.
     pub max_concurrent_password_checks: u32,
@@ -134,6 +138,7 @@ pub struct ServerAuthConfig {
     /// Wait imposed on an address after its first failure in the window,
     /// doubling with each further failure up to the next setting.
     pub failed_login_delay_seconds: u32,
+    /// The longest wait an address's failures can add up to.
     pub failed_login_max_delay_seconds: u32,
     /// Failed logins per minute across all addresses before every address
     /// but this machine gets "too many requests" until the minute passes.
@@ -208,6 +213,10 @@ impl ServerAuthConfig {
 
     /// Every rule the deserializer enforces beyond types. Public so a writer
     /// can check a candidate before it lands on disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first rule the settings break.
     pub fn validate(&self) -> Result<(), String> {
         match self.problems().into_iter().next() {
             Some(problem) => Err(problem),
@@ -624,6 +633,10 @@ impl AddressBlock {
     /// (`203.0.113.0/24`), so it reads and matches like the IPv4 form; with
     /// a shorter prefix it stays an IPv6 range. Its prefix is checked
     /// against 128, the length of what was written.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `entry` is not an IP address or CIDR range, or its prefix length is out of range.
     pub fn parse(entry: &str) -> Result<Self, String> {
         let (addr, prefix) = match entry.split_once('/') {
             Some((addr, prefix)) => (addr, Some(prefix)),
@@ -695,7 +708,7 @@ impl fmt::Display for AddressBlock {
 pub fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
-        v4 => v4,
+        v4 @ IpAddr::V4(_) => v4,
     }
 }
 

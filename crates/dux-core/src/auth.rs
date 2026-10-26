@@ -73,6 +73,10 @@ impl Password {
 
     /// Take ownership of raw bytes read from a request or a pipe. Bytes that
     /// are not UTF-8 are wiped before the error returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`AuthError::NotUtf8`] when the bytes are not UTF-8.
     pub fn from_utf8(bytes: Vec<u8>) -> Result<Self, AuthError> {
         match String::from_utf8(bytes) {
             Ok(text) => Ok(Self::new(text)),
@@ -132,6 +136,10 @@ impl std::error::Error for AuthError {}
 
 /// Hash `password` into a new Argon2id PHC string with a fresh random salt.
 /// Slow on purpose (tens of milliseconds); keep it off UI and async threads.
+///
+/// # Errors
+///
+/// Fails when the salt cannot be drawn or Argon2 cannot hash.
 pub fn hash_password(password: &Password) -> Result<String, AuthError> {
     let params = Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
         .map_err(|e| AuthError::Hashing(e.to_string()))?;
@@ -216,6 +224,10 @@ fn parse_checked(phc: &str) -> Result<PasswordHash, AuthError> {
 /// first ([`validate_password_hash`]), so an absurd one is refused before any
 /// memory is allocated for it. `Ok(false)` is a wrong password; `Err` is a
 /// hash dux will not use. Slow on purpose; keep it off UI and async threads.
+///
+/// # Errors
+///
+/// Fails when `phc` is not a hash dux will use, or Argon2 cannot verify against it.
 pub fn verify_password(password: &Password, phc: &str) -> Result<bool, AuthError> {
     let parsed = parse_checked(phc)?;
     match Argon2::default().verify_password(password.expose().as_bytes(), &parsed) {
@@ -346,11 +358,26 @@ pub struct PasswordPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MinimumFailure {
     /// Fewer characters than `minimum_password_length`.
-    TooShort { length: usize, minimum: u32 },
+    TooShort {
+        /// How many characters the password has.
+        length: usize,
+        /// The fewest it may have.
+        minimum: u32,
+    },
     /// A zxcvbn score below `minimum_password_score`.
-    TooWeak { score: u8, minimum: u8 },
+    TooWeak {
+        /// The password's zxcvbn score.
+        score: u8,
+        /// The lowest score allowed.
+        minimum: u8,
+    },
     /// More bytes than `max_password_bytes`.
-    TooLong { bytes: usize, maximum: u32 },
+    TooLong {
+        /// How many bytes the password has.
+        bytes: usize,
+        /// The most it may have.
+        maximum: u32,
+    },
     /// A control character (Unicode category Cc: a line break, a tab, NUL,
     /// DEL), which a browser's password field cannot type, so the web login
     /// could never match the password. Says nothing of where or which.
@@ -390,7 +417,9 @@ impl fmt::Display for MinimumFailure {
 /// meter can show it) and every minimum the password misses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MinimumCheck {
+    /// How strong the password is, for the meter.
     pub strength: Strength,
+    /// Every minimum the password misses.
     pub failures: Vec<MinimumFailure>,
 }
 
@@ -415,7 +444,7 @@ pub fn check_minimums(
     let strength = strength(password, user_inputs);
     let mut failures = Vec::new();
     let length = password.char_len();
-    if length < policy.minimum_length as usize {
+    if length < crate::numeric::u32_to_usize(policy.minimum_length) {
         failures.push(MinimumFailure::TooShort {
             length,
             minimum: policy.minimum_length,
@@ -428,7 +457,7 @@ pub fn check_minimums(
         });
     }
     let bytes = password.byte_len();
-    if bytes > policy.maximum_bytes as usize {
+    if bytes > crate::numeric::u32_to_usize(policy.maximum_bytes) {
         failures.push(MinimumFailure::TooLong {
             bytes,
             maximum: policy.maximum_bytes,

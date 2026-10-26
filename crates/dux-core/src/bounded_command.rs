@@ -146,7 +146,7 @@ pub(crate) fn run_command_with_timeout(
 /// started and left running does not outlive the cap holding the pipes. A child
 /// that shares dux's own group is never group-killed.
 fn kill_with_group(child: &mut std::process::Child) {
-    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32)
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id().cast_signed())
         && rustix::process::getpgid(Some(pid)).is_ok_and(|group| group == pid)
     {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);

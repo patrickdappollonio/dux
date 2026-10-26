@@ -1,16 +1,14 @@
+//! The domain records both surfaces share: projects, agent sessions and their
+//! tabs, providers, changed files and the runtime state around them.
+
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 
 use crate::ids::TabIdRef;
 use crate::pty::PtyClient;
 
-/// GitHub CLI availability status.
-///
-/// First probed at startup, and RE-probed whenever the GitHub integration is
-/// switched from off to on and on every config reload, on both surfaces. It is
-/// last-known-good rather than a once-per-process value: a decisive probe
-/// replaces it, and a transient failure leaves the previous value standing.
 /// Whether an agent should be running: what auto-reopen brings back on the
 /// next start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +51,12 @@ impl ConversationStart {
     }
 }
 
+/// GitHub CLI availability status.
+///
+/// First probed at startup, and RE-probed whenever the GitHub integration is
+/// switched from off to on and on every config reload, on both surfaces. It is
+/// last-known-good rather than a once-per-process value: a decisive probe
+/// replaces it, and a transient failure leaves the previous value standing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GhStatus {
     /// Not yet checked.
@@ -81,53 +85,83 @@ pub enum GhStatus {
 /// State of a GitHub pull request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrState {
+    /// The pull request is open.
     Open,
+    /// The pull request was merged.
     Merged,
+    /// The pull request was closed without merging.
     Closed,
 }
 
 /// Cached information about a GitHub pull request associated with a session.
 #[derive(Clone, Debug)]
 pub struct PrInfo {
+    /// The pull request's number.
     pub number: u64,
+    /// Whether it is open, merged or closed.
     pub state: PrState,
+    /// The pull request's title.
     pub title: String,
+    /// The GitHub host it lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's web address.
     pub url: String,
 }
 
+/// A provider's name, as configured under `[providers]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderKind(String);
 
 impl ProviderKind {
+    /// A provider of that name.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
+    /// The provider's name.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    #[allow(clippy::should_implement_trait)]
+    /// A provider of that name; any text is accepted.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         Self(value.to_string())
     }
 }
 
+/// A project as the running dux holds it: its config, its derived git state and its row's
+/// timestamps.
 #[derive(Clone, Debug)]
 pub struct Project {
+    /// The project's unique id.
     pub id: String,
+    /// The display name.
     pub name: String,
+    /// The repository's path.
     pub path: String,
+    /// The provider the project's config names, or `None` when it follows the global default.
     pub explicit_default_provider: Option<ProviderKind>,
+    /// The provider new agents in this project use: the explicit one, else the global default.
     pub default_provider: ProviderKind,
+    /// The branch new worktrees start from, when known.
     pub leading_branch: Option<String>,
+    /// Whether the project's agents come back at startup, or `None` to follow the global setting.
     pub auto_reopen_agents: Option<bool>,
+    /// The command run in each new agent worktree before the provider launches.
     pub startup_command: Option<String>,
+    /// Variables passed to the project's agent and terminal PTYs, over the global ones.
     pub env: BTreeMap<String, String>,
+    /// The branch the project's source checkout is on.
     pub current_branch: String,
+    /// Whether the source checkout is on its default branch.
     pub branch_status: ProjectBranchStatus,
+    /// Whether the project's path is gone from disk.
     pub path_missing: bool,
     /// When this project was first added, as persisted in the SQLite `projects`
     /// table. This is derived/runtime state (not portable config), surfaced so
@@ -136,21 +170,30 @@ pub struct Project {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+/// Whether a project's source checkout is on its default branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectBranchStatus {
+    /// The checkout is on its default branch, or no other branch is known to be the default.
     Leading,
+    /// The checkout is on a branch other than its default.
     NotLeading,
+    /// Not yet checked.
     Unknown,
 }
 
+/// An agent session's lifecycle state, as stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
+    /// The agent's provider is running.
     Active,
+    /// The agent is stopped and can be reconnected.
     Detached,
+    /// The agent's provider exited on its own.
     Exited,
 }
 
 impl SessionStatus {
+    /// The stored spelling.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -159,7 +202,11 @@ impl SessionStatus {
         }
     }
 
-    #[allow(clippy::should_implement_trait)]
+    /// Parses the stored spelling; anything unrecognized reads as `Detached`.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "active" => Self::Active,
@@ -211,6 +258,7 @@ pub enum BranchProvenance {
 }
 
 impl BranchProvenance {
+    /// The stored spelling.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CreatedByDux => "created",
@@ -231,7 +279,10 @@ impl BranchProvenance {
     /// distinct from the MIGRATION default (`'created'`, which preserves
     /// today's behavior for rows written before the column existed and whose
     /// true provenance is unknowable).
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "created" => Self::CreatedByDux,
@@ -393,22 +444,30 @@ impl BranchKeptReason {
     }
 }
 
+/// The lifecycle of an agent's companion terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompanionTerminalStatus {
+    /// No terminal has been started.
     NotLaunched,
+    /// The terminal's shell is running.
     Running,
+    /// The terminal's shell has exited.
     Exited,
 }
 
 impl CompanionTerminalStatus {
+    /// Whether the shell is running.
     pub fn is_running(self) -> bool {
         matches!(self, Self::Running)
     }
 }
 
+/// Which of an agent's two panes something addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionSurface {
+    /// The provider's pane.
     Agent,
+    /// The companion terminal's pane.
     Terminal,
 }
 
@@ -424,6 +483,7 @@ pub enum AgentWorkspaceKind {
 }
 
 impl AgentWorkspaceKind {
+    /// The stored spelling.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Managed => "managed",
@@ -443,7 +503,10 @@ impl AgentWorkspaceKind {
     /// whatever is there rather than anything trustworthy; that is the accepted
     /// cost. The arm is reachable only from a row written by a newer dux, or one
     /// edited by hand.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+    )]
     pub fn from_str(value: &str) -> Self {
         match value {
             "folder" => Self::Folder,
@@ -456,9 +519,13 @@ impl AgentWorkspaceKind {
 /// full git identity of the branch dux minted or attached for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManagedWorkspace {
+    /// The project the working copy belongs to.
     pub project_id: String,
+    /// The project's source checkout path, when known.
     pub project_path: Option<String>,
+    /// The branch the agent's branch was created from.
     pub source_branch: String,
+    /// The branch the working copy is on now.
     pub branch_name: String,
     /// The branch this agent was created on. Immutable identity: unlike
     /// `branch_name` (which the branch-sync poller and intentional renames keep
@@ -470,6 +537,7 @@ pub struct ManagedWorkspace {
     /// agent may delete the branch. Set once at creation and never mutated (the
     /// storage layer writes it on INSERT only). See [`BranchProvenance`].
     pub branch_provenance: BranchProvenance,
+    /// The working copy's path.
     pub worktree_path: String,
 }
 
@@ -549,6 +617,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// The owning project's id, or `None` for a standalone folder.
     pub fn project_id(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => Some(managed.project_id.as_str()),
@@ -560,6 +629,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// The owning project's path, or `None` for a standalone folder or when unknown.
     pub fn project_path(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => managed.project_path.as_deref(),
@@ -567,6 +637,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// The branch the working copy is on, or `None` for a standalone folder.
     pub fn branch_name(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => Some(managed.branch_name.as_str()),
@@ -574,6 +645,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// The branch the agent's branch was created from, or `None` for a standalone folder.
     pub fn source_branch(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => Some(managed.source_branch.as_str()),
@@ -581,6 +653,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// The branch the agent was created on, or `None` for a standalone folder.
     pub fn initial_branch(&self) -> Option<&str> {
         match self {
             Self::Managed(managed) => Some(managed.initial_branch.as_str()),
@@ -588,6 +661,7 @@ impl AgentWorkspace {
         }
     }
 
+    /// Where the agent's branch came from, or `None` for a standalone folder, which has no branch.
     pub fn branch_provenance(&self) -> Option<BranchProvenance> {
         match self {
             Self::Managed(managed) => Some(managed.branch_provenance),
@@ -653,8 +727,10 @@ impl AgentWorkspace {
     }
 }
 
+/// An agent: its provider, its workspace, and the state dux keeps about it.
 #[derive(Clone, Debug)]
 pub struct AgentSession {
+    /// The session's unique id.
     pub id: String,
     /// The id of this agent's **session-slot tab**: a pointer into `agent_tabs`,
     /// stored in the session row. Read it through
@@ -663,15 +739,23 @@ pub struct AgentSession {
     /// `agent_tabs` row, and this names which of them currently occupies the
     /// slot. It is a generated id and is deliberately NOT the session id.
     pub slot_tab_id: String,
+    /// The provider the session-slot tab runs.
     pub provider: ProviderKind,
     /// Where this agent lives and what dux may do there. See [`AgentWorkspace`].
     pub workspace: AgentWorkspace,
+    /// The display name the user gave the agent, if any.
     pub title: Option<String>,
+    /// The providers that have run in this session, by name.
     pub started_providers: Vec<String>,
+    /// Whether the agent should be running, so startup auto-reopen brings it back.
     pub desired_running: bool,
+    /// Whether startup auto-reopen is allowed for this agent.
     pub auto_reopen_enabled: bool,
+    /// The session's lifecycle state.
     pub status: SessionStatus,
+    /// When the agent was created.
     pub created_at: DateTime<Utc>,
+    /// When the session row last changed.
     pub updated_at: DateTime<Utc>,
     /// The tab id the user last focused on this agent, remembered so switching
     /// away and back (either surface, and across restarts) restores it. `None`
@@ -699,30 +783,37 @@ impl AgentSession {
         self.workspace.managed_worktree()
     }
 
+    /// The standalone folder's path, or `None` for a managed working copy.
     pub fn folder_path(&self) -> Option<&str> {
         self.workspace.folder_path()
     }
 
+    /// The owning project's id, or `None` for a standalone agent.
     pub fn project_id(&self) -> Option<&str> {
         self.workspace.project_id()
     }
 
+    /// The owning project's path, or `None` for a standalone agent or when unknown.
     pub fn project_path(&self) -> Option<&str> {
         self.workspace.project_path()
     }
 
+    /// The branch the agent's working copy is on, or `None` for a standalone agent.
     pub fn branch_name(&self) -> Option<&str> {
         self.workspace.branch_name()
     }
 
+    /// The branch the agent's branch was created from, or `None` for a standalone agent.
     pub fn source_branch(&self) -> Option<&str> {
         self.workspace.source_branch()
     }
 
+    /// The branch the agent was created on, or `None` for a standalone agent.
     pub fn initial_branch(&self) -> Option<&str> {
         self.workspace.initial_branch()
     }
 
+    /// Where the agent's branch came from, or `None` for a standalone agent.
     pub fn branch_provenance(&self) -> Option<BranchProvenance> {
         self.workspace.branch_provenance()
     }
@@ -775,6 +866,7 @@ impl AgentSession {
         }
     }
 
+    /// Whether `provider` has run in this session.
     pub fn has_started_provider(&self, provider: &ProviderKind) -> bool {
         self.started_providers
             .iter()
@@ -846,10 +938,15 @@ impl AgentSession {
 /// bottom of the range is what makes that true.
 #[derive(Clone, Debug)]
 pub struct AgentTab {
+    /// The tab's unique id.
     pub id: String,
+    /// The agent session the tab belongs to.
     pub session_id: String,
+    /// The provider the tab runs.
     pub provider: ProviderKind,
+    /// The tab's position among the agent's tabs, ascending.
     pub sort_order: i64,
+    /// When the tab was created.
     pub created_at: DateTime<Utc>,
 }
 
@@ -869,11 +966,16 @@ pub(crate) fn tab_display_order(a: &AgentTab, b: &AgentTab) -> std::cmp::Orderin
         .then_with(|| a.id.cmp(&b.id))
 }
 
+/// One changed path in a working copy, as git status and numstat report it.
 #[derive(Clone, Debug)]
 pub struct ChangedFile {
+    /// The git status code.
     pub status: String,
+    /// The path, relative to the working copy.
     pub path: String,
+    /// Lines added.
     pub additions: usize,
+    /// Lines removed.
     pub deletions: usize,
     /// True for a file git itself calls binary, which therefore has no line
     /// counts. Deliberately NOT the same fact as `diff_excluded`: both rows
@@ -1151,7 +1253,7 @@ pub(crate) fn folder_contents_words(contents: &FolderContents) -> String {
         ));
     }
     if !not_staged.is_empty() {
-        words.push_str(&format!(" \u{b7} {} not staged", join_words(&not_staged)));
+        let _ = write!(words, " \u{b7} {} not staged", join_words(&not_staged));
     }
     words
 }
@@ -1245,8 +1347,11 @@ pub enum TerminalRoute<'a> {
 /// Produced by the exhaustive [`TerminalOwner::as_ref`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalOwnerRef<'a> {
+    /// A terminal owned by the agent session with this id.
     Session(&'a str),
+    /// A terminal owned by the project with this id.
     Project(&'a str),
+    /// A terminal that belongs to nothing.
     Standalone,
 }
 
@@ -1260,8 +1365,8 @@ impl TerminalOwner {
     /// forced through the answer rather than quietly rejecting the new kind.
     pub fn is_at_route(&self, route: TerminalRoute<'_>) -> bool {
         match (self, route) {
-            (Self::Session(owner), TerminalRoute::Session(id)) => owner == id,
-            (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
+            (Self::Session(owner), TerminalRoute::Session(id))
+            | (Self::Project(owner), TerminalRoute::Project(id)) => owner == id,
             // A standalone terminal lives at the un-nested address and nowhere
             // else, and no owned terminal is reachable there: the un-nested
             // address names no owner, so serving an owned terminal from it would
@@ -1310,7 +1415,6 @@ impl TerminalOwner {
 
     /// Presentation: borrow the owner for naming/projection. Exhaustive, so a
     /// new kind must decide how it is presented before this compiles.
-    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> TerminalOwnerRef<'_> {
         match self {
             Self::Session(id) => TerminalOwnerRef::Session(id),
@@ -1394,10 +1498,16 @@ mod terminal_owner_tests {
     }
 }
 
+/// A running terminal: its owner, its display label and its PTY.
+#[derive(Debug)]
 pub struct CompanionTerminal {
+    /// What the terminal belongs to; it never changes after spawn.
     pub owner: TerminalOwner,
+    /// The terminal's display label.
     pub label: String,
+    /// The program running in the foreground, when one is.
     pub foreground_cmd: Option<String>,
+    /// The terminal's PTY.
     pub client: PtyClient,
     /// The manual (drag) display position of this terminal within the flat
     /// Terminals section, ascending. Stamped at spawn from a monotonic engine

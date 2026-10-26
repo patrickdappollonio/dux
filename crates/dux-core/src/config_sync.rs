@@ -37,6 +37,11 @@ use crate::storage::SessionStore;
 /// was repaired from config-only projects, to keep the on-disk config
 /// normalized). Identity conflicts within either store, or across the two, abort
 /// with a descriptive error and no writes.
+///
+/// # Errors
+///
+/// Fails on an identity conflict within or across the two stores, or when the database or `persist`
+/// fails.
 pub fn reconcile_config_projects<P>(
     config: &mut Config,
     session_store: &SessionStore,
@@ -77,12 +82,16 @@ where
                 changed_config = true;
             }
             if &merged_stored_project != stored_project {
-                session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
+                session_store.upsert_project_at(
+                    &merged_stored_project,
+                    crate::numeric::usize_to_i64_wrapping(stored_index),
+                )?;
                 stored[stored_index] = merged_stored_project;
                 changed_store = true;
             }
         } else {
-            session_store.upsert_project_at(cfg_project, index as i64)?;
+            session_store
+                .upsert_project_at(cfg_project, crate::numeric::usize_to_i64_wrapping(index))?;
             changed_store = true;
             stored.push(cfg_project.clone());
         }
@@ -114,6 +123,10 @@ where
 /// reconciliation touches anything: two entries with the same id, or two entries
 /// whose expanded paths collide. `source` names the store ("config.toml" or
 /// "SQLite") for the error.
+///
+/// # Errors
+///
+/// Fails when two records share an id or a path.
 pub fn validate_project_records(source: &str, projects: &[ProjectConfig]) -> Result<()> {
     match duplicate_project(projects) {
         // Named by position, never by path, name or id: those are what a
@@ -187,6 +200,10 @@ pub(crate) fn duplicate_project(projects: &[ProjectConfig]) -> Option<DuplicateP
 /// back into portable config); `env` is config-authoritative wholesale. A
 /// same-id/different-path or same-path/different-id mismatch is an identity
 /// conflict and aborts.
+///
+/// # Errors
+///
+/// Fails when the two records share an id but not a path, or a path but not an id.
 pub fn merge_project_records(
     config_project: &ProjectConfig,
     stored_project: &ProjectConfig,
@@ -248,7 +265,7 @@ fn sync_config_authoritative_project_field<T>(
             *stored_value = Some(config.clone());
         }
         None => {
-            *config_value = stored_value.clone();
+            config_value.clone_from(stored_value);
         }
     }
 }
@@ -303,7 +320,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
         }
     }
 

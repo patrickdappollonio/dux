@@ -32,6 +32,7 @@
 //! `dux-tui` and `dux-web` enable as a dev-dependency, so none of it ships.
 
 use crate::config::{Config, ProviderCommandConfig, default_provider_commands};
+use std::io::Write as _;
 
 /// The file names of the only programs a test may spawn through a PTY. Matched
 /// exactly against the command's file name, so `/bin/sh` is allowed and `Claude`
@@ -99,7 +100,7 @@ pub(crate) fn refuse_unlisted_spawn(command: &str) -> anyhow::Result<()> {
              a harmless helper the test genuinely needs, add its file name to \
              dux_core::test_provider::ALLOWED_TEST_COMMANDS."
         );
-        eprintln!("{message}");
+        let _ = writeln!(std::io::stderr().lock(), "{message}");
         anyhow::bail!(message);
     }
     Ok(())
@@ -122,7 +123,7 @@ pub(crate) fn refuse_unlisted_launch(what: &str, command: &str) -> anyhow::Resul
              a harmless helper the test genuinely needs, add its file name to \
              dux_core::test_provider::ALLOWED_TEST_COMMANDS."
         );
-        eprintln!("{message}");
+        let _ = writeln!(std::io::stderr().lock(), "{message}");
         anyhow::bail!(message);
     }
     Ok(())
@@ -170,6 +171,10 @@ pub fn harmless_config() -> Config {
 
 /// Asserts a fixture's config can launch nothing but a stand-in: not for any
 /// stock provider, not for its default provider, and not for a terminal.
+///
+/// # Panics
+///
+/// Panics when the config could launch anything but a stand-in.
 pub fn assert_fixture_config_is_harmless(config: &Config) {
     let mut providers: Vec<crate::model::ProviderKind> = default_provider_commands()
         .iter()
@@ -325,12 +330,11 @@ mod tests {
     #[test]
     fn the_pty_spawn_path_refuses_a_real_agent_cli() {
         let tmp = tempfile::tempdir().unwrap();
-        let err =
-            match crate::pty::PtyClient::spawn_with_env("claude", &[], tmp.path(), 24, 80, 10, &[])
-            {
-                Ok(_) => panic!("the guard let a real agent CLI spawn"),
-                Err(err) => err,
-            };
+        let Err(err) =
+            crate::pty::PtyClient::spawn_with_env("claude", &[], tmp.path(), 24, 80, 10, &[])
+        else {
+            panic!("the guard let a real agent CLI spawn")
+        };
         assert!(err.to_string().contains("test guard"), "{err}");
     }
 

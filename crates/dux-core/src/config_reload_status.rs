@@ -47,7 +47,10 @@ pub fn adopted_but_apply_failed(error: &str) -> StatusUpdate {
 pub enum ConfigReloadOutcome {
     /// The new settings are in force. `notes` are what the owner says only a
     /// restart applies, each a sentence, in the owner's own words.
-    Applied { notes: Vec<String> },
+    Applied {
+        /// What only a restart applies, each a sentence.
+        notes: Vec<String>,
+    },
     /// The new config is in force, but a step of applying it failed.
     ApplyFailed(String),
     /// The file could not be taken on, so the running settings are unchanged.

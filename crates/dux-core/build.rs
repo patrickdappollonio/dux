@@ -1,3 +1,6 @@
+//! Build script: stamps the version string dux displays, `v<version>` for a
+//! release build and `development` otherwise.
+
 use std::env;
 fn main() {
     println!("cargo:rerun-if-env-changed=DUX_RELEASE_BUILD");

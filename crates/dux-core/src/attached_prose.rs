@@ -15,9 +15,13 @@ use crate::prose::Prose;
 pub struct AttachedEntry {
     /// The device's short label, or `None` when it could not be read.
     pub device: Option<String>,
+    /// Which kind of client it is.
     pub surface: Surface,
+    /// The address it connected from.
     pub address: Option<String>,
+    /// Whether `address` is one the auth layer verified.
     pub verified: bool,
+    /// Whether it is driving the tab or terminal rather than watching it.
     pub driving: bool,
     pub(crate) target_kind: TargetKind,
     pub(crate) target_label: String,

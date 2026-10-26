@@ -36,17 +36,29 @@ use crate::engine::{InFlightKey, RemovedBranches};
 /// removal shows, so the user is told what dux is waiting for.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub enum WorktreeOpKind {
+    /// A pull.
     Pull,
+    /// A commit.
     Commit,
+    /// A push.
     Push,
+    /// A branch rename.
     BranchRename,
+    /// The working copy being recreated.
     RecreateWorkingCopy,
+    /// An agent being created in it.
     CreateAgent,
+    /// Its startup command.
     StartupCommand,
+    /// A save from the editor.
     EditorWrite,
+    /// A file upload.
     Upload,
+    /// A change to its files from the changes pane.
     GitChange,
+    /// A project being added there.
     AddProject,
+    /// A repository being cloned there.
     CloneRepository,
 }
 
@@ -99,6 +111,7 @@ pub enum HoldOwner {
 /// delete or move of it is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HoldRefused {
+    /// The folder the refused operation wanted.
     pub path: PathBuf,
     /// `None` for a worktree removal; for a destructive file operation, what
     /// it is ("an editor delete or move").
@@ -515,6 +528,7 @@ fn under_with_case(inner: &Path, outer: &Path, case: CaseRule) -> bool {
 }
 
 impl WorktreeOps {
+    /// An empty registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -528,6 +542,10 @@ impl WorktreeOps {
 
     /// Register an operation on `path` for as long as the returned guard lives.
     /// Refused once a removal of the path has been announced.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the refusal once a removal or a destructive operation covers the path.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn hold(
         &self,
@@ -690,6 +708,11 @@ impl WorktreeOps {
     /// between the occupancy check and the operation. Refused, with the
     /// reason, when a removal already covers it or an operation is already
     /// running inside it. Dropping the lease lets the folder go.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason when a removal already covers the path or an operation is running
+    /// inside it.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive(
         &self,
@@ -701,6 +724,11 @@ impl WorktreeOps {
     /// [`Self::claim_for_destructive_within`], saying what the operation is
     /// ("an editor delete or move", "a changes-pane delete"), so anything it
     /// refuses meanwhile names it truthfully.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason when a removal still covers the path or an operation is still running
+    /// inside it after `wait`.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive_as(
         &self,
@@ -833,7 +861,7 @@ impl std::fmt::Debug for DestructiveClaim {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DestructiveClaim")
             .field("path", &self.key)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -866,7 +894,7 @@ impl std::fmt::Debug for WorktreeOpGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorktreeOpGuard")
             .field("path", &self.key)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -892,6 +920,7 @@ pub enum RemovalClaim {
 }
 
 impl RemovalClaim {
+    /// The path being removed.
     pub fn path(&self) -> &Path {
         match self {
             Self::Lead(lease) => &lease.key,
@@ -921,7 +950,18 @@ pub struct RemovalLease {
     finished: bool,
 }
 
+impl std::fmt::Debug for RemovalLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalLease")
+            .field("key", &self.key)
+            .field("id", &self.id)
+            .field("finished", &self.finished)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RemovalLease {
+    /// The path this lease may remove.
     pub fn path(&self) -> &Path {
         &self.key
     }
@@ -1036,7 +1076,16 @@ pub struct RemovalJoin {
     slot: Arc<OutcomeSlot>,
 }
 
+impl std::fmt::Debug for RemovalJoin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovalJoin")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RemovalJoin {
+    /// The path the joined removal is removing.
     pub fn path(&self) -> &Path {
         &self.key
     }

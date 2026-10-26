@@ -279,111 +279,128 @@ async fn journey_03_repeated_failures_block_the_address_until_the_owner_lifts_it
         )
         .await;
         let client = dux.client().await;
-        let address = dux.host_client_address().await;
-
-        for attempt in 1..=5 {
-            let response = wrong_password_until_counted(&client).await;
-            assert!(
-                matches!(response.status, 401 | 403),
-                "attempt {attempt} should be refused as a failure: {}",
-                response.describe()
-            );
-        }
-
-        let blocked_line = blocked_addresses(&dux.config_text().await);
-        assert!(
-            blocked_line.contains(&address),
-            "the guessing address {address} is appended to blocked_addresses:\n{blocked_line}"
-        );
-        assert!(
-            !blocked_line.contains("127.0.0.1"),
-            "loopback is never blocked:\n{blocked_line}"
-        );
-
-        let right = client.login(STRONG_PASSWORD).await;
-        assert_eq!(
-            (right.status, right.error_code().as_deref()),
-            (403, Some("blocked")),
-            "a blocked address is refused even with the right password: {}",
-            right.describe()
-        );
-        assert_eq!(
-            right.json(),
-            json!({ "error": "blocked" }),
-            "the refusal is the code alone, and no path reaches the blocked client: {}",
-            right.describe()
-        );
-        for path in ["/api/v1/projects", "/api/v1/auth/status"] {
-            let other = client.get(path).await;
-            assert_eq!(
-                (other.status, other.error_code().as_deref()),
-                (403, Some("blocked")),
-                "{path} from a blocked address: {}",
-                other.describe()
-            );
-        }
-        assert_accepted_then_closed(
-            &client,
-            "/ws/events",
-            CLOSE_BLOCKED,
-            "the events socket from a blocked address",
-        )
-        .await;
-
-        // The owner's hand edit: empty the list, whether dux wrote it on one
-        // line or across several, and leave everything else alone.
-        dux.exec_ok(
-            "sed -i \
-               -e '/^blocked_addresses = \\[.*\\]/c\\blocked_addresses = []' \
-               -e '/^blocked_addresses = \\[[^]]*$/,/\\]/c\\blocked_addresses = []' \
-               \"$DUX_HOME/config.toml\"",
-        )
-        .await;
-        assert!(
-            dux.config_text().await.contains("blocked_addresses = []"),
-            "the hand edit emptied the list"
-        );
-        dux.signal_reload().await;
-        dux_journeys::eventually(
-            "the lifted block to apply",
-            Duration::from_secs(20),
-            || async { (client.login(STRONG_PASSWORD).await.status == 204).then_some(()) },
-        )
-        .await;
-        assert!(projects(&client).await.is_empty());
-
-        let inside = dux.inside();
-        for _ in 0..7 {
-            let response = inside.login("not-the-password-at-all").await;
-            assert!(
-                matches!(response.status, 401 | 429),
-                "this machine is slowed, never blocked: {}",
-                response.describe()
-            );
-        }
-        let blocked = blocked_addresses(&dux.config_text().await);
-        assert!(
-            !blocked.contains("\"127.0.0.1\"") && !blocked.contains("\"::1\""),
-            "loopback never lands in blocked_addresses:\n{blocked}"
-        );
-        let signed_in = dux_journeys::eventually(
-            "this machine to sign in after the slow-down",
-            Duration::from_secs(60),
-            || async {
-                let response = inside.login(STRONG_PASSWORD).await;
-                assert_ne!(
-                    response.status,
-                    403,
-                    "loopback was blocked: {}",
-                    response.describe()
-                );
-                (response.status == 204).then_some(response)
-            },
-        )
-        .await;
-        assert_eq!(signed_in.status, 204);
+        the_guessing_address_is_blocked(&dux, &client).await;
+        the_owner_lifts_the_block(&dux, &client).await;
+        this_machine_is_slowed_never_blocked(&dux).await;
     })
     .await;
+}
+
+/// Five wrong passwords from the network put its address in `blocked_addresses`,
+/// never loopback, and from then on the right password, every request and the
+/// events socket are refused as blocked.
+async fn the_guessing_address_is_blocked(dux: &Dux, client: &Client) {
+    let address = dux.host_client_address().await;
+
+    for attempt in 1..=5 {
+        let response = wrong_password_until_counted(client).await;
+        assert!(
+            matches!(response.status, 401 | 403),
+            "attempt {attempt} should be refused as a failure: {}",
+            response.describe()
+        );
+    }
+
+    let blocked_line = blocked_addresses(&dux.config_text().await);
+    assert!(
+        blocked_line.contains(&address),
+        "the guessing address {address} is appended to blocked_addresses:\n{blocked_line}"
+    );
+    assert!(
+        !blocked_line.contains("127.0.0.1"),
+        "loopback is never blocked:\n{blocked_line}"
+    );
+
+    let right = client.login(STRONG_PASSWORD).await;
+    assert_eq!(
+        (right.status, right.error_code().as_deref()),
+        (403, Some("blocked")),
+        "a blocked address is refused even with the right password: {}",
+        right.describe()
+    );
+    assert_eq!(
+        right.json(),
+        json!({ "error": "blocked" }),
+        "the refusal is the code alone, and no path reaches the blocked client: {}",
+        right.describe()
+    );
+    for path in ["/api/v1/projects", "/api/v1/auth/status"] {
+        let other = client.get(path).await;
+        assert_eq!(
+            (other.status, other.error_code().as_deref()),
+            (403, Some("blocked")),
+            "{path} from a blocked address: {}",
+            other.describe()
+        );
+    }
+    assert_accepted_then_closed(
+        client,
+        "/ws/events",
+        CLOSE_BLOCKED,
+        "the events socket from a blocked address",
+    )
+    .await;
+}
+
+/// Emptying `blocked_addresses` by hand and sending `SIGUSR1` lets the right
+/// password sign in again.
+async fn the_owner_lifts_the_block(dux: &Dux, client: &Client) {
+    // The owner's hand edit: empty the list, whether dux wrote it on one
+    // line or across several, and leave everything else alone.
+    dux.exec_ok(
+        "sed -i \
+           -e '/^blocked_addresses = \\[.*\\]/c\\blocked_addresses = []' \
+           -e '/^blocked_addresses = \\[[^]]*$/,/\\]/c\\blocked_addresses = []' \
+           \"$DUX_HOME/config.toml\"",
+    )
+    .await;
+    assert!(
+        dux.config_text().await.contains("blocked_addresses = []"),
+        "the hand edit emptied the list"
+    );
+    dux.signal_reload().await;
+    dux_journeys::eventually(
+        "the lifted block to apply",
+        Duration::from_secs(20),
+        || async { (client.login(STRONG_PASSWORD).await.status == 204).then_some(()) },
+    )
+    .await;
+    assert!(projects(client).await.is_empty());
+}
+
+/// From this machine, failures past the limit are slowed and never blocked, and
+/// the right password still signs in.
+async fn this_machine_is_slowed_never_blocked(dux: &Dux) {
+    let inside = dux.inside();
+    for _ in 0..7 {
+        let response = inside.login("not-the-password-at-all").await;
+        assert!(
+            matches!(response.status, 401 | 429),
+            "this machine is slowed, never blocked: {}",
+            response.describe()
+        );
+    }
+    let blocked = blocked_addresses(&dux.config_text().await);
+    assert!(
+        !blocked.contains("\"127.0.0.1\"") && !blocked.contains("\"::1\""),
+        "loopback never lands in blocked_addresses:\n{blocked}"
+    );
+    let signed_in = dux_journeys::eventually(
+        "this machine to sign in after the slow-down",
+        Duration::from_secs(60),
+        || async {
+            let response = inside.login(STRONG_PASSWORD).await;
+            assert_ne!(
+                response.status,
+                403,
+                "loopback was blocked: {}",
+                response.describe()
+            );
+            (response.status == 204).then_some(response)
+        },
+    )
+    .await;
+    assert_eq!(signed_in.status, 204);
 }
 
 /// The `blocked_addresses` setting as config.toml writes it, on one line or
@@ -457,139 +474,159 @@ async fn journey_11_the_first_password_is_set_only_from_this_machine_or_the_tail
         let dux = Dux::start(DuxOptions::exposed().with_tailscale_checks()).await;
         let network = dux.client().await;
 
-        let status = network.auth_status().await;
-        assert_eq!(status["password_set"], json!(false), "{status}");
-        assert_eq!(status["can_set_first_password"], json!(false), "{status}");
-        let attempt = network
-            .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
-            .await;
-        assert_eq!(attempt.status, 403, "{}", attempt.describe());
-        assert!(
-            !dux.config_text()
-                .await
-                .contains("password_hash = \"$argon2id$"),
-            "a refused first password writes nothing"
-        );
-
-        let inside = dux.inside();
-        assert_eq!(
-            inside.auth_status().await["can_set_first_password"],
-            json!(true)
-        );
-        let weak = inside
-            .post_json("/api/v1/auth/password", &json!({ "new": "password1234" }))
-            .await;
-        assert_eq!(
-            (weak.status, weak.error_code().as_deref()),
-            (400, Some("weak_password")),
-            "{}",
-            weak.describe()
-        );
-        let body = weak.json();
-        assert!(body["score"].is_number(), "{body}");
-        assert!(body["message"].is_string(), "{body}");
-        assert!(body["feedback"]["suggestions"].is_array(), "{body}");
-        let short = inside
-            .post_json("/api/v1/auth/password", &json!({ "new": "Qz7#vL9p" }))
-            .await;
-        assert_eq!(
-            (short.status, short.error_code().as_deref()),
-            (400, Some("password_too_short")),
-            "{}",
-            short.describe()
-        );
-        assert_eq!(short.json()["minimum"], json!(12));
-        assert!(
-            !dux.config_text()
-                .await
-                .contains("password_hash = \"$argon2id$")
-        );
-
-        let set = inside
-            .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
-            .await;
-        assert_eq!(set.status, 204, "{}", set.describe());
-        let config = dux.config_text().await;
-        assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
-        assert!(
-            !config.contains(STRONG_PASSWORD),
-            "the password itself is never written"
-        );
-        assert_eq!(network.auth_status().await["password_set"], json!(true));
-
-        network.login_ok(STRONG_PASSWORD).await;
-        let before_change = network.cookie_header().expect("a session cookie");
-
-        let missing = network
-            .post_json(
-                "/api/v1/auth/password",
-                &json!({ "new": OTHER_STRONG_PASSWORD }),
-            )
-            .await;
-        assert!(
-            matches!(missing.status, 400 | 403),
-            "a change with no current password is refused, and not as signed out: {}",
-            missing.describe()
-        );
-        let wrong = network
-            .post_json(
-                "/api/v1/auth/password",
-                &json!({ "current": "wrong-current-password-123", "new": OTHER_STRONG_PASSWORD }),
-            )
-            .await;
-        assert_eq!(
-            (wrong.status, wrong.error_code().as_deref()),
-            (403, Some("wrong_current_password")),
-            "{}",
-            wrong.describe()
-        );
-        assert_eq!(
-            network.get("/api/v1/projects").await.status,
-            200,
-            "a refused change leaves the session alone"
-        );
-        // The wrong current password is slowed like a failed sign-in, so the
-        // right one waits that out first.
-        let changed = network
-            .post_json_waiting(
-                "/api/v1/auth/password",
-                &json!({ "current": STRONG_PASSWORD, "new": OTHER_STRONG_PASSWORD }),
-            )
-            .await;
-        assert_eq!(changed.status, 204, "{}", changed.describe());
-
-        let replay = network.fresh();
-        replay.set_cookie(&before_change);
-        assert_auth_required(
-            &replay.get("/api/v1/projects").await,
-            "a session from before the change",
-        );
-        let again = network.fresh();
-        assert_eq!(again.login(STRONG_PASSWORD).await.status, 401);
-        again.login_ok(OTHER_STRONG_PASSWORD).await;
-
-        let tailnet_dux = Dux::start(DuxOptions::local().with_tailnet(4100)).await;
-        let peer = tailnet_dux.client_on(4100).await;
-        peer.wait_answering().await;
-        // A peer is the tailnet only once dux's first Tailscale look has named
-        // the address it reached, so wait for that look rather than racing it.
-        dux_journeys::eventually(
-            "the first Tailscale look",
-            Duration::from_secs(30),
-            || async {
-                (peer.auth_status().await["client_class"] == json!("tailnet")).then_some(())
-            },
-        )
-        .await;
-        let set = peer
-            .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
-            .await;
-        assert_eq!(
-            set.status,
-            204,
-            "a tailnet peer may set the first password: {}",
-            set.describe()
-        );
+        the_network_cannot_set_the_first_password(&dux, &network).await;
+        this_machine_sets_the_first_password(&dux, &network).await;
+        changing_it_takes_the_current_one_and_signs_everyone_out(&network).await;
+        a_tailnet_peer_may_set_the_first_password().await;
     })
     .await;
+}
+
+/// The network is told it cannot set the first password, and an attempt is
+/// refused and writes nothing.
+async fn the_network_cannot_set_the_first_password(dux: &Dux, network: &Client) {
+    let status = network.auth_status().await;
+    assert_eq!(status["password_set"], json!(false), "{status}");
+    assert_eq!(status["can_set_first_password"], json!(false), "{status}");
+    let attempt = network
+        .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
+        .await;
+    assert_eq!(attempt.status, 403, "{}", attempt.describe());
+    assert!(
+        !dux.config_text()
+            .await
+            .contains("password_hash = \"$argon2id$"),
+        "a refused first password writes nothing"
+    );
+}
+
+/// This machine is refused a common and a short password, saying why, and sets
+/// a strong one, written only as its hash, which the network then sees set.
+async fn this_machine_sets_the_first_password(dux: &Dux, network: &Client) {
+    let inside = dux.inside();
+    assert_eq!(
+        inside.auth_status().await["can_set_first_password"],
+        json!(true)
+    );
+    let weak = inside
+        .post_json("/api/v1/auth/password", &json!({ "new": "password1234" }))
+        .await;
+    assert_eq!(
+        (weak.status, weak.error_code().as_deref()),
+        (400, Some("weak_password")),
+        "{}",
+        weak.describe()
+    );
+    let body = weak.json();
+    assert!(body["score"].is_number(), "{body}");
+    assert!(body["message"].is_string(), "{body}");
+    assert!(body["feedback"]["suggestions"].is_array(), "{body}");
+    let short = inside
+        .post_json("/api/v1/auth/password", &json!({ "new": "Qz7#vL9p" }))
+        .await;
+    assert_eq!(
+        (short.status, short.error_code().as_deref()),
+        (400, Some("password_too_short")),
+        "{}",
+        short.describe()
+    );
+    assert_eq!(short.json()["minimum"], json!(12));
+    assert!(
+        !dux.config_text()
+            .await
+            .contains("password_hash = \"$argon2id$")
+    );
+
+    let set = inside
+        .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
+        .await;
+    assert_eq!(set.status, 204, "{}", set.describe());
+    let config = dux.config_text().await;
+    assert!(config.contains("password_hash = \"$argon2id$"), "{config}");
+    assert!(
+        !config.contains(STRONG_PASSWORD),
+        "the password itself is never written"
+    );
+    assert_eq!(network.auth_status().await["password_set"], json!(true));
+}
+
+/// Signed in from the network, a change with no current password or a wrong one
+/// is refused and leaves the session alone; the right one changes it and ends
+/// every session, so only the new password signs in.
+async fn changing_it_takes_the_current_one_and_signs_everyone_out(network: &Client) {
+    network.login_ok(STRONG_PASSWORD).await;
+    let before_change = network.cookie_header().expect("a session cookie");
+
+    let missing = network
+        .post_json(
+            "/api/v1/auth/password",
+            &json!({ "new": OTHER_STRONG_PASSWORD }),
+        )
+        .await;
+    assert!(
+        matches!(missing.status, 400 | 403),
+        "a change with no current password is refused, and not as signed out: {}",
+        missing.describe()
+    );
+    let wrong = network
+        .post_json(
+            "/api/v1/auth/password",
+            &json!({ "current": "wrong-current-password-123", "new": OTHER_STRONG_PASSWORD }),
+        )
+        .await;
+    assert_eq!(
+        (wrong.status, wrong.error_code().as_deref()),
+        (403, Some("wrong_current_password")),
+        "{}",
+        wrong.describe()
+    );
+    assert_eq!(
+        network.get("/api/v1/projects").await.status,
+        200,
+        "a refused change leaves the session alone"
+    );
+    // The wrong current password is slowed like a failed sign-in, so the
+    // right one waits that out first.
+    let changed = network
+        .post_json_waiting(
+            "/api/v1/auth/password",
+            &json!({ "current": STRONG_PASSWORD, "new": OTHER_STRONG_PASSWORD }),
+        )
+        .await;
+    assert_eq!(changed.status, 204, "{}", changed.describe());
+
+    let replay = network.fresh();
+    replay.set_cookie(&before_change);
+    assert_auth_required(
+        &replay.get("/api/v1/projects").await,
+        "a session from before the change",
+    );
+    let again = network.fresh();
+    assert_eq!(again.login(STRONG_PASSWORD).await.status, 401);
+    again.login_ok(OTHER_STRONG_PASSWORD).await;
+}
+
+/// On a dux reached over the stand-in tailnet, a peer may set the first
+/// password.
+async fn a_tailnet_peer_may_set_the_first_password() {
+    let tailnet_dux = Dux::start(DuxOptions::local().with_tailnet(4100)).await;
+    let peer = tailnet_dux.client_on(4100).await;
+    peer.wait_answering().await;
+    // A peer is the tailnet only once dux's first Tailscale look has named
+    // the address it reached, so wait for that look rather than racing it.
+    dux_journeys::eventually(
+        "the first Tailscale look",
+        Duration::from_secs(30),
+        || async { (peer.auth_status().await["client_class"] == json!("tailnet")).then_some(()) },
+    )
+    .await;
+    let set = peer
+        .post_json("/api/v1/auth/password", &json!({ "new": STRONG_PASSWORD }))
+        .await;
+    assert_eq!(
+        set.status,
+        204,
+        "a tailnet peer may set the first password: {}",
+        set.describe()
+    );
 }

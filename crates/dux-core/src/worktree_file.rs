@@ -47,16 +47,20 @@ impl std::fmt::Display for SaveTooLarge {
 
 impl std::error::Error for SaveTooLarge {}
 
+/// A file of a worktree as the web editor opens it: its text, how it is encoded and the stamp a
+/// save must match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent facts about a file sent to the web editor as JSON booleans"
 )]
 pub struct WorktreeFile {
+    /// The path, relative to the worktree.
     pub path: String,
     /// True when the working copy is binary (see [`crate::text_encoding::decode`]);
     /// `content` is then empty and the editor refuses to open it.
     pub binary: bool,
+    /// The decoded text; empty for a binary file.
     pub content: String,
     /// The WHATWG name of the encoding `content` was decoded from, which a save
     /// sends back so the file is written in it again. `None` for binary.
@@ -122,7 +126,9 @@ pub struct WorktreeFile {
 /// unconditional write it replaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct FileStamp {
+    /// The modification time from the shared formatter, or `None` when the filesystem reports none.
     pub modified: Option<String>,
+    /// The size in bytes.
     pub size: u64,
 }
 
@@ -201,6 +207,10 @@ pub(crate) fn stamp_from_meta(meta: &std::fs::Metadata) -> FileStamp {
 ///
 /// `pub` rather than `pub(crate)` because `dux-web`'s `file_routes` calls it for
 /// the read-permissive resolver in `read_raw`.
+///
+/// # Errors
+///
+/// Fails when the path is malformed, traverses out of the worktree, or cannot be resolved.
 pub fn resolve_worktree_path_for_read(
     worktree: &Path,
     rel_path: &str,
@@ -277,6 +287,10 @@ pub fn resolve_worktree_path_for_read(
 ///
 /// This is `pub` (not `pub(crate)`) because `dux-web`'s `file_routes` uses it
 /// for the TOCTOU-safe read in `read_raw` after `canonicalize()` (cross-crate call).
+///
+/// # Errors
+///
+/// Fails when the path is a symlink, is not a regular file, or cannot be read.
 pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
     read_nofollow_stat(abs_path).map(|(bytes, _)| bytes)
 }
@@ -362,6 +376,10 @@ pub(crate) fn read_nofollow_stat(abs_path: &Path) -> anyhow::Result<(Vec<u8>, st
 /// always fail for them; marking them read-only surfaces this immediately.
 /// `.git/` paths are always `read_only: true`.
 /// Dangling symlinks (target does not exist) return an error.
+///
+/// # Errors
+///
+/// Fails as [`read_file_as`] does.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
     read_file_as(worktree, rel_path, None)
 }
@@ -370,6 +388,11 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
 /// person's answer to a fallback that read the file wrong. Bytes that are not
 /// valid in it are refused (a [`crate::text_encoding::DecodeRefused`]) rather
 /// than shown with replacement characters a save would write back.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, is a dangling symlink, is not a
+/// regular file, is too large, cannot be read, or does not decode in `requested`.
 pub fn read_file_as(
     worktree: &Path,
     rel_path: &str,
@@ -492,6 +515,10 @@ pub fn read_file_as(
 ///
 /// The permission bits match `std::fs::write` (0o666, masked by the process
 /// umask); they apply only when the file is created.
+///
+/// # Errors
+///
+/// Fails when the path is a symlink or cannot be opened or written.
 pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
     write_nofollow_stamped(abs_path, content).map(|_| ())
 }
@@ -499,6 +526,10 @@ pub fn write_nofollow(abs_path: &Path, content: &str) -> anyhow::Result<()> {
 /// [`write_nofollow`] plus the stamp of the file it just wrote, taken by
 /// `fstat` on the same descriptor. That stamp is what a client re-baselines on
 /// so its OWN save never looks like somebody else's edit on the next check.
+///
+/// # Errors
+///
+/// Fails as [`write_nofollow`] does, or when the written file cannot be stat'ed.
 pub fn write_nofollow_stamped(abs_path: &Path, content: &str) -> anyhow::Result<FileStamp> {
     write_nofollow_bytes_stamped(abs_path, content.as_bytes())
 }
@@ -678,6 +709,10 @@ fn write_checked_existing(
 /// NOT what enforces the symlink rule, because an entry can be replaced between
 /// the stat and the write. The [`write_nofollow`] open is the enforcement, and
 /// it refuses a symlink leaf no matter when the link appeared.
+///
+/// # Errors
+///
+/// Fails as [`write_file_encoded`] does with no encoding and no stamp.
 pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<FileStamp> {
     write_file_checked(worktree, rel_path, content, None)
 }
@@ -707,7 +742,9 @@ pub(crate) fn write_file_checked(
 /// chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveEncoding {
+    /// The encoding.
     pub encoding: &'static encoding_rs::Encoding,
+    /// Whether the bytes start with a byte-order mark.
     pub bom: bool,
     /// The encoding (and mark) the client read the file in, which tells an
     /// ordinary save (the same pair) from a conversion (any other). `None`
@@ -772,6 +809,11 @@ fn leading_mark_from_file(
 /// returned unwrapped so the HTTP layer can answer with its details) before the
 /// file is so much as opened. `None` is the old behaviour exactly: the text's
 /// own UTF-8 bytes, and the guard against saving over bytes that are not UTF-8.
+///
+/// # Errors
+///
+/// Fails when the text cannot be encoded, would be too large, the path is a symlink, not a regular
+/// file or inside the git directory, the file changed since `expected`, or the write fails.
 pub fn write_file_encoded(
     worktree: &Path,
     rel_path: &str,
@@ -793,9 +835,9 @@ pub fn write_file_encoded(
         .into(),
         None => content.as_bytes().into(),
     };
-    if bytes.len() as u64 > MAX_SAVED_BYTES {
+    if crate::numeric::usize_to_u64(bytes.len()) > MAX_SAVED_BYTES {
         return Err(anyhow::Error::new(SaveTooLarge {
-            size: bytes.len() as u64,
+            size: crate::numeric::usize_to_u64(bytes.len()),
         }));
     }
     let path = resolve_worktree_path(worktree, rel_path)?;
@@ -861,6 +903,11 @@ pub fn write_file_encoded(
 /// TOCTOU-safe: if another process creates the file in the race window between
 /// our existence check and the actual create, this call fails instead of
 /// silently overwriting.
+///
+/// # Errors
+///
+/// Fails when the path is invalid, already exists, has no parent inside the worktree, is inside the
+/// git directory, or cannot be created.
 pub fn create_file(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     let path = resolve_worktree_path(worktree, rel_path)?;
     if path.symlink_metadata().is_ok() {
@@ -884,6 +931,11 @@ pub fn create_file(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// components (VS Code "New Folder: a/b/c"). Refuses to overwrite an existing
 /// entry, refuses `.git`/traversal, and refuses if the nearest existing
 /// ancestor escapes the worktree or resolves into `.git`.
+///
+/// # Errors
+///
+/// Fails when the path is invalid, already exists, escapes the worktree, is inside the git
+/// directory, or cannot be created.
 pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     let path = resolve_worktree_path(worktree, rel_path)?;
     if path.symlink_metadata().is_ok() {
@@ -989,6 +1041,12 @@ fn create_dir_from_root(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
 /// It moves only with a clearance for both ends (see [`crate::destructive`]):
 /// `clear` is asked once the move is otherwise valid, right before anything
 /// moves. A symbolic link is judged at its own path, never followed.
+///
+/// # Errors
+///
+/// Fails when either path is invalid or outside the worktree, the source is missing, the
+/// destination is in the git directory or already exists, the clearance is refused, or the rename
+/// fails.
 pub fn rename_entry<'c>(
     worktree: &Path,
     from_rel: &str,
@@ -1185,6 +1243,11 @@ fn check_entry_parent_contained(
 /// [`crate::destructive`]): `clear` is asked once the delete is otherwise
 /// valid, right before anything is removed. A symbolic link is judged at its
 /// own path, never followed.
+///
+/// # Errors
+///
+/// Fails when the path is invalid, missing, outside the worktree or the worktree root itself, the
+/// clearance is refused, or the removal fails.
 pub fn delete_entry<'c>(
     worktree: &Path,
     rel_path: &str,
@@ -1223,8 +1286,11 @@ pub fn delete_entry<'c>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
+    /// A regular file.
     File,
+    /// A directory.
     Dir,
+    /// A symbolic link, never the thing it points at.
     Symlink,
     /// A fifo, socket, or device node. Rare inside a worktree, but real, and
     /// calling one a file would be wrong.
@@ -1256,8 +1322,11 @@ pub enum GitStatusView {
     Ignored,
     /// Tracked, with nothing pending.
     Clean,
+    /// Tracked, with changes pending.
     Changed {
+        /// The staged change's status letter, when there is one.
         staged: Option<String>,
+        /// The unstaged change's status letter, when there is one.
         unstaged: Option<String>,
     },
 }
@@ -1269,6 +1338,7 @@ pub struct WorktreeEntryInfo {
     /// Echoed back exactly as the caller wrote it, never re-encoded or
     /// normalized, so a non-Latin name survives the round trip.
     pub path: String,
+    /// What kind of entry it is.
     pub kind: EntryKind,
     /// `None` for a directory: the on-disk size of a directory entry is an
     /// implementation detail of the filesystem, not something a user wants.
@@ -1298,6 +1368,7 @@ pub struct WorktreeEntryInfo {
     /// instant.
     pub(crate) target_modified: Option<String>,
     pub(crate) target_size: Option<u64>,
+    /// What git says about it.
     pub git: GitStatusView,
 }
 
@@ -1356,6 +1427,11 @@ impl std::error::Error for EntryMissing {}
 /// and no size, mode or mtime of the host file leaks. What would leak is
 /// `symlink_target`, which the panel prints verbatim, and `/root/.ssh/id_ed25519`
 /// is a disclosure on its own.
+///
+/// # Errors
+///
+/// Fails when the path does not resolve inside the worktree, cannot be stat'ed, or git cannot say
+/// its status.
 pub fn entry_info(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeEntryInfo> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1520,7 +1596,7 @@ mod tests {
         assert_eq!(f.encoding.as_deref(), Some("windows-1252"));
         assert!(f.encoding_fallback);
         assert!(!f.bom);
-        assert_eq!(f.size, Some(latin1.len() as u64));
+        assert_eq!(f.size, Some(crate::numeric::usize_to_u64(latin1.len())));
     }
 
     #[test]
@@ -1656,7 +1732,7 @@ mod tests {
     #[test]
     fn oversized_file_is_refused() {
         let dir = worktree();
-        let big = vec![b'a'; (MAX_EDITABLE_BYTES + 1) as usize];
+        let big = vec![b'a'; crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES + 1)];
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let err = read_file(dir.path(), "big.txt").unwrap_err().to_string();
         assert!(err.contains("too large"), "unexpected error: {err}");
@@ -2792,8 +2868,8 @@ mod tests {
             use rustix::fs::{AtFlags, CWD, Timestamps, utimensat};
             let dur = to.duration_since(std::time::UNIX_EPOCH).unwrap();
             let ts = rustix::fs::Timespec {
-                tv_sec: dur.as_secs() as _,
-                tv_nsec: dur.subsec_nanos() as _,
+                tv_sec: i64::try_from(dur.as_secs()).expect("a test time fits in i64"),
+                tv_nsec: dur.subsec_nanos().into(),
             };
             utimensat(
                 CWD,
@@ -2811,7 +2887,10 @@ mod tests {
         fn read_reports_the_stamp_of_what_it_read() {
             let dir = worktree();
             let f = read_file(dir.path(), "hello.txt").unwrap();
-            assert_eq!(f.size, Some("hi\nthere\n".len() as u64));
+            assert_eq!(
+                f.size,
+                Some(crate::numeric::usize_to_u64("hi\nthere\n".len()))
+            );
             let modified = f.modified.expect("a real filesystem reports an mtime");
             let on_disk = std::fs::metadata(dir.path().join("hello.txt")).unwrap();
             assert_eq!(modified, format_mtime(on_disk.modified().unwrap()));
@@ -2845,7 +2924,10 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "rewritten\n"
             );
-            assert_eq!(fresh.size, "rewritten\n".len() as u64);
+            assert_eq!(
+                fresh.size,
+                crate::numeric::usize_to_u64("rewritten\n".len())
+            );
             // The returned stamp is the one the client must re-baseline on, so
             // an immediate second save with it must be accepted.
             write_file_checked(dir.path(), "hello.txt", "again\n", Some(&fresh)).unwrap();
@@ -2869,7 +2951,10 @@ mod tests {
                 .expect("a stale stamp must surface as a WriteConflict, not a generic error");
             assert!(!conflict.deleted);
             let current = conflict.current.as_ref().unwrap();
-            assert_eq!(current.size, "the agent's work\n".len() as u64);
+            assert_eq!(
+                current.size,
+                crate::numeric::usize_to_u64("the agent's work\n".len())
+            );
             assert_eq!(
                 std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
                 "the agent's work\n",
@@ -2888,7 +2973,7 @@ mod tests {
                 modified: read.modified.clone(),
                 size: read.size.unwrap(),
             };
-            let big = "a".repeat(MAX_EDITABLE_BYTES as usize + 1);
+            let big = "a".repeat(crate::numeric::u64_to_usize(MAX_EDITABLE_BYTES) + 1);
             let grown = write_file_checked(dir.path(), "hello.txt", &big, Some(&expected)).unwrap();
             assert!(grown.size > MAX_EDITABLE_BYTES);
             write_file_checked(dir.path(), "hello.txt", "smaller again\n", Some(&grown)).unwrap();
@@ -3303,7 +3388,7 @@ mod tests {
                 4 * 1024 * 1024
             );
             // Past the limit on disk it is refused, typed, and writes nothing.
-            let over = "a".repeat(MAX_SAVED_BYTES as usize + 1);
+            let over = "a".repeat(crate::numeric::u64_to_usize(MAX_SAVED_BYTES) + 1);
             let err = write_file_encoded(
                 dir.path(),
                 "big.txt",
@@ -3498,7 +3583,7 @@ mod tests {
                 std::fs::read_to_string(dir.path().join("brand-new.txt")).unwrap(),
                 "hello\n"
             );
-            assert_eq!(fresh.size, "hello\n".len() as u64);
+            assert_eq!(fresh.size, crate::numeric::usize_to_u64("hello\n".len()));
         }
 
         /// A guarded write shortens the file: the guard must ftruncate, not
@@ -3593,7 +3678,10 @@ mod tests {
                 .unwrap();
             let read_only = read_file(dir.path(), "link.txt").unwrap();
             assert!(read_only.read_only);
-            assert_eq!(read_only.size, Some("hi\nthere\n".len() as u64));
+            assert_eq!(
+                read_only.size,
+                Some(crate::numeric::usize_to_u64("hi\nthere\n".len()))
+            );
             assert!(read_only.modified.is_some());
         }
 

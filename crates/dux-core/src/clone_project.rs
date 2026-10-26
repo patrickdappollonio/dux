@@ -55,19 +55,23 @@ pub(crate) struct CloneRequest {
 /// reason, the flag's, covers whatever copy turns out to be needed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpfrontReviewCopy {
+    /// Whether the user agreed to a review copy.
     #[serde(default)]
     pub agreed: bool,
+    /// The word the warning's reason began with, or `None` for an agreement that covers any copy.
     #[serde(default)]
     pub reason: Option<String>,
     /// The branch the warning said the copy would be made on. An agreement that
     /// names none covers the reason under any name.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Whether the agreement came from a command-line flag rather than a dialog.
     #[serde(default)]
     pub by_flag: bool,
 }
 
 impl UpfrontReviewCopy {
+    /// The agreement as the agent create weighs it.
     pub fn consent(&self) -> crate::worker::ReviewCopyConsent {
         crate::worker::ReviewCopyConsent::from_upfront(
             crate::worker::ReviewCopyAnswer {
@@ -84,8 +88,10 @@ impl UpfrontReviewCopy {
 /// is worded by: a clone never says it added, and an add never says it cloned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CloneMode {
+    /// Clone the repository into the folder.
     #[default]
     Clone,
+    /// Add the checkout already in the folder as the project.
     AddExisting,
 }
 
@@ -129,12 +135,15 @@ impl CloneOutcome {
 /// A clone that is waiting for its worker, with whether a browser asked for
 /// it (whose follow-up the web layer then drives).
 pub struct PendingClone {
+    /// The clone's operation, which its outcome resolves.
     pub op: HandlerStatusOp<CloneOutcome>,
+    /// Whether a browser asked for the clone.
     pub from_web: bool,
     /// The repository key a pull request clone holds, released once the
     /// project is registered or the clone ends without one; `None` for an
     /// ordinary clone.
     pub repository_key: Option<String>,
+    /// Whether the folder is cloned into or added as it is.
     pub mode: CloneMode,
     /// The folder the operation clones into or adds, to word a refusal by what
     /// the holder of that folder is doing.
@@ -144,11 +153,25 @@ pub struct PendingClone {
     pub review_copy: crate::worker::ReviewCopyConsent,
 }
 
+impl std::fmt::Debug for PendingClone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingClone")
+            .field("from_web", &self.from_web)
+            .field("repository_key", &self.repository_key)
+            .field("mode", &self.mode)
+            .field("destination", &self.destination)
+            .field("review_copy", &self.review_copy)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The engine's clones: the operations waiting for their worker, and the git
 /// processes running, which quitting dux stops.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Clones {
+    /// The clones waiting for their worker, by operation id.
     pub pending: HashMap<String, PendingClone>,
+    /// The git processes running for those clones.
     pub processes: CloneProcesses,
     /// Extra variables for every clone's git, empty outside tests.
     pub(crate) git_env: Vec<(String, String)>,
@@ -259,10 +282,15 @@ pub(crate) fn inspect_pr_destination(
 
 /// The pull request a folder check is for, when the answer for a checkout
 /// should also say whether the agent will need a review copy there.
+#[derive(Debug)]
 pub struct FolderReviewCopyQuery<'a> {
+    /// The directory managed worktrees are created under.
     pub worktrees_root: &'a Path,
+    /// The pull request's number.
     pub number: u64,
+    /// The pull request's head branch.
     pub head_branch: &'a str,
+    /// The pull request's head commit, when known.
     pub head_commit: Option<&'a str>,
     /// The name the agent will be given: one spelled like a review copy of the
     /// branch asks for a copy, until a local branch of that name exists.
@@ -277,8 +305,11 @@ const REVIEW_COPY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// and a `review` query, whether the agent will need a review copy there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrDestinationCheck {
+    /// What the folder holds.
     pub state: PrDestination,
+    /// The folder, canonicalized as dux will use it.
     pub path: PathBuf,
+    /// Whether the agent will need a review copy there, when the check could say.
     pub review_copy: Option<ReviewCopyOutlook>,
 }
 
@@ -287,6 +318,11 @@ pub struct PrDestinationCheck {
 /// folder check and the terminal UI's give. Runs git, so only on a worker. The
 /// outlook is told from the folder as it is, never from a write, and a folder
 /// that does not answer in time leaves the question open for the create to ask.
+///
+/// # Errors
+///
+/// Fails with the sentence to show when the folder cannot take the clone or the add: it holds
+/// something else, or cannot be named or inspected.
 pub fn check_pr_destination(
     raw: &str,
     target: &PullRequestCloneTarget,
@@ -423,9 +459,13 @@ pub struct LeadingBranchGuess {
 /// The pull request a clone's worker looked up, and the agent name it settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClonedPullRequest {
+    /// The pull request.
     pub target: PullRequestCloneTarget,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's state as `gh` reported it.
     pub state: String,
+    /// The pull request's head branch.
     pub head_branch: String,
     /// The typed name, or the head branch when none was typed.
     pub agent_name: String,
@@ -439,10 +479,15 @@ pub struct ClonedPullRequest {
 pub struct ClonedFor {
     /// The address, with any user and token removed.
     pub address: String,
+    /// The folder the repository was cloned into or added from.
     pub path: PathBuf,
+    /// The new project's display name.
     pub project_name: String,
+    /// The new project's id.
     pub project_id: String,
+    /// The agent's name.
     pub agent_name: String,
+    /// Whether the folder was cloned into or added as it is.
     pub mode: CloneMode,
     /// The pull request the agent is for, when it is for one.
     pub pull_request: Option<PullRequestCloneTarget>,
@@ -511,7 +556,7 @@ impl ClonedFor {
             ]
         };
         question.project_id = Some(self.project_id.clone());
-        question.pull_request = self.pull_request.clone();
+        question.pull_request.clone_from(&self.pull_request);
         crate::status_text![
             self.done_so_far(),
             ". Agent ",
@@ -543,12 +588,16 @@ impl ClonedFor {
 pub struct ClonedProject {
     /// The clone's op, which the follow-up resolves.
     pub status_op_id: Option<String>,
+    /// The folder the repository was cloned into or added from.
     pub path: PathBuf,
+    /// The agent's name.
     pub agent_name: String,
+    /// What the clone left on disk.
     pub cloned: ClonedRepository,
     /// The repository key the clone held, to release when the pending clone
     /// is gone.
     pub repository_key: Option<String>,
+    /// Whether the folder was cloned into or added as it is.
     pub mode: CloneMode,
 }
 
@@ -618,32 +667,11 @@ fn settle_pull_request(
     parent: &Path,
 ) -> Result<ClonedPullRequest, CloneOutcome> {
     let target = &pull_request.target;
-    let reference = crate::pr_reference::TypedReference {
-        host: Some(target.host.clone()),
-        owner_repo: Some(target.owner_repo.clone()),
-        number: Some(target.number),
-    };
-    let repository = format!("{}/{}", target.host, target.owner_repo);
     let (did_not, nothing_was) = match job.mode {
         CloneMode::Clone => ("clone", " Nothing was cloned."),
         CloneMode::AddExisting => ("add", " Nothing was added."),
     };
-    let resolution = crate::pr_reference::resolve_reference_projects(
-        &reference,
-        &pull_request.projects,
-        &pull_request.policy,
-    );
-    if let Some(project) = resolution.matches.first() {
-        return Err(CloneOutcome::Refused(crate::status_text![
-            q(project.name),
-            " is already a checkout of ",
-            n(repository),
-            format!(
-                ", so dux did not {did_not} it again. Use New agent from PR again; it will \
-                 find that project now."
-            )
-        ]));
-    }
+    refuse_project_already_checked_out(pull_request, did_not)?;
     let lookup = crate::worker::PullRequestLookup {
         host: target.host.clone(),
         owner_repo: target.owner_repo.clone(),
@@ -659,28 +687,8 @@ fn settle_pull_request(
             };
             CloneOutcome::Refused(crate::status_text![format!("{said}{stop}"), nothing_was])
         })?;
-    let typed = job.agent_name.trim();
-    let agent_name = if typed.is_empty() {
-        let branch = metadata.head_ref_name.as_str();
-        if !crate::git::is_valid_agent_name(branch)
-            || !crate::git::is_valid_branch_name(parent, branch)
-        {
-            return Err(CloneOutcome::Refused(crate::status_text![
-                "PR ",
-                n(format!("#{}", target.number)),
-                " has head branch ",
-                q(branch),
-                format!(
-                    ", which is not a usable agent name. Type a name for the agent instead. \
-                     {}{nothing_was}",
-                    crate::git::AGENT_NAME_RULE
-                )
-            ]));
-        }
-        branch.to_string()
-    } else {
-        typed.to_string()
-    };
+    let agent_name =
+        pull_request_agent_name(&job.agent_name, target, &metadata, parent, nothing_was)?;
     // A clone has the repository's default branch checked out and no other
     // local branch, so an agent on the pull request's own branch needs a copy
     // when that is the default branch, and so does one named like a copy of it.
@@ -693,34 +701,7 @@ fn settle_pull_request(
             crate::worker::ReviewCopyConsent::Blanket
         )
     {
-        let outlook = if agent_name == metadata.head_ref_name {
-            let default_branch = crate::gh::look_up_default_branch(
-                &pull_request.gh_program,
-                &target.host,
-                &target.owner_repo,
-            )
-            .ok();
-            let project = crate::wire::display_project_name("", &job.destination.to_string_lossy());
-            crate::agent_job::clone_review_copy_outlook(
-                &metadata.head_ref_name,
-                default_branch.as_deref(),
-                target.number,
-                &|candidate| {
-                    crate::agent_job::worktree_folder_is_free(
-                        &pull_request.worktrees_root,
-                        &project,
-                        candidate,
-                    )
-                },
-            )
-        } else {
-            crate::agent_job::typed_copy_review_outlook(
-                &metadata.head_ref_name,
-                &agent_name,
-                target.number,
-            )
-            .unwrap_or(ReviewCopyOutlook::NotNeeded)
-        };
+        let outlook = cloned_review_copy_outlook(job, pull_request, &agent_name, &metadata);
         refuse_unagreed_review_copy(
             &pull_request.review_copy,
             outlook,
@@ -737,6 +718,120 @@ fn settle_pull_request(
         agent_name,
         head_oid: metadata.head_ref_oid,
     })
+}
+
+/// Refuse a clone or an add (`did_not` names which) for a pull request whose
+/// repository a project has become a checkout of since the request was
+/// accepted.
+///
+/// # Errors
+///
+/// Fails, naming the project, when one is such a checkout.
+fn refuse_project_already_checked_out(
+    pull_request: &PullRequestJob,
+    did_not: &str,
+) -> Result<(), CloneOutcome> {
+    let target = &pull_request.target;
+    let reference = crate::pr_reference::TypedReference {
+        host: Some(target.host.clone()),
+        owner_repo: Some(target.owner_repo.clone()),
+        number: Some(target.number),
+    };
+    let repository = format!("{}/{}", target.host, target.owner_repo);
+    let resolution = crate::pr_reference::resolve_reference_projects(
+        &reference,
+        &pull_request.projects,
+        &pull_request.policy,
+    );
+    if let Some(project) = resolution.matches.first() {
+        return Err(CloneOutcome::Refused(crate::status_text![
+            q(project.name),
+            " is already a checkout of ",
+            n(repository),
+            format!(
+                ", so dux did not {did_not} it again. Use New agent from PR again; it will \
+                 find that project now."
+            )
+        ]));
+    }
+    Ok(())
+}
+
+/// The agent's name for the pull request `target`: the `typed` one, or the pull
+/// request's head branch when none was typed.
+///
+/// # Errors
+///
+/// Fails when no name was typed and the head branch is not a usable agent name
+/// in the repository at `parent`; `nothing_was` ends the sentence.
+fn pull_request_agent_name(
+    typed: &str,
+    target: &PullRequestCloneTarget,
+    metadata: &crate::gh::PullRequestMetadata,
+    parent: &Path,
+    nothing_was: &str,
+) -> Result<String, CloneOutcome> {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        return Ok(typed.to_string());
+    }
+    let branch = metadata.head_ref_name.as_str();
+    if !crate::git::is_valid_agent_name(branch) || !crate::git::is_valid_branch_name(parent, branch)
+    {
+        return Err(CloneOutcome::Refused(crate::status_text![
+            "PR ",
+            n(format!("#{}", target.number)),
+            " has head branch ",
+            q(branch),
+            format!(
+                ", which is not a usable agent name. Type a name for the agent instead. \
+                 {}{nothing_was}",
+                crate::git::AGENT_NAME_RULE
+            )
+        ]));
+    }
+    Ok(branch.to_string())
+}
+
+/// Whether an agent named `agent_name` on a fresh clone for the pull request
+/// needs a review copy: a clone has the repository's default branch checked out
+/// and no other local branch, so an agent on the pull request's own branch needs
+/// one when that is the default branch, and so does one named like a copy of it.
+fn cloned_review_copy_outlook(
+    job: &CloneJob,
+    pull_request: &PullRequestJob,
+    agent_name: &str,
+    metadata: &crate::gh::PullRequestMetadata,
+) -> ReviewCopyOutlook {
+    let target = &pull_request.target;
+    if agent_name == metadata.head_ref_name {
+        let default_branch = crate::gh::look_up_default_branch(
+            &pull_request.gh_program,
+            &target.host,
+            &target.owner_repo,
+        )
+        .ok();
+        let project = crate::wire::display_project_name("", &job.destination.to_string_lossy());
+        crate::agent_job::clone_review_copy_outlook(
+            &metadata.head_ref_name,
+            default_branch.as_deref(),
+            target.number,
+            &|candidate| {
+                crate::agent_job::worktree_folder_is_free(
+                    &pull_request.worktrees_root,
+                    &project,
+                    candidate,
+                )
+            },
+        )
+    } else {
+        crate::agent_job::typed_copy_review_outlook(
+            &metadata.head_ref_name,
+            agent_name,
+            target.number,
+        )
+        .unwrap_or(ReviewCopyOutlook::NotNeeded)
+    }
 }
 
 /// Refuse, before anything is cloned or added, a pull request whose agent
@@ -944,6 +1039,56 @@ fn add_existing_checkout(
     let dest = &job.destination;
     let refuse =
         |why: StatusText| CloneOutcome::Refused(crate::status_text![why, " Nothing was added."]);
+    refuse_unaddable_checkout(dest, request, &pull_request, refuse)?;
+    crate::logger::info(&format!("adding {} as a project", dest.display()));
+    let unreadable = || {
+        refuse(crate::status_text![
+            "git could not read the history of ",
+            n(dest.display()),
+            ", so dux can't tell which branch could lead a project there."
+        ])
+    };
+    match crate::git::repo_commit_state(dest) {
+        crate::git::CommitState::Born => {}
+        crate::git::CommitState::Unborn => {
+            crate::logger::info(&format!("not adding {}: no commits", dest.display()));
+            return Err(refuse(crate::status_text![
+                n(dest.display()),
+                " has no commits yet, so there is no branch to lead a project with. Make a \
+                 first commit in it, then use New agent from PR again."
+            ]));
+        }
+        crate::git::CommitState::Indeterminate => return Err(unreadable()),
+    }
+    let Ok(checked_out) = crate::git::current_branch_opt(dest) else {
+        return Err(unreadable());
+    };
+    let (leading_branch, leading_branch_guess) =
+        leading_branch_of_checkout(job, checked_out.as_deref(), refuse)?;
+    keep_env_config(dest, &job.git_env);
+    Ok(ClonedRepository {
+        address,
+        branch: checked_out.unwrap_or_default(),
+        leading_branch,
+        leading_branch_guess,
+        name_taken: false,
+        pull_request: Some(pull_request),
+    })
+}
+
+/// Refuse to add `dest` for `request` when it no longer holds a checkout of the
+/// repository, or when the agent for `pull_request` will need a review copy
+/// nobody agreed to. `refuse` ends each sentence.
+///
+/// # Errors
+///
+/// Fails, saying why, in either case.
+fn refuse_unaddable_checkout(
+    dest: &Path,
+    request: &PullRequestJob,
+    pull_request: &ClonedPullRequest,
+    refuse: impl Fn(StatusText) -> CloneOutcome,
+) -> Result<(), CloneOutcome> {
     let projects: Vec<&str> = request.projects.iter().map(|p| p.path.as_str()).collect();
     match inspect_pr_destination(
         &dest.to_string_lossy(),
@@ -989,29 +1134,23 @@ fn add_existing_checkout(
         &request.target,
         " Nothing was added.",
     )?;
-    crate::logger::info(&format!("adding {} as a project", dest.display()));
-    let unreadable = || {
-        refuse(crate::status_text![
-            "git could not read the history of ",
-            n(dest.display()),
-            ", so dux can't tell which branch could lead a project there."
-        ])
-    };
-    match crate::git::repo_commit_state(dest) {
-        crate::git::CommitState::Born => {}
-        crate::git::CommitState::Unborn => {
-            crate::logger::info(&format!("not adding {}: no commits", dest.display()));
-            return Err(refuse(crate::status_text![
-                n(dest.display()),
-                " has no commits yet, so there is no branch to lead a project with. Make a \
-                 first commit in it, then use New agent from PR again."
-            ]));
-        }
-        crate::git::CommitState::Indeterminate => return Err(unreadable()),
-    }
-    let Ok(checked_out) = crate::git::current_branch_opt(dest) else {
-        return Err(unreadable());
-    };
+    Ok(())
+}
+
+/// The branch that leads the project for the checkout `job` adds, which has
+/// `checked_out` out, and how it was guessed: the remote's default when the
+/// folder has a branch of that name, otherwise the branch checked out.
+/// `refuse` ends the refusal's sentence.
+///
+/// # Errors
+///
+/// Fails when HEAD is detached and the folder has no local branch to lead with.
+fn leading_branch_of_checkout(
+    job: &CloneJob,
+    checked_out: Option<&str>,
+    refuse: impl Fn(StatusText) -> CloneOutcome,
+) -> Result<(String, Option<LeadingBranchGuess>), CloneOutcome> {
+    let dest = &job.destination;
     let env: Vec<(&str, &str)> = job
         .git_env
         .iter()
@@ -1026,7 +1165,7 @@ fn add_existing_checkout(
         .as_deref()
         .filter(|default| crate::git::local_branch_exists(dest, default));
     let (leading_branch, leading_branch_guess) = match crate::add_project_plan::project_base_at_add(
-        checked_out.as_deref(),
+        checked_out,
         local_default,
         crate::add_project_plan::DefaultCheckout::CheckOutDefault,
     ) {
@@ -1063,15 +1202,7 @@ fn add_existing_checkout(
             (branch, Some(guess))
         }
     };
-    keep_env_config(dest, &job.git_env);
-    Ok(ClonedRepository {
-        address,
-        branch: checked_out.unwrap_or_default(),
-        leading_branch,
-        leading_branch_guess,
-        name_taken: false,
-        pull_request: Some(pull_request),
-    })
+    Ok((leading_branch, leading_branch_guess))
 }
 
 /// The destination a clone goes into, and whether dux made it.
@@ -1313,40 +1444,59 @@ mod tests {
         assert!(users.is_dir(), "a folder dux did not make was removed");
     }
 
+    /// A working copy in `root`, named `name`, with one commit on `branch` and
+    /// `origin` as its remote.
+    fn working_copy(root: &Path, name: &str, origin: &str, branch: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", branch],
+            vec!["remote", "add", "origin", origin],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        ] {
+            let out = crate::git::test_support::git_command()
+                .arg("-C")
+                .arg(&dir)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+        dir
+    }
+
+    /// Make the local branch `name` in the working copy `dir`.
+    fn make_branch(dir: &Path, name: &str) {
+        let made = crate::git::test_support::git_command()
+            .arg("-C")
+            .arg(dir)
+            .args(["branch", name])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+    }
+
     #[test]
     fn a_folder_is_judged_by_what_it_holds_against_the_repository_asked_for() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let working_copy = |name: &str, origin: &str, branch: &str| {
-            let dir = root.join(name);
-            std::fs::create_dir(&dir).unwrap();
-            for args in [
-                vec!["init", "-q", "-b", branch],
-                vec!["remote", "add", "origin", origin],
-                vec![
-                    "-c",
-                    "user.name=t",
-                    "-c",
-                    "user.email=t@t",
-                    "commit",
-                    "-q",
-                    "--allow-empty",
-                    "-m",
-                    "init",
-                ],
-            ] {
-                let out = crate::git::test_support::git_command()
-                    .arg("-C")
-                    .arg(&dir)
-                    .args(&args)
-                    .output()
-                    .unwrap();
-                assert!(out.status.success(), "git {args:?}: {out:?}");
-            }
-            dir
-        };
-        let ours = working_copy("ours", "https://github.com/Acme/Widget.git", "feature");
-        let other = working_copy("other", "https://github.com/acme/other.git", "main");
+        let ours = working_copy(
+            &root,
+            "ours",
+            "https://github.com/Acme/Widget.git",
+            "feature",
+        );
+        let other = working_copy(&root, "other", "https://github.com/acme/other.git", "main");
         let full = root.join("full");
         std::fs::create_dir(&full).unwrap();
         std::fs::write(full.join("notes"), "x").unwrap();
@@ -1428,13 +1578,7 @@ mod tests {
             ("typed", "fix-docs-review")
         );
         assert_eq!(ask("my-own-name"), Some(ReviewCopyOutlook::NotNeeded));
-        let made = crate::git::test_support::git_command()
-            .arg("-C")
-            .arg(&ours)
-            .args(["branch", "fix-docs-review"])
-            .output()
-            .unwrap();
-        assert!(made.status.success());
+        make_branch(&ours, "fix-docs-review");
         assert_eq!(ask("fix-docs-review"), Some(ReviewCopyOutlook::NotNeeded));
 
         let refused = inspect(&ours, &[project.as_str()])

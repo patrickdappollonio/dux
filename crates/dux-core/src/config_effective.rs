@@ -78,13 +78,23 @@ impl LogLevel {
         }
     }
 
-    /// The inverse of the `as u8` cast the logger stores the level as.
-    /// Anything else means a corrupted store, which reads as the default.
+    /// The byte the logger stores the level as, which is its discriminant.
+    pub(crate) const fn as_u8(self) -> u8 {
+        match self {
+            Self::Error => 0,
+            Self::Warn => 1,
+            Self::Info => 2,
+            Self::Debug => 3,
+        }
+    }
+
+    /// The inverse of [`Self::as_u8`]. Anything else means a corrupted store,
+    /// which reads as the default.
     pub(crate) fn from_u8(value: u8) -> Self {
         match value {
-            v if v == Self::Error as u8 => Self::Error,
-            v if v == Self::Warn as u8 => Self::Warn,
-            v if v == Self::Debug as u8 => Self::Debug,
+            0 => Self::Error,
+            1 => Self::Warn,
+            3 => Self::Debug,
             _ => Self::Info,
         }
     }
@@ -200,6 +210,7 @@ pub fn effective_agent_sort(configured: &str) -> FlatSortMode {
 /// Where the pull-request banner sits in an agent's pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PrBannerPosition {
+    /// At the top of the pane.
     Top,
     /// The default.
     #[default]
@@ -392,7 +403,9 @@ pub enum ServerColor {
     /// Color when the console is a terminal that wants it. The default.
     #[default]
     Auto,
+    /// Always color, even when the console is not a terminal.
     Always,
+    /// Never color.
     Never,
 }
 
@@ -598,50 +611,100 @@ pub(crate) fn use_time_corrections_at(
     config: &Config,
     root: Option<&std::path::Path>,
 ) -> Vec<UseTimeCorrection> {
-    let mut found = Vec::new();
-    let mut note = |path: &[&str],
-                    written: serde_json::Value,
-                    used: serde_json::Value,
-                    reason: &dyn Fn() -> String| {
-        if written != used {
-            found.push(UseTimeCorrection {
+    let mut found = Corrections::default();
+    logging_corrections(&mut found, config);
+    ui_corrections(&mut found, config);
+    ui_display_corrections(&mut found, config, root);
+    capability_provider_and_editor_corrections(&mut found, config);
+    server_corrections(&mut found, config);
+    server_timing_and_identity_corrections(&mut found, config);
+    found.0
+}
+
+/// The corrections found so far.
+#[derive(Default)]
+struct Corrections(Vec<UseTimeCorrection>);
+
+impl Corrections {
+    /// Record that dux uses `used` for the setting at `path`, written as
+    /// `written`, when the two differ; `reason` says why.
+    fn note(
+        &mut self,
+        path: &[&str],
+        written: &serde_json::Value,
+        used: serde_json::Value,
+        reason: &dyn Fn() -> String,
+    ) {
+        if *written != used {
+            self.0.push(UseTimeCorrection {
                 path: path.iter().map(|segment| (*segment).to_string()).collect(),
                 used,
                 reason: reason(),
             });
         }
-    };
-    let json = |value: &dyn ErasedSerialize| value.to_json();
-    let numbered = |configured: u64, used: u64, ceiling: u64, floor_reason: &str| -> String {
-        if configured > used && used == ceiling {
-            format!("dux uses at most {ceiling}")
-        } else {
-            floor_reason.to_string()
-        }
-    };
-    // A value its parser reads (only the spelling differs from the config
-    // comment's), or one it does not.
-    let worded = |parsed: bool, known: &str, fallback: &str| -> String {
-        if parsed {
-            "dux reads this setting without regard to case or surrounding spaces".to_string()
-        } else {
-            format!("dux knows {known}, and uses {fallback} for anything else")
-        }
-    };
+    }
+}
 
+/// `value` serialized for comparison.
+fn json(value: &dyn ErasedSerialize) -> serde_json::Value {
+    value.to_json()
+}
+
+/// Why a number is not used as written: the ceiling when it was cut down to
+/// it, else `floor_reason`.
+fn numbered(configured: u64, used: u64, ceiling: u64, floor_reason: &str) -> String {
+    if configured > used && used == ceiling {
+        format!("dux uses at most {ceiling}")
+    } else {
+        floor_reason.to_string()
+    }
+}
+
+/// Whether a setting's parser read its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Parse {
+    /// The parser read it.
+    Read,
+    /// The parser did not.
+    NotRead,
+}
+
+impl<T> From<Option<T>> for Parse {
+    fn from(parsed: Option<T>) -> Self {
+        if parsed.is_some() {
+            Self::Read
+        } else {
+            Self::NotRead
+        }
+    }
+}
+
+/// Why a worded value is not used as written, from its parser's answer: one
+/// it reads (only the spelling differs from the config comment's), or one it
+/// does not.
+fn worded(parsed: Parse, known: &str, fallback: &str) -> String {
+    if parsed == Parse::Read {
+        "dux reads this setting without regard to case or surrounding spaces".to_string()
+    } else {
+        format!("dux knows {known}, and uses {fallback} for anything else")
+    }
+}
+
+/// The `[logging]` settings dux corrects.
+fn logging_corrections(found: &mut Corrections, config: &Config) {
     let level = &config.logging.level;
-    note(
+    found.note(
         &["logging", "level"],
-        json(level),
+        &json(level),
         json(&effective_log_level(level).as_str()),
         &|| {
             "dux knows the levels debug, info, warn and error, written in lowercase, and logs at info for anything else".to_string()
         },
     );
     let keep = config.logging.keep;
-    note(
+    found.note(
         &["logging", "keep"],
-        json(&keep),
+        &json(&keep),
         json(&effective_log_keep(keep)),
         &|| format!("dux keeps at most {MAX_LOG_KEEP} rotated copies"),
     );
@@ -655,9 +718,9 @@ pub(crate) fn use_time_corrections_at(
             config.server.shutdown_timeout_seconds,
         ),
     ] {
-        note(
+        found.note(
             path,
-            json(&seconds),
+            &json(&seconds),
             json(&effective_shutdown_timeout_seconds(seconds)),
             &|| {
                 format!(
@@ -667,12 +730,15 @@ pub(crate) fn use_time_corrections_at(
             },
         );
     }
+}
 
+/// `[ui]`'s tab cap, pull-request polls and pane sizes.
+fn ui_corrections(found: &mut Corrections, config: &Config) {
     let ui = &config.ui;
     let tabs = ui.agent_tabs_max;
-    note(
+    found.note(
         &["ui", "agent_tabs_max"],
-        json(&tabs),
+        &json(&tabs),
         json(&effective_agent_tabs_max(tabs)),
         &|| {
             numbered(
@@ -684,9 +750,9 @@ pub(crate) fn use_time_corrections_at(
         },
     );
     let poll = ui.pr_poll_interval_seconds;
-    note(
+    found.note(
         &["ui", "pr_poll_interval_seconds"],
-        json(&poll),
+        &json(&poll),
         json(&effective_pr_poll_interval_seconds(poll)),
         &|| {
             numbered(
@@ -700,9 +766,9 @@ pub(crate) fn use_time_corrections_at(
         },
     );
     let inactive = ui.pr_poll_inactive_interval_seconds;
-    note(
+    found.note(
         &["ui", "pr_poll_inactive_interval_seconds"],
-        json(&inactive),
+        &json(&inactive),
         json(&effective_pr_poll_inactive_interval_seconds(inactive)),
         &|| {
             numbered(
@@ -720,9 +786,9 @@ pub(crate) fn use_time_corrections_at(
         ("staged_pane_height_pct", ui.staged_pane_height_pct),
         ("commit_pane_height_pct", ui.commit_pane_height_pct),
     ] {
-        note(
+        found.note(
             &["ui", key],
-            json(&pct),
+            &json(&pct),
             json(&effective_pane_height_pct(pct)),
             &|| {
                 format!(
@@ -732,9 +798,9 @@ pub(crate) fn use_time_corrections_at(
             },
         );
     }
-    note(
+    found.note(
         &["ui", "agent_sort"],
-        json(&ui.agent_sort),
+        &json(&ui.agent_sort),
         json(&agent_sort_name(effective_agent_sort(&ui.agent_sort))),
         &|| {
             "dux knows the sorts active, updated, created, name, name_desc and manual, and sorts \
@@ -742,36 +808,46 @@ pub(crate) fn use_time_corrections_at(
                 .to_string()
         },
     );
+}
+
+/// `[ui]`'s banner, compose bar, uploads, theme and terminal font; the theme is judged only
+/// with the config directory `root`.
+fn ui_display_corrections(
+    found: &mut Corrections,
+    config: &Config,
+    root: Option<&std::path::Path>,
+) {
+    let ui = &config.ui;
     let position = &ui.pr_banner_position;
-    note(
+    found.note(
         &["ui", "pr_banner_position"],
-        json(position),
+        &json(position),
         json(&effective_pr_banner_position(position).as_str()),
         &|| {
             worded(
-                PrBannerPosition::parse(position).is_some(),
+                PrBannerPosition::parse(position).into(),
                 "top and bottom",
                 "bottom",
             )
         },
     );
     let compose = &ui.compose_bar;
-    note(
+    found.note(
         &["ui", "compose_bar"],
-        json(compose),
+        &json(compose),
         json(&effective_compose_bar(compose).as_str()),
         &|| {
             worded(
-                ComposeBarMode::parse(compose).is_some(),
+                ComposeBarMode::parse(compose).into(),
                 "auto, always and never",
                 "auto",
             )
         },
     );
     let uploads = &ui.upload_directory;
-    note(
+    found.note(
         &["ui", "upload_directory"],
-        json(uploads),
+        &json(uploads),
         json(&effective_upload_directory(uploads)),
         &|| {
             if crate::config::upload_directory_rejection(uploads).is_some() {
@@ -784,7 +860,7 @@ pub(crate) fn use_time_corrections_at(
         },
     );
     if let Some(used) = root.and_then(|root| effective_theme(&ui.theme, root)) {
-        note(&["ui", "theme"], json(&ui.theme), json(&used), &|| {
+        found.note(&["ui", "theme"], &json(&ui.theme), json(&used), &|| {
             format!(
                 "the terminal UI has no theme by this name (built in, or a file in the themes \
                  directory beside config.toml), so it draws with {used}"
@@ -792,9 +868,9 @@ pub(crate) fn use_time_corrections_at(
         });
     }
     let family = &ui.terminal_font_family;
-    note(
+    found.note(
         &["ui", "terminal_font_family"],
-        json(family),
+        &json(family),
         json(&effective_terminal_font_family(family)),
         &|| {
             format!(
@@ -804,30 +880,33 @@ pub(crate) fn use_time_corrections_at(
             )
         },
     );
+}
 
+/// `[capabilities]`, the providers and `[editor]`.
+fn capability_provider_and_editor_corrections(found: &mut Corrections, config: &Config) {
     let capabilities = &config.capabilities;
     let identity = &capabilities.terminal_identity;
-    note(
+    found.note(
         &["capabilities", "terminal_identity"],
-        json(identity),
+        &json(identity),
         json(&effective_terminal_identity(identity).as_str()),
         &|| {
             worded(
-                TerminalIdentityMode::parse(identity).is_some(),
+                TerminalIdentityMode::parse(identity).into(),
                 "auto, mirror, ghostty, kitty, iterm2 and none",
                 "auto",
             )
         },
     );
     let clipboard = &capabilities.clipboard_passthrough;
-    note(
+    found.note(
         &["capabilities", "clipboard_passthrough"],
-        json(clipboard),
+        &json(clipboard),
         json(&effective_clipboard_passthrough(capabilities).as_str()),
         &|| {
             if capabilities.passthrough {
                 worded(
-                    ClipboardPassthroughMode::parse(clipboard).is_some(),
+                    ClipboardPassthroughMode::parse(clipboard).into(),
                     "focused, always and off",
                     "focused",
                 )
@@ -843,13 +922,13 @@ pub(crate) fn use_time_corrections_at(
         let Some(form) = provider.web_dragdrop_paste.as_deref() else {
             continue;
         };
-        note(
+        found.note(
             &["providers", name, "web_dragdrop_paste"],
-            json(&form),
+            &json(&form),
             json(&effective_web_dragdrop_paste(Some(form)).as_str()),
             &|| {
                 worded(
-                    WebDragDropPaste::parse(form).is_some(),
+                    WebDragDropPaste::parse(form).into(),
                     "bare, single_quoted, double_quoted and backslash_escaped",
                     "bare",
                 )
@@ -859,29 +938,32 @@ pub(crate) fn use_time_corrections_at(
 
     let editor = &config.editor.default;
     if !editor.trim().is_empty() && effective_editor_default(editor).is_none() {
-        note(&["editor", "default"], json(editor), json(&""), &|| {
+        found.note(&["editor", "default"], &json(editor), json(&""), &|| {
             "dux knows no editor by this name, so it opens the first supported editor it finds \
              on PATH"
                 .to_string()
         });
     }
+}
 
+/// `[server]`'s logging, log viewer, drop concurrency and caps.
+fn server_corrections(found: &mut Corrections, config: &Config) {
     let server = &config.server;
-    note(
+    found.note(
         &["server", "tailscale"],
-        json(&server.tailscale),
+        &json(&server.tailscale),
         json(&effective_tailscale(&server.tailscale).as_str()),
         &|| {
             worded(
-                TailscaleMode::parse(&server.tailscale).is_some(),
+                TailscaleMode::parse(&server.tailscale).into(),
                 "auto, yes and no",
                 "auto",
             )
         },
     );
-    note(
+    found.note(
         &["server", "color"],
-        json(&server.color),
+        &json(&server.color),
         json(&effective_server_color(&server.color).as_str()),
         &|| {
             "dux knows auto, always and never, written in lowercase, and uses auto for anything \
@@ -890,23 +972,23 @@ pub(crate) fn use_time_corrections_at(
         },
     );
     let server_keep = server.log_keep;
-    note(
+    found.note(
         &["server", "log_keep"],
-        json(&server_keep),
+        &json(&server_keep),
         json(&effective_log_keep(server_keep)),
         &|| format!("dux keeps at most {MAX_LOG_KEEP} rotated copies"),
     );
     let lines = server.log_viewer_lines;
-    note(
+    found.note(
         &["server", "log_viewer_lines"],
-        json(&lines),
+        &json(&lines),
         json(&effective_log_viewer_lines(lines)),
         &|| format!("the log viewer keeps at least 1 line and at most {LOG_VIEWER_LINES_MAX}"),
     );
     let drops = server.file_drop_max_concurrency;
-    note(
+    found.note(
         &["server", "file_drop_max_concurrency"],
-        json(&drops),
+        &json(&drops),
         json(&effective_file_drop_max_concurrency(drops)),
         &|| {
             "no upload slots at all would stall every drop, so 0 is 1 (file_drop_max_bytes = 0 \
@@ -936,14 +1018,19 @@ pub(crate) fn use_time_corrections_at(
             effective_reconnect_attempt_timeout_seconds(server.reconnect_attempt_timeout_seconds),
         ),
     ] {
-        note(&["server", key], json(&configured), json(&used), &|| {
+        found.note(&["server", key], &json(&configured), json(&used), &|| {
             "0 means the default".to_string()
         });
     }
+}
+
+/// `[server]`'s request timeouts, heartbeat, title and favicon.
+fn server_timing_and_identity_corrections(found: &mut Corrections, config: &Config) {
+    let server = &config.server;
     let changes = server.changes_request_timeout_seconds;
-    note(
+    found.note(
         &["server", "changes_request_timeout_seconds"],
-        json(&changes),
+        &json(&changes),
         json(&effective_changes_request_timeout_seconds(changes)),
         &|| {
             numbered(
@@ -955,9 +1042,9 @@ pub(crate) fn use_time_corrections_at(
         },
     );
     let deadline = server.heartbeat_deadline_seconds;
-    note(
+    found.note(
         &["server", "heartbeat_deadline_seconds"],
-        json(&deadline),
+        &json(&deadline),
         json(&effective_heartbeat_deadline_seconds(
             deadline,
             server.heartbeat_seconds,
@@ -975,9 +1062,9 @@ pub(crate) fn use_time_corrections_at(
             }
         },
     );
-    note(
+    found.note(
         &["server", "title"],
-        json(&server.title),
+        &json(&server.title),
         json(&effective_server_title(&server.title)),
         &|| {
             format!(
@@ -986,20 +1073,19 @@ pub(crate) fn use_time_corrections_at(
             )
         },
     );
-    note(
+    found.note(
         &["server", "favicon"],
-        json(&server.favicon),
+        &json(&server.favicon),
         json(&effective_server_favicon(&server.favicon)),
         &|| {
             worded(
-                parse_server_favicon(&server.favicon).is_some(),
+                parse_server_favicon(&server.favicon).into(),
                 "the tints violet, blue, sky, cyan, teal, green, amber, orange, red, pink and \
                  rose",
                 "the default duck",
             )
         },
     );
-    found
 }
 
 /// A value serialized for comparison, without naming its type at the call.

@@ -47,7 +47,7 @@ impl std::fmt::Debug for DestructiveCheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DestructiveCheck")
             .field("targets", &self.targets)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -105,6 +105,11 @@ impl DestructiveCheck {
     /// clearance borrows them. Blocking: reads the session database and the
     /// process table, so call it off the engine thread, right before the
     /// operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a [`Refused`] naming the path and why it may not go: a target not held by one of
+    /// `claims`, something of an agent's still there, or a process dux started standing in it.
     pub fn clear<'a>(
         &self,
         claims: &[&'a crate::worktree_ops::DestructiveClaim],
@@ -217,6 +222,10 @@ pub struct Cleared<'a> {
 impl Cleared<'_> {
     /// Refuse unless `path` is one of the paths this clearance was granted
     /// for: a clearance for one folder never licenses another.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `path` is not one of the paths this clearance was granted for.
     pub fn require(&self, path: &Path) -> anyhow::Result<()> {
         #[cfg(test)]
         if self.any {
@@ -347,7 +356,7 @@ mod tests {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::default(),
             })
             .unwrap();
         let refused = pending.clear(&[&claim], "delete").unwrap_err();

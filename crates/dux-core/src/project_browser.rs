@@ -15,6 +15,8 @@ use crate::worker::{
     BranchWarningKind, BrowserEntry, NonDefaultBranchAction, ProjectWorktreeEntry, WorkerEvent,
 };
 
+/// The add-project browser's rows for `dir`: its visible subdirectories, repositories first then by
+/// name, under a `../` row for its parent.
 pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     let mut entries = fs::read_dir(dir)
         .ok()
@@ -85,6 +87,7 @@ pub fn resolve_start_dir(config: &Config) -> PathBuf {
         })
 }
 
+/// `path` canonicalized, or `path` itself when it cannot be.
 pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -202,6 +205,8 @@ pub fn load_projects<S: std::hash::BuildHasher>(
     projects
 }
 
+/// Tags each of a project's git worktrees with whether dux manages it, which agent holds it and
+/// whether it is the project's own checkout, the ones an agent can be started on first.
 pub fn classify_project_worktrees(
     project: &Project,
     paths: &DuxPaths,
@@ -284,6 +289,8 @@ pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: &Sender
     });
 }
 
+/// Works out on the calling worker thread which branch the project's checkout is on and whether it
+/// is the default, and reports it to `worker_tx`.
 pub fn run_checkout_project_default_branch_inspection_job(
     project: Project,
     worker_tx: &Sender<WorkerEvent>,
@@ -683,7 +690,7 @@ mod tests {
             leading_branch: Some("trunk".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
             current_branch: "feature".to_string(),
             branch_status: ProjectBranchStatus::NotLeading,
             path_missing: false,
@@ -741,7 +748,7 @@ mod tests {
             leading_branch: Some("feature".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
             current_branch: "feature".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,
@@ -764,6 +771,16 @@ mod tests {
                 );
             }
             _ => panic!("expected checkout inspection event"),
+        }
+    }
+
+    /// A worktree as git lists it: at `path`, with `head` out on `branch`.
+    fn listed_worktree(path: &Path, head: &str, branch: &str) -> git::GitWorktree {
+        git::GitWorktree {
+            path: path.to_path_buf(),
+            head: Some(head.to_string()),
+            branch_name: Some(branch.to_string()),
+            detached: false,
         }
     }
 
@@ -790,7 +807,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,
@@ -827,30 +844,10 @@ mod tests {
             }),
         }];
         let worktrees = vec![
-            git::GitWorktree {
-                path: repo.clone(),
-                head: Some("0000000".to_string()),
-                branch_name: Some("main".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: managed.clone(),
-                head: Some("1111111".to_string()),
-                branch_name: Some("managed-orphan".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: external.clone(),
-                head: Some("2222222".to_string()),
-                branch_name: Some("feature".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: existing.clone(),
-                head: Some("3333333".to_string()),
-                branch_name: Some("existing".to_string()),
-                detached: false,
-            },
+            listed_worktree(&repo, "0000000", "main"),
+            listed_worktree(&managed, "1111111", "managed-orphan"),
+            listed_worktree(&external, "2222222", "feature"),
+            listed_worktree(&existing, "3333333", "existing"),
         ];
 
         let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
@@ -914,7 +911,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: crate::model::ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -982,7 +979,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
         };
         let config = Config::default();
         let mut created_ats = HashMap::new();

@@ -12,6 +12,10 @@ use crate::util::eventually;
 pub const DEMO_REPO: &str = "/repos/demo-api";
 
 /// `GET /api/v1/projects`, panicking unless it answered with a list.
+///
+/// # Panics
+///
+/// When dux does not answer 200 with a list.
 pub async fn projects(client: &Client) -> Vec<Value> {
     let response = client.get("/api/v1/projects").await;
     assert_eq!(
@@ -29,6 +33,11 @@ pub async fn projects(client: &Client) -> Vec<Value> {
 
 /// Add the demo repository as a project running the fake provider, and return
 /// the project's id.
+///
+/// # Panics
+///
+/// When dux refuses to add the project, answers without an id, or refuses to point it at
+/// the fake provider.
 pub async fn add_demo_project(client: &Client) -> String {
     let response = client
         .post_json(
@@ -61,6 +70,10 @@ pub async fn add_demo_project(client: &Client) -> String {
 
 /// Create an agent called `name` in `project_id` and wait until it has a tab.
 /// Returns the session as the server lists it.
+///
+/// # Panics
+///
+/// When dux refuses the create, or the agent has no tab within 90 seconds.
 pub async fn create_agent(client: &Client, project_id: &str, name: &str) -> Value {
     let response = client
         .post_json(
@@ -99,6 +112,10 @@ pub async fn create_agent(client: &Client, project_id: &str, name: &str) -> Valu
 }
 
 /// The id of a session as the server lists it.
+///
+/// # Panics
+///
+/// When `session` has no string `id`.
 pub fn session_id(session: &Value) -> String {
     session["id"]
         .as_str()

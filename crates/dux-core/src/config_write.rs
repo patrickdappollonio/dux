@@ -37,7 +37,9 @@ use crate::file_modes::PRIVATE_FILE_MODE as CONFIG_FILE_MODE;
 /// use `NoFsync` (crash-safe via rename, but not power-loss-durable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
+    /// Fsync the file before the rename, for power-loss durability.
     Fsync,
+    /// Rename without an fsync: crash-safe, but not power-loss-durable.
     NoFsync,
 }
 
@@ -70,6 +72,10 @@ impl ConfigFileLock {
     }
 
     /// Take the lock, waiting up to [`Self::DEFAULT_WAIT`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock file cannot be opened, or the lock is not free within the wait.
     pub fn acquire(config_path: &Path) -> Result<Self> {
         Self::acquire_within(config_path, Self::DEFAULT_WAIT)
     }
@@ -334,10 +340,14 @@ fn write_target(path: &Path) -> Result<PathBuf> {
 /// fails `cargo clippy --all-targets --all-features -- -D warnings`. This is a
 /// regression guard: all runtime config writes must go through `ConfigWriteQueue`.
 /// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
-/// recover, bootstrap project-sync) silence the lint with `#[allow(deprecated)]`
+/// recover, bootstrap project-sync) silence the lint with `#[expect(deprecated)]`
 /// and a short comment explaining why direct write is correct there.
+///
+/// # Errors
+///
+/// Fails when the temporary file cannot be written, synced or renamed into place.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic(path, contents, Durability::Fsync)
@@ -348,13 +358,23 @@ use crate::config::{Config, MacrosConfig, ProjectConfig, ProvidersConfig};
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
 /// every section patch, and writes it back atomically at [`Durability::Fsync`].
+///
+/// # Errors
+///
+/// Fails as [`patch_config_file_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
     patch_config_file_with(config_path, config, Durability::Fsync)
 }
 
+/// Patches the existing config file in place to match `config`, keeping the user's comments and
+/// layout, with the given durability.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or parsed as TOML, or the write fails.
 pub fn patch_config_file_with(
     config_path: &Path,
     config: &Config,
@@ -371,9 +391,11 @@ pub fn patch_config_file_with(
 /// it since it last read it: the text it read, plus every key it has written
 /// since. It answers one question: was this setting ever in the file? A
 /// setting that was, and is gone now, was deleted by hand.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SaveBase<'a> {
+    /// The config the file last agreed with.
     pub config: &'a Config,
+    /// The file's text as dux has seen it since it last read it, when known.
     pub seen: Option<&'a str>,
 }
 
@@ -431,6 +453,11 @@ pub(crate) fn patch_config_file_three_way(
 /// [`save_config_with`] for a writer that knows its base: patch the file
 /// three ways when it exists, write the documented template when it does
 /// not. Returns the text written.
+///
+/// # Errors
+///
+/// Fails when an existing file cannot be read or parsed as TOML, the result's `[server.auth]` would
+/// not load, or the write fails.
 pub fn save_config_three_way(
     config_path: &Path,
     base: Option<SaveBase<'_>>,
@@ -464,7 +491,7 @@ pub fn source_after_sync(
             .and_then(|text| crate::config::config_from_text_as_loaded(text).ok())
             .unwrap_or_else(|| synced.clone()),
     };
-    base.projects = synced.projects.clone();
+    base.projects.clone_from(&synced.projects);
     // What the read text expressed, its carried-over keys included.
     let read_seen = read
         .as_str()
@@ -828,183 +855,257 @@ fn merge_changed_at(
     for (key, ours_item) in ours {
         let Some(base_side) = base else {
             // No base: the full patch, through the same in-place writes.
-            match (ours_item, disk.get(key), target.get_mut(key)) {
-                (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
-                    merge_changed(t, disk_table, None, ours_table);
-                }
-                (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
-                    *t = ours_array.clone();
-                }
-                _ => put_in_place(target, key, ours_item.clone()),
-            }
+            merge_key_without_base(target, disk, key, ours_item);
             continue;
         };
         let base_item = base_side.base.get(key);
         let raw_item = base_side.raw.and_then(|raw| raw.get(key));
-        let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
         // A whole table or array missing from the file is merged as an empty
         // one, so each setting (or project) in it gets the same rule as a
         // single deleted setting, and it reappears only if something in it is
         // written.
-        if disk.get(key).is_none() {
-            match (ours_item, base_item) {
-                (Item::Table(ours_table), Some(Item::Table(base_table))) => {
-                    // What dux has seen there, in either form: an inline
-                    // section deleted by hand was seen, so what it held
-                    // stays deleted.
-                    let raw_table = raw_item.and_then(table_like);
-                    let empty = Table::new();
-                    let mut out = Table::new();
-                    merge_changed(
-                        &mut out,
-                        &empty,
-                        Some(MergeBase {
-                            raw: raw_table.as_ref(),
-                            base: base_table,
-                        }),
-                        ours_table,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, Item::Table(out));
-                    }
-                    continue;
-                }
-                (ours_item, Some(base_item))
-                    if is_inline_table(ours_item) && table_like(base_item).is_some() =>
-                {
-                    let (Some(ours_table), Some(base_table)) =
-                        (table_like(ours_item), table_like(base_item))
-                    else {
-                        continue;
-                    };
-                    let raw_table = raw_item.and_then(table_like);
-                    let empty = Table::new();
-                    let mut out = Table::new();
-                    merge_changed(
-                        &mut out,
-                        &empty,
-                        Some(MergeBase {
-                            raw: raw_table.as_ref(),
-                            base: &base_table,
-                        }),
-                        &ours_table,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, toml_edit::value(out.into_inline_table()));
-                    }
-                    continue;
-                }
-                (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
-                    if merges_entries(key, level) =>
-                {
-                    let empty = toml_edit::ArrayOfTables::new();
-                    let mut out = toml_edit::ArrayOfTables::new();
-                    merge_array_of_tables(
-                        &mut out,
-                        &empty,
-                        raw_item.and_then(Item::as_array_of_tables),
-                        Some(base_array),
-                        ours_array,
-                    );
-                    if !out.is_empty() {
-                        put_in_place(target, key, Item::ArrayOfTables(out));
-                    }
-                    continue;
-                }
-                _ => {}
-            }
+        if disk.get(key).is_none()
+            && merge_section_missing_from_file(target, key, ours_item, base_item, raw_item, level)
+        {
+            continue;
         }
         let Some(disk_item) = disk.get(key) else {
             // Missing from the file. Memory's own change is written; an
             // unchanged setting is filled in only when the file has never had
             // it (new to this version), and otherwise stays deleted, because
             // someone deleted it by hand.
+            let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
             if !unchanged || raw_item.is_none() {
                 put_in_place(target, key, ours_item.clone());
             }
             continue;
         };
-        match (ours_item, disk_item, target.get_mut(key)) {
-            (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
-                if base_item.is_some_and(Item::is_table) =>
-            {
-                // What dux has seen there, in either form: a section the user
-                // rewrote from inline to a table was seen with every key it
-                // held, so one left out in the rewrite stays out.
-                let raw_table = raw_item.and_then(table_like);
-                let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+        merge_key_in_file(
+            target,
+            key,
+            KeySides {
+                ours: ours_item,
+                disk: disk_item,
+                base: base_item,
+                raw: raw_item,
+            },
+            level,
+        );
+    }
+    remove_gone_from_memory(target, disk, base, ours, level);
+    take_ours_order(target, disk, base, ours);
+}
+
+/// The sides of one key [`merge_changed_at`] merges: memory's, the file's,
+/// the base's and what dux has seen there.
+#[derive(Clone, Copy)]
+struct KeySides<'a> {
+    /// Memory's item.
+    ours: &'a Item,
+    /// The file's item.
+    disk: &'a Item,
+    /// The base's item, absent where the base has none.
+    base: Option<&'a Item>,
+    /// What dux has seen there, absent where it has seen none.
+    raw: Option<&'a Item>,
+}
+
+/// [`merge_changed_at`] for `key`, memory's `ours_item`, with no base: the full
+/// patch, through the same in-place writes.
+fn merge_key_without_base(target: &mut Table, disk: &Table, key: &str, ours_item: &Item) {
+    match (ours_item, disk.get(key), target.get_mut(key)) {
+        (Item::Table(ours_table), Some(Item::Table(disk_table)), Some(Item::Table(t))) => {
+            merge_changed(t, disk_table, None, ours_table);
+        }
+        (Item::ArrayOfTables(ours_array), _, Some(Item::ArrayOfTables(t))) => {
+            *t = ours_array.clone();
+        }
+        _ => put_in_place(target, key, ours_item.clone()),
+    }
+}
+
+/// [`merge_changed_at`] for a table or array at `key` that is missing from the
+/// file, merged against an empty one. `true` when it was merged here, `false`
+/// when it is merged as a single setting.
+fn merge_section_missing_from_file(
+    target: &mut Table,
+    key: &str,
+    ours_item: &Item,
+    base_item: Option<&Item>,
+    raw_item: Option<&Item>,
+    level: Level,
+) -> bool {
+    match (ours_item, base_item) {
+        (Item::Table(ours_table), Some(Item::Table(base_table))) => {
+            // What dux has seen there, in either form: an inline
+            // section deleted by hand was seen, so what it held
+            // stays deleted.
+            let raw_table = raw_item.and_then(table_like);
+            let empty = Table::new();
+            let mut out = Table::new();
+            merge_changed(
+                &mut out,
+                &empty,
+                Some(MergeBase {
                     raw: raw_table.as_ref(),
-                    base,
-                });
-                merge_changed(t, disk_table, child, ours_table);
+                    base: base_table,
+                }),
+                ours_table,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, Item::Table(out));
             }
-            // An array the base never had (memory and the file each started
-            // one) is merged against an empty one, so the file's own entries
-            // stay beside memory's.
-            (
-                Item::ArrayOfTables(ours_array),
-                Item::ArrayOfTables(disk_array),
-                Some(Item::ArrayOfTables(t)),
-            ) if merges_entries(key, level) && base_item.is_none_or(Item::is_array_of_tables) => {
-                let empty = toml_edit::ArrayOfTables::new();
-                merge_array_of_tables(
-                    t,
-                    disk_array,
-                    raw_item.and_then(Item::as_array_of_tables),
-                    Some(
-                        base_item
-                            .and_then(Item::as_array_of_tables)
-                            .unwrap_or(&empty),
-                    ),
-                    ours_array,
-                );
-            }
-            // A table written inline on either side (a project's `env`, as
-            // dux writes it, or as the user wrote it in either form) is
-            // merged entry by entry like any other table, and keeps the
-            // file's form: a `[projects.env]` subtable stays one, with its
-            // comments, and an inline table stays inline. A table the base
-            // never had (memory and the file each started one) is merged
-            // against an empty one, so the file's own entries stay.
-            (ours_item, disk_item, Some(target_item))
-                if table_like(ours_item).is_some()
-                    && table_like(disk_item).is_some()
-                    && base_item.is_none_or(|item| table_like(item).is_some()) =>
-            {
-                let (Some(ours_table), Some(disk_table), Some(base_table)) = (
-                    table_like(ours_item),
-                    table_like(disk_item),
-                    base_item.map_or(Some(Table::new()), table_like),
-                ) else {
-                    continue;
-                };
-                let raw_table = raw_item.and_then(table_like);
-                let entry_base = Some(MergeBase {
+            return true;
+        }
+        (ours_item, Some(base_item))
+            if is_inline_table(ours_item) && table_like(base_item).is_some() =>
+        {
+            let (Some(ours_table), Some(base_table)) =
+                (table_like(ours_item), table_like(base_item))
+            else {
+                return true;
+            };
+            let raw_table = raw_item.and_then(table_like);
+            let empty = Table::new();
+            let mut out = Table::new();
+            merge_changed(
+                &mut out,
+                &empty,
+                Some(MergeBase {
                     raw: raw_table.as_ref(),
                     base: &base_table,
-                });
-                match target_item {
-                    Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
-                    Item::Value(Value::InlineTable(inline)) => {
-                        let mut out = disk_table.clone();
-                        merge_changed(&mut out, &disk_table, entry_base, &ours_table);
-                        let decor = inline.decor().clone();
-                        *inline = out.into_inline_table();
-                        *inline.decor_mut() = decor;
-                    }
-                    _ => {}
-                }
+                }),
+                &ours_table,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, toml_edit::value(out.into_inline_table()));
             }
-            _ => {
-                if !unchanged {
-                    put_in_place(target, key, ours_item.clone());
+            return true;
+        }
+        (Item::ArrayOfTables(ours_array), Some(Item::ArrayOfTables(base_array)))
+            if merges_entries(key, level) =>
+        {
+            let empty = toml_edit::ArrayOfTables::new();
+            let mut out = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                &mut out,
+                &empty,
+                raw_item.and_then(Item::as_array_of_tables),
+                Some(base_array),
+                ours_array,
+            );
+            if !out.is_empty() {
+                put_in_place(target, key, Item::ArrayOfTables(out));
+            }
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
+/// [`merge_changed_at`] for `key`, which the file has: a table on both sides is
+/// merged key by key, a merged array of tables entry by entry, and anything else
+/// is memory's when memory changed it.
+fn merge_key_in_file(target: &mut Table, key: &str, sides: KeySides<'_>, level: Level) {
+    let KeySides {
+        ours: ours_item,
+        disk: disk_item,
+        base: base_item,
+        raw: raw_item,
+    } = sides;
+    let unchanged = base_item.is_some_and(|b| item_text(b) == item_text(ours_item));
+
+    match (ours_item, disk_item, target.get_mut(key)) {
+        (Item::Table(ours_table), Item::Table(disk_table), Some(Item::Table(t)))
+            if base_item.is_some_and(Item::is_table) =>
+        {
+            // What dux has seen there, in either form: a section the user
+            // rewrote from inline to a table was seen with every key it
+            // held, so one left out in the rewrite stays out.
+            let raw_table = raw_item.and_then(table_like);
+            let child = base_item.and_then(Item::as_table).map(|base| MergeBase {
+                raw: raw_table.as_ref(),
+                base,
+            });
+            merge_changed(t, disk_table, child, ours_table);
+        }
+        // An array the base never had (memory and the file each started
+        // one) is merged against an empty one, so the file's own entries
+        // stay beside memory's.
+        (
+            Item::ArrayOfTables(ours_array),
+            Item::ArrayOfTables(disk_array),
+            Some(Item::ArrayOfTables(t)),
+        ) if merges_entries(key, level) && base_item.is_none_or(Item::is_array_of_tables) => {
+            let empty = toml_edit::ArrayOfTables::new();
+            merge_array_of_tables(
+                t,
+                disk_array,
+                raw_item.and_then(Item::as_array_of_tables),
+                Some(
+                    base_item
+                        .and_then(Item::as_array_of_tables)
+                        .unwrap_or(&empty),
+                ),
+                ours_array,
+            );
+        }
+        // A table written inline on either side (a project's `env`, as
+        // dux writes it, or as the user wrote it in either form) is
+        // merged entry by entry like any other table, and keeps the
+        // file's form: a `[projects.env]` subtable stays one, with its
+        // comments, and an inline table stays inline. A table the base
+        // never had (memory and the file each started one) is merged
+        // against an empty one, so the file's own entries stay.
+        (ours_item, disk_item, Some(target_item))
+            if table_like(ours_item).is_some()
+                && table_like(disk_item).is_some()
+                && base_item.is_none_or(|item| table_like(item).is_some()) =>
+        {
+            let (Some(ours_table), Some(disk_table), Some(base_table)) = (
+                table_like(ours_item),
+                table_like(disk_item),
+                base_item.map_or(Some(Table::new()), table_like),
+            ) else {
+                return;
+            };
+            let raw_table = raw_item.and_then(table_like);
+            let entry_base = Some(MergeBase {
+                raw: raw_table.as_ref(),
+                base: &base_table,
+            });
+            match target_item {
+                Item::Table(t) => merge_changed(t, &disk_table, entry_base, &ours_table),
+                Item::Value(Value::InlineTable(inline)) => {
+                    let mut out = disk_table.clone();
+                    merge_changed(&mut out, &disk_table, entry_base, &ours_table);
+                    let decor = inline.decor().clone();
+                    *inline = out.into_inline_table();
+                    *inline.decor_mut() = decor;
                 }
+                _ => {}
+            }
+        }
+        _ => {
+            if !unchanged {
+                put_in_place(target, key, ours_item.clone());
             }
         }
     }
-    // Removed in memory (an env variable, a provider): in the base, gone
-    // from ours. Something the base never had stays: it was added on disk.
-    // With no base, whatever the patch left out goes, as in the full patch.
+}
+
+/// Remove from `target` what memory removed (an env variable, a provider): in
+/// the base, gone from `ours`. Something the base never had stays: it was added
+/// on disk. With no base, whatever the patch left out goes, as in the full
+/// patch.
+fn remove_gone_from_memory(
+    target: &mut Table,
+    disk: &Table,
+    base: Option<MergeBase<'_>>,
+    ours: &Table,
+    level: Level,
+) {
     let gone: Vec<String> = disk
         .iter()
         .map(|(key, _)| key.to_string())
@@ -1039,9 +1140,12 @@ fn merge_changed_at(
         }
         target.remove(&key);
     }
-    // Order is meaningful in some tables (`[macros]` above all), so a pure
-    // reorder in memory is a change: the keys ours shares with the file take
-    // ours' order, and anything added on disk keeps its place after them.
+}
+
+/// Order is meaningful in some tables (`[macros]` above all), so a pure reorder
+/// in memory is a change: the keys `ours` shares with the file take ours' order
+/// in `target`, and anything added on disk keeps its place after them.
+fn take_ours_order(target: &mut Table, disk: &Table, base: Option<MergeBase<'_>>, ours: &Table) {
     let reference: Vec<String> = match base {
         Some(base) => base.base.iter().map(|(key, _)| key.to_string()).collect(),
         None => disk.iter().map(|(key, _)| key.to_string()).collect(),
@@ -1398,6 +1502,11 @@ fn item_text(item: &Item) -> String {
 /// is part of what `render` sees. For the whole-file writers that depend on
 /// what the file holds now: recovering the last working config, restoring the
 /// documentation. The result's `[server.auth]` is checked before it lands.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, the file cannot be read, `render` fails, the result's
+/// `[server.auth]` would not load, or the write fails.
 pub fn replace_config_file<T>(
     config_path: &Path,
     render: impl FnOnce(Option<&str>) -> Result<(String, T)>,
@@ -1423,6 +1532,11 @@ pub fn replace_config_file<T>(
 /// to judge) and returns the text to write, if any, with its outcome. A
 /// text to write is checked for a readable `[server.auth]` first. For a
 /// load-time migration, which rewrites keys of whatever the file holds.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, `decide` fails, the result's `[server.auth]` would not
+/// load, or the write fails.
 pub fn migrate_config_file<T>(
     config_path: &Path,
     decide: impl FnOnce(std::io::Result<String>) -> Result<(Option<String>, T)>,
@@ -1442,6 +1556,10 @@ pub fn migrate_config_file<T>(
 /// Write a private (0600) file beside the config while the caller holds the
 /// [`ConfigFileLock`] inside [`replace_config_file`]'s `render`: a backup of
 /// the file being replaced. Taking the lock again there would wait forever.
+///
+/// # Errors
+///
+/// Fails when the file cannot be written.
 pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic_unlocked(path, contents, Durability::Fsync)
 }
@@ -1459,6 +1577,11 @@ pub fn write_beside_config_locked(path: &Path, contents: &str) -> Result<()> {
 /// not TOML is refused (there is nothing safe to patch), and so is a result
 /// whose `[server.auth]` would not load, because that would stop dux from
 /// starting; in both cases nothing is written.
+///
+/// # Errors
+///
+/// Fails when the lock cannot be taken, the file cannot be read or is not TOML, `change` fails, the
+/// result's `[server.auth]` would not load, or the write fails.
 pub fn mutate_config_file<T>(
     config_path: &Path,
     change: impl FnOnce(&mut DocumentMut) -> Result<T>,
@@ -1474,6 +1597,15 @@ pub enum MissingConfig<'a> {
     /// template only when it passes. `dux config set` refuses here while a
     /// dux is running: a fresh default file would drop its password.
     CheckFirst(Box<dyn Fn() -> Result<()> + 'a>),
+}
+
+impl std::fmt::Debug for MissingConfig<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreateDocumented => f.write_str("CreateDocumented"),
+            Self::CheckFirst(_) => f.debug_tuple("CheckFirst").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// [`mutate_config_file`] with a choice of what a missing file means.
@@ -1522,7 +1654,9 @@ enum AuthRule {
 /// IT read came before the write (it carries `before`) or not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileWrite {
+    /// The read token of the text the write replaced.
     pub before: String,
+    /// The read token of the text it wrote.
     pub after: String,
 }
 
@@ -1640,17 +1774,27 @@ fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthCo
     }
 }
 
-/// Save config: patch in place if the file exists, otherwise write a plain
-/// (uncommented) `toml_edit` serialization from scratch. Used by surfaces that
+/// Save config: patch in place if the file exists, otherwise write the
+/// documented template from scratch (see [`render_config_documented`]). Used by surfaces that
 /// don't have the TUI's canonical commented renderer (e.g. the web). The TUI
 /// keeps its own `save_config` for the pretty first-creation path.
+///
+/// # Errors
+///
+/// Fails as [`save_config_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     save_config_with(config_path, config, Durability::Fsync)
 }
 
+/// Saves `config` with the given durability: patches the file in place when it exists, and writes
+/// the documented template otherwise.
+///
+/// # Errors
+///
+/// Fails when an existing file cannot be read or parsed as TOML, or the write fails.
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     if config_path.exists() {
         patch_config_file_three_way(config_path, None, config, durability).map(|_| ())
@@ -1697,13 +1841,23 @@ pub fn render_config_documented(config: &Config) -> String {
 /// an existing file, so it succeeds even when the current `config.toml` is
 /// corrupt or unparseable. Used by the web's "recover config" path, which must
 /// overwrite a broken file from the in-memory config.
+///
+/// # Errors
+///
+/// Fails as [`write_config_plain_with`] does.
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
     write_config_plain_with(config_path, config, Durability::Fsync)
 }
 
+/// Overwrites the file with a fresh plain serialization of `config`, with the given durability,
+/// whatever is on disk.
+///
+/// # Errors
+///
+/// Fails when the write fails.
 pub fn write_config_plain_with(
     config_path: &Path,
     config: &Config,
@@ -1816,6 +1970,19 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_root_u16(doc, "removal_wait_seconds", config.removal_wait_seconds);
 
+    patch_defaults_env_and_logging(doc, config);
+    patch_ui_layout(doc, config);
+    patch_ui_timing_and_github(doc, config);
+    patch_ui_web_and_attention(doc, config);
+    patch_capabilities_editor_cli_and_git(doc, config);
+    patch_server_listener(doc, config);
+    patch_server_connection_caps(doc, config);
+    patch_server_timeouts_and_concurrency(doc, config);
+    patch_terminals_keys_and_lists(doc, config);
+}
+
+/// The `[defaults]`, `[env]` and `[logging]` tables.
+fn patch_defaults_env_and_logging(doc: &mut DocumentMut, config: &Config) {
     // --- [defaults] ---
     patch_table_str(doc, "defaults", "provider", &config.defaults.provider);
     patch_table_opt_str(
@@ -1856,7 +2023,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_u64(doc, "logging", "max_bytes", config.logging.max_bytes);
     patch_table_u32(doc, "logging", "keep", config.logging.keep);
     patch_table_value(doc, "logging", "compress", config.logging.compress);
+}
 
+/// `[ui]`'s pane sizes and scrollback.
+fn patch_ui_layout(doc: &mut DocumentMut, config: &Config) {
     // --- [ui] ---
     patch_table_u16(doc, "ui", "left_width_pct", config.ui.left_width_pct);
     patch_table_u16(doc, "ui", "right_width_pct", config.ui.right_width_pct);
@@ -1891,6 +2061,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.agent_scrollback_lines,
     );
     patch_table_u16(doc, "ui", "agent_tabs_max", config.ui.agent_tabs_max);
+}
+
+/// `[ui]`'s status, branch sync, diff and GitHub settings.
+fn patch_ui_timing_and_github(doc: &mut DocumentMut, config: &Config) {
     patch_table_u16(
         doc,
         "ui",
@@ -1935,6 +2109,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.github_probe_interval_secs,
     );
     patch_table_value(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+}
+
+/// `[ui]`'s web terminal, attention, tab, upload and first-load settings.
+fn patch_ui_web_and_attention(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(
         doc,
         "ui",
@@ -2015,7 +2193,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "ui", "agent_sort", &config.ui.agent_sort);
     patch_table_str(doc, "ui", "theme", &config.ui.theme);
     patch_table_value(doc, "ui", "nerd_font_icons", config.ui.nerd_font_icons);
+}
 
+/// The `[capabilities]`, `[editor]`, `[cli]` and `[git]` tables.
+fn patch_capabilities_editor_cli_and_git(doc: &mut DocumentMut, config: &Config) {
     // --- [capabilities] ---
     patch_table_str(
         doc,
@@ -2066,7 +2247,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "clone_stall_seconds",
         config.git.clone_stall_seconds,
     );
+}
 
+/// `[server]`'s listener, log viewer, background serving and control socket.
+fn patch_server_listener(doc: &mut DocumentMut, config: &Config) {
     // --- [server] ---
     // The deprecated `bind` field is migrated away on load and is never
     // re-emitted here, so a patch/recover/plain write produces the new
@@ -2105,6 +2289,10 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "control_socket",
         &config.server.control_socket,
     );
+}
+
+/// `[server]`'s connection caps, shutdown wait and search index cap.
+fn patch_server_connection_caps(doc: &mut DocumentMut, config: &Config) {
     // The single WebSocket cap was split into three per-class caps; drop the
     // obsolete key from any existing config block on every save so saves stop
     // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when
@@ -2117,37 +2305,40 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
             Set those per-class caps instead; a value of 0 still means disable \
             (refuse all new connections of that class until restart).";
         crate::logger::warn(msg);
-        eprintln!("dux config migration warning: {msg}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "dux config migration warning: {msg}"
+        );
     }
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_events_connections",
-        config.server.max_websocket_events_connections as usize,
+        config.server.max_websocket_events_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_agent_connections",
-        config.server.max_websocket_agent_connections as usize,
+        config.server.max_websocket_agent_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_terminal_connections",
-        config.server.max_websocket_terminal_connections as usize,
+        config.server.max_websocket_terminal_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_tab_connections",
-        config.server.max_websocket_tab_connections as usize,
+        config.server.max_websocket_tab_connections,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "max_websocket_tabs_per_agent",
-        config.server.max_websocket_tabs_per_agent as usize,
+        config.server.max_websocket_tabs_per_agent,
     );
     patch_table_str(doc, "server", "title", &config.server.title);
     patch_table_str(doc, "server", "favicon", &config.server.favicon);
@@ -2163,83 +2354,87 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "search_index_max_files",
         config.server.search_index_max_files,
     );
-    patch_table_usize(
+}
+
+/// `[server]`'s reconnect, heartbeat, operation and concurrency settings.
+fn patch_server_timeouts_and_concurrency(doc: &mut DocumentMut, config: &Config) {
+    patch_table_u32(
         doc,
         "server",
         "replay_wait_seconds",
-        config.server.replay_wait_seconds as usize,
+        config.server.replay_wait_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_backoff_cap_seconds",
-        config.server.reconnect_backoff_cap_seconds as usize,
+        config.server.reconnect_backoff_cap_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_attempts",
-        config.server.reconnect_attempts as usize,
+        config.server.reconnect_attempts,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "reconnect_attempt_timeout_seconds",
-        config.server.reconnect_attempt_timeout_seconds as usize,
+        config.server.reconnect_attempt_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "changes_request_timeout_seconds",
-        config.server.changes_request_timeout_seconds as usize,
+        config.server.changes_request_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "heartbeat_seconds",
-        config.server.heartbeat_seconds as usize,
+        config.server.heartbeat_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "heartbeat_deadline_seconds",
-        config.server.heartbeat_deadline_seconds as usize,
+        config.server.heartbeat_deadline_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "pty_send_timeout_seconds",
-        config.server.pty_send_timeout_seconds as usize,
+        config.server.pty_send_timeout_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "operation_unknown_after_seconds",
-        config.server.operation_unknown_after_seconds as usize,
+        config.server.operation_unknown_after_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "operation_retention_seconds",
-        config.server.operation_retention_seconds as usize,
+        config.server.operation_retention_seconds,
     );
-    patch_table_usize(
+    patch_table_u64(
         doc,
         "server",
         "presence_grace_seconds",
-        config.server.presence_grace_seconds as usize,
+        config.server.presence_grace_seconds,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "tree_list_max_concurrency",
-        config.server.tree_list_max_concurrency as usize,
+        config.server.tree_list_max_concurrency,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "release_notes_max_concurrency",
-        config.server.release_notes_max_concurrency as usize,
+        config.server.release_notes_max_concurrency,
     );
     patch_table_usize(
         doc,
@@ -2247,15 +2442,18 @@ fn apply_section_patches(doc: &mut DocumentMut, config: &Config) {
         "file_drop_max_bytes",
         config.server.file_drop_max_bytes,
     );
-    patch_table_usize(
+    patch_table_u32(
         doc,
         "server",
         "file_drop_max_concurrency",
-        config.server.file_drop_max_concurrency as usize,
+        config.server.file_drop_max_concurrency,
     );
 
     // [server.auth] is deliberately absent: see `render_auth_section`.
+}
 
+/// The `[terminal]`, `[startup_command_terminal]` and `[keys]` tables, then providers, projects and macros.
+fn patch_terminals_keys_and_lists(doc: &mut DocumentMut, config: &Config) {
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(doc, "terminal", "args", &config.terminal.args);
@@ -2372,7 +2570,7 @@ fn patch_table_u32(doc: &mut DocumentMut, section: &str, key: &str, value: u32) 
 }
 fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
     let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value as i64);
+    table[key] = toml_edit::value(crate::numeric::usize_to_i64_wrapping(value));
 }
 
 fn patch_table_value(
@@ -2387,7 +2585,7 @@ fn patch_table_value(
 
 fn patch_table_u64(doc: &mut DocumentMut, section: &str, key: &str, value: u64) {
     let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value as i64);
+    table[key] = toml_edit::value(value.cast_signed());
 }
 
 fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {
@@ -2436,7 +2634,7 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
         }
         tbl["resume_args"] = toml_edit::value(resume);
         if let Some(timeout_ms) = config.resume_wait_timeout_ms {
-            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms as i64);
+            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms.cast_signed());
         }
 
         // The AI commit-message feature was removed; drop the obsolete oneshot
@@ -2987,6 +3185,7 @@ pub struct RestoreMergeReport {
 }
 
 impl RestoreMergeReport {
+    /// Whether the merge dropped, kept and failed to place nothing.
     pub fn is_empty(&self) -> bool {
         self.dropped.is_empty() && self.preserved.is_empty() && self.unplaceable.is_empty()
     }
@@ -3171,7 +3370,10 @@ pub fn escape_toml_multiline(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // tests call the deprecated wrappers directly to verify their behaviour
+#[expect(
+    deprecated,
+    reason = "the tests call the deprecated wrappers directly to verify their behaviour"
+)]
 mod tests {
     use super::*;
 
@@ -6127,7 +6329,7 @@ pub fn read_token(current: Option<&str>) -> String {
         None => Sha256::new().chain_update(b"missing\0"),
     }
     .finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::text::hex_lower(&digest)
 }
 
 #[cfg(test)]

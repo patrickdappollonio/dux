@@ -1,3 +1,6 @@
+//! The SQLite session database (sessions.sqlite3): projects, agent sessions,
+//! tabs and pull-request associations, with its migrations.
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -11,12 +14,19 @@ use crate::text::count_of;
 /// A stored PR association loaded from the database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPr {
+    /// The agent session the pull request is associated with.
     pub session_id: String,
+    /// The pull request's number.
     pub pr_number: u64,
+    /// The GitHub host it lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's state as last seen.
     pub state: String,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's web address.
     pub url: String,
 }
 
@@ -28,6 +38,8 @@ const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
 /// [`SessionStore::instance_id`].
 const INSTANCE_ID_KEY: &str = "instance_id";
 
+/// The open session database: the one connection dux reads and writes `sessions.sqlite3` through.
+#[derive(Debug)]
 pub struct SessionStore {
     conn: Connection,
 }
@@ -102,7 +114,24 @@ pub(crate) struct PendingWorktreeRemoval {
     pub(crate) process_snapshot: Vec<crate::process_sessions::ProcessIdentity>,
 }
 
+/// Whether `agent_sessions.initial_branch` appeared in this open, which is when
+/// the one-time title freeze runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialBranchColumn {
+    /// The column was just added.
+    JustAdded,
+    /// The column was already there.
+    AlreadyThere,
+}
+
 impl SessionStore {
+    /// Opens the database at `path`, tightens its files to owner-only, and brings its schema up to
+    /// date.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be opened, the connection cannot be configured, or a migration
+    /// fails.
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -139,6 +168,24 @@ impl SessionStore {
     }
 
     fn migrate(&self) -> Result<()> {
+        self.migrate_projects_and_sessions_tables()?;
+        self.migrate_session_identity_columns()?;
+        self.migrate_session_state_columns()?;
+        self.migrate_pull_request_tables()?;
+        self.migrate_housekeeping_tables()?;
+        // The slot-tab passes run last: they write `agent_tabs` rows, so the
+        // table has to exist, and a failure in any of them aborts the open. A
+        // workspace whose first tabs are unaddressable is worse than a startup
+        // that says why it stopped.
+        self.sweep_orphan_agent_tabs()?;
+        self.sweep_orphan_minted_branch_renames()?;
+        self.backfill_slot_tabs()?;
+        self.heal_slot_tab_pointers()?;
+        Ok(())
+    }
+
+    /// The `agent_sessions` and `projects` tables, and the project columns added since.
+    fn migrate_projects_and_sessions_tables(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
             create table if not exists agent_sessions (
@@ -199,6 +246,13 @@ impl SessionStore {
             "updated_at",
             "text not null default ''",
         )?;
+        Ok(())
+    }
+
+    /// The agent columns that say what an agent is: its name, its birth branch, where
+    /// its branch came from and which kind of workspace it has, with the one-time
+    /// backfills they need.
+    fn migrate_session_identity_columns(&self) -> Result<()> {
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         // The immutable branch an agent was created on. Additive column with a
         // '' default so old rows and inserts by an older binary still succeed.
@@ -263,66 +317,81 @@ impl SessionStore {
         // Capture the one-time freeze count and log it ONLY after the commit
         // succeeds, so the success line can never claim a migration that a commit
         // failure actually rolled back.
-        let frozen_titles = {
-            let tx = immediate_tx(&self.conn)?;
-            // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
-            // that still lacks one. The WHERE clause is self-limiting, since new
-            // rows always record a genuine `initial_branch` at creation, so this
-            // is a no-op once healed and still repairs rows stranded by a crash
-            // mid-migration or a downgrade-then-upgrade window. The true original
-            // may already be lost to prior drift, so the current branch is frozen
-            // as the recorded initial.
-            //
-            // Gated on the KIND column: a standalone row has an empty
-            // `initial_branch` and an empty `branch_name` permanently by design,
-            // so the assignment would be a no-op today. The gate keeps it from
-            // ever starting to matter for folder rows, which have no branch
-            // identity to heal.
-            tx.execute(
-                "update agent_sessions set initial_branch = branch_name \
-                 where workspace_kind = 'managed' \
-                   and (initial_branch = '' or initial_branch is null)",
-                [],
-            )?;
-            // ONE-TIME backfill, gated on the FIRST appearance of the
-            // `initial_branch` column so it runs exactly once, mirroring the gated
-            // `sort_order` backfill below. `migrate()` runs on every `open()`,
-            // which happens on every startup and every background
-            // project-persistence or config-reload, and an unconditional `title`
-            // backfill would re-freeze the intentionally-NULL `title` of every
-            // auto-named agent on each open, pinning it so the display can no
-            // longer track the branch. `title IS NULL` is a legitimate ongoing
-            // state for auto-named agents, so this must never re-run.
-            //
-            // The asymmetry is deliberate: legacy pet-named agents present at the
-            // one-time upgrade get their current name frozen into `title` here, so
-            // their display never drifts with the branch again, while agents
-            // auto-named afterwards keep `title` NULL and track `branch_name`,
-            // with drift shown through `initial_branch`.
-            let frozen = if initial_branch_added {
-                //
-                // Gated on the kind column for the same reason as the backfill
-                // above: freezing a standalone row's empty branch name into its
-                // title would leave the row with no label at all. A standalone
-                // agent always has a title anyway (creation enforces one), so
-                // this arm has nothing to do for one.
-                Some(tx.execute(
-                    "update agent_sessions set title = branch_name \
-                     where workspace_kind = 'managed' and title is null",
-                    [],
-                )?)
-            } else {
-                None
-            };
-            tx.commit()?;
-            frozen
-        };
+        let frozen_titles = self.backfill_initial_branches(if initial_branch_added {
+            InitialBranchColumn::JustAdded
+        } else {
+            InitialBranchColumn::AlreadyThere
+        })?;
         if let Some(frozen) = frozen_titles {
             crate::logger::info(&format!(
                 "one-time migration: froze the title of {}",
                 count_of(frozen, "legacy session")
             ));
         }
+        Ok(())
+    }
+
+    /// Freeze the birth branch of every managed row still lacking one and, the first
+    /// time `initial_branch` appears, the title of every legacy auto-named agent, in
+    /// one transaction. Answers how many titles were frozen, when that ran.
+    fn backfill_initial_branches(&self, column: InitialBranchColumn) -> Result<Option<usize>> {
+        let tx = immediate_tx(&self.conn)?;
+        // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
+        // that still lacks one. The WHERE clause is self-limiting, since new
+        // rows always record a genuine `initial_branch` at creation, so this
+        // is a no-op once healed and still repairs rows stranded by a crash
+        // mid-migration or a downgrade-then-upgrade window. The true original
+        // may already be lost to prior drift, so the current branch is frozen
+        // as the recorded initial.
+        //
+        // Gated on the KIND column: a standalone row has an empty
+        // `initial_branch` and an empty `branch_name` permanently by design,
+        // so the assignment would be a no-op today. The gate keeps it from
+        // ever starting to matter for folder rows, which have no branch
+        // identity to heal.
+        tx.execute(
+            "update agent_sessions set initial_branch = branch_name \
+             where workspace_kind = 'managed' \
+               and (initial_branch = '' or initial_branch is null)",
+            [],
+        )?;
+        // ONE-TIME backfill, gated on the FIRST appearance of the
+        // `initial_branch` column so it runs exactly once, mirroring the gated
+        // `sort_order` backfill below. `migrate()` runs on every `open()`,
+        // which happens on every startup and every background
+        // project-persistence or config-reload, and an unconditional `title`
+        // backfill would re-freeze the intentionally-NULL `title` of every
+        // auto-named agent on each open, pinning it so the display can no
+        // longer track the branch. `title IS NULL` is a legitimate ongoing
+        // state for auto-named agents, so this must never re-run.
+        //
+        // The asymmetry is deliberate: legacy pet-named agents present at the
+        // one-time upgrade get their current name frozen into `title` here, so
+        // their display never drifts with the branch again, while agents
+        // auto-named afterwards keep `title` NULL and track `branch_name`,
+        // with drift shown through `initial_branch`.
+        let frozen = if column == InitialBranchColumn::JustAdded {
+            //
+            // Gated on the kind column for the same reason as the backfill
+            // above: freezing a standalone row's empty branch name into its
+            // title would leave the row with no label at all. A standalone
+            // agent always has a title anyway (creation enforces one), so
+            // this arm has nothing to do for one.
+            Some(tx.execute(
+                "update agent_sessions set title = branch_name \
+                 where workspace_kind = 'managed' and title is null",
+                [],
+            )?)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(frozen)
+    }
+
+    /// The agent columns for its runtime state: started providers, auto-reopen,
+    /// display order, the remembered tab and the session-slot pointer.
+    fn migrate_session_state_columns(&self) -> Result<()> {
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
             &self.conn,
@@ -383,6 +452,11 @@ impl SessionStore {
         // Both passes run after `create table if not exists agent_tabs` further
         // down, because they write rows into it.
         ensure_column(&self.conn, "agent_sessions", "slot_tab_id", "text")?;
+        Ok(())
+    }
+
+    /// The pull request tables: detected, pinned and suppressed, and branch renames.
+    fn migrate_pull_request_tables(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
             create table if not exists session_prs (
@@ -467,6 +541,11 @@ impl SessionStore {
             );
             ",
         )?;
+        Ok(())
+    }
+
+    /// The housekeeping tables: the changes revision, tabs, app state, pending removals and the process registry.
+    fn migrate_housekeeping_tables(&self) -> Result<()> {
         // Per-session monotonic changed-files revision counter (server mode).
         // Separate from the session record so it is purely housekeeping: a single
         // chokepoint that hands out a strictly-increasing `rev` per session,
@@ -566,14 +645,6 @@ impl SessionStore {
             );
             ",
         )?;
-        // The slot-tab passes run last: they write `agent_tabs` rows, so the
-        // table has to exist, and a failure in any of them aborts the open. A
-        // workspace whose first tabs are unaddressable is worse than a startup
-        // that says why it stopped.
-        self.sweep_orphan_agent_tabs()?;
-        self.sweep_orphan_minted_branch_renames()?;
-        self.backfill_slot_tabs()?;
-        self.heal_slot_tab_pointers()?;
         Ok(())
     }
 
@@ -759,6 +830,10 @@ impl SessionStore {
     }
 
     /// Read one [`app_state`](Self::set_app_state) value.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn app_state(&self, key: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
@@ -785,11 +860,19 @@ impl SessionStore {
     ///
     /// Derived UI state, so it lives here and never in portable config. Shared
     /// by both surfaces on purpose: see [`crate::first_load`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn last_seen_version(&self) -> Result<Option<String>> {
         self.app_state(LAST_SEEN_VERSION_KEY)
     }
 
     /// Record `version` as seen, so its what's-new screen does not reappear.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_last_seen_version(&self, version: &str) -> Result<()> {
         self.set_app_state(LAST_SEEN_VERSION_KEY, version)
     }
@@ -801,6 +884,10 @@ impl SessionStore {
     ///
     /// A consistency check only: it is public and anyone can repeat it, so no
     /// auth, trust, ownership or ban decision may ever read it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write or read fails.
     pub fn instance_id(&self) -> Result<String> {
         // Insert-if-absent then read, so two connections minting at once both
         // read the one that won.
@@ -813,6 +900,10 @@ impl SessionStore {
     }
 
     /// Insert a new extra tab row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails, a duplicate tab id included.
     pub fn insert_agent_tab(&self, tab: &AgentTab) -> Result<()> {
         self.conn.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
@@ -899,6 +990,10 @@ impl SessionStore {
     }
 
     /// Replace the saved process registry with `stored`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the registry cannot be encoded or the database write fails.
     pub fn replace_process_registry(
         &self,
         stored: &[crate::process_sessions::StoredSession],
@@ -935,6 +1030,10 @@ impl SessionStore {
 
     /// The saved process registry, where a body that does not parse is an error
     /// rather than the empty registry [`Self::load_process_registry`] answers.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails or the saved body does not parse.
     pub fn load_process_registry_strict(
         &self,
     ) -> Result<Vec<crate::process_sessions::StoredSession>> {
@@ -1157,6 +1256,10 @@ impl SessionStore {
     /// Load every tab, the slot tab included, ordered so a session's tabs come
     /// out in a stable creation order. A plain reader: orphan rows are swept once
     /// per open by [`Self::sweep_orphan_agent_tabs`], not on every read.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_agent_tabs(&self) -> Result<Vec<AgentTab>> {
         let mut stmt = self.conn.prepare(
             "select id, session_id, provider, sort_order, created_at \
@@ -1177,6 +1280,10 @@ impl SessionStore {
     /// its provider (see [`Self::set_slot_provider`]). Sessions and tabs are
     /// joined, so an orphan row cannot come back out even if
     /// [`Self::sweep_orphan_agent_tabs`] has not run.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_extra_agent_tabs(&self) -> Result<Vec<AgentTab>> {
         let mut stmt = self.conn.prepare(
             "select t.id, t.session_id, t.provider, t.sort_order, t.created_at \
@@ -1338,6 +1445,10 @@ impl SessionStore {
 
     /// How many tabs one session has, the slot tab included: every tab is a
     /// row, so this is the number the per-agent cap is compared against directly.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn count_agent_tabs(&self, session_id: &str) -> Result<i64> {
         let count: i64 = self.conn.query_row(
             "select count(*) from agent_tabs where session_id = ?1",
@@ -1354,6 +1465,10 @@ impl SessionStore {
     /// (supported by the bundled SQLite in `rusqlite`) so it is the one chokepoint
     /// that guarantees a strictly-increasing, persisted `rev` per session, the
     /// ordering/dedup token web clients apply to changed-files GETs and events.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn next_changes_rev(&self, session_id: &str) -> rusqlite::Result<u64> {
         let rev: i64 = self.conn.query_row(
             "insert into changes_rev(session_id, rev) values(?1, 1) \
@@ -1361,17 +1476,27 @@ impl SessionStore {
             params![session_id],
             |row| row.get(0),
         )?;
-        Ok(rev as u64)
+        Ok(rev.cast_unsigned())
     }
 
     /// Insert or update a project. If a project with the same path already
     /// exists under a different id, keep the existing id so sessions remain
     /// attached and refresh the editable metadata.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read or write fails.
     pub fn upsert_project(&self, project: &ProjectConfig) -> Result<()> {
         let sort_order = self.next_project_sort_order()?;
         self.upsert_project_at(project, sort_order)
     }
 
+    /// Inserts or updates a project at `sort_order`, keeping the id of a project already stored at
+    /// the same path.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_project_at(&self, project: &ProjectConfig, sort_order: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let updated = self.conn.execute(
@@ -1447,6 +1572,11 @@ impl SessionStore {
             .context("failed to compute next project sort order")
     }
 
+    /// Every stored project, in sort order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1479,6 +1609,10 @@ impl SessionStore {
     /// Kept separate from [`SessionStore::load_projects`] because `created_at` is
     /// persisted/runtime state, not portable `ProjectConfig`: surfacing it does
     /// not pollute the config representation that gets written back to disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails; a timestamp that does not parse is left out.
     pub fn load_project_created_ats(
         &self,
     ) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
@@ -1499,6 +1633,11 @@ impl SessionStore {
         Ok(map)
     }
 
+    /// Sets or clears a project's default provider.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn update_project_default_provider(
         &self,
         project_id: &str,
@@ -1666,6 +1805,10 @@ impl SessionStore {
     }
 
     /// Insert a PR association or update its state and title if it already exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
             r"
@@ -1680,7 +1823,7 @@ impl SessionStore {
             ",
             params![
                 pr.session_id,
-                pr.pr_number as i64,
+                pr.pr_number.cast_signed(),
                 pr.host,
                 pr.owner_repo,
                 pr.state,
@@ -1692,6 +1835,10 @@ impl SessionStore {
     }
 
     /// Load all known PRs for a session, ordered by `pr_number` descending (latest first).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1703,7 +1850,7 @@ impl SessionStore {
         )?;
         let sid = session_id.to_string();
         let rows = stmt.query_map(params![session_id], |row| {
-            let pr_number = row.get::<_, i64>(0)? as u64;
+            let pr_number = row.get::<_, i64>(0)?.cast_unsigned();
             let host: String = row.get(1)?;
             let owner_repo: String = row.get(2)?;
             Ok(StoredPr {
@@ -1735,7 +1882,7 @@ impl SessionStore {
             ",
         )?;
         let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)? as u64;
+            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
             let host: String = row.get(2)?;
             let owner_repo: String = row.get(3)?;
             Ok(StoredPr {
@@ -1757,6 +1904,10 @@ impl SessionStore {
 
     /// Insert or replace a session's manually attached (pinned) pull request.
     /// One row per session: attaching again replaces the previous pin.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_pr_override(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
             r"
@@ -1775,7 +1926,7 @@ impl SessionStore {
                 pr.session_id,
                 pr.host,
                 pr.owner_repo,
-                pr.pr_number as i64,
+                pr.pr_number.cast_signed(),
                 pr.state,
                 pr.title,
                 pr.url
@@ -1785,6 +1936,10 @@ impl SessionStore {
     }
 
     /// Load every session's pinned pull request (at most one per session).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_pr_overrides(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1793,7 +1948,7 @@ impl SessionStore {
             ",
         )?;
         let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)? as u64;
+            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
             let host: String = row.get(2)?;
             let owner_repo: String = row.get(3)?;
             Ok(StoredPr {
@@ -1825,6 +1980,10 @@ impl SessionStore {
     /// Record that a session's pull-request autodetection is suppressed (the
     /// user detached). Idempotent: suppressing an already-suppressed session
     /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_pr_suppressed(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "insert into session_pr_suppressions (session_id) values (?1) \
@@ -1836,6 +1995,10 @@ impl SessionStore {
 
     /// Clear a session's suppression so autodetection runs again (a no-op when
     /// the session was not suppressed).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn delete_pr_suppression(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "delete from session_pr_suppressions where session_id = ?1",
@@ -1846,6 +2009,10 @@ impl SessionStore {
 
     /// Every session id whose pull-request autodetection is suppressed. Loaded
     /// once at boot into the engine's in-memory mirror.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_pr_suppressions(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -1910,6 +2077,11 @@ impl SessionStore {
     ///
     /// Existing sessions keep going through [`Self::upsert_session`], which is
     /// the hot path status churn takes and which never touches `agent_tabs`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction cannot start, a write fails or the commit fails; nothing is
+    /// written then.
     pub fn create_session(&self, session: &AgentSession) -> Result<()> {
         let tx = immediate_tx(&self.conn).context("failed to start creating the agent")?;
         tx.execute(
@@ -1928,6 +2100,11 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Inserts or updates an agent session row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
         Self::upsert_session_in(&self.conn, session)
     }
@@ -2102,6 +2279,10 @@ impl SessionStore {
     /// The smallest `sort_order` assigned to ANY session, or `None` when there
     /// are none. The placement rule for a standalone agent, which has no project
     /// whose top it could be placed at.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn min_session_sort_order_overall(&self) -> Result<Option<i64>> {
         min_session_sort_order_overall_in(&self.conn)
     }
@@ -2109,6 +2290,10 @@ impl SessionStore {
     /// The smallest `sort_order` currently assigned to any session in
     /// `project_id`, or `None` when the project has no sessions yet. Used to
     /// place a new session one position above the current top.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn min_session_sort_order(&self, project_id: &str) -> Result<Option<i64>> {
         min_session_sort_order_in(&self.conn, project_id)
     }
@@ -2119,6 +2304,10 @@ impl SessionStore {
     /// complete set of the project's sessions. That strict validation lives in
     /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
     /// so would corrupt the "sort by most recently updated" semantics.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; no position changes then.
     pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
         {
@@ -2126,7 +2315,11 @@ impl SessionStore {
                 "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
             )?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id, project_id])?;
+                stmt.execute(params![
+                    crate::numeric::usize_to_i64_wrapping(position),
+                    id,
+                    project_id
+                ])?;
             }
         }
         tx.commit()?;
@@ -2145,7 +2338,7 @@ impl SessionStore {
         {
             let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id])?;
+                stmt.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;
@@ -2156,12 +2349,16 @@ impl SessionStore {
     /// `projects.sort_order` column. Single transaction. Like
     /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
     /// of known projects lives in `Engine::apply`, not here.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; no position changes then.
     pub fn reorder_projects(&self, ordered_ids: &[String]) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
         {
             let mut stmt = tx.prepare("update projects set sort_order = ?1 where id = ?2")?;
             for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![position as i64, id])?;
+                stmt.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;
@@ -2222,13 +2419,18 @@ impl SessionStore {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
             for (position, id) in ids.iter().enumerate() {
-                update.execute(params![position as i64, id])?;
+                update.execute(params![crate::numeric::usize_to_i64_wrapping(position), id])?;
             }
         }
         tx.commit()?;
         Ok(())
     }
 
+    /// Every stored agent session.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -2344,6 +2546,10 @@ impl SessionStore {
 
     /// Test builds only: make every later session delete fail, as a database
     /// that refuses a write would.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sessions table cannot be renamed aside.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_session_deletes_for_tests(&self) {
         // The table a delete names is moved out of its way, so the delete
@@ -2353,6 +2559,11 @@ impl SessionStore {
             .expect("move the sessions table aside");
     }
 
+    /// Deletes a session and every row that depends on it, in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; nothing is deleted then.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
@@ -2384,6 +2595,11 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Records whether an agent should be running, for startup auto-reopen.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_desired_running(
         &self,
         id: &str,
@@ -2403,6 +2619,10 @@ impl SessionStore {
     /// [`crate::model::AgentSession::last_focused_tab`] for why. `updated_at` is
     /// intentionally NOT touched: a focus change is not a content change, and
     /// touching it would perturb "sort by most recently updated" ordering.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_last_focused_tab(&self, id: &str, tab_id: Option<&str>) -> Result<()> {
         self.conn.execute(
             "update agent_sessions set last_focused_tab = ?2 where id = ?1",
@@ -2641,7 +2861,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
         }
     }
 
@@ -3387,9 +3607,8 @@ mod tests {
                 .unwrap();
         }
 
-        let err = match SessionStore::open(&path) {
-            Ok(_) => panic!("a failed migration must stop startup"),
-            Err(err) => err,
+        let Err(err) = SessionStore::open(&path) else {
+            panic!("a failed migration must stop startup")
         };
         assert!(
             format!("{err:#}").contains("slot tab"),
@@ -4226,7 +4445,7 @@ mod tests {
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .unwrap();
 
@@ -4981,7 +5200,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
         };
         store.upsert_project(&mk("a")).unwrap();
         store.upsert_project(&mk("b")).unwrap();

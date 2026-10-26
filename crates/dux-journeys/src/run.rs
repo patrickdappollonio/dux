@@ -34,6 +34,10 @@ pub const RUN_LABEL: &str = "dux-journeys.run";
 
 /// This user's cache directory for the suite (`~/.cache/dux-journeys`),
 /// independent of `TMPDIR`.
+///
+/// # Panics
+///
+/// When neither `XDG_CACHE_HOME` nor `HOME` is set.
 pub fn cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
@@ -57,6 +61,10 @@ static RUN: OnceLock<Run> = OnceLock::new();
 
 /// This process's run id, starting the run (heartbeat and signal cleanup) the
 /// first time it is asked for.
+///
+/// # Panics
+///
+/// The first time, when the run's heartbeat file cannot be created or locked.
 pub fn run_id() -> &'static str {
     &RUN.get_or_init(|| {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -166,15 +174,17 @@ fn install_signal_cleanup(run: String) {
     let mut signals = match signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]) {
         Ok(signals) => signals,
         Err(err) => {
-            eprintln!(
+            crate::image::say(&format!(
                 "dux-journeys: cannot watch for Ctrl-C ({err}); the next run cleans up instead"
-            );
+            ));
             return;
         }
     };
     std::thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
-            eprintln!("dux-journeys: interrupted; removing this run's containers and networks");
+            crate::image::say(
+                "dux-journeys: interrupted; removing this run's containers and networks",
+            );
             remove_run(&run);
             let _ = std::fs::remove_file(runs_dir().join(format!("{run}.lock")));
             let _ = signal_hook::low_level::emulate_default_handler(signal);

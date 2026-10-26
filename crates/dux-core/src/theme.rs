@@ -44,6 +44,7 @@ pub struct ThemeListing {
     pub id: String,
     /// Human-readable label shown in the picker.
     pub display_name: String,
+    /// Where the theme comes from.
     pub source: ThemeSource,
 }
 

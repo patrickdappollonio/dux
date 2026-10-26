@@ -6,13 +6,15 @@ use std::time::{Duration, Instant};
 
 fn alive(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-        let close = s.rfind(')').unwrap();
+        let close = s
+            .rfind(')')
+            .expect("a /proc stat line holds the closing paren of the command name");
         !s[close + 1..].trim_start().starts_with('Z')
     })
 }
 
 fn kill(pid: u32) {
-    if let Some(p) = rustix::process::Pid::from_raw(pid as i32) {
+    if let Some(p) = rustix::process::Pid::from_raw(pid.cast_signed()) {
         let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
     }
 }
@@ -52,10 +54,10 @@ fn run(record: RecordWait) -> (u32, bool) {
         std::thread::sleep(Duration::from_millis(5));
     }
     let job: u32 = std::fs::read_to_string(&pidfile)
-        .unwrap()
+        .expect("the job wrote its pid file")
         .trim()
         .parse()
-        .unwrap();
+        .expect("the pid file holds a pid");
     assert!(process_start(job).is_some());
     if record == RecordWait::WaitForIt {
         registry.wait_for_recordings(&[process], Duration::from_secs(5));

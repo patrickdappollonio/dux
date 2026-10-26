@@ -15,6 +15,7 @@ use anyhow::{Context, Result, anyhow};
 
 /// A directory dux offers to ignore when it initializes a repository, plus the
 /// one-line explanatory comment written above its pattern.
+#[derive(Debug)]
 pub struct IgnoreCandidate {
     /// Directory name relative to the repo root, without a trailing slash.
     pub dir: &'static str,

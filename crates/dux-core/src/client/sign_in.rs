@@ -32,6 +32,10 @@ pub struct RemoteDux {
 }
 
 /// Whether the remote has a password at all, and which dux it is.
+///
+/// # Errors
+///
+/// Fails when the remote cannot be reached or its answer cannot be read.
 pub fn look(name: &str, remote: &Remote) -> Result<RemoteDux, CliError> {
     let reply = send(name, remote, &Request::get("/api/v1/auth/status"))?;
     let status = super::connect::read_auth_status(&format!("{name} ({})", remote.url), &reply)?;
@@ -44,6 +48,11 @@ pub fn look(name: &str, remote: &Remote) -> Result<RemoteDux, CliError> {
 /// The instance id to keep with a sign-in that just succeeded: the remote is
 /// asked again, and a dux other than the one `before` found when the sign-in
 /// began refuses the sign-in rather than pin the remote to either.
+///
+/// # Errors
+///
+/// Fails when the remote cannot be reached, or a different dux answers than the one the sign-in
+/// began with.
 pub fn pin_after_login(
     name: &str,
     remote: &Remote,
@@ -75,7 +84,17 @@ pub struct SignedIn {
 }
 
 /// Sign in with `password` and return the remote's CLI token.
+///
+/// # Errors
+///
+/// Fails when the remote cannot be reached, refuses the password, or answers with something that is
+/// not a token.
 pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, CliError> {
+    #[derive(serde::Deserialize)]
+    struct Issued {
+        token: String,
+    }
+
     let body = serde_json::json!({ "password": password, "label": LABEL });
     let reply = send(
         name,
@@ -90,10 +109,6 @@ pub fn login(name: &str, remote: &Remote, password: &str) -> Result<SignedIn, Cl
     )?;
     if reply.status != 200 {
         return Err(CliError::new(Exit::Failed, reply_sentence(&reply)));
-    }
-    #[derive(serde::Deserialize)]
-    struct Issued {
-        token: String,
     }
     let token = serde_json::from_slice::<Issued>(&reply.body)
         .map(|issued| issued.token)
@@ -152,6 +167,11 @@ fn token_may_go(name: &str, remote: &Remote) -> Result<(), CliError> {
 }
 
 /// Ask the remote to end the sign-in `token`, once it is the dux that issued it.
+///
+/// # Errors
+///
+/// Fails when the remote cannot be reached, is not the dux that issued the token, or refuses to end
+/// it.
 pub fn logout(name: &str, remote: &Remote, token: &str) -> Result<(), CliError> {
     token_may_go(name, remote)?;
     let reply = end_sign_in(name, remote, token)?;

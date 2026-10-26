@@ -1,3 +1,6 @@
+//! Writes dux.log: the process-wide logger, its level, its rotation and the
+//! redaction of names a log line must not carry.
+
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -28,12 +31,14 @@ static ROTATION: LazyLock<Arc<RotationCell>> = LazyLock::new(|| {
 /// The threshold [`log`] gates on, kept outside [`LOGGER`] because the file is
 /// opened once for the process while the level moves with the config: a reload
 /// retunes it through [`set_level`].
-static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info as u8);
+static LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Info.as_u8());
 
 struct Logger {
     log: RotatingLog,
 }
 
+/// Opens the log file the config names and installs the process-wide logger, with its level,
+/// rotation and panic hook; a file that cannot be opened leaves logging off.
 pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
     let path = resolve_log_path(config, paths);
     if let Some(parent) = path.parent() {
@@ -79,18 +84,22 @@ fn install_panic_hook() {
     });
 }
 
+/// Logs `message` at warn level.
 pub fn warn(message: &str) {
     log(LogLevel::Warn, message);
 }
 
+/// Logs `message` at info level.
 pub fn info(message: &str) {
     log(LogLevel::Info, message);
 }
 
+/// Logs `message` at debug level.
 pub fn debug(message: &str) {
     log(LogLevel::Debug, message);
 }
 
+/// Logs `message` at error level.
 pub fn error(message: &str) {
     log(LogLevel::Error, message);
 }
@@ -100,7 +109,7 @@ pub fn error(message: &str) {
 /// reload cannot move it.
 pub(crate) fn set_level(level: &str) {
     LEVEL.store(
-        crate::config_effective::effective_log_level(level) as u8,
+        crate::config_effective::effective_log_level(level).as_u8(),
         Ordering::Relaxed,
     );
 }
@@ -341,7 +350,10 @@ impl RotatingLog {
         if settings.max_bytes > 0
             && !state.rotation_broken
             && state.size > 0
-            && state.size.saturating_add(bytes.len() as u64) > settings.max_bytes
+            && state
+                .size
+                .saturating_add(crate::numeric::usize_to_u64(bytes.len()))
+                > settings.max_bytes
         {
             self.rotate(&mut state, settings);
         }
@@ -354,11 +366,13 @@ impl RotatingLog {
             match state.file.write(&bytes[written..]) {
                 Ok(0) => break,
                 Ok(n) => written += n,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }
-        state.size = state.size.saturating_add(written as u64);
+        state.size = state
+            .size
+            .saturating_add(crate::numeric::usize_to_u64(written));
         let _ = state.file.flush();
     }
 
@@ -446,11 +460,12 @@ impl RotatingLog {
                 state.size = 0;
             }
             Err(err) => {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+
                 // The handle still points at the file that was just renamed, so
                 // putting it back under the live name keeps later lines where a
                 // reader expects them.
                 let restored = fs::rename(self.numbered(1), &self.path).is_ok();
-                static REPORTED: std::sync::Once = std::sync::Once::new();
                 report_rotation_failure(
                     &REPORTED,
                     &format!(
@@ -691,6 +706,8 @@ fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
     Ok(file)
 }
 
+/// The log file's path: `[logging] path` resolved against the config directory, `dux.log` there
+/// when it is empty.
 pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     resolve_under_root(&config.path, paths, "dux.log")
 }
@@ -723,6 +740,14 @@ fn resolve_under_root(configured: &str, paths: &DuxPaths, default_name: &str) ->
 /// `[server]`'s `log_*` settings, apart from `dux.log`'s.
 pub struct ServerLog(RotatingLog);
 
+impl std::fmt::Debug for ServerLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerLog")
+            .field("path", &self.0.path)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ServerLog {
     /// Append one line, adding its newline.
     pub fn write_line(&self, line: &str) {
@@ -740,6 +765,10 @@ impl ServerLog {
 
 /// Open the server log named by `config`, creating its folder and the file
 /// owner-only; its settings are read once, here.
+///
+/// # Errors
+///
+/// Fails when the log's folder cannot be created or the file cannot be opened.
 pub fn open_server_log(config: &ServerConfig, paths: &DuxPaths) -> std::io::Result<ServerLog> {
     let path = resolve_server_log_path(config, paths);
     if let Some(parent) = path.parent() {
@@ -1032,7 +1061,7 @@ mod tests {
             );
             assert_eq!(
                 log.state.lock().unwrap().size,
-                "third line\n".len() as u64,
+                crate::numeric::usize_to_u64("third line\n".len()),
                 "the counter must restart with the new file"
             );
         }
@@ -1238,7 +1267,10 @@ mod tests {
             fs::write(&path, &existing).unwrap();
 
             let log = log_in(dir.path(), settings(64, 3));
-            assert_eq!(log.state.lock().unwrap().size, existing.len() as u64);
+            assert_eq!(
+                log.state.lock().unwrap().size,
+                crate::numeric::usize_to_u64(existing.len())
+            );
 
             log.write_line("the first line after the upgrade\n");
             assert_eq!(

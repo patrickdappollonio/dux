@@ -27,11 +27,11 @@ fn a_pull_request_fetch_starts_no_auto_maintenance_even_where_the_repository_wan
     let trace = tmp.path().join("trace2.json");
     // SAFETY: this binary holds this one test, so no other thread reads the
     // environment while it changes.
-    unsafe {
-        std::env::set_var("GIT_TRACE2_EVENT", &trace);
-        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-    }
+    unsafe { std::env::set_var("GIT_TRACE2_EVENT", &trace) };
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GIT_CONFIG_NOSYSTEM", "1") };
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null") };
 
     let origin = tmp.path().join("origin");
     let repo = tmp.path().join("repo");

@@ -55,7 +55,7 @@ impl CloneProcesses {
         let child = start().map_err(SpawnRefused::Failed)?;
         state.next += 1;
         let token = state.next;
-        state.running.insert(token, child.id() as i32);
+        state.running.insert(token, child.id().cast_signed());
         Ok((child, token))
     }
 
@@ -171,6 +171,11 @@ pub(crate) fn remote_default_branch_from_remote(
 /// time limit, because a big repository is slow rather than stuck; a clone
 /// that prints nothing for `stall` (its progress keeps stderr moving) is
 /// stopped. `processes` records it, so quitting dux stops it too.
+///
+/// # Errors
+///
+/// Fails when git cannot be started, the clone fails or would have to prompt, or it stalls for
+/// `stall`.
 pub fn clone_repository(
     url: &str,
     dest: &Path,
@@ -211,7 +216,7 @@ pub(crate) fn clone_repository_with_env(
                     CloneError::Failed(format!("couldn't run git: {error}"))
                 }
             })?;
-    let group = child.id() as i32;
+    let group = child.id().cast_signed();
 
     // Every chunk git writes is progress. Read on a thread of its own and handed
     // over a channel, so the stall clock can wait on it with a bound.

@@ -20,6 +20,7 @@
 //! fails prints everything the container said (see [`crate::journey`]).
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -227,8 +228,11 @@ fn secret_command(path: &str, secret: &str) -> String {
 /// What a command run inside the container did.
 #[derive(Debug, Clone)]
 pub struct Exec {
+    /// The exit code.
     pub code: i64,
+    /// Everything it printed on stdout, decoded lossily.
     pub stdout: String,
+    /// Everything it printed on stderr, decoded lossily.
     pub stderr: String,
 }
 
@@ -240,6 +244,7 @@ impl Exec {
 }
 
 /// One running dux. Dropping it removes the container.
+#[derive(Debug)]
 pub struct Dux {
     container: ContainerAsync<GenericImage>,
     // After the container, so it drops second: it removes a container a
@@ -255,6 +260,11 @@ pub struct Dux {
 
 impl Dux {
     /// Start a dux and wait until it answers.
+    ///
+    /// # Panics
+    ///
+    /// When the container does not start, or, for `dux server`, its container stops before dux
+    /// answers `/healthz` or dux does not answer within 60 seconds.
     pub async fn start(options: DuxOptions) -> Dux {
         let (image_name, tag) = journey_image().await;
         // A network of its own unless the journey shares one, so no journey
@@ -356,6 +366,10 @@ impl Dux {
     }
 
     /// The host port Docker published `container_port` on.
+    ///
+    /// # Panics
+    ///
+    /// When `container_port` is not published.
     pub async fn host_port(&self, container_port: u16) -> u16 {
         self.container
             .get_host_port_ipv4(container_port.tcp())
@@ -370,6 +384,11 @@ impl Dux {
 
     /// dux's own URL from the host. Only meaningful for [`Bind::Everywhere`]; a
     /// local dux is reached through a relay ([`Self::client_on`]).
+    ///
+    /// # Panics
+    ///
+    /// When this dux is bound to loopback ([`Bind::Local`]), which has no URL from the host, or
+    /// its port is not published.
     pub async fn url(&self) -> String {
         assert_eq!(
             self.bind,
@@ -402,6 +421,11 @@ impl Dux {
     }
 
     /// Run a shell script inside the container and collect what it did.
+    ///
+    /// # Panics
+    ///
+    /// When the exec cannot run (the container stopped), or reports no exit code within 10
+    /// seconds.
     pub async fn exec(&self, script: &str) -> Exec {
         let mut result = self
             .container
@@ -440,6 +464,10 @@ impl Dux {
     }
 
     /// [`Self::exec`], panicking with the output unless it exited 0.
+    ///
+    /// # Panics
+    ///
+    /// When the script cannot run or does not exit 0.
     pub async fn exec_ok(&self, script: &str) -> String {
         let run = self.exec(script).await;
         assert_eq!(
@@ -510,6 +538,10 @@ impl Dux {
     }
 
     /// Wait until dux answers `/healthz` from this machine.
+    ///
+    /// # Panics
+    ///
+    /// When the container stops before dux answers, or dux does not answer within 60 seconds.
     pub async fn wait_healthy(&self) {
         eventually(
             &format!("dux in {} to answer /healthz", self.name),
@@ -537,6 +569,10 @@ impl Dux {
 
     /// Stop the dux process inside the container and wait for the restart loop
     /// to bring up a new run that answers. Needs [`DuxOptions::with_restart_loop`].
+    ///
+    /// # Panics
+    ///
+    /// When dux is not running, the stop fails, or no new dux answers in time.
     pub async fn restart_process(&self) {
         let before = self.dux_pid().await.expect("dux is running");
         self.exec_ok(&format!("kill -TERM {before}")).await;
@@ -554,6 +590,10 @@ impl Dux {
     /// bring up a new run and wait until it answers. Needs
     /// [`DuxOptions::with_restart_loop`]; the loop holds while `/tmp/dux-hold`
     /// exists.
+    ///
+    /// # Panics
+    ///
+    /// When dux is not running, the stop fails, or no new dux answers in time.
     pub async fn stop_process_for(&self, down: Duration) {
         let before = self.dux_pid().await.expect("dux is running");
         self.exec_ok(&format!("touch /tmp/dux-hold && kill -TERM {before}"))
@@ -689,6 +729,7 @@ fn strip_port(address: &str) -> String {
 
 /// A client on this machine: `curl` inside the dux container, against loopback,
 /// with its own cookie jar file.
+#[derive(Debug)]
 pub struct Inside<'a> {
     dux: &'a Dux,
     jar: String,
@@ -711,14 +752,29 @@ impl Inside<'_> {
         self
     }
 
+    /// `GET path`, as [`Self::request`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::request`] does.
     pub async fn get(&self, path: &str) -> Response {
         self.request("GET", path, None).await
     }
 
+    /// `POST path` with `body` as JSON, as [`Self::request`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::request`] does.
     pub async fn post_json(&self, path: &str, body: &serde_json::Value) -> Response {
         self.request("POST", path, Some(body)).await
     }
 
+    /// `POST path` with no body, as [`Self::request`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::request`] does.
     pub async fn post_empty(&self, path: &str) -> Response {
         self.request("POST", path, None).await
     }
@@ -733,6 +789,10 @@ impl Inside<'_> {
     }
 
     /// `GET /api/v1/auth/status` as JSON.
+    ///
+    /// # Panics
+    ///
+    /// When curl fails, or the status does not answer 200 with JSON.
     pub async fn auth_status(&self) -> serde_json::Value {
         let response = self.get("/api/v1/auth/status").await;
         assert_eq!(
@@ -746,6 +806,10 @@ impl Inside<'_> {
 
     /// One request, made the way a browser on this machine would: the jar,
     /// and an `Origin` naming dux itself on anything but a GET.
+    ///
+    /// # Panics
+    ///
+    /// When curl fails inside the container or prints no HTTP status line.
     pub async fn request(
         &self,
         method: &str,
@@ -757,13 +821,14 @@ impl Inside<'_> {
             jar = shell_quote(&self.jar),
         );
         if method != "GET" {
-            command.push_str(&format!(
+            let _ = write!(
+                command,
                 " -H {}",
                 shell_quote(&format!("Origin: {}", self.base))
-            ));
+            );
         }
         for (name, value) in &self.headers {
-            command.push_str(&format!(" -H {}", shell_quote(&format!("{name}: {value}"))));
+            let _ = write!(command, " -H {}", shell_quote(&format!("{name}: {value}")));
         }
         let script = match body {
             Some(body) => {

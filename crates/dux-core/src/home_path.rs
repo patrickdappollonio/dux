@@ -220,13 +220,14 @@ mod tests {
 
     #[test]
     fn a_home_without_search_permission_falls_back_to_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+
         // Root bypasses the permission bits entirely (CAP_DAC_OVERRIDE), so this
         // case cannot be built there; skipping beats asserting the opposite of
         // what an ordinary user sees.
         if rustix::process::geteuid().is_root() {
             return;
         }
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("home");
         std::fs::create_dir(&dir).expect("create dir");

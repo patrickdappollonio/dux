@@ -54,7 +54,9 @@ pub enum StatusAsk {
 /// [`StatusAsk::ReviewCopy`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReviewCopyAsk {
+    /// What the warning said, sent back with the agreement.
     pub warned: String,
+    /// The warning alone, in parts.
     pub warning: Vec<ProseSegment>,
     /// The id the asking client gave the create, so it can tell this is the
     /// answer to that create and not to a later one.
@@ -101,7 +103,9 @@ pub enum ReviewCopyOutlook {
     /// A copy will be needed and every name it could take is taken, so nothing
     /// can be done until the user types another name for the agent.
     NoFreeName {
+        /// Why a copy is needed, as the word a [`ReviewCopyAsk::warned`] begins with.
         reason: String,
+        /// The pull request's own branch, which is left alone.
         branch: String,
         /// The refusal's sentence, in parts.
         message: Vec<ProseSegment>,
@@ -179,6 +183,7 @@ impl StatusText {
         (self.message, self.prose.map(Prose::into_segments))
     }
 
+    /// Whether the message is empty.
     pub fn is_empty(&self) -> bool {
         self.message.is_empty()
     }
@@ -226,8 +231,10 @@ impl StatusText {
 /// - anything else: words, or a whole [`StatusText`] or [`Prose`] spliced in.
 #[macro_export]
 macro_rules! status_text {
-    ($($part:tt)*) => {{
-        #[allow(unused_mut)]
+    () => {
+        $crate::status_text::StatusText::new()
+    };
+    ($($part:tt)+) => {{
         let mut __status_text = $crate::status_text::StatusText::new();
         $crate::__status_text_parts!(__status_text; $($part)*);
         __status_text

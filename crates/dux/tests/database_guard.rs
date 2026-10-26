@@ -210,6 +210,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "retries an interrupted system call",
     ),
     (
+        "dux_core::numeric",
+        Vetted::Module("crates/dux-core/src/numeric.rs"),
+        "converts a number from one integer or float type to another",
+    ),
+    (
         "dux_core::tailscale",
         Vetted::Module("crates/dux-core/src/tailscale.rs"),
         "tells a Tailscale address apart",
@@ -293,13 +298,17 @@ fn client_sources() -> Vec<(String, &'static str, String)> {
     }
     let client = workspace().join("crates/dux-core/src/client");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&client)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
+        .expect("list dux-core's client folder")
+        .map(|entry| entry.expect("read an entry of the client folder").path())
         .filter(|path| path.extension().is_some_and(|e| e == "rs"))
         .collect();
     files.sort();
     for path in files {
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .expect("a listed file has a name")
+            .to_string_lossy()
+            .into_owned();
         // A fake dux for the client's own unit tests; `mod.rs` declares it
         // under `#[cfg(test)]`.
         if name == "test_server.rs" {
@@ -309,7 +318,7 @@ fn client_sources() -> Vec<(String, &'static str, String)> {
         sources.push((
             shown,
             "dux_core",
-            code_of(&std::fs::read_to_string(&path).unwrap()),
+            code_of(&std::fs::read_to_string(&path).expect("read a client source")),
         ));
     }
     sources

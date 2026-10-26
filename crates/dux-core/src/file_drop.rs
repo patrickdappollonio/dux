@@ -94,7 +94,10 @@ pub enum DropNameError {
     Control,
     /// Longer than this filesystem allows. The limit is in BYTES, which is what
     /// the kernel counts.
-    TooLong { limit: usize },
+    TooLong {
+        /// The filesystem's limit, in bytes.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for DropNameError {
@@ -231,7 +234,10 @@ pub enum DropDirError {
     /// one way a relative, traversal-free `ui.upload_directory` could still
     /// land outside the worktree, and a file in the way means the path names
     /// something dux did not create and must not disturb.
-    UploadPathBlocked { component: String },
+    UploadPathBlocked {
+        /// The path component that is in the way.
+        component: String,
+    },
     /// The directory the editor's file tree named is not a place a file may be
     /// put. See [`TreeDirError`].
     TreeDirRefused(TreeDirError),
@@ -239,7 +245,10 @@ pub enum DropDirError {
     /// rather than a directory. Refused rather than followed, for the same
     /// reason as [`Self::UploadPathBlocked`]: a symlink is the one way a
     /// relative, traversal-free directory still lands outside the worktree.
-    TreePathBlocked { component: String },
+    TreePathBlocked {
+        /// The path component that is a symlink.
+        component: String,
+    },
     /// A component of the editor tree directory is not there. The browser's
     /// tree is a lazy client-side cache, so the ordinary way to reach this is
     /// a folder deleted elsewhere since the tree last listed it.
@@ -247,7 +256,10 @@ pub enum DropDirError {
     /// It is its OWN variant rather than an [`Self::Io`] carrying `ENOENT`
     /// because the message is shown to a person: an errno is not a sentence,
     /// and every other refusal on this path is written in the user's words.
-    TreeDirMissing { component: String },
+    TreeDirMissing {
+        /// The path component that is missing.
+        component: String,
+    },
     /// The editor tree directory was opened, and the path it answers to no
     /// longer names it (it was removed while the handle was held).
     ///
@@ -347,7 +359,10 @@ pub enum DropSaveError {
     Name(DropNameError),
     /// Something already at this name is a SYMLINK. The request fails rather
     /// than being renamed around, for ANY candidate name and not only the first.
-    Symlink { name: String },
+    Symlink {
+        /// The name the symlink is at.
+        name: String,
+    },
     /// Every candidate name was taken, or the name is so long that no suffixed
     /// candidate fits within the filesystem's limit. Fails deterministically
     /// rather than looping.
@@ -561,7 +576,9 @@ pub struct DropDir {
 
 impl std::fmt::Debug for DropDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DropDir").field("path", &self.path).finish()
+        f.debug_struct("DropDir")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 
@@ -573,6 +590,11 @@ impl DropDir {
     /// is the deliverable: a file saved into a folder dux cannot name is a file
     /// the user cannot reference, and it is better to refuse than to leave one
     /// behind and report a path that names something else.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be opened, or its path cannot be sent to a terminal
+    /// unchanged.
     pub fn open(dir: &Path) -> Result<Self, DropDirError> {
         let fd = rustix::fs::open(
             dir,
@@ -766,7 +788,7 @@ impl DropDir {
         // the duration of the call.
         let raw = unsafe { libc::fpathconf(self.fd.as_raw_fd(), libc::_PC_NAME_MAX) };
         if raw > 0 {
-            raw as usize
+            usize::try_from(raw).expect("a positive c_long fits in a usize")
         } else {
             FALLBACK_NAME_MAX_BYTES
         }
@@ -801,7 +823,7 @@ impl DropDir {
     fn entry_is_symlink(&self, name: &str) -> rustix::io::Result<bool> {
         let stat = rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW)?;
         Ok(
-            rustix::fs::FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode)
+            rustix::fs::FileType::from_raw_mode(rustix::fs::RawMode::from(stat.st_mode))
                 == rustix::fs::FileType::Symlink,
         )
     }
@@ -973,6 +995,10 @@ fn collision_step(probe: rustix::io::Result<bool>) -> CollisionStep {
 ///
 /// `stamp` is the timestamp half of the collision suffix, passed in rather than
 /// read from the clock so the naming is testable.
+///
+/// # Errors
+///
+/// Fails when the name is not usable, a symlink is in the way, or the file cannot be written.
 pub fn save_drop(
     dir: &DropDir,
     requested_name: &str,
@@ -1146,6 +1172,11 @@ impl FileDropDestination {
     /// this is the first file to land in it. Blocking: this creates
     /// directories, and for a terminal reads `/proc` (Linux) or asks the kernel
     /// (macOS), so it belongs on a blocking pool.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a component of the upload directory is a symlink or a file, or the directory
+    /// cannot be created or opened.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         match self {
             Self::AgentUploads {
@@ -1423,6 +1454,10 @@ fn group_scan_step(stat: std::io::Result<Vec<u8>>, pgid: u32) -> ScanEntry {
 /// The two are read differently by the caller, because "the group has gone" and
 /// "dux could not look properly" are different facts and only the first may
 /// fall through to the shell.
+#[expect(
+    clippy::similar_names,
+    reason = "pid, ppid and pgid are the process table's own names for these ids"
+)]
 fn process_group_members(pgid: u32) -> ProcessGroup {
     // Group 0 is not a group. Every kernel thread reports a process group of 0,
     // so scanning for it would sweep them all in and then refuse the drop the
@@ -1542,6 +1577,10 @@ impl WorkingDirectory {
     /// finished is an ordinary thing rather than an error. Only when every
     /// member is gone too does the shell get its turn. A platform that cannot
     /// enumerate the group refuses instead of guessing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the terminal's working directory cannot be learned, or it cannot be opened.
     pub fn open(&self) -> Result<DropDir, DropDirError> {
         self.open_with(probe_process_cwd, process_group_members)
     }
@@ -1572,7 +1611,7 @@ impl WorkingDirectory {
                         match probe(pid) {
                             CwdProbe::Pinned(dir) => return Ok(dir),
                             CwdProbe::Failed(e) => return Err(e),
-                            CwdProbe::Gone => continue,
+                            CwdProbe::Gone => {}
                         }
                     }
                     if !complete {
@@ -1933,6 +1972,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the extension must survive byte for byte, case included"
+    )]
     fn a_slug_that_grows_past_the_limit_is_cut_keeping_the_extension() {
         // Transliteration spells each glyph out, so 80 three-byte glyphs (240
         // bytes, under the limit) become far more than 255 bytes of letters.
@@ -2085,6 +2128,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the extension must survive byte for byte, case included"
+    )]
     fn a_name_at_the_limit_still_gets_a_usable_collision_name() {
         // The case the design calls out by name: a name that PASSES validation
         // and would exceed the limit once a suffix is appended. Room is
@@ -3080,7 +3127,7 @@ mod tests {
             .current_dir(dir.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .process_group(child.id() as i32)
+            .process_group(child.id().cast_signed())
             .spawn()
             .expect("spawn a second member of the same group");
         let mut inner_out = inner.stdout.take().expect("stdout");
@@ -3347,6 +3394,10 @@ mod tests {
     /// Classify one live process the way the production scan does, straight
     /// from its own `/proc` entry rather than through a walk of the machine.
     #[cfg(target_os = "linux")]
+    #[expect(
+        clippy::similar_names,
+        reason = "pid, ppid and pgid are the process table's own names for these ids"
+    )]
     fn scan_entry(pid: u32, pgid: u32) -> ScanEntry {
         group_scan_step(std::fs::read(format!("/proc/{pid}/stat")), pgid)
     }
@@ -3606,7 +3657,7 @@ mod uploads_dir {
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let root = root.clone();
-                let barrier = barrier.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
                     DropDir::open_uploads(&root, ".dux/uploads", UploadGitignore::Write)

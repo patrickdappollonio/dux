@@ -5,6 +5,7 @@
 //! fails those tests.
 
 /// One file and which surfaces will not start with it.
+#[derive(Debug)]
 pub struct Fixture {
     /// What the file is, for a failure message.
     pub name: &'static str,
@@ -114,6 +115,7 @@ pub const FIXTURES: &[Fixture] = &[
 /// One case of the start corpus (`tests/fixtures/start_corpus.txt`): a
 /// whole config file and whether each surface starts with it, as pinned to
 /// the release before the config checks were rebuilt.
+#[derive(Debug)]
 pub struct CorpusCase {
     /// The whole config file.
     pub text: String,
@@ -125,6 +127,10 @@ pub struct CorpusCase {
 
 /// Every case of the start corpus, read from its fixture (see the comment
 /// at its head for the format and for each outcome changed on purpose).
+///
+/// # Panics
+///
+/// Panics on a fixture line that does not parse, or names an unknown outcome.
 pub fn start_corpus() -> Vec<CorpusCase> {
     const TEXT: &str = include_str!("../tests/fixtures/start_corpus.txt");
     let starts = |outcome: &str| match outcome.split('(').next() {
@@ -434,9 +440,9 @@ pub fn name_tokens() -> Vec<String> {
             let body: String = (0..20)
                 .map(|_| {
                     state = state
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    ALPHABET[(state >> 33) as usize % ALPHABET.len()] as char
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    char::from(ALPHABET[crate::numeric::u64_to_usize(state >> 33) % ALPHABET.len()])
                 })
                 .collect();
             format!("zzTOKEN{}.{} x", &body[..10], &body[10..])

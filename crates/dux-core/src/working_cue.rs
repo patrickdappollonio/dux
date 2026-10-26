@@ -48,6 +48,11 @@ pub fn mute_blend(step: usize) -> f32 {
 pub(crate) const ELLIPSIS_STATES: u64 = WORKING_CUE_PERIOD_MS / ELLIPSIS_STEP_MS;
 
 /// Width of the reserved ellipsis slot, in character cells.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "a constant three, and no From or TryFrom runs in a const"
+)]
 pub const ELLIPSIS_SLOT_WIDTH: usize = (ELLIPSIS_STATES - 1) as usize;
 
 /// The ellipsis at `elapsed_ms`: `""`, `"."`, `".."`, `"..."`, one step every
@@ -74,7 +79,8 @@ pub fn ellipsis_slot(elapsed_ms: u64) -> String {
 /// `1.0` at its end. A triangle wave shaped by a smoothstep, which is the same
 /// curve the web gets from `ease-in-out` on a two-keyframe opacity animation.
 pub(crate) fn pulse_level(elapsed_ms: u64) -> f32 {
-    let u = (elapsed_ms % WORKING_CUE_PERIOD_MS) as f32 / WORKING_CUE_PERIOD_MS as f32;
+    let u = crate::numeric::u64_to_f32(elapsed_ms % WORKING_CUE_PERIOD_MS)
+        / crate::numeric::u64_to_f32(WORKING_CUE_PERIOD_MS);
     let triangle = 1.0 - (2.0 * u - 1.0).abs();
     let eased = triangle * triangle * (3.0 - 2.0 * triangle);
     // Clamped because the arithmetic lands a hair outside at the endpoints, and
@@ -88,14 +94,14 @@ pub(crate) fn pulse_level(elapsed_ms: u64) -> f32 {
 /// bright, mid, floor, mid: cell 0 is full brightness, cells 1 and 3 sit halfway
 /// down, and cell 2 is the floor.
 pub fn pulse_step(elapsed_ms: u64) -> usize {
-    ((elapsed_ms / ELLIPSIS_STEP_MS) % ELLIPSIS_STATES) as usize
+    crate::numeric::u64_to_usize((elapsed_ms / ELLIPSIS_STEP_MS) % ELLIPSIS_STATES)
 }
 
 /// The brightness level a [`pulse_step`] cell paints at: [`pulse_level`] sampled
 /// at the cell's own start, so the quantized shades sit on the continuous curve
 /// rather than beside it.
 pub(crate) fn step_level(step: usize) -> f32 {
-    pulse_level(step as u64 % ELLIPSIS_STATES * ELLIPSIS_STEP_MS)
+    pulse_level(crate::numeric::usize_to_u64(step) % ELLIPSIS_STATES * ELLIPSIS_STEP_MS)
 }
 
 #[cfg(test)]
@@ -185,7 +191,8 @@ mod tests {
 
     #[test]
     fn the_mute_blend_runs_none_third_two_thirds_third() {
-        let thirds = |value: f32| (value * 3.0).round() as i32;
+        let thirds =
+            |value: f32| crate::numeric::f64_to_u32_saturating(f64::from(value * 3.0).round());
         assert!(mute_blend(0).abs() < 1e-6);
         assert_eq!(thirds(mute_blend(1)), 1);
         assert_eq!(thirds(mute_blend(2)), 2);

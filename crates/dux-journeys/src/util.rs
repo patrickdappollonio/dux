@@ -12,11 +12,12 @@ use testcontainers::core::logs::consumer::LogConsumer;
 
 /// Everything one container has printed, shared between the container's log
 /// stream and the journey that may need to print it.
-#[derive(Clone, Default)]
-pub struct LogBuffer(Arc<Mutex<String>>);
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LogBuffer(Arc<Mutex<String>>);
 
 impl LogBuffer {
-    pub fn text(&self) -> String {
+    /// Everything printed so far.
+    pub(crate) fn text(&self) -> String {
         self.0.lock().expect("log buffer").clone()
     }
 }
@@ -39,7 +40,7 @@ tokio::task_local! {
 
 /// A fresh log buffer for container `name`, recorded against the running
 /// journey so a failure or a timeout prints it.
-pub fn container_logs(name: &str) -> LogBuffer {
+pub(crate) fn container_logs(name: &str) -> LogBuffer {
     let buffer = LogBuffer::default();
     let _ = JOURNEY_LOGS.try_with(|registry| {
         registry
@@ -50,6 +51,13 @@ pub fn container_logs(name: &str) -> LogBuffer {
     buffer
 }
 
+/// Print every recorded container's output, through the test harness's capture so a failing
+/// journey shows it under its own name.
+#[expect(
+    clippy::print_stderr,
+    reason = "only eprintln! reaches the test harness's output capture, which files these logs \
+              under the failing journey instead of interleaving them with the others"
+)]
 fn print_logs(registry: &Registry) {
     for (name, buffer) in registry.lock().expect("journey log registry").iter() {
         eprintln!(
@@ -65,6 +73,11 @@ fn print_logs(registry: &Registry) {
 /// the run. When the body panics or times out, everything every container it
 /// started printed (dux's output and dux.log included) is printed first. Its
 /// containers are removed either way: they drop with the body.
+///
+/// # Panics
+///
+/// When the one-time setup fails, when `body` panics (its panic is resumed once the logs are
+/// printed), or when it does not finish within `deadline`.
 pub async fn journey<F, T>(name: &str, deadline: Duration, body: F) -> T
 where
     F: Future<Output = T>,
@@ -88,6 +101,10 @@ where
 /// Ask `probe` until it returns `Some`, or panic naming `what` when `within`
 /// runs out. Every wait in a journey is a condition polled, never a bare sleep
 /// sized to a guess.
+///
+/// # Panics
+///
+/// When `probe` has not returned `Some` within `within`.
 pub async fn eventually<T, F, Fut>(what: &str, within: Duration, mut probe: F) -> T
 where
     F: FnMut() -> Fut,

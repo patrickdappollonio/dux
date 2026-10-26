@@ -63,7 +63,9 @@ pub const TERMINAL_UI_CONNECTION: &str = "terminal-ui";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
+    /// A browser tab's socket.
     Browser,
+    /// This process's terminal UI.
     TerminalUi,
 }
 
@@ -81,9 +83,11 @@ pub enum TargetKind {
 /// one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
+    /// Whether it is a tab or a terminal.
     pub kind: TargetKind,
     /// The PTY's id: the tab id or the terminal id.
     pub id: String,
+    /// The agent it belongs to, when it belongs to one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 }
@@ -110,6 +114,7 @@ impl BrowserId {
         shaped.then(|| Self(raw.to_string()))
     }
 
+    /// The id as presented.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -124,6 +129,7 @@ impl BrowserId {
 /// Who a connection is, as it presented itself when it connected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionFacts {
+    /// Which kind of client it is.
     pub surface: Surface,
     /// The raw `User-Agent` a browser sent (length-bounded by the web layer),
     /// or the terminal UI's fixed label.
@@ -131,6 +137,7 @@ pub struct ConnectionFacts {
     /// The client's address: the verified one when the auth layer could
     /// verify it, otherwise the peer's.
     pub address: Option<IpAddr>,
+    /// Whether `address` is one the auth layer verified.
     pub verified: bool,
     /// Whether this is a browser tab's events connection, the only kind a
     /// terminal socket may link itself to.
@@ -157,10 +164,12 @@ impl ConnectionFacts {
 pub struct Heard(Arc<Mutex<Instant>>);
 
 impl Heard {
+    /// A peer heard from just now.
     pub fn now() -> Self {
         Self::at(Instant::now())
     }
 
+    /// A peer last heard from at `at`.
     pub fn at(at: Instant) -> Self {
         Self(Arc::new(Mutex::new(at)))
     }
@@ -190,7 +199,9 @@ impl Heard {
 /// to these agents.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scope {
+    /// The PTYs, by id.
     pub ptys: BTreeSet<String>,
+    /// The agents, by session id; anything attached to one of them is covered.
     pub agents: BTreeSet<String>,
 }
 
@@ -201,6 +212,7 @@ impl Scope {
         self.agents.extend(other.agents);
     }
 
+    /// Whether the scope covers nothing.
     pub fn is_empty(&self) -> bool {
         self.ptys.is_empty() && self.agents.is_empty()
     }
@@ -237,18 +249,29 @@ pub enum Life {
     Released,
     /// Until a final lands under this status key ([`Attachments::finish_key`]),
     /// or `until`, whichever comes first.
-    Key { key: String, until: Instant },
+    Key {
+        /// The status key whose final ends the reservation.
+        key: String,
+        /// When the reservation ends if no final has landed by then.
+        until: Instant,
+    },
 }
 
 /// One connection in the way of a change. Read back from a refusal by the
 /// command line, which prints it the way the engine words it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blocker {
+    /// Which kind of client it is.
     pub surface: Surface,
+    /// The device it said it is, or the terminal UI's fixed label.
     pub device: Option<String>,
+    /// The address it connected from.
     pub address: Option<String>,
+    /// Whether `address` is one the auth layer verified.
     pub verified: bool,
+    /// Whether it is driving the PTY rather than watching it.
     pub driving: bool,
+    /// The tab or terminal it is attached to.
     pub target: Target,
 }
 
@@ -265,10 +288,7 @@ impl Blocker {
             self.target,
         ]);
         let digest = Sha256::digest(identity.to_string().as_bytes());
-        digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        crate::text::hex_lower(&digest[..8])
     }
 
     /// One blocker in words: who, from where, doing what, to which tab or
@@ -305,12 +325,15 @@ impl Blocker {
 pub struct ConnectionView {
     /// The registry's id for it.
     pub id: String,
+    /// Which kind of client it is.
     pub surface: Surface,
     /// The short form of the browser it says it belongs to ([`BrowserId::short`]),
     /// so the rows of one browser's tabs read as one browser.
     #[serde(default)]
     pub browser: Option<String>,
+    /// The device it said it is, or the terminal UI's fixed label.
     pub device: Option<String>,
+    /// The address it connected from.
     pub address: Option<String>,
     /// Whether `address` is one the auth layer verified; otherwise it is the
     /// peer's, which a proxy in between may be.
@@ -319,14 +342,17 @@ pub struct ConnectionView {
     pub since: String,
     /// Whether it drives any of what it is attached to.
     pub driving: bool,
+    /// The tabs and terminals it is streaming.
     pub attachments: Vec<AttachmentView>,
 }
 
 /// One tab or terminal a listed connection is streaming.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentView {
+    /// The tab or terminal.
     #[serde(flatten)]
     pub target: Target,
+    /// Whether this connection drives it.
     pub driving: bool,
 }
 
@@ -466,6 +492,10 @@ impl Attachments {
 
     /// Attach `connection` to `target`, refused while a change that covers it
     /// holds a reservation. The token is what [`Self::detach`] takes.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Reserved`] when a change that covers `target` holds a reservation.
     pub fn attach(
         &self,
         connection: &str,

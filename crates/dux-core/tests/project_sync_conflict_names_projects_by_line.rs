@@ -31,7 +31,7 @@ fn a_project_path_edited_by_hand_is_named_by_its_line() {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: std::collections::BTreeMap::default(),
             },
             0,
         )

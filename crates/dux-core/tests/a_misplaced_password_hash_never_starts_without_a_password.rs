@@ -7,7 +7,7 @@ const HASH: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g";
 
 fn starts_with_no_password(body: &str) -> bool {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create a temporary config directory");
     let paths = dux_core::config::DuxPaths {
         root: dir.path().to_path_buf(),
         config_path: dir.path().join("config.toml"),
@@ -16,7 +16,7 @@ fn starts_with_no_password(body: &str) -> bool {
         lock_path: dir.path().join("dux.lock"),
         socket_path: dir.path().join("dux.sock"),
     };
-    std::fs::write(&paths.config_path, body).unwrap();
+    std::fs::write(&paths.config_path, body).expect("write the config file");
     let refused =
         dux_core::config::start_refusal(body, dux_core::config::Surface::DuxServer).is_some();
     match dux_core::config::load_config(&paths) {

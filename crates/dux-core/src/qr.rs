@@ -38,11 +38,14 @@ pub enum Polarity {
 /// it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
+    /// Part of a QR code.
     Code(String),
+    /// Words and spacing around a code.
     Text(String),
 }
 
 impl Segment {
+    /// The run's text.
     pub fn text(&self) -> &str {
         match self {
             Segment::Code(text) | Segment::Text(text) => text,
@@ -268,9 +271,10 @@ mod tests {
 
     /// Decode the drawn code the way a phone would: as pixels, with no help.
     fn decode(rows: &[String], polarity: Polarity) -> String {
-        let grid = modules(rows, polarity);
         const SCALE: usize = 6;
         const MARGIN: usize = 4;
+
+        let grid = modules(rows, polarity);
         let size = grid.len();
         let px = (size + 2 * MARGIN) * SCALE;
         let mut image = rqrr::PreparedImage::prepare_from_greyscale(px, px, |x, y| {

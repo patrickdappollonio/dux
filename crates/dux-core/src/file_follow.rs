@@ -66,6 +66,7 @@ impl std::error::Error for LogError {}
 /// What a log read found.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LogRead {
+    /// The complete lines read, in order.
     pub lines: Vec<String>,
     /// Where a later read picks up: `<generation>:<line>`, the file (renamed by a
     /// rotation) and the complete lines of it read so far.
@@ -113,7 +114,7 @@ fn scan(file: &std::fs::File, want: &Want) -> std::io::Result<Scan> {
         if read == 0 || !raw.ends_with(b"\n") {
             break;
         }
-        position += read as u64;
+        position += crate::numeric::usize_to_u64(read);
         let index = total;
         total += 1;
         match want {
@@ -175,6 +176,10 @@ fn capped_note(cap: usize) -> String {
 ///
 /// A cursor from before a rotation reads on in the uncompressed kept copy, or,
 /// with it gone, from the new file's start with a note; a missing file is empty.
+///
+/// # Errors
+///
+/// Fails when `since` is not a cursor dux gave, or the file cannot be read.
 pub fn open_log(
     path: &Path,
     since: Option<&str>,
@@ -219,7 +224,7 @@ pub fn open_log(
         Some((generation, line)) if generation == current => {
             let mut scanned = scan(&file, &Want::After { skip: line, cap }).map_err(io)?;
             let lines = std::mem::take(&mut scanned.lines);
-            let reached = line + lines.len() as u64;
+            let reached = line + crate::numeric::usize_to_u64(lines.len());
             let end = if reached < scanned.total {
                 note = Some(capped_note(cap));
                 reached
@@ -254,7 +259,7 @@ pub fn open_log(
             let room = cap - lines.len();
             let mut scanned = scan(&file, &Want::After { skip: 0, cap: room }).map_err(io)?;
             let fresh = std::mem::take(&mut scanned.lines);
-            let taken = fresh.len() as u64;
+            let taken = crate::numeric::usize_to_u64(fresh.len());
             lines.extend(fresh);
             let end = if taken < scanned.total {
                 note = Some(capped_note(cap));
@@ -319,7 +324,7 @@ fn kept_copy(
     }
     let mut scanned = scan(&old, &Want::After { skip: line, cap })?;
     let lines = std::mem::take(&mut scanned.lines);
-    let end = line + lines.len() as u64;
+    let end = line + crate::numeric::usize_to_u64(lines.len());
     Ok(Some(KeptRead {
         more: end < scanned.total,
         end: end.min(scanned.total),
@@ -329,6 +334,7 @@ fn kept_copy(
 
 /// Reads `server.log` from where it left off, finishing a rotated-away file
 /// before the new one; two rotations inside one poll lose the file in between.
+#[derive(Debug)]
 pub struct FileFollower {
     path: PathBuf,
     file: Option<std::fs::File>,
@@ -401,7 +407,7 @@ impl FileFollower {
         {
             return;
         }
-        self.position += fresh.len() as u64;
+        self.position += crate::numeric::usize_to_u64(fresh.len());
         self.partial.extend_from_slice(&fresh);
     }
 

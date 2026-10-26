@@ -34,7 +34,9 @@ pub enum FlatSortMode {
 /// indices. Indices point into the input `sessions` slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatOrder {
+    /// The active agents, in display order.
     pub active: Vec<usize>,
+    /// The inactive agents, in display order.
     pub inactive: Vec<usize>,
 }
 

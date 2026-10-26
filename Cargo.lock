@@ -1140,6 +1140,7 @@ dependencies = [
  "chrono",
  "compact_str",
  "content_inspector",
+ "dux-core",
  "encoding_rs",
  "flate2",
  "getrandom 0.3.4",

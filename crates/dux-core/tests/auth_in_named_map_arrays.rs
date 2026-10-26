@@ -7,7 +7,7 @@ fn hash() -> String {
     hash_password(&Password::new(
         "correct horse battery staple veranda".into(),
     ))
-    .unwrap()
+    .expect("hash the test password")
 }
 
 fn assert_dux_server_refuses(text: &str) {

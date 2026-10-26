@@ -43,7 +43,10 @@ pub enum AddProjectAction {
     /// The path is inside an existing work tree or git dir: blocked from being
     /// added as its own project. `root` names the containing work-tree root when
     /// known (a git-dir hit carries `None`).
-    Blocked { root: Option<String> },
+    Blocked {
+        /// The containing work tree's root, when known.
+        root: Option<String>,
+    },
     /// A repo with an unborn HEAD (no commits): offer to make an initial commit
     /// before adding.
     NeedsInitialCommit,
@@ -60,7 +63,10 @@ pub enum AddProjectWarning {
     None,
     /// The repo is on a non-default branch and dux resolved the default for
     /// certain, so it may offer to check it out first.
-    NotOnDefaultBranch { default_branch: String },
+    NotOnDefaultBranch {
+        /// The repository's default branch.
+        default_branch: String,
+    },
     /// The repo is on a non-default branch but dux cannot identify the default,
     /// so it warns without offering a switch.
     NotOnDefaultBranchUnknown,
@@ -71,8 +77,11 @@ pub enum AddProjectWarning {
 /// switch). Rendered per surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddProjectPlan {
+    /// What adding the path will do, or why it cannot.
     pub action: AddProjectAction,
+    /// What the add should warn about.
     pub warning: AddProjectWarning,
+    /// Whether the surface may offer to check the default branch out first.
     pub can_checkout_default: bool,
 }
 
@@ -161,18 +170,21 @@ pub enum ProjectBase {
 }
 
 impl ProjectBase {
+    /// The branch's name.
     pub fn branch(&self) -> &str {
         match self {
             Self::RemoteDefault(branch) | Self::Other(branch) => branch,
         }
     }
 
+    /// The branch's name, by value.
     pub fn into_branch(self) -> String {
         match self {
             Self::RemoteDefault(branch) | Self::Other(branch) => branch,
         }
     }
 
+    /// Whether it is the remote's default branch.
     pub fn is_remote_default(&self) -> bool {
         match self {
             Self::RemoteDefault(_) => true,
@@ -233,6 +245,13 @@ mod tests {
     }
 
     fn vectors() -> Vec<Vector> {
+        let mut all = vectors_that_stop_short();
+        all.extend(vectors_that_are_ready());
+        all
+    }
+
+    /// The rows whose folder cannot be added as it is.
+    fn vectors_that_stop_short() -> Vec<Vector> {
         vec![
             Vector {
                 name: "inside a work tree is blocked (root named)",
@@ -296,6 +315,12 @@ mod tests {
                     can_checkout_default: false,
                 },
             },
+        ]
+    }
+
+    /// The rows whose folder is ready to add, each with its branch warning.
+    fn vectors_that_are_ready() -> Vec<Vector> {
+        vec![
             Vector {
                 name: "on a non-default branch with a known default: checkout offered",
                 inspection: AddProjectInspection {

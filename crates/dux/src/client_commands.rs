@@ -8,6 +8,8 @@ use dux_core::client::remotes::{self, Remotes};
 use dux_core::client::{CliError, Exit, server_inspect, sign_in, wait, workspace};
 use dux_core::config::DuxPaths;
 use dux_tui::SecretInput;
+use std::fmt::Write as _;
+use std::io::Write;
 
 use crate::commands::{
     AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
@@ -97,18 +99,56 @@ pub(crate) fn finish(result: Result<String, CliError>) -> ! {
     finish_with_code(result.map(|text| (text, 0)))
 }
 
+/// [`finish`] for a command that writes to standard output and standard error as it runs: `run`
+/// is handed both, locked, and they are let go before the result is printed.
+pub(crate) fn finish_with(
+    run: impl FnOnce(
+        &mut std::io::StdoutLock<'static>,
+        &mut std::io::StderrLock<'static>,
+    ) -> Result<String, CliError>,
+) -> ! {
+    let result = run(&mut std::io::stdout().lock(), &mut std::io::stderr().lock());
+    finish(result)
+}
+
 /// [`finish`] for a result that carries its own exit code.
 pub(crate) fn finish_with_code(result: Result<(String, i32), CliError>) -> ! {
+    let code = write_outcome(
+        result,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    );
+    std::process::exit(code);
+}
+
+/// Write a command's result to `out`, or its error's sentence to `err`, and return the exit code
+/// the command ends with. A reader that went away (`| head`) ends it quietly with its own code;
+/// any other failure to write the result is said on `err` and ends it as failed.
+fn write_outcome(
+    result: Result<(String, i32), CliError>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> i32 {
     match result {
-        Ok((text, code)) => {
-            print!("{text}");
-            std::process::exit(code);
-        }
+        Ok((text, code)) => match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+            Ok(()) => code,
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => code,
+            Err(error) => {
+                note(err, &format!("could not print the result: {error}"));
+                Exit::Failed.code()
+            }
+        },
         Err(error) => {
-            eprintln!("{}", error.message);
-            std::process::exit(error.exit.code());
+            note(err, &error.message);
+            error.exit.code()
         }
     }
+}
+
+/// Write `text` as a line on `err`. A stderr that cannot take it has nowhere left to say so, and
+/// a sentence that could not be shown is no reason to stop the command, so a failure is dropped.
+pub(crate) fn note(err: &mut impl Write, text: &str) {
+    let _ = writeln!(err, "{text}");
 }
 
 fn discover() -> Result<DuxPaths, CliError> {
@@ -150,7 +190,13 @@ pub(crate) fn operations(
     }
 }
 
-pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliError> {
+/// `dux remote`: the saved remotes, and signing in to and out of one. Sentences that are not the
+/// result (a plain HTTP warning, a sign-in that could not be ended) go to `err`.
+pub(crate) fn remote(
+    command: RemoteSub,
+    selection: &Selection,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     let paths = discover()?;
     let root = &paths.root;
     match command {
@@ -159,62 +205,19 @@ pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String
             url,
             insecure,
         } => {
-            let url = Remotes::update(root, |saved| {
-                let plain_http = if insecure {
-                    remotes::PlainHttp::Anywhere
-                } else {
-                    remotes::PlainHttp::SafeNetworksOnly
-                };
-                saved.add(&name, &url, plain_http)?;
-                Ok(saved.get(&name)?.url.clone())
-            })?;
-            Ok(line(&format!(
-                "Saved remote {name} ({url}). Use it with --remote {name}, or make it the default \
-                 with \"dux remote default {name}\"."
-            )))
+            let plain_http = if insecure {
+                remotes::PlainHttp::Anywhere
+            } else {
+                remotes::PlainHttp::SafeNetworksOnly
+            };
+            remote_add(root, &name, &url, plain_http)
         }
         RemoteSub::Ls(list) => Ok(output::render(
             &Remotes::load(root)?.listing(),
             shape(&list),
         )),
-        RemoteSub::Rm { name } => {
-            let (was_default, removed) = Remotes::update(root, |saved| {
-                let was_default = saved.default.as_deref() == Some(name.as_str());
-                Ok((was_default, saved.remove(&name)?))
-            })?;
-            let mut text = format!("Forgot remote {name}.");
-            if was_default {
-                text.push_str(
-                    " It was the default, so commands now talk to this machine's dux unless \
-                     --remote or DUX_REMOTE names a remote.",
-                );
-            }
-            if removed.token.is_some() {
-                text.push_str(&format!(
-                    " Its sign-in was discarded here without telling {name}, which ends it once \
-                     it goes unused for [server.auth] cli_token_idle_days."
-                ));
-            }
-            Ok(line(&text))
-        }
-        RemoteSub::Default { name, unset: _ } => {
-            let before = Remotes::update(root, |saved| {
-                let before = saved.default.clone();
-                saved.set_default(name.as_deref())?;
-                Ok(before)
-            })?;
-            Ok(line(&match (name, before) {
-                (Some(name), _) => format!(
-                    "{name} is now the default remote: commands talk to it unless --local, \
-                     --remote or DUX_REMOTE says otherwise."
-                ),
-                (None, None) => "No remote was the default, and none is now.".to_string(),
-                (None, Some(old)) => format!(
-                    "{old} is no longer the default remote: commands talk to this machine's dux \
-                     unless --remote or DUX_REMOTE names a remote."
-                ),
-            }))
-        }
+        RemoteSub::Rm { name } => remote_rm(root, &name),
+        RemoteSub::Default { name, unset: _ } => remote_default(root, name),
         RemoteSub::Login { name, stdin } => {
             let saved = Remotes::load(root)?;
             let name = named_or_selected(name, selection, &saved, "login")?;
@@ -227,7 +230,7 @@ pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String
                     if let Some(entry) = saved.remotes.get_mut(&name)
                         && entry.url == remote.url
                     {
-                        entry.instance = found.instance.clone();
+                        entry.instance.clone_from(&found.instance);
                     }
                     Ok(())
                 })?;
@@ -237,7 +240,7 @@ pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String
                 )));
             }
             if let Some(warning) = remotes::insecure_login_warning(&name, &remote) {
-                eprintln!("{warning}");
+                note(err, &warning);
             }
             let input = if stdin {
                 SecretInput::Stdin
@@ -250,7 +253,7 @@ pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String
             // The dux that answered the sign-in is the one the remote means now.
             let instance = sign_in::pin_after_login(&name, &remote, &found)?;
             if let Some(kept) = &signed_in.old_sign_in_kept {
-                eprintln!("{kept}");
+                note(err, kept);
             }
             // The prompt may have waited while another command changed the
             // remote; the token is kept only for the URL that issued it.
@@ -263,37 +266,104 @@ pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String
             )?;
             Ok(line(&format!("Signed in to {name}.")))
         }
-        RemoteSub::Logout { name } => {
-            let saved = Remotes::load(root)?;
-            let name = named_or_selected(name, selection, &saved, "logout")?;
-            let remote = saved.get(&name)?.clone();
-            let Some(token) = remote.token.clone() else {
-                return Ok(line(&format!(
-                    "Not signed in to {name}, so there was nothing to end."
-                )));
-            };
-            let told = sign_in::logout(&name, &remote, &token);
-            Remotes::update(root, |saved| {
-                if let Some(entry) = saved.remotes.get_mut(&name)
-                    && entry.token.as_deref() == Some(token.as_str())
-                {
-                    entry.token = None;
-                }
-                Ok(())
-            })?;
-            match told {
-                Ok(()) => Ok(line(&format!("Signed out of {name}."))),
-                Err(error) => Err(CliError::new(
-                    error.exit,
-                    format!(
-                        "Forgot the sign-in to {name} here, but could not tell {name} to end it: \
-                         {}. It ends on its own once it goes unused for [server.auth] \
-                         cli_token_idle_days.",
-                        error.message
-                    ),
-                )),
-            }
+        RemoteSub::Logout { name } => remote_logout(root, name, selection),
+    }
+}
+
+/// `dux remote add`.
+fn remote_add(
+    root: &std::path::Path,
+    name: &str,
+    url: &str,
+    plain_http: remotes::PlainHttp,
+) -> Result<String, CliError> {
+    let url = Remotes::update(root, |saved| {
+        saved.add(name, url, plain_http)?;
+        Ok(saved.get(name)?.url.clone())
+    })?;
+    Ok(line(&format!(
+        "Saved remote {name} ({url}). Use it with --remote {name}, or make it the default \
+         with \"dux remote default {name}\"."
+    )))
+}
+
+/// `dux remote rm`.
+fn remote_rm(root: &std::path::Path, name: &str) -> Result<String, CliError> {
+    let (was_default, removed) = Remotes::update(root, |saved| {
+        let was_default = saved.default.as_deref() == Some(name);
+        Ok((was_default, saved.remove(name)?))
+    })?;
+    let mut text = format!("Forgot remote {name}.");
+    if was_default {
+        text.push_str(
+            " It was the default, so commands now talk to this machine's dux unless \
+             --remote or DUX_REMOTE names a remote.",
+        );
+    }
+    if removed.token.is_some() {
+        let _ = write!(
+            text,
+            " Its sign-in was discarded here without telling {name}, which ends it once \
+             it goes unused for [server.auth] cli_token_idle_days."
+        );
+    }
+    Ok(line(&text))
+}
+
+/// `dux remote default`: `name`, or none with `--unset`.
+fn remote_default(root: &std::path::Path, name: Option<String>) -> Result<String, CliError> {
+    let before = Remotes::update(root, |saved| {
+        let before = saved.default.clone();
+        saved.set_default(name.as_deref())?;
+        Ok(before)
+    })?;
+    Ok(line(&match (name, before) {
+        (Some(name), _) => format!(
+            "{name} is now the default remote: commands talk to it unless --local, \
+             --remote or DUX_REMOTE says otherwise."
+        ),
+        (None, None) => "No remote was the default, and none is now.".to_string(),
+        (None, Some(old)) => format!(
+            "{old} is no longer the default remote: commands talk to this machine's dux \
+             unless --remote or DUX_REMOTE names a remote."
+        ),
+    }))
+}
+
+/// `dux remote logout`.
+fn remote_logout(
+    root: &std::path::Path,
+    name: Option<String>,
+    selection: &Selection,
+) -> Result<String, CliError> {
+    let saved = Remotes::load(root)?;
+    let name = named_or_selected(name, selection, &saved, "logout")?;
+    let remote = saved.get(&name)?.clone();
+    let Some(token) = remote.token.clone() else {
+        return Ok(line(&format!(
+            "Not signed in to {name}, so there was nothing to end."
+        )));
+    };
+    let told = sign_in::logout(&name, &remote, &token);
+    Remotes::update(root, |saved| {
+        if let Some(entry) = saved.remotes.get_mut(&name)
+            && entry.token.as_deref() == Some(token.as_str())
+        {
+            entry.token = None;
         }
+        Ok(())
+    })?;
+    match told {
+        Ok(()) => Ok(line(&format!("Signed out of {name}."))),
+        Err(error) => Err(CliError::new(
+            error.exit,
+            format!(
+                "Forgot the sign-in to {name} here, but could not tell {name} to end it: \
+                 {}. It ends on its own once it goes unused for [server.auth] \
+                 cli_token_idle_days.",
+                error.message
+            ),
+        )),
     }
 }
 
@@ -536,6 +606,7 @@ fn read_on_dux(
 /// not to, wait for how it ended.
 fn change_on_dux(
     selection: &Selection,
+    err: &mut impl Write,
     flags: &ChangeFlags,
     plan: impl FnOnce(&connect::Client, &std::path::Path) -> Result<workspace::Planned, CliError>,
 ) -> Result<String, CliError> {
@@ -548,7 +619,7 @@ fn change_on_dux(
     })?;
     let planned = plan(&client, &cwd)?;
     if let Some(notice) = &planned.notice {
-        eprintln!("{notice}");
+        note(err, notice);
     }
     ask(
         &planned.question,
@@ -568,6 +639,7 @@ fn change_on_dux(
 /// when asked to in so many words.
 fn guarded_on_dux(
     selection: &Selection,
+    err: &mut impl Write,
     flags: &GuardedChangeFlags,
     plan: impl FnOnce(&connect::Client, workspace::IfAttached) -> Result<workspace::Planned, CliError>,
 ) -> Result<String, CliError> {
@@ -576,10 +648,16 @@ fn guarded_on_dux(
     } else {
         workspace::IfAttached::Refuse
     };
-    change_on_dux(selection, &flags.change, |client, _| plan(client, force))
+    change_on_dux(selection, err, &flags.change, |client, _| {
+        plan(client, force)
+    })
 }
 
-pub(crate) fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn projects(
+    command: ProjectsSub,
+    selection: &Selection,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     match command {
         ProjectsSub::Ls(list) => read_on_dux(selection, |client| {
             workspace::projects_ls(client, shape(&list))
@@ -593,7 +671,7 @@ pub(crate) fn projects(command: ProjectsSub, selection: &Selection) -> Result<St
             checkout_default,
             init,
             change,
-        } => change_on_dux(selection, &change, |client, cwd| {
+        } => change_on_dux(selection, err, &change, |client, cwd| {
             let choices = workspace::ProjectAddChoices {
                 checkout_default,
                 init_repo: init,
@@ -604,7 +682,7 @@ pub(crate) fn projects(command: ProjectsSub, selection: &Selection) -> Result<St
             project,
             delete_worktrees,
             guarded,
-        } => guarded_on_dux(selection, &guarded, |client, force| {
+        } => guarded_on_dux(selection, err, &guarded, |client, force| {
             let worktrees = if delete_worktrees {
                 workspace::Worktrees::Delete
             } else {
@@ -620,7 +698,11 @@ pub(crate) fn projects(command: ProjectsSub, selection: &Selection) -> Result<St
     }
 }
 
-pub(crate) fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn agents(
+    command: AgentsSub,
+    selection: &Selection,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     match command {
         AgentsSub::Ls {
             project,
@@ -639,7 +721,7 @@ pub(crate) fn agents(command: AgentsSub, selection: &Selection) -> Result<String
         }
         AgentsSub::Add(args) => {
             let how = new_agent(&args);
-            change_on_dux(selection, &args.change, |client, cwd| {
+            change_on_dux(selection, err, &args.change, |client, cwd| {
                 workspace::agents_add(client, how, args.name.as_deref(), cwd)
             })
             .map_err(workspace::existing_branch_refusal)
@@ -663,19 +745,21 @@ pub(crate) fn agents(command: AgentsSub, selection: &Selection) -> Result<String
             } else {
                 workspace::Worktrees::Keep
             };
-            guarded_on_dux(selection, &guarded, |client, force| {
+            guarded_on_dux(selection, err, &guarded, |client, force| {
                 workspace::agents_rm(client, &agent, worktree, branch, force)
             })
         }
         AgentsSub::Stop { agent, guarded } => {
-            guarded_on_dux(selection, &guarded, |client, force| {
+            guarded_on_dux(selection, err, &guarded, |client, force| {
                 workspace::agents_stop(client, &agent, force)
             })
         }
-        AgentsSub::Start { agent, change } => change_on_dux(selection, &change, |client, _| {
-            workspace::agents_start(client, &agent)
-        }),
-        AgentsSub::Tabs { command } => tabs(command, selection),
+        AgentsSub::Start { agent, change } => {
+            change_on_dux(selection, err, &change, |client, _| {
+                workspace::agents_start(client, &agent)
+            })
+        }
+        AgentsSub::Tabs { command } => tabs(command, selection, err),
     }
 }
 
@@ -726,7 +810,7 @@ fn new_agent(args: &AddAgentArgs) -> workspace::NewAgent {
     }
 }
 
-fn tabs(command: TabsSub, selection: &Selection) -> Result<String, CliError> {
+fn tabs(command: TabsSub, selection: &Selection, err: &mut impl Write) -> Result<String, CliError> {
     match command {
         TabsSub::Ls { agent, list } => read_on_dux(selection, |client| {
             workspace::tabs_ls(client, &agent, shape(&list))
@@ -735,30 +819,36 @@ fn tabs(command: TabsSub, selection: &Selection) -> Result<String, CliError> {
             agent,
             provider,
             change,
-        } => change_on_dux(selection, &change, |client, _| {
+        } => change_on_dux(selection, err, &change, |client, _| {
             workspace::tabs_add(client, &agent, provider.as_deref())
         }),
         TabsSub::Rm {
             agent,
             tab,
             guarded,
-        } => guarded_on_dux(selection, &guarded, |client, force| {
+        } => guarded_on_dux(selection, err, &guarded, |client, force| {
             workspace::tabs_rm(client, &agent, &tab, force)
         }),
-        TabsSub::Start { agent, tab, change } => change_on_dux(selection, &change, |client, _| {
-            workspace::tabs_start(client, &agent, &tab)
-        }),
+        TabsSub::Start { agent, tab, change } => {
+            change_on_dux(selection, err, &change, |client, _| {
+                workspace::tabs_start(client, &agent, &tab)
+            })
+        }
         TabsSub::Stop {
             agent,
             tab,
             guarded,
-        } => guarded_on_dux(selection, &guarded, |client, force| {
+        } => guarded_on_dux(selection, err, &guarded, |client, force| {
             workspace::tabs_stop(client, &agent, &tab, force)
         }),
     }
 }
 
-pub(crate) fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn terminals(
+    command: TerminalsSub,
+    selection: &Selection,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     match command {
         TerminalsSub::Ls(list) => read_on_dux(selection, |client| {
             workspace::terminals_ls(client, shape(&list))
@@ -769,12 +859,12 @@ pub(crate) fn terminals(command: TerminalsSub, selection: &Selection) -> Result<
                 (_, Some(project)) => workspace::TerminalFor::Project(project.clone()),
                 (None, None) => workspace::TerminalFor::Standalone,
             };
-            change_on_dux(selection, &args.change, |client, _| {
+            change_on_dux(selection, err, &args.change, |client, _| {
                 workspace::terminals_add(client, owner)
             })
         }
         TerminalsSub::Rm { terminal, guarded } => {
-            guarded_on_dux(selection, &guarded, |client, force| {
+            guarded_on_dux(selection, err, &guarded, |client, force| {
                 workspace::terminals_rm(client, &terminal, force)
             })
         }
@@ -795,8 +885,14 @@ fn server_connections(command: ConnectionsSub, selection: &Selection) -> Result<
 
 /// `dux server logs`: the last lines of the server log and, with `follow`, every line after.
 /// With no dux running on this machine, its log file is read as it stands.
-/// `dux server logs` and `dux server connections`.
-pub(crate) fn server(command: ServerSub, selection: &Selection) -> Result<String, CliError> {
+/// `dux server logs` and `dux server connections`. Log lines go to `out` as they are read, and
+/// what is said about them to `err`.
+pub(crate) fn server(
+    command: ServerSub,
+    selection: &Selection,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     match command {
         ServerSub::Logs { follow, lines } => {
             let read = if follow {
@@ -804,7 +900,7 @@ pub(crate) fn server(command: ServerSub, selection: &Selection) -> Result<String
             } else {
                 LogRead::Tail
             };
-            server_logs(read, lines, selection)
+            server_logs(read, lines, selection, out, err)
         }
         ServerSub::Connections { command } => server_connections(command, selection),
     }
@@ -819,18 +915,15 @@ enum LogRead {
     Follow,
 }
 
-fn server_logs(read: LogRead, lines: usize, selection: &Selection) -> Result<String, CliError> {
-    use std::io::Write;
-    use std::ops::ControlFlow;
+fn server_logs(
+    read: LogRead,
+    lines: usize,
+    selection: &Selection,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<String, CliError> {
     let paths = discover()?;
-    // A closed pipe (`| head`) ends the command quietly.
-    let mut print = |line: &str| {
-        let mut out = std::io::stdout().lock();
-        match writeln!(out, "{line}").and_then(|()| out.flush()) {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(_) => ControlFlow::Break(()),
-        }
-    };
+    let mut print = |line: &str| print_line(out, line);
     let target = selection.target(&paths)?;
     // This machine's dux that writes no log leaves its file to be read; a
     // remote's file is not here, so its sentence is shown.
@@ -842,36 +935,140 @@ fn server_logs(read: LogRead, lines: usize, selection: &Selection) -> Result<Str
         Some(client) => print_tail(
             server_inspect::tail_or_file(&client, this_machine, lines)?,
             &mut print,
+            err,
         ),
         None => {
             let path = server_inspect::log_file(&paths)?;
             if !path.exists() {
-                eprintln!(
-                    "There is no server log at {} yet: dux has not served from this machine.",
-                    path.display()
+                note(
+                    err,
+                    &format!(
+                        "There is no server log at {} yet: dux has not served from this machine.",
+                        path.display()
+                    ),
                 );
             }
             if matches!(read, LogRead::Follow) {
                 server_inspect::file_follow(&path, lines, &mut print)?;
             } else {
-                print_tail(server_inspect::file_tail(&path, lines)?, &mut print);
+                print_tail(server_inspect::file_tail(&path, lines)?, &mut print, err);
             }
         }
     }
     Ok(String::new())
 }
 
-/// Print a log's last lines, then on stderr the sentence saying they were cut short, if any.
+/// Write one log line to `out` at once, so a follow shows it as it arrives. Any failure, a closed
+/// pipe (`| head`) above all, ends the printing quietly.
+fn print_line(out: &mut impl Write, line: &str) -> std::ops::ControlFlow<()> {
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => std::ops::ControlFlow::Continue(()),
+        Err(_) => std::ops::ControlFlow::Break(()),
+    }
+}
+
+/// Print a log's last lines, then on `err` the sentence saying they were cut short, if any.
 fn print_tail(
-    (tail, note): (Vec<String>, Option<String>),
+    (tail, cut_short): (Vec<String>, Option<String>),
     print: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
+    err: &mut impl Write,
 ) {
     for line in tail {
         if print(&line).is_break() {
             break;
         }
     }
-    if let Some(note) = note {
-        eprintln!("{note}");
+    if let Some(cut_short) = cut_short {
+        note(err, &cut_short);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer that refuses every write with `kind`.
+    struct Refusing(std::io::ErrorKind);
+
+    impl Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "refused"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_result_goes_to_stdout_as_it_is_and_an_error_to_stderr_as_a_line() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = write_outcome(Ok(("one\ntwo".to_string(), 6)), &mut out, &mut err);
+        assert_eq!(
+            (code, out.as_slice(), err.as_slice()),
+            (6, &b"one\ntwo"[..], &b""[..])
+        );
+
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let refused = CliError::new(Exit::NotRunning, "dux isn't running".to_string());
+        let code = write_outcome(Err(refused), &mut out, &mut err);
+        assert_eq!(
+            (code, out.as_slice(), err.as_slice()),
+            (4, &b""[..], &b"dux isn't running\n"[..])
+        );
+    }
+
+    #[test]
+    fn a_reader_that_went_away_ends_quietly_and_any_other_failure_is_said() {
+        let mut err = Vec::new();
+        let mut gone = Refusing(std::io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            write_outcome(Ok(("x".to_string(), 0)), &mut gone, &mut err),
+            0
+        );
+        assert!(err.is_empty());
+
+        let mut full = Refusing(std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            write_outcome(Ok(("x".to_string(), 0)), &mut full, &mut err),
+            1
+        );
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "could not print the result: refused\n"
+        );
+    }
+
+    #[test]
+    fn a_tail_prints_its_lines_then_says_on_stderr_that_it_was_cut_short() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut print = |line: &str| print_line(&mut out, line);
+        print_tail(
+            (
+                vec!["one".to_string(), "two".to_string()],
+                Some("Only the last 2 lines.".to_string()),
+            ),
+            &mut print,
+            &mut err,
+        );
+        assert_eq!(out, b"one\ntwo\n");
+        assert_eq!(err, b"Only the last 2 lines.\n");
+    }
+
+    #[test]
+    fn a_tail_stops_at_the_first_line_its_reader_cannot_take() {
+        let mut gone = Refusing(std::io::ErrorKind::BrokenPipe);
+        let mut lines = 0;
+        let mut print = |line: &str| {
+            lines += 1;
+            print_line(&mut gone, line)
+        };
+        let mut err = Vec::new();
+        print_tail(
+            (vec!["one".to_string(), "two".to_string()], None),
+            &mut print,
+            &mut err,
+        );
+        assert_eq!(lines, 1);
+        assert!(err.is_empty());
     }
 }

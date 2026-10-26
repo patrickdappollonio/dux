@@ -23,7 +23,9 @@ use crate::serve_log::LogLine;
 pub struct ActivitySnapshot {
     /// How many lines were ever pushed, dropped ones included.
     pub generation: u64,
+    /// How many browsers were connected.
     pub browsers: usize,
+    /// Every line, the pinned startup lines first, then the rest oldest first.
     pub lines: Vec<LogLine>,
 }
 
@@ -60,6 +62,15 @@ struct ActivityInner {
 /// A cheap-to-clone (`Arc`) shared handle to the line buffer.
 #[derive(Clone)]
 pub struct ActivityRing(Arc<ActivityInner>);
+
+impl std::fmt::Debug for ActivityRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivityRing")
+            .field("generation", &self.generation())
+            .field("browsers", &self.browsers())
+            .finish_non_exhaustive()
+    }
+}
 
 impl Default for ActivityRing {
     fn default() -> Self {
@@ -180,6 +191,7 @@ impl ActivityRing {
         Arc::clone(&self.0.browsers)
     }
 
+    /// How many lines were ever pushed, dropped ones included.
     pub fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::Relaxed)
     }
@@ -383,7 +395,7 @@ mod tests {
                 for _ in 0..5000 {
                     let snap = ring.snapshot();
                     assert!(snap.lines.len() <= CAP);
-                    assert!(snap.lines.len() as u64 <= snap.generation);
+                    assert!(crate::numeric::usize_to_u64(snap.lines.len()) <= snap.generation);
                 }
             })
         };
@@ -404,6 +416,9 @@ mod tests {
 
         let snap = ring.snapshot();
         assert_eq!(snap.lines.len(), CAP, "ring stays capped");
-        assert_eq!(snap.generation, (THREADS * PER_THREAD) as u64);
+        assert_eq!(
+            snap.generation,
+            crate::numeric::usize_to_u64(THREADS * PER_THREAD)
+        );
     }
 }

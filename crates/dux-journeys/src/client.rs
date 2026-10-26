@@ -13,14 +13,20 @@ use reqwest::{Certificate, Method, Url};
 /// One HTTP response, read in full.
 #[derive(Debug, Clone)]
 pub struct Response {
+    /// The HTTP status code.
     pub status: u16,
     /// Every header, names lowercased, in the order they arrived.
     pub headers: Vec<(String, String)>,
+    /// The body as text, decoded lossily.
     pub body: String,
 }
 
 impl Response {
     /// The body as JSON, panicking with the body when it is not.
+    ///
+    /// # Panics
+    ///
+    /// When the body is not JSON.
     pub fn json(&self) -> serde_json::Value {
         serde_json::from_str(&self.body).unwrap_or_else(|err| {
             panic!(
@@ -81,6 +87,10 @@ pub fn cookie_attributes(set_cookie: &str) -> Vec<String> {
 
 /// Parse curl's `-i` output (headers, a blank line, the body) into a
 /// [`Response`]. Interim `100 Continue` blocks are skipped.
+///
+/// # Panics
+///
+/// When `raw` has no HTTP status line.
 pub fn parse_raw_response(raw: &str) -> Response {
     let mut rest = raw;
     loop {
@@ -112,7 +122,7 @@ pub fn parse_raw_response(raw: &str) -> Response {
 }
 
 /// A person on the host, reaching dux through one published port.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Client {
     http: reqwest::Client,
     jar: Arc<Jar>,
@@ -139,6 +149,10 @@ impl Client {
     /// reaches at `address` instead of through DNS, trusting `root_pem`: what a
     /// browser at that name sends (its TLS name, `Host` and `Origin`), delivered
     /// to a published port on this machine.
+    ///
+    /// # Panics
+    ///
+    /// When `base` is not a URL with a host, or `root_pem` is not a PEM certificate.
     pub fn with_root_at(base: &str, root_pem: &[u8], address: SocketAddr) -> Client {
         let host = Url::parse(base)
             .expect("a base URL")
@@ -199,8 +213,8 @@ impl Client {
             self.root.as_deref(),
             self.resolve.clone(),
         );
-        other.headers = self.headers.clone();
-        other.origin = self.origin.clone();
+        other.headers.clone_from(&self.headers);
+        other.origin.clone_from(&self.origin);
         other
     }
 
@@ -209,6 +223,11 @@ impl Client {
     /// yet accepts and then drops the connection, which is a "not yet" here and
     /// not a failure. (The Tailscale leg binds a moment after dux's first look
     /// at the CLI, so a tailnet relay needs this.)
+    ///
+    /// # Panics
+    ///
+    /// When the base URL has no host or port, or `/healthz` does not answer 200 within 30
+    /// seconds.
     pub async fn wait_answering(&self) {
         let url = self.base.clone();
         let addr = format!(
@@ -243,11 +262,16 @@ impl Client {
         .await;
     }
 
+    /// The address every request goes to, joined with its path.
     pub fn base(&self) -> &Url {
         &self.base
     }
 
     /// The `Cookie` header this jar would send to dux, for a WebSocket upgrade.
+    ///
+    /// # Panics
+    ///
+    /// When the jar holds a cookie that is not ASCII.
     pub fn cookie_header(&self) -> Option<String> {
         self.jar
             .cookies(&self.base)
@@ -270,28 +294,44 @@ impl Client {
         self.origin.as_deref()
     }
 
+    /// `GET path`, as [`Self::send`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::send`] does.
     pub async fn get(&self, path: &str) -> Response {
         self.send(Method::GET, path, None).await
     }
 
+    /// `POST path` with `body` as JSON, as [`Self::send`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::send`] does.
     pub async fn post_json(&self, path: &str, body: &serde_json::Value) -> Response {
         self.send(Method::POST, path, Some(body)).await
     }
 
+    /// `POST path` with no body, as [`Self::send`] sends it.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::send`] does.
     pub async fn post_empty(&self, path: &str) -> Response {
         self.send(Method::POST, path, None).await
     }
 
-    pub async fn patch_json(&self, path: &str, body: &serde_json::Value) -> Response {
+    /// `PATCH path` with `body` as JSON, as [`Self::send`] sends it.
+    pub(crate) async fn patch_json(&self, path: &str, body: &serde_json::Value) -> Response {
         self.send(Method::PATCH, path, Some(body)).await
-    }
-
-    pub async fn put_json(&self, path: &str, body: &serde_json::Value) -> Response {
-        self.send(Method::PUT, path, Some(body)).await
     }
 
     /// One request, with the jar, the extra headers, and an `Origin` on
     /// anything but a GET.
+    ///
+    /// # Panics
+    ///
+    /// When `path` does not join onto the base URL, or the request gets no response.
     pub async fn send(
         &self,
         method: Method,
@@ -349,6 +389,10 @@ impl Client {
     /// Sign in, waiting out any slow-down the way a person does: a 429 says
     /// how long to wait (`Retry-After`), and dux slows every address down after
     /// a failed attempt, this machine included.
+    ///
+    /// # Panics
+    ///
+    /// When the sign-in does not answer 204, after waiting out up to five 429s.
     pub async fn login_ok(&self, password: &str) {
         let mut response = self.login(password).await;
         for _ in 0..5 {
@@ -395,6 +439,10 @@ impl Client {
     }
 
     /// `GET /api/v1/auth/status` as JSON.
+    ///
+    /// # Panics
+    ///
+    /// When the status does not answer 200 with JSON.
     pub async fn auth_status(&self) -> serde_json::Value {
         let response = self.get("/api/v1/auth/status").await;
         assert_eq!(

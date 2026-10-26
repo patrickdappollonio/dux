@@ -11,8 +11,11 @@ use super::{CliError, Exit};
 /// order, and the object `--format json` prints for it.
 #[derive(Clone, Debug)]
 pub struct Row {
+    /// The row's id, which `-q` prints.
     pub id: String,
+    /// The table's cells, in header order.
     pub cells: Vec<String>,
+    /// The object `--format json` prints for the row.
     pub json: serde_json::Value,
 }
 
@@ -20,7 +23,9 @@ pub struct Row {
 /// resource's own list uses.
 #[derive(Clone, Debug)]
 pub struct Listing {
+    /// The table's column headers.
     pub headers: Vec<&'static str>,
+    /// The rows, in the resource's own order.
     pub rows: Vec<Row>,
 }
 
@@ -64,7 +69,7 @@ pub fn render(listing: &Listing, shape: Shape) -> String {
         Shape::Ids => listing
             .rows
             .iter()
-            .map(|row| format!("{}\n", row.id))
+            .flat_map(|row| [row.id.as_str(), "\n"])
             .collect(),
         Shape::Json => {
             let array: Vec<&serde_json::Value> = listing.rows.iter().map(|row| &row.json).collect();
@@ -319,13 +324,14 @@ mod tests {
 
     #[test]
     fn a_resource_is_picked_by_id_or_by_a_name_only_it_has() {
-        let items = [("a1", "web"), ("b2", "api"), ("c3", "api"), ("web", "docs")];
         fn id<'a>(item: &'a (&'static str, &'static str)) -> &'a str {
             item.0
         }
         fn name<'a>(item: &'a (&'static str, &'static str)) -> &'a str {
             item.1
         }
+
+        let items = [("a1", "web"), ("b2", "api"), ("c3", "api"), ("web", "docs")];
 
         assert_eq!(select("agent", "b2", &items, id, name).unwrap().0, "b2");
         assert_eq!(

@@ -160,6 +160,10 @@ impl ControlSocket {
 
     /// A clone of the bound listener for a core to serve; the socket stays bound
     /// while no core serves, and connections wait in its backlog.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the listener cannot be cloned.
     pub fn listener(&self) -> io::Result<UnixListener> {
         self.listener.try_clone()
     }
@@ -327,7 +331,8 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
         uid: 0,
         gid: 0,
     };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
+        .expect("ucred's size fits in a socklen_t");
     // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
     // the descriptor is open for as long as `stream` is borrowed.
     let read = unsafe {
@@ -339,7 +344,7 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
             std::ptr::addr_of_mut!(len),
         )
     };
-    (read == 0 && cred.pid > 0).then_some(cred.pid as u32)
+    (read == 0 && cred.pid > 0).then_some(cred.pid.cast_unsigned())
 }
 
 /// The process that called listen() on the socket `stream` is connected to;
@@ -348,7 +353,8 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
 fn listener_pid(stream: &UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     let mut pid: libc::pid_t = 0;
-    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::pid_t>())
+        .expect("pid_t's size fits in a socklen_t");
     // SAFETY: `pid` and `len` are valid for writes of the sizes passed, and
     // the descriptor is open for as long as `stream` is borrowed.
     let read = unsafe {
@@ -360,7 +366,7 @@ fn listener_pid(stream: &UnixStream) -> Option<u32> {
             std::ptr::addr_of_mut!(len),
         )
     };
-    (read == 0 && pid > 0).then_some(pid as u32)
+    (read == 0 && pid > 0).then_some(pid.cast_unsigned())
 }
 
 /// The sentence a start without the socket shows on its status line and

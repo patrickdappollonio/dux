@@ -128,7 +128,9 @@ pub fn project_gained_agents_message(
 /// Which confirmed act found its project gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectGoneVerb {
+    /// Deleting the project, its agents' worktrees included.
     Delete,
+    /// Removing the project from the workspace.
     Remove,
 }
 

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,9 +29,12 @@ pub use crate::config_effective::{
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum MacroSurface {
+    /// Only in the macro bar over an agent pane.
     #[default]
     Agent,
+    /// Only in the macro bar over a terminal pane.
     Terminal,
+    /// In the macro bar over either kind of pane.
     Both,
 }
 
@@ -99,7 +103,9 @@ impl MacroSurface {
 /// A single text macro entry with surface restriction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MacroEntry {
+    /// The text the macro types into the PTY.
     pub text: String,
+    /// The panes the macro is offered on.
     pub surface: MacroSurface,
 }
 
@@ -127,6 +133,11 @@ pub(crate) fn checked_macro(
 
 /// Whether `name` may be set to `value` in the global environment, by the rule
 /// a project's env lines follow. A refusal never quotes the value.
+///
+/// # Errors
+///
+/// Fails when `name` is not a valid variable name or `value` holds a NUL byte or invalid expansion
+/// syntax.
 pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
     // A name that is no variable name may be a token pasted where a name
     // goes, so it is never repeated either.
@@ -150,40 +161,57 @@ pub fn check_global_env_var(name: &str, value: &str) -> anyhow::Result<()> {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MacrosConfig {
+    /// Every macro, by name, in the order the file lists them.
     #[serde(flatten)]
     pub entries: IndexMap<String, MacroEntry>,
 }
 
+/// The `[defaults]` table: what a new agent starts from when nothing more specific is set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Defaults {
+    /// The global fallback provider for new agents in projects with no override.
     pub provider: String,
+    /// The directory the project browser opens in.
     pub start_directory: Option<String>,
+    /// Whether the new-agent name prompt starts with a random two-word pet name.
     pub enable_randomized_pet_name_by_default: bool,
+    /// Whether dux fast-forward pulls a project's source checkout before creating an agent
+    /// worktree.
     #[serde(default = "default_true")]
     pub pull_before_creating_agent_by_default: bool,
+    /// Whether creating an agent copies the project checkout's uncommitted and untracked changes
+    /// into the new worktree.
     #[serde(default = "default_true")]
     pub copy_uncommitted_changes_by_default: bool,
 }
 
+/// The `[providers.*]` tables: every configured provider, by name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
+    /// Each provider's command and launch settings, by provider name, in file order.
     #[serde(flatten)]
     pub commands: IndexMap<String, ProviderCommandConfig>,
 }
 
+/// The `[terminal]` table: the command a companion terminal runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
+    /// The program a terminal runs.
     pub command: String,
+    /// The arguments passed to that program.
     pub args: Vec<String>,
 }
 
+/// The `[startup_command_terminal]` table: the shell a project's startup command runs in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StartupCommandTerminalConfig {
+    /// The shell program the startup command is handed to.
     pub command: String,
+    /// The arguments passed before the startup command itself.
     pub args: Vec<String>,
 }
 
@@ -205,10 +233,13 @@ pub const DEFAULT_LOG_KEEP: u32 = 5;
 /// copies and the user is unlikely to want a thousand of them.
 pub(crate) const MAX_LOG_KEEP: u32 = 1000;
 
+/// The `[logging]` table: where dux.log lives and how it is rotated.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
+    /// The log level, as written: `error`, `warn`, `info` or `debug`.
     pub level: String,
+    /// The log file's path; a relative path resolves from the dux config directory.
     pub path: String,
     /// Size in bytes the log may reach before dux rotates it. A line is written
     /// whole, so the file stops just short of this rather than crossing it; a
@@ -223,9 +254,11 @@ pub struct LoggingConfig {
     pub compress: bool,
 }
 
+/// The `[editor]` table: the editor that open-in-editor launches.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorConfig {
+    /// The preferred editor's name, matched against the editor CLIs on PATH.
     pub default: String,
 }
 
@@ -693,7 +726,10 @@ pub enum TailscaleModeOutcome {
     /// The mode is live. `bound` is the Tailscale leg's address, or `None` when
     /// the mode wants no leg right now (`no`, or `auto` still waiting for the
     /// interface).
-    Applied { bound: Option<std::net::SocketAddr> },
+    Applied {
+        /// The Tailscale leg's address, or `None` when no leg is wanted now.
+        bound: Option<std::net::SocketAddr>,
+    },
     /// The Tailscale listener that was serving has been stopped.
     Detached,
     /// `yes` looked for a Tailscale address and found none. The mode still
@@ -720,7 +756,9 @@ pub enum TailscaleModeOutcome {
 /// warning rather than plain information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleModeReport {
+    /// Whether the outcome is a warning rather than plain information.
     pub warning: bool,
+    /// The sentence to show.
     pub message: crate::status_text::StatusText,
 }
 
@@ -883,7 +921,7 @@ where
     impl serde::de::Visitor<'_> for TailscaleVisitor {
         type Value = String;
 
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("\"auto\", \"yes\", \"no\", or a legacy boolean")
         }
 
@@ -911,6 +949,7 @@ pub(crate) fn tailscale_load_warning(config: &Config) -> Option<String> {
 
 pub use crate::config_auth::{AddressBlock, AuthRequire, CookieSecure, ServerAuthConfig};
 
+/// The `[server]` table: how the web UI is served, bound and protected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[expect(
@@ -1332,13 +1371,22 @@ pub(crate) fn server_console_settings_changed(prev: &ServerConfig, next: &Server
     prev.color != next.color || prev.qr_codes != next.qr_codes
 }
 
+/// One `[providers.<name>]` table: the CLI dux runs in a PTY for that provider, and how it launches
+/// and resumes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCommandConfig {
+    /// The program dux runs for the provider.
     pub command: String,
+    /// The arguments passed on every interactive launch.
     pub args: Vec<String>,
+    /// Extra arguments appended when a launch resumes the previous conversation; `None` or empty
+    /// means the provider cannot resume.
     pub resume_args: Option<Vec<String>>,
+    /// Milliseconds a resumed launch may show no output before dux kills it and launches fresh;
+    /// `None` or 0 disables the timeout.
     pub resume_wait_timeout_ms: Option<u64>,
+    /// What to tell the user to run when the command is not found on PATH.
     pub install_hint: Option<String>,
     /// Scroll-forwarding policy for the wheel and PgUp/PgDn over this
     /// provider's embedded PTY. Tri-state:
@@ -1611,7 +1659,7 @@ where
     impl serde::de::Visitor<'_> for ComposeBarVisitor {
         type Value = String;
 
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("\"auto\", \"always\", \"never\", or a legacy boolean")
         }
 
@@ -1641,20 +1689,31 @@ pub(crate) fn compose_bar_load_warning(config: &Config) -> Option<String> {
     ComposeBarMode::unknown_value_warning(&config.ui.compose_bar)
 }
 
+/// One `[[projects]]` entry: a repository's portable identity and preferences.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    /// The project's unique id, matching it to its agents and worktrees in the database.
     #[serde(default = "new_project_id")]
     pub id: String,
+    /// The repository's path; it may use `$HOME`, `${HOME}` or `~`.
     pub path: String,
+    /// The display name, or `None` to use the folder's name.
     pub name: Option<String>,
+    /// The provider new agents in this project use, or `None` for the global default.
     pub default_provider: Option<String>,
+    /// The branch new worktrees start from, carried only while syncing into the database; a saved
+    /// config omits it.
     pub leading_branch: Option<String>,
+    /// Whether this project's agents come back at startup, or `None` to follow the global setting.
     pub auto_reopen_agents: Option<bool>,
+    /// The command run in each new agent worktree before the provider launches.
     pub startup_command: Option<String>,
+    /// Variables passed to the project's agent and terminal PTYs, over the global `[env]`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
 
+/// A fresh random project id.
 pub fn new_project_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -1663,6 +1722,7 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
+/// The `[ui]` table: layout, timing and behaviour preferences for both surfaces.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[expect(
@@ -1670,12 +1730,20 @@ pub(crate) fn default_true() -> bool {
     reason = "each bool is its own on/off key in config.toml's [ui] table, read and written by serde"
 )]
 pub struct UiConfig {
+    /// The left pane's initial width, as a percentage of the terminal.
     pub left_width_pct: u16,
+    /// The right (files and diff) pane's initial width, as a percentage of the terminal.
     pub right_width_pct: u16,
+    /// The most of the left pane's height the companion terminals list may take, as a percentage.
     pub terminal_pane_height_pct: u16,
+    /// The project count at which projects with no agents move below their own divider; 0 disables
+    /// it.
     pub empty_project_separator_min_projects: u16,
+    /// The percentage of the right pane's height given to the staged changes and commit sections.
     pub staged_pane_height_pct: u16,
+    /// The percentage of the staged section's height given to the commit message input.
     pub commit_pane_height_pct: u16,
+    /// The most lines an embedded agent terminal keeps in its scrollback.
     pub agent_scrollback_lines: usize,
     /// Maximum number of tabs a single agent may have, counting the session-slot tab
     /// (so 20 means the session-slot tab plus up to 19 ephemeral extra tabs). The "+"
@@ -1697,9 +1765,13 @@ pub struct UiConfig {
     /// with no window to wait out, the TUI line stops queueing and shows the most
     /// recent message until the next one arrives.
     pub status_clear_seconds: u16,
+    /// Seconds between background syncs of git branch names; 0 disables them.
     pub branch_sync_interval: u16,
+    /// Whether the diff gutter shows old and new line numbers.
     pub show_diff_line_numbers: bool,
+    /// How many spaces a tab character renders as in a diff; 0 leaves tabs as they are.
     pub diff_tab_width: u16,
+    /// Whether pull requests are tracked for agent branches through the `gh` CLI.
     pub github_integration: bool,
     /// Seconds between blind GitHub PR-status safety polls. Some checks run on
     /// events (focusing, creating or an agent exiting); this poll is what
@@ -1822,6 +1894,7 @@ pub struct UiConfig {
     /// reports the grace never applies: the focused agent's indicator clears
     /// right away.
     pub attention_grace_seconds: u64,
+    /// Whether agents still running when dux last exited are reopened at startup.
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
     /// Toggling it from the TUI's command palette, the web's Changes actions
@@ -1860,6 +1933,7 @@ pub struct UiConfig {
     /// still works and ALWAYS fetches: this flag governs the automatic screen,
     /// not what that screen is allowed to contain.
     pub disable_release_notes: bool,
+    /// Where the pull-request banner sits in the agent pane: `top` or `bottom`.
     pub pr_banner_position: String,
     /// The agent-list sort mode, persisted so a chosen order (and the manual
     /// drag order it enables) survives restarts and is shared across clients:
@@ -1874,6 +1948,7 @@ pub struct UiConfig {
     /// drag stamps "manual" the same way. Each surface offers its own subset of
     /// the modes and displays whatever value the other one set.
     pub agent_sort: String,
+    /// The color theme's name: a built-in theme or a file stem under the themes directory.
     pub theme: String,
     /// Draw the terminal UI's icons from a Nerd Font (the project folder, the
     /// standalone star, the pull-request mark, warnings, disclosure chevrons,
@@ -1943,6 +2018,10 @@ pub(crate) const DEFAULT_UPLOAD_DIRECTORY: &str = ".dux/uploads";
 /// relative tail that already fills `PATH_MAX` cannot fit under any worktree
 /// whatsoever. How much of the remaining room a particular worktree leaves is
 /// not knowable at load, and is left to the syscall.
+#[expect(
+    clippy::as_conversions,
+    reason = "PATH_MAX is a small positive constant, and no From or TryFrom runs in a const"
+)]
 pub(crate) const MAX_UPLOAD_DIRECTORY_BYTES: usize = libc::PATH_MAX as usize;
 
 /// Why a configured `ui.upload_directory` cannot be used, or `None` when it is
@@ -2152,6 +2231,8 @@ impl Default for ProvidersConfig {
 }
 
 impl ProviderCommandConfig {
+    /// The arguments for an interactive launch, with the resume arguments appended when `start`
+    /// resumes the previous conversation.
     pub fn interactive_args(&self, start: crate::model::ConversationStart) -> Vec<String> {
         let mut args = self.args.clone();
         if start.is_resume()
@@ -2162,6 +2243,8 @@ impl ProviderCommandConfig {
         args
     }
 
+    /// Whether this provider has resume arguments, so it can pick its previous conversation back
+    /// up.
     pub fn supports_session_resume(&self) -> bool {
         self.resume_args
             .as_ref()
@@ -2344,10 +2427,13 @@ impl Default for UiConfig {
 }
 
 impl ProvidersConfig {
+    /// The named provider's settings, if it is configured.
     pub fn get(&self, name: &str) -> Option<&ProviderCommandConfig> {
         self.commands.get(name)
     }
 
+    /// Adds every shipped provider that is missing, and fills the resume and drop-paste settings a
+    /// configured shipped provider leaves unset.
     pub fn ensure_defaults(&mut self) {
         for (name, config) in default_provider_commands() {
             match self.commands.entry(name.to_string()) {
@@ -2463,11 +2549,16 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
 // DuxPaths: canonical locations for runtime files
 // ---------------------------------------------------------------------------
 
+/// Where dux keeps its files: the config directory and everything it holds.
 #[derive(Clone, Debug)]
 pub struct DuxPaths {
+    /// The dux config directory.
     pub root: PathBuf,
+    /// The config file, `config.toml`.
     pub config_path: PathBuf,
+    /// The session database, `sessions.sqlite3`.
     pub sessions_db_path: PathBuf,
+    /// The directory managed worktrees are created under.
     pub worktrees_root: PathBuf,
     /// Path to the lockfile that enforces a single dux instance per
     /// config directory. Contains the PID of the holder.
@@ -2478,6 +2569,13 @@ pub struct DuxPaths {
 }
 
 impl DuxPaths {
+    /// Resolves the paths from `DUX_HOME`, else the platform's config directory under the home
+    /// directory (`XDG_CONFIG_HOME` on Linux).
+    ///
+    /// # Errors
+    ///
+    /// Fails when `DUX_HOME` is set to a relative path, or when it is unset and the home directory
+    /// cannot be determined.
     pub fn discover() -> Result<Self> {
         let root = resolve_root(
             env::var_os("DUX_HOME"),
@@ -2521,6 +2619,10 @@ impl DuxPaths {
     /// local user cannot search their way in whatever the worktrees directory
     /// itself says; sharing a worktree with another local account means putting
     /// the worktrees outside the config root, never loosening the root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the config directory or the worktrees directory cannot be created.
     pub fn ensure_dirs(&self) -> Result<()> {
         crate::file_modes::create_private_dir_all(&self.root)
             .with_context(|| format!("failed to create {}", self.root.display()))?;
@@ -2647,6 +2749,13 @@ pub(crate) fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<
     Ok(resolved)
 }
 
+/// The environment an agent's PTY gets: the global variables overlaid with the project's, with
+/// variable references expanded.
+///
+/// # Errors
+///
+/// Fails when a variable's name is invalid, its value has invalid expansion syntax, or the expanded
+/// value holds a NUL byte.
 pub fn resolve_agent_env(
     global_env: &BTreeMap<String, String>,
     project_env: &BTreeMap<String, String>,
@@ -2656,6 +2765,7 @@ pub fn resolve_agent_env(
     resolve_project_env(&merged)
 }
 
+/// The variables as `NAME=value` lines, one per variable, for editing as text.
 pub fn project_env_to_lines(env: &BTreeMap<String, String>) -> String {
     env.iter()
         .map(|(name, value)| format!("{name}={value}"))
@@ -2663,6 +2773,12 @@ pub fn project_env_to_lines(env: &BTreeMap<String, String>) -> String {
         .join("\n")
 }
 
+/// Parses `NAME=value` lines back into variables, skipping blank lines.
+///
+/// # Errors
+///
+/// Fails on a line without `=`, an invalid variable name or a value holding a NUL byte, naming the
+/// line.
 pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     for (index, line) in raw.lines().enumerate() {
@@ -2729,7 +2845,7 @@ pub(crate) fn expand_path(raw: &str) -> Option<String> {
 
 /// The text a leading `~` expands to, empty when the path does not start with
 /// one. `None` rejects `~user`, whose home dux does not resolve.
-fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
     if chars.peek() != Some(&'~') {
         return Some(String::new());
     }
@@ -2746,7 +2862,7 @@ fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars>) -> Opt
 /// The text the `$VAR`/`${VAR}` reference starting at `chars` expands to, or
 /// the literal reference itself when the variable is unset, so the user can see
 /// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`.
-fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
     let braced = chars.peek() == Some(&'{');
     if braced {
         chars.next();
@@ -2798,6 +2914,7 @@ fn is_valid_var_name(name: &str) -> bool {
 // Top-level Config and KeysConfig
 // ---------------------------------------------------------------------------
 
+/// The whole of `config.toml`, as dux reads and writes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -2825,24 +2942,39 @@ pub struct Config {
     /// agent still being created in it, before giving up out loud. The removal
     /// runs on a background worker, so the wait never blocks either surface.
     pub removal_wait_seconds: u16,
+    /// The `[defaults]` table.
     pub defaults: Defaults,
+    /// The global `[env]` variables passed to every agent, terminal and startup command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The `[providers.*]` tables.
     pub providers: ProvidersConfig,
+    /// The `[terminal]` table.
     pub terminal: TerminalConfig,
+    /// The `[startup_command_terminal]` table.
     pub startup_command_terminal: StartupCommandTerminalConfig,
+    /// The `[logging]` table.
     pub logging: LoggingConfig,
+    /// The `[[projects]]` entries.
     pub projects: Vec<ProjectConfig>,
+    /// The `[ui]` table.
     pub ui: UiConfig,
+    /// The `[capabilities]` table.
     #[serde(default)]
     pub capabilities: CapabilitiesConfig,
+    /// The `[editor]` table.
     pub editor: EditorConfig,
+    /// The `[cli]` table.
     pub cli: CliConfig,
+    /// The `[git]` table.
     #[serde(default)]
     pub git: GitConfig,
+    /// The `[server]` table.
     #[serde(default)]
     pub server: ServerConfig,
+    /// The `[keys]` table.
     pub keys: KeysConfig,
+    /// The `[macros]` table.
     pub macros: MacrosConfig,
     /// The exact text of the file this config was read from, or that dux
     /// wrote from it, when there is one. Never serialized. The config
@@ -2888,6 +3020,7 @@ impl SourceText {
         }
     }
 
+    /// The text, when there is one.
     pub fn as_str(&self) -> Option<&str> {
         self.text.as_deref()
     }
@@ -2919,10 +3052,13 @@ impl std::fmt::Debug for SourceText {
     }
 }
 
+/// The `[keys]` table: the key combos bound to each action.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeysConfig {
+    /// Whether hints show terminal-convention keys dux documents but does not control.
     pub show_terminal_keys: bool,
+    /// Each action's key combos, by the action's config name.
     #[serde(flatten)]
     pub bindings: BTreeMap<String, Vec<String>>,
 }
@@ -3008,11 +3144,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The global default provider.
     pub fn default_provider(&self) -> crate::model::ProviderKind {
         crate::model::ProviderKind::from_str(&self.defaults.provider)
     }
 }
 
+/// The settings for `provider`, or a bare command of the provider's own name when it is not
+/// configured.
 pub fn provider_config(
     config: &Config,
     provider: &crate::model::ProviderKind,
@@ -3035,6 +3174,10 @@ pub fn provider_config(
 /// config. Note the returned value is the raw parse (no provider defaults
 /// applied); callers that want to *adopt* the config should reload from disk via
 /// [`load_config`] so provider defaults are reapplied consistently.
+///
+/// # Errors
+///
+/// Fails with a sentence when `s` is not TOML or does not read as a config.
 pub fn validate_config_str(s: &str) -> Result<Config, String> {
     toml::from_str::<Config>(s).map_err(|e| describe_toml_error(s, &e))
 }
@@ -3197,7 +3340,9 @@ impl ConfigLoadProblem {
 /// A [`ConfigLoadProblem`] with the file it is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigLoadError {
+    /// The config file the problem is about.
     pub path: PathBuf,
+    /// What is wrong with it.
     pub problem: ConfigLoadProblem,
 }
 
@@ -3792,6 +3937,10 @@ pub fn misplaced_auth_problems(raw: &str) -> Vec<String> {
 ///
 /// Read from the user's own text, so an error quotes their file with its real
 /// line numbers rather than a re-serialized copy of the section.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML, `[server.auth]` sits somewhere else, or the section does not read.
 pub fn auth_section_of(raw: &str) -> std::result::Result<ServerAuthConfig, ConfigLoadProblem> {
     // Only `server.auth` is read; every other key is ignored here.
     #[derive(Deserialize)]
@@ -3946,6 +4095,7 @@ impl StartProblem {
 /// satisfied either.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StartCheck {
+    /// Every problem found that stops dux starting with the file.
     pub problems: Vec<StartProblem>,
     pub(crate) unjudgeable_rules: Vec<String>,
 }
@@ -4631,7 +4781,9 @@ pub(crate) fn shown_parts(raw: &str, parts: &[PathPart<'_>]) -> String {
                     }
                     out.push_str(&dotted(&[(*key).to_string()]));
                 }
-                PathPart::Index(index) => out.push_str(&format!("[{index}]")),
+                PathPart::Index(index) => {
+                    let _ = write!(out, "[{index}]");
+                }
             }
         }
         out
@@ -4975,6 +5127,10 @@ fn env_variable_problem(name: &str, value: &str) -> Option<String> {
 }
 
 /// [`start_check_problems`], failing on the first.
+///
+/// # Errors
+///
+/// Fails with the first problem that stops dux starting with `config`.
 pub fn start_check(config: &Config) -> Result<()> {
     match start_check_problems(config).into_iter().next() {
         Some(problem) => Err(anyhow!(problem)),
@@ -5069,6 +5225,10 @@ pub fn log_path_refusal(config: &Config, paths: &DuxPaths) -> Option<String> {
 
 /// The config dux runs with from a whole file's text: read as a start reads
 /// it, with the corrections a load makes.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML or carries an `[server.auth]` that does not load.
 pub fn effective_config_from_text(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
     config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
@@ -5369,6 +5529,11 @@ fn table_into_config(table: &toml::Table) -> Result<Config, String> {
 /// or carries an invalid auth section is a [`ConfigLoadError`], never a
 /// silent fallback to defaults, because the default is "no password". A
 /// start then refuses to run and a reload keeps the running config.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, is not TOML, or carries an `[server.auth]` that does not
+/// load.
 pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     load_config_file(&paths.config_path)
 }
@@ -5380,6 +5545,11 @@ pub fn load_config(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadEr
 /// refused for the same reason: it is what an editor leaves mid-save. The
 /// emptiness is judged on the very text that is then parsed, so a file
 /// truncated between two reads cannot slip through as the defaults.
+///
+/// # Errors
+///
+/// Fails when the file is missing, empty, unreadable, not TOML, or carries an `[server.auth]` that
+/// does not load.
 pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, ConfigLoadError> {
     let fail = |problem| ConfigLoadError {
         path: paths.config_path.clone(),
@@ -5399,6 +5569,10 @@ pub fn load_config_for_reload(paths: &DuxPaths) -> std::result::Result<Config, C
 /// UI's `ensure_config_for_reload`, which would otherwise create a fresh
 /// default file) runs first: the file is there. Emptiness is that reader's to
 /// judge on the text it parses.
+///
+/// # Errors
+///
+/// Fails when the file is missing, unreadable, or a link to a file that is gone.
 pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), ConfigLoadError> {
     match read_config_text(&paths.config_path)? {
         Some(_) => Ok(()),
@@ -5410,6 +5584,10 @@ pub fn config_present_for_reload(paths: &DuxPaths) -> std::result::Result<(), Co
 }
 
 /// [`load_config`] for a bare file path.
+///
+/// # Errors
+///
+/// Fails as [`load_config`] does.
 pub fn load_config_file(config_path: &Path) -> std::result::Result<Config, ConfigLoadError> {
     let config = load_config_file_as_written(config_path)?;
     Ok(apply_load_corrections(config))
@@ -5450,6 +5628,10 @@ fn config_from_read_text(
 /// `dux config get`): `None` when there is no file yet, which means the
 /// defaults; an error when it cannot be read, or when it is a link to a file
 /// that is gone, which is not "no file yet" and stops every surface.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, or is a link to a file that is gone.
 pub fn read_config_text(
     config_path: &Path,
 ) -> std::result::Result<Option<String>, ConfigLoadError> {
@@ -5473,6 +5655,10 @@ pub fn read_config_text(
 /// with the load's in-memory corrections, without warning about them. What
 /// memory starts as, and therefore the config writer's base: a correction is
 /// never a change dux made, so a save never writes it over what the file says.
+///
+/// # Errors
+///
+/// Fails when `raw` is not TOML or carries an `[server.auth]` that does not load.
 pub fn config_from_text_as_loaded(raw: &str) -> std::result::Result<Config, ConfigLoadProblem> {
     config_from_text(raw, Report::Quiet).map(|config| load_corrections(config).0)
 }
@@ -5846,6 +6032,8 @@ fn provider_command_available_in_path(command: &str, paths: &std::ffi::OsStr) ->
 }
 
 fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
@@ -5853,7 +6041,6 @@ fn is_executable_file(path: &Path) -> bool {
         return false;
     }
 
-    use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o111 != 0
 }
 
@@ -5955,6 +6142,7 @@ pub fn ipv6_unavailable(err: &std::io::Error) -> bool {
 /// degrades to a warning and serves the remaining addresses).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerPlan {
+    /// Every address to bind, deduplicated, in a stable order.
     pub addrs: Vec<PlanAddr>,
     /// The one REQUIRED address (the configured `host:port` or `--bind`). Kept
     /// beside `addrs` because the Tailscale watcher has to know what the primary
@@ -6094,6 +6282,10 @@ fn port_zero_problem(host: &str, port: u16) -> Option<String> {
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
+///
+/// # Errors
+///
+/// Fails when the configured or `--bind` address does not parse, or the plan breaks a bind rule.
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,
@@ -7251,14 +7443,20 @@ mod tests {
         unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
         let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
         assert_eq!(result, "/test/value/subdir");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_1") };
     }
 
     #[test]
     fn expand_path_braced_var() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
         let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
         assert_eq!(result, "/braced/sub");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_2") };
     }
 
@@ -7285,8 +7483,12 @@ mod tests {
 
     #[test]
     fn expand_path_rejects_traversal() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
         assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_3") };
     }
 
@@ -7894,6 +8096,8 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn expand_variable_reads_both_forms_and_stops_at_the_name() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_VAR_4", "/value") };
         let mut plain = "DUX_TEST_VAR_4/rest".chars().peekable();
         assert_eq!(expand_variable(&mut plain).as_deref(), Some("/value"));
@@ -7902,6 +8106,8 @@ auth = { minimum_password_score = 9 }
         let mut braced = "{DUX_TEST_VAR_4}/rest".chars().peekable();
         assert_eq!(expand_variable(&mut braced).as_deref(), Some("/value"));
         assert_eq!(braced.collect::<String>(), "/rest");
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_VAR_4") };
 
         let mut unset = "NONEXISTENT_DUX_VAR_998/rest".chars().peekable();
@@ -7932,12 +8138,16 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn project_env_lines_parse_and_expand() {
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is set.
         unsafe { std::env::set_var("DUX_TEST_PROJECT_ENV_SOURCE", "secret") };
         let env = parse_project_env_lines("EDITOR=true\nAPI_KEY=${DUX_TEST_PROJECT_ENV_SOURCE}")
             .expect("parse env");
         let resolved = resolve_project_env(&env).expect("resolve env");
         assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
         assert!(resolved.contains(&("API_KEY".to_string(), "secret".to_string())));
+        // SAFETY: the variable's name is unique to this test, so nothing else in the
+        // process reads or writes it while it is removed.
         unsafe { std::env::remove_var("DUX_TEST_PROJECT_ENV_SOURCE") };
     }
 
@@ -7964,8 +8174,9 @@ auth = { minimum_password_score = 9 }
     }
 
     fn write_executable(path: &Path) {
-        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write fixture command");
         use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write fixture command");
         let mut permissions = std::fs::metadata(path)
             .expect("fixture metadata")
             .permissions();

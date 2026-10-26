@@ -25,7 +25,9 @@ use crate::worker::{ResourceKind, ResourceStats};
 /// `GET /api/v1/sessions/:id/changes`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpineView {
+    /// Every project in the workspace.
     pub projects: Vec<ProjectView>,
+    /// Every agent session in the workspace.
     pub sessions: Vec<SessionView>,
     /// Every companion terminal in manual `sort_order`. Each carries a tagged
     /// [`TerminalOwnerView`] so clients handle owner kinds exhaustively.
@@ -361,8 +363,11 @@ pub struct BootstrapView {
 /// from an array index, so the client never has to re-derive the sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WelcomeStepView {
+    /// The step's position in the sequence, from 1.
     pub number: u8,
+    /// The step's title.
     pub title: String,
+    /// What the step asks the user to do.
     pub detail: String,
 }
 
@@ -373,8 +378,11 @@ pub struct WelcomeStepView {
 /// the trimming so neither surface needs a Markdown renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WelcomeScreenView {
+    /// The line under the welcome screen's title.
     pub tagline: String,
+    /// The screen's introductory paragraphs.
     pub paragraphs: Vec<String>,
+    /// The numbered getting-started steps.
     pub steps: Vec<WelcomeStepView>,
 }
 
@@ -421,6 +429,7 @@ impl PendingFirstLoadView {
     /// The wire name for [`crate::first_load::FirstLoad::WhatsNew`].
     pub(crate) const WHATS_NEW: &'static str = "whats_new";
 
+    /// The first-run welcome screen, with no release notes.
     pub fn welcome() -> Self {
         Self {
             screen: Self::WELCOME.to_string(),
@@ -428,6 +437,7 @@ impl PendingFirstLoadView {
         }
     }
 
+    /// The what's-new screen for the running version, carrying its release notes.
     pub fn whats_new(notes: crate::release_notes::ReleaseNotes) -> Self {
         Self {
             screen: Self::WHATS_NEW.to_string(),
@@ -450,20 +460,30 @@ pub struct MacroView {
     pub surface: String,
 }
 
+/// A project projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProjectView {
+    /// The project's unique id.
     pub id: String,
+    /// The display name.
     pub name: String,
+    /// The repository's path on the server.
     pub path: String,
+    /// The provider new agents in this project use: the explicit override, else the global default.
     pub default_provider: String,
     /// Explicit per-project provider override (None = inherits the global default).
     pub explicit_default_provider: Option<String>,
+    /// Whether the project's agents come back at startup, or `None` to follow the global setting.
     pub auto_reopen_agents: Option<bool>,
+    /// The command run in each new agent worktree before the provider launches.
     pub startup_command: Option<String>,
+    /// Variables passed to the project's agent and terminal PTYs, over the global ones.
     pub env: std::collections::BTreeMap<String, String>,
+    /// The branch the project's source checkout is on.
     pub current_branch: String,
     /// "leading" | "`not_leading`" | "unknown"
     pub branch_status: String,
+    /// Whether the project's path is gone from disk.
     pub path_missing: bool,
     /// The project's configured leading/default branch, if known. Surfaced so a
     /// client can show the default branch in a project-info view. `None` when it
@@ -487,8 +507,11 @@ pub struct ProjectView {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentWorkspaceView {
+    /// A working copy dux created and owns, inside a project.
     Managed {
+        /// The project the working copy belongs to.
         project_id: String,
+        /// The branch the working copy is on now.
         branch_name: String,
         /// The branch this agent was created on, immutable. Distinct from
         /// `branch_name` (the current branch, which tracks the worktree). When
@@ -501,6 +524,7 @@ pub enum AgentWorkspaceView {
         /// The branch this agent was forked from (its fork point / leading
         /// branch).
         source_branch: String,
+        /// The working copy's path on the server.
         worktree_path: String,
         /// The same path shortened against the server's home directory, for
         /// display. Computed here for the same reason the folder's label is:
@@ -524,6 +548,7 @@ pub enum AgentWorkspaceView {
         /// of its own. `None` while the working copy is there.
         recreate: Option<RecreateView>,
     },
+    /// A folder the user already had, which dux only visits.
     Folder {
         /// The folder as it exists on the SERVER's filesystem.
         folder_path: String,
@@ -623,20 +648,25 @@ fn folder_repo_status_wire(status: crate::git::FolderRepoStatus) -> &'static str
     }
 }
 
+/// An agent session projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent facts about an agent sent to the web client as JSON booleans"
 )]
 pub struct SessionView {
+    /// The session's unique id.
     pub id: String,
+    /// The display name the user gave the agent, if any.
     pub title: Option<String>,
+    /// The provider the session-slot tab runs.
     pub provider: String,
     /// Where this agent lives and what dux may do there. See
     /// [`AgentWorkspaceView`].
     pub workspace: AgentWorkspaceView,
     /// "active" | "detached" | "exited"
     pub status: String,
+    /// Whether startup auto-reopen is allowed for this agent.
     pub auto_reopen_enabled: bool,
     /// Associated GitHub pull request, if one is tracked for this session.
     pub pr: Option<PrView>,
@@ -717,15 +747,24 @@ pub struct SessionView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TerminalOwnerView {
     /// A companion terminal spawned in an agent's worktree.
-    Session { session_id: String },
+    Session {
+        /// The agent session that owns the terminal.
+        session_id: String,
+    },
     /// A project terminal spawned at a project's repo root, with no agent.
-    Project { project_id: String },
+    Project {
+        /// The project that owns the terminal.
+        project_id: String,
+    },
     /// A standalone terminal, belonging to no agent and no project. There is no
     /// owner id to send, so it carries what its row names it by: the directory it
     /// opened in, home collapsed to `~` ([`crate::home_path::shorten_home`]),
     /// which is the row's second line and the sidebar search key. Collapsed
     /// server-side because the browser may be on another machine.
-    Standalone { cwd_label: String },
+    Standalone {
+        /// The directory the terminal opened in, home collapsed to `~`.
+        cwd_label: String,
+    },
 }
 
 impl crate::model::TerminalOwner {
@@ -753,13 +792,16 @@ impl crate::model::TerminalOwner {
     }
 }
 
+/// A terminal projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TerminalView {
+    /// The terminal's unique id.
     pub id: String,
     /// Who this terminal belongs to, tagged. Every terminal carries its own
     /// owner now that they arrive as one flat collection rather than nested
     /// under the session or project that owns them.
     pub owner: TerminalOwnerView,
+    /// The terminal's display label.
     pub label: String,
     /// Whether the terminal's PTY has emitted any output yet.
     pub has_output: bool,
@@ -971,12 +1013,16 @@ pub struct DropPasteView {
     pub command_name: String,
 }
 
+/// A pull request projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PrView {
+    /// The pull request's number.
     pub number: u64,
     /// "open" | "merged" | "closed"
     pub state: String,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's web address.
     pub url: String,
     /// Whether this PR was manually attached (pinned) rather than autodetected:
     /// plain provenance. On `PrView` and NOT on `SessionView`, so "overridden
@@ -990,10 +1036,15 @@ pub struct PrView {
 /// changed-files REST read `GET /api/v1/sessions/:id/changes`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChangedFileView {
+    /// The git status code.
     pub status: String,
+    /// The path, relative to the working copy.
     pub path: String,
+    /// Lines added.
     pub additions: usize,
+    /// Lines removed.
     pub deletions: usize,
+    /// Whether git calls the file binary, so it has no line counts.
     pub binary: bool,
     /// True when the repository excludes this path from diffs (`-diff` in a
     /// `.gitattributes`). Like a binary it has no line counts; unlike a binary
@@ -1025,13 +1076,17 @@ pub enum FolderView {
     /// travels as hex text, because a 64-bit number does not survive a
     /// JavaScript number.
     Directory {
+        /// How many files the folder stands for, at any depth.
         file_count: usize,
+        /// Repositories of their own inside the folder; omitted when there are none.
         #[serde(skip_serializing_if = "is_zero")]
         nested_repositories: usize,
         /// Worktrees of this same repository inside the folder, counted apart
         /// from repositories of their own. Omitted when there are none.
         #[serde(skip_serializing_if = "is_zero")]
         linked_worktrees: usize,
+        /// The folder's fingerprint as hex text; omitted when the folder was too large to
+        /// fingerprint.
         #[serde(skip_serializing_if = "Option::is_none")]
         fingerprint: Option<String>,
         /// Staged side only: repositories of their own inside the folder that
@@ -1096,9 +1151,13 @@ fn is_zero(count: &usize) -> bool {
 /// One process inside a sampled tree, projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProcessInfoView {
+    /// The process's name.
     pub name: String,
+    /// The process id.
     pub pid: u32,
+    /// Its CPU use, as a percentage of one core.
     pub cpu_percent: f32,
+    /// Its resident memory, in bytes.
     pub rss_bytes: u64,
     /// True for the entry that IS the row's root process. The breakdown
     /// includes the root so it sums to the row total; this marks it so it does
@@ -1121,12 +1180,16 @@ pub struct ResourceStatsView {
     pub kind: String,
     /// Human-readable description. Display only; never parse it.
     pub label: String,
+    /// The root process's id, when the row has one.
     pub pid: Option<u32>,
     /// May exceed 100: a multi-threaded tree spread across cores legitimately
     /// does, so no surface may clamp it.
     pub cpu_percent: f32,
+    /// The resident memory of the whole tree, in bytes.
     pub rss_bytes: u64,
+    /// How many processes the tree holds.
     pub process_count: usize,
+    /// The processes in the tree, the root included.
     pub children: Vec<ProcessInfoView>,
     /// Whether the breakdown carries information beyond the row itself, i.e.
     /// whether the client should offer an expand affordance. Computed by core
@@ -1260,8 +1323,7 @@ impl Engine {
                 .map(|s| {
                     let extras = extras_by_session
                         .get(s.id.as_str())
-                        .map(std::vec::Vec::as_slice)
-                        .unwrap_or(&[]);
+                        .map_or(&[][..], std::vec::Vec::as_slice);
                     self.project_session(s, extras)
                 })
                 .collect(),
@@ -1410,7 +1472,11 @@ impl Engine {
                 .get(TabIdRef::new(&t.id))
                 .cloned()
                 .unwrap_or_else(|| t.provider.clone());
-            tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, (i + 1) as u32));
+            tabs.push(self.tab_view(
+                TabIdRef::new(&t.id),
+                &effective,
+                u32::try_from(i + 1).expect("an agent has far fewer than 2^32 tabs"),
+            ));
         }
         let conversation = if crate::config::provider_config(&self.config, &s.provider)
             .supports_session_resume()
@@ -1502,21 +1568,24 @@ impl Engine {
         })
     }
 
-    /// Project the build-/config-static snapshot served once via
-    /// `GET /api/v1/bootstrap`. Delivered as a one-shot REST read invalidated by
-    /// `config.changed`.
-    pub fn bootstrap(&self) -> BootstrapView {
+    /// Every configured provider's name, sorted.
+    fn available_providers(&self) -> Vec<String> {
         let mut available_providers: Vec<String> =
             self.config.providers.commands.keys().cloned().collect();
         available_providers.sort();
-        // What CONFIG says, and nothing else. A live process never writes here:
-        // what a tab launched with is published on the SPINE, per tab, because
-        // that is what a launch and a termination refresh. Folding launched
-        // entries in here collapsed a per-tab answer onto a per-provider key
-        // (two sibling tabs of one provider could not both be right) AND left
-        // the browser's copy stale for the life of the process.
-        let provider_drop_paste: BTreeMap<String, DropPasteView> = self
-            .config
+        available_providers
+    }
+
+    /// How a drop pastes into each provider, by provider name.
+    ///
+    /// What CONFIG says, and nothing else. A live process never writes here:
+    /// what a tab launched with is published on the SPINE, per tab, because
+    /// that is what a launch and a termination refresh. Folding launched
+    /// entries in here collapsed a per-tab answer onto a per-provider key
+    /// (two sibling tabs of one provider could not both be right) AND left
+    /// the browser's copy stale for the life of the process.
+    fn provider_drop_paste(&self) -> BTreeMap<String, DropPasteView> {
+        self.config
             .providers
             .commands
             .iter()
@@ -1529,17 +1598,49 @@ impl Engine {
                     },
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    /// The compose bar mode dux uses, by name.
+    fn compose_bar_name(&self) -> String {
+        crate::config_effective::effective_compose_bar(&self.config.ui.compose_bar)
+            .as_str()
+            .to_string()
+    }
+
+    /// The clipboard passthrough mode dux uses, by name, with the master switch
+    /// resolved in.
+    fn clipboard_passthrough_name(&self) -> String {
+        crate::config_effective::effective_clipboard_passthrough(&self.config.capabilities)
+            .as_str()
+            .to_string()
+    }
+
+    /// Where the pull-request banner sits, by name.
+    fn pr_banner_position_name(&self) -> String {
+        crate::config_effective::effective_pr_banner_position(&self.config.ui.pr_banner_position)
+            .as_str()
+            .to_string()
+    }
+
+    /// Every macro, in the config's order.
+    fn macro_views(&self) -> Vec<MacroView> {
+        self.config
+            .macros
+            .entries
+            .iter()
+            .map(|(name, entry)| MacroView::from_entry(name, entry))
+            .collect()
+    }
+
+    /// Project the build-/config-static snapshot served once via
+    /// `GET /api/v1/bootstrap`. Delivered as a one-shot REST read invalidated by
+    /// `config.changed`.
+    pub fn bootstrap(&self) -> BootstrapView {
         BootstrapView {
-            available_providers,
-            provider_drop_paste,
-            macros: self
-                .config
-                .macros
-                .entries
-                .iter()
-                .map(|(name, entry)| MacroView::from_entry(name, entry))
-                .collect(),
+            available_providers: self.available_providers(),
+            provider_drop_paste: self.provider_drop_paste(),
+            macros: self.macro_views(),
             macros_version: crate::wire::macros_version(&self.config.macros),
             welcome_tips: crate::welcome::web_tips(),
             dux_version: crate::display_version().to_string(),
@@ -1563,11 +1664,7 @@ impl Engine {
             // Normalized rather than passed through: `set_settings` and the raw
             // config editor both put a value in memory without going through
             // `load_config`, so this is the last place to catch a typo.
-            compose_bar: crate::config_effective::effective_compose_bar(
-                &self.config.ui.compose_bar,
-            )
-            .as_str()
-            .to_string(),
+            compose_bar: self.compose_bar_name(),
             mobile_accessory_bar: self.config.ui.mobile_accessory_bar,
             upload_write_gitignore: self.config.ui.upload_write_gitignore,
             upload_pasted_text_chars: crate::config::normalized_upload_pasted_text_chars(
@@ -1581,16 +1678,8 @@ impl Engine {
             // one answer. Browser notifications are not one of its consequences:
             // `web_notifications` is the only switch over those and is published
             // untouched above.
-            clipboard_passthrough: crate::config_effective::effective_clipboard_passthrough(
-                &self.config.capabilities,
-            )
-            .as_str()
-            .to_string(),
-            pr_banner_position: crate::config_effective::effective_pr_banner_position(
-                &self.config.ui.pr_banner_position,
-            )
-            .as_str()
-            .to_string(),
+            clipboard_passthrough: self.clipboard_passthrough_name(),
+            pr_banner_position: self.pr_banner_position_name(),
             tailscale_mode: self.config.server.tailscale_mode().as_str().to_string(),
             // Always `false` here: `--no-tailscale` is the serving process's own
             // fact, and the bootstrap ROUTE injects it. See the field's doc.
@@ -1922,10 +2011,11 @@ mod tests {
 
     #[test]
     fn macros_reflect_a_config_reload() {
+        use crate::config::{MacroEntry, MacroSurface};
+
         // Held because the reload stores this config's `logging.level` into the
         // process-wide threshold another test may be asserting on.
         let _guard = crate::logger::level_test_guard();
-        use crate::config::{MacroEntry, MacroSurface};
         let (mut engine, _tmp) = test_engine();
         assert!(engine.bootstrap().macros.is_empty());
 

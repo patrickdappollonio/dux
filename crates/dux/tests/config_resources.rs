@@ -24,9 +24,9 @@ fn append(path: &Path, text: &str) {
         .create(true)
         .append(true)
         .open(path)
-        .unwrap()
+        .expect("open the file to append to")
         .write_all(text.as_bytes())
-        .unwrap();
+        .expect("append to the file");
 }
 
 /// A `dux … logs -f` that keeps running: its stdout lines arrive on a
@@ -48,7 +48,7 @@ impl Follower {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("the dux binary runs");
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().expect("the follow's stdout is piped");
         let (sender, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines() {
@@ -69,7 +69,10 @@ impl Follower {
             match self.lines.recv_timeout(left) {
                 Ok(line) if line.contains(want) => return,
                 Ok(_) => {}
-                Err(_) => panic!("{want:?} was never printed"),
+                Err(
+                    std::sync::mpsc::RecvTimeoutError::Timeout
+                    | std::sync::mpsc::RecvTimeoutError::Disconnected,
+                ) => panic!("{want:?} was never printed"),
             }
         }
     }
@@ -80,13 +83,16 @@ impl Follower {
         let pid = self.child.id().to_string();
         let sent = Command::new("kill")
             .args(["-INT", &pid])
-            .env("PATH", SHELL_PATH.get().unwrap())
+            .env(
+                "PATH",
+                SHELL_PATH.get().expect("the test kept its shell's PATH"),
+            )
             .status()
-            .unwrap();
+            .expect("kill runs");
         assert!(sent.success());
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if let Some(status) = self.child.try_wait().unwrap() {
+            if let Some(status) = self.child.try_wait().expect("ask whether the follow ended") {
                 return status.signal();
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -125,10 +131,20 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     );
     assert_eq!(run.code(), 0, "{}", run.stderr());
 
-    // A macro saved with dux running is in the running dux at once, which
-    // the remote's API answers from, and in the file, comments kept.
+    macros_and_env_through_the_running_dux(&root);
+    listings_match_here_and_through_the_remote(&root);
+    nobody_is_connected(&root);
+    the_server_log_tailed_and_followed(&root);
+    with_no_dux_running_the_file_is_edited();
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A macro saved with dux running is in the running dux at once, which
+/// the remote's API answers from, and in the file, comments kept.
+fn macros_and_env_through_the_running_dux(root: &Path) {
     let run = dux(
-        &root,
+        root,
         &[
             "macros",
             "add",
@@ -142,13 +158,13 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     );
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(run.stdout().contains("greet"), "{}", run.stdout());
-    let run = dux(&root, &["--remote", "here", "macros", "ls"], "");
+    let run = dux(root, &["--remote", "here", "macros", "ls"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(
         run.stdout(),
         "NAME    SURFACE   TEXT\nhi      agent     hello\ngreet   both      hello there\n"
     );
-    let file = std::fs::read_to_string(root.join("config.toml")).unwrap();
+    let file = std::fs::read_to_string(root.join("config.toml")).expect("read the config");
     assert!(
         file.contains(
             "# kept by hand\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" }\n\
@@ -158,52 +174,56 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     );
 
     // Removing one that is not there is the running dux's refusal.
-    let run = dux(&root, &["macros", "rm", "nope", "--yes"], "");
+    let run = dux(root, &["macros", "rm", "nope", "--yes"], "");
     assert_eq!(run.code(), 1, "{}", run.stderr());
     assert!(run.stderr().contains("nope"), "{}", run.stderr());
 
     // A value goes in through standard input and is never printed back.
     let run = dux(
-        &root,
+        root,
         &["env", "set", "API_TOKEN", "--stdin", "--yes"],
         "zzsecret\n",
     );
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(!run.stdout().contains("zzsecret"), "{}", run.stdout());
-    let run = dux(&root, &["--remote", "here", "env", "ls"], "");
+    let run = dux(root, &["--remote", "here", "env", "ls"], "");
     assert_eq!(run.stdout(), "NAME\nAPI_TOKEN\n");
-    let run = dux(&root, &["--remote", "here", "env", "ls", "--show"], "");
+    let run = dux(root, &["--remote", "here", "env", "ls", "--show"], "");
     assert_eq!(run.stdout(), "NAME        VALUE\nAPI_TOKEN   zzsecret\n");
+}
 
-    // The themes are the picker's, in its order, here and through the remote.
-    let here = dux(&root, &["themes", "ls", "-q"], "");
+/// The themes are the picker's, in its order, here and through the remote.
+fn listings_match_here_and_through_the_remote(root: &Path) {
+    let here = dux(root, &["themes", "ls", "-q"], "");
     assert_eq!(here.code(), 0, "{}", here.stderr());
     assert!(
         here.stdout().starts_with("dux_dark\nalpha\nayu_dark\n"),
         "{}",
         here.stdout()
     );
-    let remote = dux(&root, &["--remote", "here", "themes", "ls", "-q"], "");
+    let remote = dux(root, &["--remote", "here", "themes", "ls", "-q"], "");
     assert_eq!(remote.code(), 0, "{}", remote.stderr());
     assert_eq!(remote.stdout(), here.stdout());
 
     for listing in [&["keys", "ls", "-q"][..], &["providers", "ls", "-q"][..]] {
-        let here = dux(&root, listing, "");
+        let here = dux(root, listing, "");
         let mut through = vec!["--remote", "here"];
         through.extend_from_slice(listing);
-        let remote = dux(&root, &through, "");
+        let remote = dux(root, &through, "");
         assert_eq!(here.code(), 0, "{listing:?}: {}", here.stderr());
         assert_eq!(remote.code(), 0, "{listing:?}: {}", remote.stderr());
         assert!(!here.stdout().is_empty(), "{listing:?}");
         assert_eq!(remote.stdout(), here.stdout(), "{listing:?}");
     }
+}
 
-    // Nobody is connected to this dux, over the socket or the remote.
+/// Nobody is connected to this dux, over the socket or the remote.
+fn nobody_is_connected(root: &Path) {
     for through in [&[][..], &["--remote", "here"][..]] {
         let with = |rest: &[&str]| {
             let mut args = through.to_vec();
             args.extend_from_slice(rest);
-            dux(&root, &args, "")
+            dux(root, &args, "")
         };
         let run = with(&["server", "connections", "ls"]);
         assert_eq!(run.code(), 0, "{through:?}: {}", run.stderr());
@@ -217,8 +237,10 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
             "[]\n"
         );
     }
+}
 
-    // The server log, a tail and a follow, over the socket and the remote.
+/// The server log, a tail and a follow, over the socket and the remote.
+fn the_server_log_tailed_and_followed(root: &Path) {
     for (turn, through) in [&[][..], &["--remote", "here"][..]].into_iter().enumerate() {
         let (first, last, live) = (
             format!("tail {turn} first"),
@@ -228,13 +250,13 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
         append(&root.join("server.log"), &format!("{first}\n{last}\n"));
         let mut args = through.to_vec();
         args.extend_from_slice(&["server", "logs", "--lines", "2"]);
-        let run = dux(&root, &args, "");
+        let run = dux(root, &args, "");
         assert_eq!(run.code(), 0, "{through:?}: {}", run.stderr());
         assert_eq!(run.stdout(), format!("{first}\n{last}\n"), "{through:?}");
 
         let mut args = through.to_vec();
         args.extend_from_slice(&["server", "logs", "-f", "--lines", "1"]);
-        let mut follower = Follower::start(&root, &args);
+        let mut follower = Follower::start(root, &args);
         follower.wait_for(&last);
         append(&root.join("server.log"), &format!("{live}\n"));
         follower.wait_for(&live);
@@ -244,10 +266,12 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
             "{through:?}: Ctrl-C ends the follow"
         );
     }
+}
 
-    // With no dux running the command edits the file, comments kept.
+/// With no dux running the command edits the file, comments kept.
+fn with_no_dux_running_the_file_is_edited() {
     let stopped = home("stopped");
-    std::fs::write(stopped.join("config.toml"), CONFIG).unwrap();
+    std::fs::write(stopped.join("config.toml"), CONFIG).expect("write the config");
     let run = dux(&stopped, &["macros", "add", "bye", "see you", "--yes"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert!(
@@ -256,7 +280,7 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
         run.stdout()
     );
     assert_eq!(
-        std::fs::read_to_string(stopped.join("config.toml")).unwrap(),
+        std::fs::read_to_string(stopped.join("config.toml")).expect("read the config"),
         CONFIG.replace(
             "surface = \"agent\" }\n",
             "surface = \"agent\" }\nbye = { text = \"see you\", surface = \"agent\" }\n"
@@ -268,12 +292,12 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
 
     // A macro whose name is not shown has no id to print, so -q leaves it out
     // and says how many it left out.
-    let mut text = std::fs::read_to_string(stopped.join("config.toml")).unwrap();
+    let mut text = std::fs::read_to_string(stopped.join("config.toml")).expect("read the config");
     text = text.replace(
         "bye = {",
         "\"not shown here\" = { text = \"x\", surface = \"agent\" }\nbye = {",
     );
-    std::fs::write(stopped.join("config.toml"), text).unwrap();
+    std::fs::write(stopped.join("config.toml"), text).expect("write the config");
     let run = dux(&stopped, &["macros", "ls", "-q"], "");
     assert_eq!(run.code(), 0, "{}", run.stderr());
     assert_eq!(run.stdout(), "hi\nbye\n");
@@ -281,5 +305,4 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
     assert!(!run.stderr().contains("not shown here"), "{}", run.stderr());
 
     let _ = std::fs::remove_dir_all(&stopped);
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -16,7 +16,9 @@ use std::path::Path;
 pub struct WelcomeStep {
     /// 1-based position, so a surface never has to derive it from an index.
     pub number: u8,
+    /// The step's title.
     pub title: &'static str,
+    /// What the step asks the user to do.
     pub detail: &'static str,
 }
 
@@ -122,7 +124,7 @@ mod tests {
         assert_eq!(s.steps[2].title, "Launch");
         // Numbers are carried, not derived, and they are 1-based and sequential.
         for (i, step) in s.steps.iter().enumerate() {
-            assert_eq!(step.number as usize, i + 1);
+            assert_eq!(usize::from(step.number), i + 1);
         }
     }
 

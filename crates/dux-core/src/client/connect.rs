@@ -9,6 +9,7 @@
 //! names there is tried first, and only when nothing answers on it is the
 //! lock itself examined, to say why.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
@@ -28,8 +29,15 @@ pub const REMOTE_VARIABLE: &str = "DUX_REMOTE";
 /// The dux a command talks to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    /// This machine's dux, over the control socket.
     Local,
-    Remote { name: String, remote: Remote },
+    /// A saved remote, over HTTP.
+    Remote {
+        /// The remote's saved name.
+        name: String,
+        /// The saved remote.
+        remote: Remote,
+    },
 }
 
 /// Whether `--local` was given, which talks to this machine's dux whatever
@@ -60,6 +68,10 @@ pub fn selected_remote(
 
 /// The target a command talks to. A remote name nothing is saved under
 /// stops the command.
+///
+/// # Errors
+///
+/// Fails when the name the flag, the environment or the saved default gives is not a saved remote.
 pub fn choose_target(
     flag: Option<&str>,
     local: LocalFlag,
@@ -93,6 +105,11 @@ impl std::fmt::Debug for Client {
 
 /// Reach `target` and check that it speaks this client's API. `lock_path`
 /// is this machine's `dux.lock`, read only for the local target.
+///
+/// # Errors
+///
+/// Fails when the target cannot be reached, needs a sign-in it does not have, or does not speak
+/// this client's API.
 pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
     let client = match target {
         Target::Local => local_client(find_local(lock_path)?),
@@ -177,6 +194,10 @@ pub(crate) fn read_auth_status(target: &str, reply: &Response) -> Result<AuthSta
 
 /// The dux on this machine, ready for requests; `None` when the lock is free. A dux that
 /// holds the lock but does not answer is an error, never worked around.
+///
+/// # Errors
+///
+/// Fails when a dux holds the lock but does not answer, or does not speak this client's API.
 pub fn connect_local_if_running(lock_path: &Path) -> Result<Option<Client>, CliError> {
     let Some(transport) = find_running_local(lock_path)? else {
         return Ok(None);
@@ -282,8 +303,12 @@ impl Client {
 
     /// Send `request` with this client's sign-in. No reply is
     /// [`Exit::NotRunning`]; a reply of any status is returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Exit::NotRunning`] when no reply arrives.
     pub fn send(&self, mut request: Request) -> Result<Response, CliError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport
             .send(&request)
             .map_err(|error| self.no_reply(&error))
@@ -291,19 +316,27 @@ impl Client {
 
     /// [`Self::send`] without mapping a missing reply, for a caller that
     /// retries one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no whole reply arrives, as the transport reports it.
     pub fn try_send(&self, mut request: Request) -> Result<Response, TransportError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport.send(&request)
     }
 
     /// [`Transport::stream`] with this client's sign-in: `request`'s reply
     /// handed to `on_body` as it arrives. A cut stream is [`Exit::NotRunning`].
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Exit::NotRunning`] when the dux cannot be reached or the stream is cut.
     pub fn stream(
         &self,
         mut request: Request,
         on_body: &mut dyn FnMut(u16, &[u8]) -> std::ops::ControlFlow<()>,
     ) -> Result<(), CliError> {
-        request.bearer = self.token.clone();
+        request.bearer.clone_from(&self.token);
         self.transport
             .stream(&request, on_body)
             .map_err(|error| self.no_reply(&error))
@@ -322,6 +355,11 @@ impl Client {
     }
 
     /// GET `path` and read its JSON; any status but 200 is the dux's refusal.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached, answers with anything but 200, or sends a body that is
+    /// not the expected JSON.
     pub fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
         let reply = self.send(Request::get(path))?;
         if reply.status != 200 {
@@ -331,6 +369,10 @@ impl Client {
     }
 
     /// `reply`'s body as `T`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the body is not the expected JSON.
     pub fn parse<T: DeserializeOwned>(&self, reply: &Response) -> Result<T, CliError> {
         serde_json::from_slice(&reply.body).map_err(|error| {
             CliError::new(
@@ -440,7 +482,7 @@ fn attached_blockers(reply: &Response) -> Option<Vec<crate::attachments::Blocker
 fn attached(blockers: &[crate::attachments::Blocker]) -> CliError {
     let mut message = String::from("Someone else is using this right now:\n");
     for blocker in blockers {
-        message.push_str(&format!("  {}\n", blocker.describe()));
+        let _ = writeln!(message, "  {}", blocker.describe());
     }
     message.push_str(
         "Nothing was changed. Ask them to close it first, or add \
@@ -744,7 +786,7 @@ mod tests {
 
         // Another dux, with a password, where the signed-in one was: said
         // before the password is asked about.
-        let (_other, other_addr) = serve(200, "application/json", dux_status("b"));
+        let (other, other_addr) = serve(200, "application/json", dux_status("b"));
         let error = connect(&remote(other_addr, Some("a")), &lock).unwrap_err();
         assert_eq!(
             error.message,
@@ -786,10 +828,10 @@ mod tests {
 
         // The saved sign-in is not shown to a different dux: only once the
         // status says it is the same one does the token go out.
-        let before = _other.seen().len();
+        let before = other.seen().len();
         let _ = connect(&remote(other_addr, Some("a")), &lock);
         assert!(
-            _other.seen()[before..]
+            other.seen()[before..]
                 .iter()
                 .all(|seen| seen.header("authorization").is_none())
         );
@@ -823,7 +865,7 @@ mod tests {
     fn a_dux_speaking_another_api_or_run_by_another_user_is_refused() {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
-        let _fake = FakeDux::unix(&socket, |_| {
+        let fake = FakeDux::unix(&socket, |_| {
             Reply::json(200, r#"{"version":"v9.0.0","process":"p","api":2}"#)
         });
         let _lock =
@@ -848,7 +890,7 @@ mod tests {
         );
 
         // A socket whose other end is not this user is sent nothing at all.
-        let before = _fake.seen().len();
+        let before = fake.seen().len();
         let other = crate::control_socket::current_uid() + 1;
         super::super::transport::OWNER_OVERRIDE.with(|owner| owner.set(Some(other)));
         let error = connect(&Target::Local, &dir.path().join("dux.lock")).unwrap_err();
@@ -859,7 +901,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert_eq!(_fake.seen().len(), before, "nothing was sent");
+        assert_eq!(fake.seen().len(), before, "nothing was sent");
     }
 
     #[test]

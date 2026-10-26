@@ -35,9 +35,15 @@ pub(crate) const VERDICT_EXCERPT_MAX_CHARS: usize = 200;
 pub enum TabRunEnding {
     /// The provider never started: the spawn itself failed, and this is what it
     /// said. Nothing ran, so there is no status and usually no output.
-    LaunchFailed { error: String },
+    LaunchFailed {
+        /// What the spawn said.
+        error: String,
+    },
     /// The child was reaped and its status was non-zero.
-    ExitedWithStatus { status: u32 },
+    ExitedWithStatus {
+        /// The exit status.
+        status: u32,
+    },
     /// The child's PTY ended without dux ever seeing a status (a read error, or
     /// a child that closed its descriptors and was never reapable). "Exited,
     /// status unknown" is a genuinely different answer from any number.
@@ -88,6 +94,7 @@ impl TabRunEnding {
 /// step backwards under an NTP correction and print a negative age.
 #[derive(Clone, Debug)]
 pub struct TabRunVerdict {
+    /// How the run ended.
     pub ending: TabRunEnding,
     pub(crate) ended_at: Instant,
     /// The last visible non-blank lines the run had on screen, captured ONCE at
@@ -97,6 +104,7 @@ pub struct TabRunVerdict {
 }
 
 impl TabRunVerdict {
+    /// A verdict on a run ending now, with the lines it left on screen.
     pub fn new(ending: TabRunEnding, excerpt: Vec<String>) -> Self {
         Self {
             ending,
@@ -105,6 +113,7 @@ impl TabRunVerdict {
         }
     }
 
+    /// How many whole seconds ago the run ended.
     pub fn ended_seconds_ago(&self) -> u64 {
         self.ended_at.elapsed().as_secs()
     }
@@ -230,7 +239,10 @@ fn spell_seconds(seconds: u64) -> String {
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     ];
     let unit = if seconds == 1 { "second" } else { "seconds" };
-    match WORDS.get(seconds as usize) {
+    match usize::try_from(seconds)
+        .ok()
+        .and_then(|index| WORDS.get(index))
+    {
         Some(word) => format!("{word} {unit}"),
         None => format!("{seconds} {unit}"),
     }

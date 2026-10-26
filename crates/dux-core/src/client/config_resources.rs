@@ -11,6 +11,7 @@
 //! at once; with no dux running it edits the file.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -26,6 +27,7 @@ use crate::config_resources::{
 };
 
 /// Where a listing is read from.
+#[derive(Debug)]
 pub enum Source<'a> {
     /// This machine's `config.toml`.
     File(&'a DuxPaths),
@@ -138,6 +140,10 @@ fn to_json<T: serde::Serialize>(value: &T) -> serde_json::Value {
 }
 
 /// `dux macros ls`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, or the config file cannot be read.
 pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
     let mut items = macro_items(source)?;
     // A macro whose name is not shown is listed by a placeholder no later
@@ -148,14 +154,20 @@ pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
         let hidden = listed - items.len();
         match hidden {
             0 => {}
-            1 => eprintln!(
-                "Left out 1 macro whose name is not shown, so it has no id to use; \"dux \
-                 macros ls\" lists it."
-            ),
-            _ => eprintln!(
-                "Left out {hidden} macros whose names are not shown, so they have no id to \
-                 use; \"dux macros ls\" lists them."
-            ),
+            1 => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Left out 1 macro whose name is not shown, so it has no id to use; \"dux \
+                     macros ls\" lists it."
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Left out {hidden} macros whose names are not shown, so they have no id to \
+                     use; \"dux macros ls\" lists them."
+                );
+            }
         }
     }
     let rows = items
@@ -182,6 +194,10 @@ pub fn macros_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 }
 
 /// `dux macros show <name>`.
+///
+/// # Errors
+///
+/// Fails when the macros cannot be read, or `name` names no macro.
 pub fn macros_show(source: &Source<'_>, name: &str) -> Result<String, CliError> {
     let items = macro_items(source)?;
     let shown = resources::shown_name("", "macros", name).0;
@@ -190,6 +206,10 @@ pub fn macros_show(source: &Source<'_>, name: &str) -> Result<String, CliError> 
 }
 
 /// `dux env ls`: names only, unless [`HeldBack::Shown`].
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, or the config file cannot be read.
 pub fn env_ls(source: &Source<'_>, values: HeldBack, shape: Shape) -> Result<String, CliError> {
     let rows = env_items(source, values)?
         .into_iter()
@@ -212,6 +232,10 @@ pub fn env_ls(source: &Source<'_>, values: HeldBack, shape: Shape) -> Result<Str
 }
 
 /// `dux providers ls`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, or the config file cannot be read.
 pub fn providers_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
     let rows = provider_items(source)?
         .into_iter()
@@ -248,6 +272,10 @@ fn provider_json(item: &ProviderItem) -> serde_json::Value {
 }
 
 /// `dux providers show <name>`.
+///
+/// # Errors
+///
+/// Fails when the providers cannot be read, or `name` names no provider.
 pub fn providers_show(source: &Source<'_>, name: &str) -> Result<String, CliError> {
     let items = provider_items(source)?;
     let shown = resources::shown_name("", "providers", name).0;
@@ -256,6 +284,10 @@ pub fn providers_show(source: &Source<'_>, name: &str) -> Result<String, CliErro
 }
 
 /// `dux keys ls`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, or the config file cannot be read.
 pub fn keys_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
     let rows = key_items(source)?
         .into_iter()
@@ -279,6 +311,10 @@ pub fn keys_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
 }
 
 /// `dux themes ls`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, or the config file cannot be read.
 pub fn themes_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> {
     let rows = theme_items(source)?
         .into_iter()
@@ -306,14 +342,16 @@ pub fn themes_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 // ---------------------------------------------------------------------------
 
 /// Where a change goes, and how long it waits for a running dux.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Writer<'a> {
     /// No dux is running on this machine: the change edits `config.toml`.
     File(&'a DuxPaths),
     /// A running dux applies it. `wait` is how long to wait for its outcome;
     /// `None` returns the operation's id at once.
     Dux {
+        /// The client that reaches the running dux.
         client: &'a Client,
+        /// How long to wait for the outcome, or `None` to return the operation's id at once.
         wait: Option<Duration>,
     },
 }
@@ -356,6 +394,11 @@ pub fn remove_macro_question(name: &str) -> String {
 }
 
 /// `dux macros add`: add the macro, or replace the one with that name.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses the macro, or the config file edit
+/// fails.
 pub fn set_macro(
     writer: Writer<'_>,
     name: &str,
@@ -385,6 +428,11 @@ pub fn set_macro(
 }
 
 /// `dux macros rm`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, `name` names no macro, or the config
+/// file edit fails.
 pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
     let label = resources::macro_label(name);
     let result = match writer {
@@ -452,12 +500,21 @@ fn file_text(paths: &DuxPaths) -> String {
 
 /// `dux env set` refuses a name that is no variable name before it asks or
 /// sends anything, without repeating it.
+///
+/// # Errors
+///
+/// Fails when `name` is not a valid environment variable name.
 pub fn check_env_name(name: &str) -> Result<(), CliError> {
     // An empty value passes every value check, so only the name is judged.
     crate::config::check_global_env_var(name, "").map_err(|error| edit_failed(&error))
 }
 
 /// `dux env set`. The value is never printed.
+///
+/// # Errors
+///
+/// Fails when `name` is not a valid variable name, the running dux cannot be reached or refuses, or
+/// the config file edit fails.
 pub fn set_env(writer: Writer<'_>, name: &str, value: &str) -> Result<String, CliError> {
     check_env_name(name)?;
     match writer {
@@ -480,6 +537,11 @@ pub fn set_env(writer: Writer<'_>, name: &str, value: &str) -> Result<String, Cl
 }
 
 /// `dux env rm`.
+///
+/// # Errors
+///
+/// Fails when the running dux cannot be reached or refuses, `name` names no variable, or the config
+/// file edit fails.
 pub fn remove_env(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
     match writer {
         Writer::Dux { client, wait } => through_dux(

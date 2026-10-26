@@ -39,7 +39,9 @@ pub enum OriginFetch {
 /// origin-only ones are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchListing {
+    /// The branches to choose from.
     pub branches: Vec<BranchChoice>,
+    /// How fetching from origin went before the listing.
     pub fetch: OriginFetch,
 }
 
@@ -67,6 +69,10 @@ impl BranchListing {
 /// `fetch_timeout`), then list the branches of the folder at `repo`. A failed
 /// fetch is recorded in the listing, never fatal; only a failed listing is an
 /// `Err`.
+///
+/// # Errors
+///
+/// Fails when git cannot list the branches.
 pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Result<BranchListing> {
     let fetch = match git::has_origin_remote(repo) {
         Ok(false) => OriginFetch::NoOrigin,
@@ -149,7 +155,12 @@ pub enum BaseBranchChangeFailure {
     /// Another worktree has the branch checked out, so git will not check it
     /// out in the project folder too. `by` says whose that worktree is, which
     /// decides the way out the refusal can honestly offer.
-    Held { holder: PathBuf, by: BranchHolder },
+    Held {
+        /// The worktree that has the branch checked out.
+        holder: PathBuf,
+        /// Whose that worktree is.
+        by: BranchHolder,
+    },
     /// Creating the local tracking branch or the `git switch` failed; the text
     /// is git's reason (for the log: the message the user reads is the sticky
     /// "Couldn't check out" one).
@@ -418,7 +429,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(bounds.len(), 2);
         assert_eq!(bounds[0], Duration::from_secs(10));
-        assert!(bounds[1] <= Duration::from_secs(10) - pause);
+        assert!(bounds[1] <= Duration::from_secs(10).checked_sub(pause).unwrap());
         assert!(bounds[1] >= min, "a retry always gets at least the minimum");
 
         let mut calls = 0;

@@ -9,6 +9,7 @@
 //! outcome is never lost. A wait that runs out says the outcome is unknown;
 //! it never claims the change stopped.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -25,17 +26,24 @@ pub(crate) const READ_WAIT: Duration = Duration::from_secs(25);
 /// How long to pause before reading again after a read got no reply.
 const RETRY_PAUSE: Duration = Duration::from_millis(250);
 
+/// Where an operation record stands, as the API spells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordState {
+    /// The work is still running.
     Running,
+    /// Everything the change set out to do was done.
     Succeeded,
+    /// Nothing the change set out to do was done.
     Failed,
+    /// Some of it was done and some was not; the parts say which.
     Partial,
+    /// Still running past the point where its outcome reads as unknown.
     Unknown,
 }
 
 impl RecordState {
+    /// Whether the record has an outcome; `Unknown` has none yet.
     pub fn is_final(self) -> bool {
         !matches!(self, RecordState::Running | RecordState::Unknown)
     }
@@ -54,9 +62,13 @@ impl RecordState {
 /// One piece of a change and what became of it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct RecordPart {
+    /// Which piece of the change: `worktree` or `branch`.
     pub part: String,
+    /// The worktree's path or the branch's name.
     pub subject: String,
+    /// What became of it.
     pub outcome: String,
+    /// Why, when it was refused or failed.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -64,23 +76,33 @@ pub struct RecordPart {
 /// An operation record as the API answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct OperationRecord {
+    /// The record's id.
     pub id: String,
+    /// What kind of change it follows, spelled `noun.verb`.
     pub kind: String,
+    /// Where it stands.
     pub state: RecordState,
+    /// The final's sentence; empty while running.
     #[serde(default)]
     pub message: String,
+    /// The ids the change created.
     #[serde(default)]
     pub created: Vec<String>,
+    /// The ids the change removed.
     #[serde(default)]
     pub removed: Vec<String>,
+    /// What became of each piece of the change.
     #[serde(default)]
     pub parts: Vec<RecordPart>,
 }
 
 /// A change the dux refused, with the operation it named as in the way, when
 /// the refusal named one.
+#[derive(Debug)]
 pub struct Refused {
+    /// The refusal.
     pub error: CliError,
+    /// The id of the operation it named as in the way, when it named one.
     pub operation: Option<String>,
 }
 
@@ -105,6 +127,11 @@ enum Whose {
 impl Client {
     /// Send a change as an operation and return its record as the change
     /// answered it: already final when the change finished inside the call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached or refuses the change, naming the operation in the way
+    /// when there is one.
     pub fn change(
         &self,
         method: Method,
@@ -145,6 +172,10 @@ impl Client {
     }
 
     /// The record `id` as it stands, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the dux cannot be reached, holds no record `id`, or refuses.
     pub fn operation(&self, id: &str) -> Result<OperationRecord, CliError> {
         let reply = self.send(Request::get(operation_path(id, 0)))?;
         match reply.status {
@@ -325,6 +356,10 @@ pub(crate) fn deadline_after(timeout: Duration) -> Instant {
 
 /// A finished record as the command ends on it: its sentence on success, or
 /// the error a failed or partly done change exits with.
+///
+/// # Errors
+///
+/// Fails when the change failed or was partly done, or is still running.
 pub fn outcome(record: &OperationRecord) -> Result<String, CliError> {
     match record.state {
         RecordState::Succeeded => Ok(record.message.clone()),
@@ -369,7 +404,7 @@ pub fn describe(record: &OperationRecord) -> String {
 pub(crate) fn part_line(part: &RecordPart) -> String {
     let mut line = format!("{}: {} {}", part.part, part.subject, part.outcome);
     if let Some(reason) = &part.reason {
-        line.push_str(&format!(" ({reason})"));
+        let _ = write!(line, " ({reason})");
     }
     line
 }

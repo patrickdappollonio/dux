@@ -16,11 +16,17 @@ use crate::model::SessionStatus;
 /// detached/exited and raises no attention signal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowState {
+    /// The agent is asking for attention.
     NeedsAttention,
+    /// Someone is typing into it.
     Typing,
+    /// It is working or running something.
     Busy,
+    /// It is live and quiet.
     Idle,
+    /// The agent is stopped and can be reconnected.
     Detached,
+    /// The agent's provider exited on its own.
     Exited,
 }
 

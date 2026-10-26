@@ -28,8 +28,11 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProseSegment {
+    /// Constant words.
     Text(String),
+    /// A name dux did not write, drawn as a chip.
     Name {
+        /// The name's text, bidi controls removed.
         name: String,
         /// The plain-text spelling wraps this name in straight double quotes.
         quoted: bool,
@@ -45,6 +48,7 @@ pub struct Prose {
 }
 
 impl Prose {
+    /// An empty sentence.
     pub fn new() -> Self {
         Self::default()
     }
@@ -82,6 +86,7 @@ impl Prose {
         self
     }
 
+    /// Appends constant words, merging them into the text before.
     pub fn push_text(&mut self, text: impl AsRef<str>) {
         let text = text.as_ref();
         if text.is_empty() {
@@ -114,6 +119,7 @@ impl Prose {
         });
     }
 
+    /// The segments, in order.
     pub fn segments(&self) -> &[ProseSegment] {
         &self.segments
     }
@@ -131,10 +137,12 @@ impl Prose {
         prose
     }
 
+    /// The segments, by value.
     pub fn into_segments(self) -> Vec<ProseSegment> {
         self.segments
     }
 
+    /// Whether the sentence has no segments.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
@@ -163,6 +171,10 @@ impl Prose {
     /// The shape the cross-language fixture records: a string for constant
     /// words, `{ "name", "quoted" }` for a name, the same shape the browser's
     /// `Prose` type has.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the segments are strings and plain structs, which always serialize.
     pub fn to_json(&self) -> Value {
         serde_json::to_value(&self.segments).expect("prose segments always serialize")
     }
@@ -317,7 +329,8 @@ mod tests {
             "detach_confirm" => {
                 let label = s("label");
                 let grace = args["grace_seconds"].as_u64().expect("grace_seconds");
-                let tabs = args["live_tabs"].as_u64().expect("live_tabs") as usize;
+                let tabs =
+                    crate::numeric::u64_to_usize(args["live_tabs"].as_u64().expect("live_tabs"));
                 crate::engine::detach_confirm_prose(&label, grace, tabs)
             }
             "recreate_confirm" => {
@@ -360,11 +373,11 @@ mod tests {
             "add_project_heuristic_note" => crate::add_project_prose::heuristic_branch_note_prose(),
             "delete_project_confirm" => crate::project_prose::delete_project_confirm_prose(
                 args["project_name"].as_str(),
-                args["agent_count"].as_u64().expect("agent_count") as usize,
+                crate::numeric::u64_to_usize(args["agent_count"].as_u64().expect("agent_count")),
             ),
             "remove_project_confirm" => crate::project_prose::remove_project_confirm_prose(
                 args["project_name"].as_str(),
-                args["agent_count"].as_u64().expect("agent_count") as usize,
+                crate::numeric::u64_to_usize(args["agent_count"].as_u64().expect("agent_count")),
             ),
             "rename_branch_note" => rename_branch_note(args),
             "pr_clone_offer" => crate::pr_reference::pr_clone_offer_prose(

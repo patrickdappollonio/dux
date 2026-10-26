@@ -13,6 +13,7 @@
 //! directory; a plain `tempfile::tempdir()` is fine where nothing outlives the
 //! test's own statements.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -22,14 +23,24 @@ pub(crate) const REMOVAL_WINDOW: Duration = Duration::from_secs(2);
 const RETRY_PAUSE: Duration = Duration::from_millis(25);
 
 /// One scratch directory, removed with retries when it drops.
+#[derive(Debug)]
 pub struct ScratchDir(Option<tempfile::TempDir>);
 
 impl ScratchDir {
     /// A fresh directory in the system temp directory.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the directory cannot be created.
     pub fn new() -> Self {
         Self::from(tempfile::tempdir().expect("create a test scratch directory"))
     }
 
+    /// The directory's path.
+    ///
+    /// # Panics
+    ///
+    /// Never: a live scratch directory always holds its directory.
     pub fn path(&self) -> &Path {
         self.0
             .as_ref()
@@ -67,22 +78,26 @@ impl Drop for ScratchDir {
 /// Several scratch directories owned together (a test app's config root and the
 /// repositories a test hands it), removed against ONE shared deadline, so a
 /// fixture holding N of them waits at most one window rather than N.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ScratchDirs(Vec<ScratchDir>);
 
 impl ScratchDirs {
+    /// No directories yet.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a directory to remove with the rest.
     pub fn push(&mut self, dir: impl Into<ScratchDir>) {
         self.0.push(dir.into());
     }
 
+    /// How many directories are held.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether none are held.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -125,7 +140,8 @@ fn remove_all_by(mut pending: Vec<PathBuf>, deadline: Instant) {
         }
         if Instant::now() >= deadline {
             for (path, err) in pending.iter().zip(last_errors) {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr().lock(),
                     "test scratch directory {} was left behind: {err}",
                     path.display()
                 );

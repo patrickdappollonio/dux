@@ -12,11 +12,13 @@ use super::{CliError, Exit};
 
 pub(crate) const REMOTES_FILE: &str = "remotes.toml";
 
+/// The saved remotes, as `remotes.toml` holds them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remotes {
     /// The remote used when none is named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// Every saved remote, by name.
     #[serde(default)]
     pub remotes: BTreeMap<String, Remote>,
 }
@@ -31,8 +33,10 @@ pub enum PlainHttp {
     Anywhere,
 }
 
+/// One saved remote.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Remote {
+    /// The remote's address.
     pub url: String,
     /// Plain HTTP to an address that is neither this machine nor the tailnet
     /// was allowed when it was added.
@@ -97,6 +101,10 @@ fn lock(root: &Path) -> Result<std::fs::File, CliError> {
 
 impl Remotes {
     /// The saved remotes, or none when the file does not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be read or parsed.
     pub fn load(root: &Path) -> Result<Self, CliError> {
         let path = remotes_path(root);
         let text = match std::fs::read_to_string(&path) {
@@ -154,6 +162,10 @@ impl Remotes {
 
     /// Load the file, `change` it and save it under an exclusive lock, so two commands changing
     /// it at once never lose either change. A `change` that fails saves nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock cannot be taken, the file cannot be read or written, or `change` fails.
     pub fn update<T>(
         root: &Path,
         change: impl FnOnce(&mut Remotes) -> Result<T, CliError>,
@@ -194,12 +206,21 @@ impl Remotes {
     }
 
     /// The remote saved as `name`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no remote is saved as `name`.
     pub fn get(&self, name: &str) -> Result<&Remote, CliError> {
         self.remotes.get(name).ok_or_else(|| unknown(name))
     }
 
     /// Save `url` as `name`. Plain HTTP is allowed to this machine and the
     /// tailnet; anywhere else only with [`PlainHttp::Anywhere`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the name is not usable or already taken, or the address is not one dux may reach
+    /// this way.
     pub fn add(&mut self, name: &str, url: &str, plain_http: PlainHttp) -> Result<(), CliError> {
         if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(CliError::new(
@@ -229,6 +250,10 @@ impl Remotes {
     }
 
     /// Forget `name`, and stop using it as the default.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no remote is saved as `name`.
     pub fn remove(&mut self, name: &str) -> Result<Remote, CliError> {
         let removed = self.remotes.remove(name).ok_or_else(|| unknown(name))?;
         if self.default.as_deref() == Some(name) {
@@ -238,6 +263,10 @@ impl Remotes {
     }
 
     /// Make `name` the default, or with `None` clear it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no remote is saved as `name`.
     pub fn set_default(&mut self, name: Option<&str>) -> Result<(), CliError> {
         if let Some(name) = name {
             self.get(name)?;

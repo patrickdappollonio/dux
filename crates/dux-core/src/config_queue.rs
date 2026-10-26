@@ -35,6 +35,9 @@ enum WriteMsg {
     Shutdown,
 }
 
+/// The process's one ordered, off-thread config writer: each save is an atomic three-way patch
+/// against the text dux last read.
+#[derive(Debug)]
 pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,
@@ -50,6 +53,7 @@ type LastWritten = Arc<std::sync::Mutex<(u64, Option<crate::config::SourceText>)
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
 /// guard lives; dropping it resumes the writer. Owns a `Sender<WriteMsg>` clone
 /// (not a borrow) so it can be stored on `Engine` as `reload_guard`.
+#[derive(Debug)]
 pub struct QuiesceGuard {
     tx: Sender<WriteMsg>,
     /// `true` when the writer explicitly acknowledged the `Pause` message (the
@@ -121,8 +125,8 @@ impl ConfigWriteQueue {
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
-                let lazy_inflight = lazy_inflight.clone();
-                let last_written = last_written.clone();
+                let lazy_inflight = std::sync::Arc::clone(&lazy_inflight);
+                let last_written = std::sync::Arc::clone(&last_written);
                 move || {
                     writer_loop(
                         rx,
@@ -179,6 +183,11 @@ impl ConfigWriteQueue {
 
     /// Awaited write: blocks (a few ms) for the result, ~2 s timeout. On a dead
     /// writer it returns an error rather than hanging.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the writer thread is gone, does not answer within its timeout, or the save itself
+    /// fails.
     pub fn save_eager(&self, config: Config) -> Result<(), String> {
         let (reply, rx) = mpsc::sync_channel(1);
         if self.tx.send(WriteMsg::Eager { config, reply }).is_err() {
@@ -516,7 +525,7 @@ fn adopt_minted_ids(base: &mut Base, config: &Config) {
         .zip(entries.iter())
     {
         if !entry.contains_key("id") {
-            project.id = theirs.id.clone();
+            project.id.clone_from(&theirs.id);
         }
     }
 }
@@ -1135,7 +1144,7 @@ mod tests {
 
         match done_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(()) => h.join().unwrap(),
-            Err(_) => {
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 // On a real regression drop(q) is genuinely deadlocked, so the spawned
                 // thread cannot be joined (that would re-hang); we abandon it and fail.
                 panic!("ConfigWriteQueue::drop deadlocked while a QuiesceGuard was still alive")
