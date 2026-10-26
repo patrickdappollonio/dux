@@ -2964,7 +2964,7 @@ impl App {
                 self.session_surface = SessionSurface::Agent;
                 // Draw the tab strip (>=2 tabs) above the terminal and render
                 // the terminal into the remaining area.
-                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area, true);
+                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area);
                 self.render_agent_terminal(frame, term_area, &title, focused);
                 self.session_surface = saved;
             }
@@ -3548,14 +3548,8 @@ impl App {
     /// If the selected agent has two or more tabs, draw a single-row desktop-style
     /// tab strip at the top of `area` and return the reduced rect for the terminal
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
-    /// single-tab agents look exactly as before. When `record_clicks` is false
-    /// (fullscreen) the strip is display-only and no hit-boxes are recorded.
-    fn render_agent_tab_strip_if_needed(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        record_clicks: bool,
-    ) -> Rect {
+    /// single-tab agents look exactly as before.
+    fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.agent_tab_regions.clear();
 
         let Some(session) = self.selected_session() else {
@@ -3810,14 +3804,12 @@ impl App {
                 .set_symbol(corners.vertical_right)
                 .set_style(border_style);
             buf.set_string(x, bot_y, &bottom, border_style);
-            if record_clicks {
-                // The whole box (all 3 rows, borders included) is clickable;
-                // the trailing gap column is not.
-                self.agent_tab_regions.push((
-                    items[i].id.clone(),
-                    Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
-                ));
-            }
+            // The whole box (all 3 rows, borders included) is clickable;
+            // the trailing gap column is not.
+            self.agent_tab_regions.push((
+                items[i].id.clone(),
+                Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
+            ));
             x += seg_w[i];
         }
 
@@ -5097,13 +5089,7 @@ impl App {
                         count,
                         Style::default().fg(self.theme.hint_desc_fg),
                     )],
-                    None => format_line_stats(
-                        file.additions,
-                        file.deletions,
-                        file.binary,
-                        file.diff_excluded,
-                        &self.theme,
-                    ),
+                    None => format_line_stats(file, &self.theme),
                 };
                 let stats_width = stats
                     .iter()
@@ -13445,19 +13431,17 @@ pub(crate) fn changes_placeholder_row(
 }
 
 pub(crate) fn format_line_stats(
-    additions: usize,
-    deletions: usize,
-    binary: bool,
-    diff_excluded: bool,
+    file: &ChangedFile,
     theme: &crate::theme::Theme,
 ) -> Vec<Span<'static>> {
-    if binary {
+    let (additions, deletions) = (file.additions, file.deletions);
+    if file.binary {
         return vec![Span::styled(
             "bin",
             Style::default().fg(theme.diff_binary_fg),
         )];
     }
-    if diff_excluded {
+    if file.diff_excluded {
         return vec![Span::styled(
             "Excl",
             Style::default().fg(theme.diff_excluded_fg),
@@ -17912,7 +17896,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
                 assert_eq!(
                     term_area, area,
                     "single tab with the preference off must not reserve a strip row"
@@ -17941,7 +17925,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
                 assert_eq!(
                     term_area,
                     Rect::new(area.x, area.y + 3, area.width, area.height - 3),
@@ -18013,7 +17997,7 @@ mod tests {
         let bottom_row = Rect::new(area.x, area.y + 2, area.width, 1);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -18163,7 +18147,7 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                    app.render_agent_tab_strip_if_needed(frame, area);
                 })
                 .expect("render frame");
             strip_row_cells(&terminal, label_row)
@@ -18235,7 +18219,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -18277,7 +18261,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -18310,7 +18294,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
 
@@ -18367,7 +18351,7 @@ mod tests {
             let area = Rect::new(0, 0, width, 24);
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                    app.render_agent_tab_strip_if_needed(frame, area);
                 })
                 .expect("render frame");
 
@@ -18436,7 +18420,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer().clone();
@@ -18803,7 +18787,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer();
@@ -19287,7 +19271,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let focused_width = app
@@ -19303,7 +19287,7 @@ mod tests {
         let mut terminal2 = Terminal::new(backend2).expect("terminal");
         terminal2
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area, true);
+                app.render_agent_tab_strip_if_needed(frame, area);
             })
             .expect("render frame");
         let unfocused_width = app
@@ -27118,13 +27102,22 @@ mod tests {
 
     // -- The changes groups' aggregate recap --
 
-    fn recap_file(additions: usize, deletions: usize, binary: bool) -> ChangedFile {
+    /// Whether a test's changed file is binary.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FileContent {
+        /// A binary file, which has no line counts.
+        Binary,
+        /// A text file.
+        Text,
+    }
+
+    fn recap_file(additions: usize, deletions: usize, content: FileContent) -> ChangedFile {
         ChangedFile {
             path: format!("f{additions}-{deletions}.rs"),
             status: "M".to_string(),
             additions,
             deletions,
-            binary,
+            binary: content == FileContent::Binary,
             diff_excluded: false,
             renamed_from: None,
             kind: dux_core::model::ChangedFileKind::File,
@@ -27152,7 +27145,13 @@ mod tests {
     #[test]
     fn the_changes_group_title_sums_the_lines_of_its_files() {
         let app = test_app(default_bindings());
-        let title = recap_title(&app, &[recap_file(12, 3, false), recap_file(7, 40, false)]);
+        let title = recap_title(
+            &app,
+            &[
+                recap_file(12, 3, FileContent::Text),
+                recap_file(7, 40, FileContent::Text),
+            ],
+        );
 
         assert_eq!(line_text(&title), "Changes (2) +19 -43");
         assert_eq!(
@@ -27175,9 +27174,9 @@ mod tests {
         let title = recap_title(
             &app,
             &[
-                recap_file(5, 1, false),
-                recap_file(0, 0, true),
-                recap_file(1, 1, true),
+                recap_file(5, 1, FileContent::Text),
+                recap_file(0, 0, FileContent::Binary),
+                recap_file(1, 1, FileContent::Binary),
             ],
         );
 
@@ -27194,7 +27193,13 @@ mod tests {
     #[test]
     fn a_changes_group_of_binaries_reports_no_lines_at_all() {
         let app = test_app(default_bindings());
-        let title = recap_title(&app, &[recap_file(0, 0, true), recap_file(0, 0, true)]);
+        let title = recap_title(
+            &app,
+            &[
+                recap_file(0, 0, FileContent::Binary),
+                recap_file(0, 0, FileContent::Binary),
+            ],
+        );
 
         assert_eq!(line_text(&title), "Changes (2) 2 bin");
     }
@@ -27219,7 +27224,7 @@ mod tests {
     fn a_diff_excluded_row_reads_excl_in_its_own_color() {
         let app = test_app(default_bindings());
 
-        let spans = format_line_stats(0, 0, false, true, &app.theme);
+        let spans = format_line_stats(&excluded_file("locked.txt"), &app.theme);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "Excl");
         assert_eq!(spans[0].style.fg, Some(app.theme.diff_excluded_fg));
@@ -27228,7 +27233,7 @@ mod tests {
             "the two countless verdicts must not look the same"
         );
 
-        let binary = format_line_stats(0, 0, true, false, &app.theme);
+        let binary = format_line_stats(&recap_file(0, 0, FileContent::Binary), &app.theme);
         assert_eq!(binary[0].content.as_ref(), "bin");
         assert_eq!(binary[0].style.fg, Some(app.theme.diff_binary_fg));
     }
@@ -27241,8 +27246,8 @@ mod tests {
         let title = recap_title(
             &app,
             &[
-                recap_file(5, 1, false),
-                recap_file(0, 0, true),
+                recap_file(5, 1, FileContent::Text),
+                recap_file(0, 0, FileContent::Binary),
                 excluded_file("locked.txt"),
                 excluded_file("also-locked.txt"),
             ],
@@ -27275,7 +27280,7 @@ mod tests {
 
         assert_eq!(line_text(&recap_title(&app, &[])), "Changes (0)");
         assert_eq!(
-            line_text(&recap_title(&app, &[recap_file(0, 0, false)])),
+            line_text(&recap_title(&app, &[recap_file(0, 0, FileContent::Text)])),
             "Changes (1)"
         );
     }
