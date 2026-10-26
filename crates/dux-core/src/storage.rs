@@ -14,12 +14,19 @@ use crate::text::count_of;
 /// A stored PR association loaded from the database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPr {
+    /// The agent session the pull request is associated with.
     pub session_id: String,
+    /// The pull request's number.
     pub pr_number: u64,
+    /// The GitHub host it lives on.
     pub host: String,
+    /// The repository, as `owner/name`.
     pub owner_repo: String,
+    /// The pull request's state as last seen.
     pub state: String,
+    /// The pull request's title.
     pub title: String,
+    /// The pull request's web address.
     pub url: String,
 }
 
@@ -31,6 +38,7 @@ const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
 /// [`SessionStore::instance_id`].
 const INSTANCE_ID_KEY: &str = "instance_id";
 
+/// The open session database: the one connection dux reads and writes `sessions.sqlite3` through.
 pub struct SessionStore {
     conn: Connection,
 }
@@ -106,6 +114,13 @@ pub(crate) struct PendingWorktreeRemoval {
 }
 
 impl SessionStore {
+    /// Opens the database at `path`, tightens its files to owner-only, and brings its schema up to
+    /// date.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be opened, the connection cannot be configured, or a migration
+    /// fails.
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -1375,6 +1390,12 @@ impl SessionStore {
         self.upsert_project_at(project, sort_order)
     }
 
+    /// Inserts or updates a project at `sort_order`, keeping the id of a project already stored at
+    /// the same path.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_project_at(&self, project: &ProjectConfig, sort_order: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let updated = self.conn.execute(
@@ -1450,6 +1471,11 @@ impl SessionStore {
             .context("failed to compute next project sort order")
     }
 
+    /// Every stored project, in sort order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -1502,6 +1528,11 @@ impl SessionStore {
         Ok(map)
     }
 
+    /// Sets or clears a project's default provider.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn update_project_default_provider(
         &self,
         project_id: &str,
@@ -1931,6 +1962,11 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Inserts or updates an agent session row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
         Self::upsert_session_in(&self.conn, session)
     }
@@ -2232,6 +2268,11 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Every stored agent session.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r"
@@ -2356,6 +2397,11 @@ impl SessionStore {
             .expect("move the sessions table aside");
     }
 
+    /// Deletes a session and every row that depends on it, in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; nothing is deleted then.
     pub fn delete_session(&self, id: &str) -> Result<()> {
         // Delete the session and all of its dependent rows atomically. These
         // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
@@ -2387,6 +2433,11 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Records whether an agent should be running, for startup auto-reopen.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn set_desired_running(
         &self,
         id: &str,

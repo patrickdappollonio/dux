@@ -841,32 +841,51 @@ pub fn projects_rm(
 pub enum NewAgent {
     /// A new branch and worktree in a project.
     Branch {
+        /// The project, by id or name.
         project: String,
+        /// Whether to attach to a branch of that name that already exists.
         existing_branch: bool,
+        /// Whether the project checkout's uncommitted changes are copied into the new worktree.
         copy_uncommitted: bool,
     },
     /// From a pull request of a project. `review_copy` agrees to a review copy
     /// of it when the pull request's own branch cannot be used as it is.
     PullRequest {
+        /// The project, by id or name.
         project: String,
+        /// The pull request reference as typed.
         reference: String,
+        /// Whether a review copy is agreed to.
         review_copy: ReviewCopy,
     },
     /// From a pull request named by its address or `owner/repo#123`, in
     /// whichever project has its repository, or in a new one cloned (or added
     /// from the existing checkout at `path`) when none does.
     PullRequestAnywhere {
+        /// The pull request's address or `owner/repo#123`.
         reference: String,
+        /// A folder holding a checkout of the repository, or `None` to clone one.
         path: Option<String>,
+        /// Whether a review copy is agreed to.
         review_copy: ReviewCopy,
     },
     /// From a worktree a project already has.
-    Worktree { project: String, path: String },
+    Worktree {
+        /// The project, by id or name.
+        project: String,
+        /// The worktree's path.
+        path: String,
+    },
     /// A copy of another agent's worktree.
-    Fork { agent: String },
+    Fork {
+        /// The agent whose worktree is copied, by id or name.
+        agent: String,
+    },
     /// In a folder of the user's own, with no project.
     Standalone {
+        /// The folder to run in.
         folder: String,
+        /// The provider to launch, or `None` for the global default.
         provider: Option<String>,
     },
 }
@@ -1456,8 +1475,11 @@ pub fn tabs_stop(
 
 /// Who a new terminal belongs to.
 pub enum TerminalFor {
+    /// An agent's companion terminal, by the agent's id or name.
     Agent(String),
+    /// A project terminal, by the project's id or name.
     Project(String),
+    /// A terminal that belongs to nothing.
     Standalone,
 }
 

@@ -123,8 +123,11 @@ pub fn list_manageable_worktrees(
 /// there).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BusyFolder {
+    /// The occupied folder.
     pub folder: PathBuf,
+    /// What is occupying it.
     pub reason: String,
+    /// The agent it belongs to, when it is an agent's own.
     pub agent_id: Option<String>,
 }
 
@@ -192,7 +195,9 @@ pub enum RemovalResolution {
     /// Removable; carries the canonical path git knows it by and the branch it
     /// is on (`None` when detached, which is nothing to delete).
     Removable {
+        /// The canonical path git knows the worktree by.
         path: PathBuf,
+        /// The branch it is on, or `None` when detached.
         branch: Option<String>,
     },
 }
@@ -241,7 +246,9 @@ pub fn branch_to_delete(removal: BranchRemoval, branch: Option<&str>) -> Option<
 /// all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchOutcome {
+    /// The branch's name.
     pub name: String,
+    /// What became of it.
     pub deletion: git::BranchDeletion,
 }
 
@@ -250,7 +257,9 @@ pub struct BranchOutcome {
 /// attempted, so no caller may claim one either way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemovalOutcome {
+    /// Not a manageable worktree of this project; nothing was done.
     NotManaged,
+    /// An agent holds it; nothing was done.
     Attached,
     /// A removal of this worktree has already begun (its agent was just
     /// deleted); nothing was done a second time.
@@ -259,10 +268,14 @@ pub enum RemovalOutcome {
     /// agent's CLI still stopping, a terminal); nothing was removed. Carries
     /// what it is.
     Busy {
+        /// What is still running there.
         reason: String,
     },
+    /// The worktree was removed.
     Removed {
+        /// The path it was removed from.
         path: PathBuf,
+        /// What happened to its branch, or `None` when no deletion was attempted.
         branch: Option<BranchOutcome>,
     },
 }
@@ -521,6 +534,7 @@ pub enum RemovalAdmission {
     /// Refused at once, against live state: an agent holds it, one is being
     /// created on it, or its removal has already begun.
     Refused(RemovalOutcome),
+    /// Admitted: the removal goes ahead.
     Admitted(Box<AdmittedRemoval>),
 }
 
@@ -530,6 +544,7 @@ pub enum RemovalAdmission {
 /// branch is gone" come apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemovalReport {
+    /// The sentence reporting the removal.
     pub message: crate::status_text::StatusText,
     /// A branch git refused to delete is a warning, not a success: the worktree
     /// went and the branch did not.
