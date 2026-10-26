@@ -130,7 +130,9 @@ pub trait Transport {
     ///
     /// # Errors
     ///
-    /// Fails when the dux cannot be reached or the exchange breaks off or times out.
+    /// Fails when nothing can be reached at the address, the connection ends
+    /// before a whole reply arrives, the request is refused before it is sent,
+    /// or the control socket's other end belongs to another user.
     fn send(&self, request: &Request) -> Result<Response, TransportError>;
 
     /// Send `request` and hand its reply's body to `on_body` as it arrives, with
