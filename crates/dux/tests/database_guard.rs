@@ -210,6 +210,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "retries an interrupted system call",
     ),
     (
+        "dux_core::numeric",
+        Vetted::Module("crates/dux-core/src/numeric.rs"),
+        "converts a number from one integer or float type to another",
+    ),
+    (
         "dux_core::tailscale",
         Vetted::Module("crates/dux-core/src/tailscale.rs"),
         "tells a Tailscale address apart",

@@ -1,3 +1,6 @@
+//! The `dux` binary: the terminal UI, `dux server`, and the command line that talks to a running
+//! dux.
+
 mod client_commands;
 mod commands;
 mod companion;
@@ -71,9 +74,9 @@ fn main() -> Result<()> {
             }
             match server.command {
                 None => run_server(&server.into_overrides()),
-                Some(command) => {
-                    client_commands::finish(client_commands::server(command, &selection))
-                }
+                Some(command) => client_commands::finish_with(|out, err| {
+                    client_commands::server(command, &selection, out, err)
+                }),
             }
         }
         // Every well-formed `config` line was split off above; clap only
@@ -81,9 +84,9 @@ fn main() -> Result<()> {
         Some(commands::Command::Config(_)) => {
             usage_error("dux config takes --local or --remote before the word config, not both")
         }
-        Some(commands::Command::Remote(remote)) => {
-            client_commands::finish(client_commands::remote(remote.command, &selection))
-        }
+        Some(commands::Command::Remote(remote)) => client_commands::finish_with(|_, err| {
+            client_commands::remote(remote.command, &selection, err)
+        }),
         Some(commands::Command::Operations(operations)) => client_commands::finish_with_code(
             client_commands::operations(operations.command, &selection),
         ),
@@ -102,21 +105,21 @@ fn main() -> Result<()> {
         Some(commands::Command::Env(env)) => {
             client_commands::finish(client_commands::env(env.command, &selection))
         }
-        Some(commands::Command::Projects(projects)) => {
-            client_commands::finish(client_commands::projects(projects.command, &selection))
-        }
-        Some(commands::Command::Agents(agents)) => {
-            client_commands::finish(client_commands::agents(agents.command, &selection))
-        }
-        Some(commands::Command::Terminals(terminals)) => {
-            client_commands::finish(client_commands::terminals(terminals.command, &selection))
-        }
+        Some(commands::Command::Projects(projects)) => client_commands::finish_with(|_, err| {
+            client_commands::projects(projects.command, &selection, err)
+        }),
+        Some(commands::Command::Agents(agents)) => client_commands::finish_with(|_, err| {
+            client_commands::agents(agents.command, &selection, err)
+        }),
+        Some(commands::Command::Terminals(terminals)) => client_commands::finish_with(|_, err| {
+            client_commands::terminals(terminals.command, &selection, err)
+        }),
     }
 }
 
 /// A refusal found while checking the command line, before anything starts.
 fn usage_error(message: &str) -> ! {
-    eprintln!("{message}");
+    client_commands::note(&mut std::io::stderr().lock(), message);
     std::process::exit(2);
 }
 
@@ -160,25 +163,17 @@ fn run_tui_with_flip() -> Result<()> {
                 // `serve_with_engine`'s two FnMut callbacks borrow it in turn: they
                 // run one at a time on this thread, but a plain `&mut` capture would
                 // be two simultaneous exclusive borrows.
-                let screen = std::cell::RefCell::new(
-                    match dux_tui::ServerStatusScreen::new(
+                let screen = std::cell::RefCell::new(status_screen_or_line(
+                    dux_tui::ServerStatusScreen::new(
                         &urls,
                         &theme_name,
                         &paths,
                         &keys,
                         activity.clone(),
-                    ) {
-                        Ok(screen) => Some(screen),
-                        Err(err) => {
-                            eprintln!(
-                                "dux server running at {} (status screen unavailable: {err}). \
-                                 Press Ctrl-C to stop",
-                                urls.join(", ")
-                            );
-                            None
-                        }
-                    },
-                );
+                    ),
+                    &urls,
+                    &mut std::io::stderr().lock(),
+                ));
 
                 // Only a screen that actually took the terminal has anything to
                 // give back, or keys to read: without one (no TTY) there is no
@@ -199,30 +194,13 @@ fn run_tui_with_flip() -> Result<()> {
                     activity,
                     &startup,
                     hooks,
-                    || {
-                        // With the screen up, its keys drive the exit; without it,
-                        // only SIGINT/SIGTERM (handled inside serve) can stop us.
-                        match screen.borrow_mut().as_mut() {
-                            Some(screen) => match screen.tick() {
-                                dux_tui::ServerScreenTick::Continue => {
-                                    dux_web::ServerTick::Continue
-                                }
-                                dux_tui::ServerScreenTick::ReturnToTui => {
-                                    dux_web::ServerTick::ReturnToTui
-                                }
-                                dux_tui::ServerScreenTick::QuitProcess => {
-                                    dux_web::ServerTick::QuitProcess
-                                }
-                            },
-                            None => dux_web::ServerTick::Continue,
-                        }
-                    },
+                    || server_tick(screen.borrow_mut().as_mut()),
                     |message| {
                         // Through the status screen so it renders on its own themed
                         // line rather than as raw text wherever the cursor sits.
                         match screen.borrow_mut().as_mut() {
                             Some(screen) => screen.show_shutdown_message(message),
-                            None => eprintln!("{message}"),
+                            None => client_commands::note(&mut std::io::stderr().lock(), message),
                         }
                     },
                     || {
@@ -273,6 +251,49 @@ fn run_tui_with_flip() -> Result<()> {
     Ok(())
 }
 
+/// The status screen the flip shows while serving, or, when it could not take the terminal (no
+/// TTY, a raw-mode error), `None` after one plain line on `err` saying where dux serves: the
+/// server must still run.
+fn status_screen_or_line(
+    made: Result<dux_tui::ServerStatusScreen>,
+    urls: &[String],
+    err: &mut impl std::io::Write,
+) -> Option<dux_tui::ServerStatusScreen> {
+    match made {
+        Ok(screen) => Some(screen),
+        Err(error) => {
+            client_commands::note(
+                err,
+                &format!(
+                    "dux server running at {} (status screen unavailable: {error}). Press Ctrl-C \
+                     to stop",
+                    urls.join(", ")
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// What one turn of the flip's serve loop does: with the screen up, its keys drive the exit;
+/// without it, only SIGINT/SIGTERM (handled inside serve) can stop it.
+fn server_tick(screen: Option<&mut dux_tui::ServerStatusScreen>) -> dux_web::ServerTick {
+    match screen.map(dux_tui::ServerStatusScreen::tick) {
+        Some(dux_tui::ServerScreenTick::Continue) | None => dux_web::ServerTick::Continue,
+        Some(dux_tui::ServerScreenTick::ReturnToTui) => dux_web::ServerTick::ReturnToTui,
+        Some(dux_tui::ServerScreenTick::QuitProcess) => dux_web::ServerTick::QuitProcess,
+    }
+}
+
+/// A `dux server` that cannot start: say why on stderr and end with code 1.
+fn refuse_server_start(reason: &dyn std::fmt::Display) -> ! {
+    client_commands::note(
+        &mut std::io::stderr().lock(),
+        &format!("error: dux server cannot start: {reason}"),
+    );
+    std::process::exit(1);
+}
+
 /// Creates the config folder owner-only: `dux server` never runs `DuxPaths::ensure_dirs`,
 /// so a first run would otherwise leave it at the umask default.
 fn create_config_root(paths: &dux_core::config::DuxPaths) -> Result<()> {
@@ -302,17 +323,13 @@ fn run_server(overrides: &dux_core::config::ServerCliOverrides) -> Result<()> {
     // at all rather than serve with no password.
     let config = match dux_core::config::load_config(&paths) {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("error: dux server cannot start: {error}");
-            std::process::exit(1);
-        }
+        Err(error) => refuse_server_start(&error),
     };
 
     // Before either log opens: a log path naming one of dux's own files would
     // write into it.
     if let Some(refusal) = dux_core::config::log_path_refusal(&config, &paths) {
-        eprintln!("error: dux server cannot start: {refusal}");
-        std::process::exit(1);
+        refuse_server_start(&refusal);
     }
 
     // Initialize the logger early so every subsequent logger::* call in the server
@@ -607,6 +624,25 @@ mod tests {
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
             "WARNING: Tailscale not detected (test).\nerror: --bind expects an IP:port\n"
+        );
+    }
+
+    #[test]
+    fn a_flip_without_its_status_screen_says_where_it_serves_in_one_line() {
+        let mut stderr = Vec::new();
+        let screen = status_screen_or_line(
+            Err(anyhow::anyhow!("no terminal")),
+            &[
+                "http://127.0.0.1:3890".to_string(),
+                "http://[::1]:3890".to_string(),
+            ],
+            &mut stderr,
+        );
+        assert!(screen.is_none());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "dux server running at http://127.0.0.1:3890, http://[::1]:3890 (status screen \
+             unavailable: no terminal). Press Ctrl-C to stop\n"
         );
     }
 
