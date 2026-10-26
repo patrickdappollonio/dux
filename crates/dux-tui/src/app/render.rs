@@ -329,22 +329,13 @@ struct ProjectConfirmDialog<'a> {
 /// session, so Detached and Exited win outright.
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
-    working: bool,
-    typing: bool,
-    needs_attention: bool,
+    facts: dux_core::row_state::AgentRowFacts,
 ) -> &'static str {
     // The priority ladder is the core-owned `row_state::agent_row_state`
     // (cross-language twin of the web's `stateWord`); this surface only maps the
     // typed state to the TUI's word. The busy state is "Working" for an agent.
     use dux_core::row_state::RowState;
-    match dux_core::row_state::agent_row_state(
-        status,
-        dux_core::row_state::AgentRowFacts {
-            working,
-            typing,
-            needs_attention,
-        },
-    ) {
+    match dux_core::row_state::agent_row_state(status, facts) {
         RowState::NeedsAttention => "Needs you",
         RowState::Typing => "Typing",
         RowState::Busy => AGENT_WORKING_WORD,
@@ -1864,10 +1855,12 @@ impl App {
         let needs_attention = self.engine.config.ui.attention_indicator
             && self.engine.session_needs_attention(&session.id);
         AgentRowCues {
-            needs_attention,
+            facts: dux_core::row_state::AgentRowFacts {
+                working: active && self.engine.session_is_streaming(&session.id),
+                typing: active && self.engine.session_is_typing(&session.id),
+                needs_attention,
+            },
             attention_cue: needs_attention && active,
-            working: active && self.engine.session_is_streaming(&session.id),
-            typing: active && self.engine.session_is_typing(&session.id),
             deleting: self.engine.pending_deletions.contains(&session.id),
         }
     }
@@ -1881,10 +1874,10 @@ impl App {
             }
             .to_string();
         }
-        if cues.typing {
+        if cues.facts.typing {
             return crate::theme::TYPING_GLYPH.to_string();
         }
-        if cues.working {
+        if cues.facts.working {
             return crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string();
         }
         steady_dot.to_string()
@@ -2000,12 +1993,9 @@ impl App {
         let label = session.display_label();
         let cues = self.agent_row_cues(session);
         let AgentRowCues {
-            needs_attention,
-            working,
-            typing,
-            deleting,
-            ..
+            facts, deleting, ..
         } = cues;
+        let working = facts.working;
         let (steady_dot, steady_color) = self.theme.session_dot(session.status);
         let dot = self.agent_row_glyph(cues, steady_dot);
         let (base_color, glyph_color) = self.agent_row_colors(session.status, cues, steady_color);
@@ -2081,7 +2071,7 @@ impl App {
         // so the tone stays on line two. The standalone terminal row wears the
         // same star at the same indent; owned terminal rows keep their arrow.
         let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
-        let word = agent_state_word(session.status, working, typing, needs_attention);
+        let word = agent_state_word(session.status, facts);
         // The one working cue: the word pulses between the working token and the
         // muted tone beside it, and a cycling ellipsis runs after it in a slot
         // three cells wide, so the tab count behind it never moves as the dots
@@ -15255,7 +15245,14 @@ mod tests {
             "demo",
             "the project name follows the glyph"
         );
-        let word = agent_state_word(app.engine.sessions[0].status, false, false, false);
+        let word = agent_state_word(
+            app.engine.sessions[0].status,
+            dux_core::row_state::AgentRowFacts {
+                working: false,
+                typing: false,
+                needs_attention: false,
+            },
+        );
         assert_eq!(
             run(mx + 6, my, 3 + word.chars().count() as u16),
             format!(" · {word}"),
@@ -15341,13 +15338,73 @@ mod tests {
     fn agent_state_word_mirrors_the_web_states() {
         use crate::model::SessionStatus::{Active, Detached, Exited};
         // Args are (status, working, typing, needs_attention).
-        assert_eq!(agent_state_word(Active, true, false, false), "Working");
-        assert_eq!(agent_state_word(Active, false, false, false), "Idle");
-        assert_eq!(agent_state_word(Detached, false, false, false), "Detached");
-        assert_eq!(agent_state_word(Exited, false, false, false), "Exited");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Working"
+        );
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Idle"
+        );
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Detached"
+        );
+        assert_eq!(
+            agent_state_word(
+                Exited,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: false
+                }
+            ),
+            "Exited"
+        );
         // Needs-attention wins over every other state, including working.
-        assert_eq!(agent_state_word(Active, true, false, true), "Needs you");
-        assert_eq!(agent_state_word(Detached, false, false, true), "Needs you");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: false,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
     }
 
     /// The search-hit split: styled spans around the matched char range, the
@@ -16274,14 +16331,64 @@ mod tests {
     fn agent_state_word_typing_sits_below_attention_and_above_working() {
         use crate::model::SessionStatus::{Active, Detached, Exited};
         // Typing is surfaced for an Active, typing session.
-        assert_eq!(agent_state_word(Active, false, true, false), "Typing");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Typing"
+        );
         // Attention still wins over typing.
-        assert_eq!(agent_state_word(Active, false, true, true), "Needs you");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: true
+                }
+            ),
+            "Needs you"
+        );
         // Typing wins over working when both are set.
-        assert_eq!(agent_state_word(Active, true, true, false), "Typing");
+        assert_eq!(
+            agent_state_word(
+                Active,
+                dux_core::row_state::AgentRowFacts {
+                    working: true,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Typing"
+        );
         // Typing never applies to a non-Active session.
-        assert_eq!(agent_state_word(Detached, false, true, false), "Detached");
-        assert_eq!(agent_state_word(Exited, false, true, false), "Exited");
+        assert_eq!(
+            agent_state_word(
+                Detached,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Detached"
+        );
+        assert_eq!(
+            agent_state_word(
+                Exited,
+                dux_core::row_state::AgentRowFacts {
+                    working: false,
+                    typing: true,
+                    needs_attention: false
+                }
+            ),
+            "Exited"
+        );
     }
 
     /// Render the sidebar with a live drag and return the painted buffer, the

@@ -1236,7 +1236,7 @@ fn the_clone_dialog_shows_names_only_in_its_fields() {
                 review_copy_agreed: false,
                 checked_review: None,
                 edits: 0,
-                submit_pending: false,
+                check_purpose: crate::app::pr_clone::PrFolderCheck::Open,
                 checking: false,
                 error: None,
             })),

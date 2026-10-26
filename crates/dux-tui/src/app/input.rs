@@ -30013,7 +30013,11 @@ cyan = "#00ffff"
     ) {
         let (_, destination, name, _) = clone_prompt_fields(app);
         let edits = pr_form(app).edits;
-        pr_form_mut(app).submit_pending = pressed;
+        pr_form_mut(app).check_purpose = if pressed {
+            crate::app::pr_clone::PrFolderCheck::Submit
+        } else {
+            crate::app::pr_clone::PrFolderCheck::Open
+        };
         app.apply_pr_clone_folder_answer(crate::app::PrCloneFolderAnswer {
             destination: destination.trim().to_string(),
             agent_name: name.trim().to_string(),
@@ -30841,7 +30845,7 @@ cyan = "#00ffff"
         // The press goes out for its folder check, and the name is edited
         // before the answer lands.
         tap(&mut app, KeyCode::Enter);
-        assert!(pr_form(&app).submit_pending);
+        assert!(pr_form(&app).check_purpose == crate::app::pr_clone::PrFolderCheck::Submit);
         tap(&mut app, KeyCode::Tab);
         type_text(&mut app, "x");
         assert_eq!(
@@ -30901,7 +30905,7 @@ cyan = "#00ffff"
             crate::app::PrFolder::Checkout { .. }
         ));
         // A press is out for the old folder when the folder is edited.
-        pr_form_mut(&mut app).submit_pending = true;
+        pr_form_mut(&mut app).check_purpose = crate::app::pr_clone::PrFolderCheck::Submit;
         tap(&mut app, KeyCode::BackTab);
         tap(&mut app, KeyCode::BackTab);
         assert_eq!(clone_prompt_fields(&app).3, CloneProjectFocus::Destination);

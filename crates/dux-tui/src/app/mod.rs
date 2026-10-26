@@ -203,11 +203,11 @@ struct SidebarListGeometry {
 
 #[derive(Clone, Copy)]
 struct AgentRowCues {
-    needs_attention: bool,
+    /// What the state word is decided from; its `needs_attention` is not gated
+    /// on the agent being active.
+    facts: dux_core::row_state::AgentRowFacts,
     /// Animation is Active-only; the static state word still uses the ungated flag.
     attention_cue: bool,
-    working: bool,
-    typing: bool,
     deleting: bool,
 }
 
