@@ -3400,23 +3400,21 @@ impl App {
             self.raw_paste_normalize = !self
                 .selected_terminal_surface_client()
                 .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste);
-            self.raw_paste_prev_cr = false;
+            self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
             return (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
         }
         if seq == crate::raw_input::BRACKET_PASTE_END {
             self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
             let action = (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
             self.raw_paste_normalize = false;
-            self.raw_paste_prev_cr = false;
+            self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
             return action;
         }
         if parsed.in_bracket_paste {
             if !self.raw_paste_normalize {
                 return Some(RawSeqAction::Forward(seq.to_vec()));
             }
-            let (bytes, prev_cr) =
-                crate::raw_input::normalize_paste_newlines(seq, self.raw_paste_prev_cr);
-            self.raw_paste_prev_cr = prev_cr;
+            let bytes = self.raw_paste_newlines.normalize(seq);
             if bytes.is_empty() {
                 return None;
             }
@@ -10202,7 +10200,11 @@ impl App {
             }
             PromptMouseTarget::ProjectActionItem(index) => {
                 let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                    if self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index)) {
+                        ClickCount::Double
+                    } else {
+                        ClickCount::Single
+                    };
                 self.click_project_action_row(index, double_click);
             }
             PromptMouseTarget::ChangeBaseBranchInput => {
@@ -10210,7 +10212,11 @@ impl App {
             }
             PromptMouseTarget::ChangeBaseBranchItem(index) => {
                 let double_click =
-                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                    if self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index)) {
+                        ClickCount::Double
+                    } else {
+                        ClickCount::Single
+                    };
                 self.click_change_base_branch_row(index, double_click);
             }
             PromptMouseTarget::StartupCommandLogItem(index) => {
@@ -12440,7 +12446,7 @@ impl App {
         self.terminal_selection = None;
         self.in_bracket_paste = false;
         self.raw_paste_normalize = false;
-        self.raw_paste_prev_cr = false;
+        self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();

@@ -301,6 +301,24 @@ pub(crate) enum Listing {
     /// It has.
     Loaded,
 }
+
+/// Whether a changes-tree folder listing puts a busy status on the line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListingStatus {
+    /// It does, keyed to the folder.
+    Announced,
+    /// It does not (a background refresh).
+    Silent,
+}
+
+/// Whether a click on a list row was the second of a double-click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClickCount {
+    /// It was, so the row is also picked.
+    Double,
+    /// It only places the cursor.
+    Single,
+}
 /// What the status line showed when the command palette last opened.
 #[derive(Default)]
 pub(crate) enum PaletteOpenedOver {
@@ -637,10 +655,10 @@ pub(crate) struct App {
     /// once, at the opening marker, from the focused surface's
     /// `has_bracketed_paste()`.
     pub(crate) raw_paste_normalize: bool,
-    /// Whether the last normalized paste byte forwarded was a CR, threaded
+    /// The open paste's newline normalizer, which carries a trailing CR
     /// across read chunks so a CR-LF pair split over two reads still
     /// collapses to one CR instead of doubling.
-    pub(crate) raw_paste_prev_cr: bool,
+    pub(crate) raw_paste_newlines: crate::raw_input::PasteNewlines,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -4869,7 +4887,7 @@ impl App {
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
             raw_paste_normalize: false,
-            raw_paste_prev_cr: false,
+            raw_paste_newlines: crate::raw_input::PasteNewlines::default(),
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,

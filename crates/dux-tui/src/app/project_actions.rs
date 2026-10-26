@@ -379,13 +379,15 @@ impl App {
 
     /// A click on the action list's `index`th row selects it; a double click
     /// runs it, like every other picker.
-    pub(super) fn click_project_action_row(&mut self, index: usize, double_click: bool) {
+    pub(super) fn click_project_action_row(&mut self, index: usize, clicks: ClickCount) {
         let rows = match &self.prompt {
             PromptState::ProjectActions(prompt) => self.project_action_rows(&prompt.target),
             _ => return,
         };
         self.place_project_actions_cursor(index, &rows);
-        if double_click && let Err(err) = self.activate_project_action_row() {
+        if clicks == ClickCount::Double
+            && let Err(err) = self.activate_project_action_row()
+        {
             self.set_error(format!("{err:#}"));
         }
     }
@@ -810,7 +812,7 @@ impl App {
 
     /// A click on the picker's `index`th visible row selects it; a double
     /// click picks it.
-    pub(super) fn click_change_base_branch_row(&mut self, index: usize, double_click: bool) {
+    pub(super) fn click_change_base_branch_row(&mut self, index: usize, clicks: ClickCount) {
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
             let visible = prompt
                 .list
@@ -820,7 +822,7 @@ impl App {
                 prompt.list.selected = index;
             }
         }
-        if double_click {
+        if clicks == ClickCount::Double {
             self.pick_change_base_branch_row();
         }
     }

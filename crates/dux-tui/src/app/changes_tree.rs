@@ -432,7 +432,8 @@ impl App {
         let Some(worktree) = self.diff_worktree_for_selection() else {
             return true;
         };
-        let seq = self.spawn_folder_listing(&session_id, worktree, side, &path, true);
+        let seq =
+            self.spawn_folder_listing(&session_id, worktree, side, &path, ListingStatus::Announced);
         self.changes_tree
             .by_session
             .entry(session_id)
@@ -478,11 +479,12 @@ impl App {
         worktree: PathBuf,
         side: ChangesSide,
         dir: &str,
-        announce: bool,
+        status: ListingStatus,
     ) -> u64 {
         self.changes_tree.listing_seq = self.changes_tree.listing_seq.wrapping_add(1);
         let seq = self.changes_tree.listing_seq;
-        let status_key = announce.then(|| listing_status_key(session_id, side, dir));
+        let status_key =
+            (status == ListingStatus::Announced).then(|| listing_status_key(session_id, side, dir));
         if let Some(key) = &status_key {
             self.changes_tree
                 .listing_status_owner
@@ -686,7 +688,13 @@ impl App {
             return;
         };
         for (side, dir, seen) in refreshes {
-            let seq = self.spawn_folder_listing(&session_id, worktree.clone(), side, &dir, false);
+            let seq = self.spawn_folder_listing(
+                &session_id,
+                worktree.clone(),
+                side,
+                &dir,
+                ListingStatus::Silent,
+            );
             if let Some(entry) = self
                 .changes_tree
                 .by_session

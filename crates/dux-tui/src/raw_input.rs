@@ -70,27 +70,40 @@ pub(crate) fn is_device_report(seq: &[u8]) -> bool {
     }
 }
 
-/// Normalize the newlines of a bracketed-paste BODY chunk for a child that
-/// never enabled DECSET 2004: every LF becomes CR (a classic terminal paste
-/// sends CR per line break), and a CR-LF pair collapses to one CR rather
-/// than doubling. `prev_cr` threads the "last byte was CR" fact across
-/// chunks, because a pair can straddle two reads; the returned bool is the
-/// value to thread into the next chunk. Mirrors the string-side
+/// The newline normalizer for the bracketed-paste BODY chunks of one paste,
+/// for a child that never enabled DECSET 2004: every LF becomes CR (a classic
+/// terminal paste sends CR per line break), and a CR-LF pair collapses to one
+/// CR rather than doubling. It carries the "last byte was CR" fact from chunk
+/// to chunk, because a pair can straddle two reads. Mirrors the string-side
 /// normalization in `App::paste_to_center_pty`.
-pub(crate) fn normalize_paste_newlines(bytes: &[u8], mut prev_cr: bool) -> (Vec<u8>, bool) {
-    let mut out = Vec::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'\n' {
-            if !prev_cr {
-                out.push(b'\r');
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PasteNewlines {
+    prev_cr: bool,
+}
+
+impl PasteNewlines {
+    /// Normalize one chunk, carrying its trailing CR into the next one.
+    pub(crate) fn normalize(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            if b == b'\n' {
+                if !self.prev_cr {
+                    out.push(b'\r');
+                }
+                self.prev_cr = false;
+            } else {
+                out.push(b);
+                self.prev_cr = b == b'\r';
             }
-            prev_cr = false;
-        } else {
-            out.push(b);
-            prev_cr = b == b'\r';
         }
+        out
     }
-    (out, prev_cr)
+
+    /// Whether the last chunk ended in a CR.
+    #[cfg(test)]
+    fn after_cr(self) -> bool {
+        self.prev_cr
+    }
 }
 
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
@@ -1192,21 +1205,27 @@ mod tests {
 
     #[test]
     fn normalize_paste_newlines_turns_lf_into_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\nb\n", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\nb\n");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\rb\r");
         assert!(!prev_cr);
     }
 
     #[test]
     fn normalize_paste_newlines_collapses_crlf_to_one_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\r\nb", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\r\nb");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\rb", "CR-LF must not double into CR-CR");
         assert!(!prev_cr);
     }
 
     #[test]
     fn normalize_paste_newlines_keeps_a_bare_cr() {
-        let (out, prev_cr) = normalize_paste_newlines(b"a\r", false);
+        let mut paste = PasteNewlines::default();
+        let out = paste.normalize(b"a\r");
+        let prev_cr = paste.after_cr();
         assert_eq!(out, b"a\r");
         assert!(prev_cr, "a trailing CR must be reported for the next chunk");
     }
@@ -1215,8 +1234,10 @@ mod tests {
     fn normalize_paste_newlines_threads_a_crlf_pair_across_chunks() {
         // "a\r" then "\nb" split over two reads: the LF opening the second
         // chunk belongs to the CR closing the first and must be dropped.
-        let (first, prev_cr) = normalize_paste_newlines(b"a\r", false);
-        let (second, prev_cr) = normalize_paste_newlines(b"\nb", prev_cr);
+        let mut paste = PasteNewlines::default();
+        let first = paste.normalize(b"a\r");
+        let second = paste.normalize(b"\nb");
+        let prev_cr = paste.after_cr();
         assert_eq!(first, b"a\r");
         assert_eq!(second, b"b");
         assert!(!prev_cr);
@@ -1224,7 +1245,7 @@ mod tests {
 
     #[test]
     fn normalize_paste_newlines_only_the_lf_directly_after_a_cr_is_dropped() {
-        let (out, _) = normalize_paste_newlines(b"\r\r\n\n", false);
+        let out = PasteNewlines::default().normalize(b"\r\r\n\n");
         // \r stays, \r stays, the \n after it is dropped, the lone \n becomes \r.
         assert_eq!(out, b"\r\r\r");
     }
