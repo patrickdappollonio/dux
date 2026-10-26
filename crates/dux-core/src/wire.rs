@@ -12117,7 +12117,9 @@ mod tests {
         );
         let (pr_remote, _) = remote_with_pull_request(&root.join("with-pr"));
         check_a_checked_out_pull_request_branch_asks_for_a_copy(&root, &gh, &pr_remote);
-        check_an_agreed_copy_with_a_known_default(&root, &pr_remote);
+        std::fs::create_dir(root.join("with-default")).unwrap();
+        let gh_default = gh_with_default_branch(&root.join("with-default"), "main", "main");
+        check_an_agreed_copy_with_a_known_default(&root, &gh_default, &pr_remote);
         check_a_held_checkout_needs_a_copy(&root, &pr_remote);
         let gh_dir = root.join("add-gh");
         std::fs::create_dir(&gh_dir).unwrap();
@@ -12126,7 +12128,7 @@ mod tests {
             &gh_prints(&pull_request_json("pr-branch")),
         );
         check_a_folder_that_cannot_be_a_project(&root, &gh_add, &remote);
-        check_a_plain_and_a_pull_request_clone_race(&root, &gh, &pr_remote);
+        check_a_plain_and_a_pull_request_clone_race(&root, &gh_default, &pr_remote);
         check_an_add_race_names_the_add(&root, &gh_add, &remote);
     }
 
@@ -12270,11 +12272,9 @@ mod tests {
     /// The same pull request, with the default branch known before the
     /// clone: the agreement that was asked for lets the clone end in the
     /// agent on the copy, and the project still leads with the default.
-    fn check_an_agreed_copy_with_a_known_default(root: &Path, pr_remote: &Path) {
+    fn check_an_agreed_copy_with_a_known_default(root: &Path, gh: &Path, pr_remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
-        std::fs::create_dir(root.join("with-default")).unwrap();
-        let gh = gh_with_default_branch(&root.join("with-default"), "main", "main");
-        serve_pull_requests(&mut engine, &gh, pr_remote);
+        serve_pull_requests(&mut engine, gh, pr_remote);
         let dest = root.join("dest-agreed");
         engine
             .apply_wire(agreeing_to_a_copy_for(
