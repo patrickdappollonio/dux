@@ -2388,10 +2388,10 @@ impl App {
     pub(crate) fn do_delete_session(
         &mut self,
         session_id: &str,
-        delete_worktree: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        self.begin_delete_session(session_id, delete_worktree, delete_branch);
+        self.begin_delete_session(session_id, worktree, delete_branch);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while self.pending_delete_ops.contains_key(session_id)
             || self.engine.pending_deletions.contains(session_id)
@@ -2475,12 +2475,12 @@ impl App {
     pub(crate) fn begin_delete_session(
         &mut self,
         session_id: &str,
-        delete_worktree: bool,
+        worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> Option<dux_core::engine::Attached> {
         match self.engine.apply(Command::BeginDeleteSession {
             session_id: session_id.to_string(),
-            delete_worktree,
+            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
             delete_branch,
         }) {
             Ok(reaction) => self.apply_reaction(reaction),
@@ -2505,12 +2505,12 @@ impl App {
         &mut self,
         session_id: &str,
         removal: WorktreeRemoval,
-        update_status: bool,
+        report: DeleteReport,
     ) -> Result<()> {
         let reaction = self.engine.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
             removal,
-            update_status,
+            update_status: report == DeleteReport::Announce,
         })?;
         self.apply_reaction(reaction);
         Ok(())
@@ -2521,7 +2521,7 @@ impl App {
         session_id: &str,
         outcome: FinishDeleteSessionOutcome,
         removal: WorktreeRemoval,
-        update_status: bool,
+        report: DeleteReport,
     ) {
         let FinishDeleteSessionOutcome {
             session,
@@ -2546,7 +2546,7 @@ impl App {
         self.rebuild_left_items();
         self.reload_changed_files();
 
-        if update_status {
+        if report == DeleteReport::Announce {
             let facts = dux_core::wire::DeleteReportFacts::from_session(
                 &session,
                 project.as_ref().map(|p| p.name.clone()),
@@ -7597,7 +7597,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.do_delete_session("s1", false, None)
+        app.do_delete_session("s1", dux_core::engine::WorktreeOnDelete::Keep, None)
             .expect("delete should succeed without touching git");
 
         assert!(
@@ -7635,7 +7635,8 @@ mod tests {
 
         mark_active(&mut app, "s3");
 
-        app.do_delete_session("s2", false, None).expect("delete s2");
+        app.do_delete_session("s2", dux_core::engine::WorktreeOnDelete::Keep, None)
+            .expect("delete s2");
 
         assert_resting_on_the_tips_screen(&mut app);
     }
@@ -7662,7 +7663,8 @@ mod tests {
         app.selected_left = 0;
         assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s1"));
 
-        app.do_delete_session("s2", false, None).expect("delete s2");
+        app.do_delete_session("s2", dux_core::engine::WorktreeOnDelete::Keep, None)
+            .expect("delete s2");
 
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
@@ -7693,7 +7695,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
 
-        app.do_delete_session("s1", true, None)
+        app.do_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None)
             .expect("delete should succeed without touching git for shared worktree");
 
         assert!(
@@ -7732,7 +7734,7 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         let err = app
-            .do_delete_session("s1", true, None)
+            .do_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None)
             .expect_err("git should fail against a non-git project dir");
         let msg = format!("{err:#}");
         assert!(
@@ -7764,7 +7766,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None);
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s1"),
@@ -7789,7 +7791,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", false, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Keep, None);
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s1"),
@@ -7814,11 +7816,19 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
-            .expect("first finish succeeds");
+        app.finish_delete_session(
+            "s1",
+            WorktreeRemoval::PreservedOrphan,
+            DeleteReport::Announce,
+        )
+        .expect("first finish succeeds");
         // Second call must not panic or return Err even though session is gone.
-        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
-            .expect("second finish is a no-op");
+        app.finish_delete_session(
+            "s1",
+            WorktreeRemoval::PreservedOrphan,
+            DeleteReport::Announce,
+        )
+        .expect("second finish is a no-op");
     }
 
     /// Deleting a session must clear its PTY-activity entry (now owned by the
@@ -7842,8 +7852,12 @@ mod tests {
         assert!(app.engine.pty_activity.contains_key("s1-slot"));
         assert!(app.engine.pty_input.contains_key("s1-slot"));
 
-        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
-            .expect("finish succeeds");
+        app.finish_delete_session(
+            "s1",
+            WorktreeRemoval::PreservedOrphan,
+            DeleteReport::Announce,
+        )
+        .expect("finish succeeds");
 
         assert!(
             !app.engine.pty_activity.contains_key("s1-slot"),
@@ -7871,7 +7885,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None);
 
         assert!(
             app.engine.pending_deletions.contains("s1"),
@@ -7895,7 +7909,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", false, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Keep, None);
 
         assert!(
             app.engine.pending_deletions.is_empty(),
@@ -7920,14 +7934,14 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.begin_delete_session("s1", true, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None);
         assert_eq!(
             app.engine.pending_deletions.len(),
             1,
             "first call records pending"
         );
 
-        app.begin_delete_session("s1", true, None);
+        app.begin_delete_session("s1", dux_core::engine::WorktreeOnDelete::Remove, None);
         assert_eq!(
             app.engine.pending_deletions.len(),
             1,
@@ -8520,8 +8534,12 @@ mod tests {
                 },
             );
         }
-        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
-            .expect("delete");
+        app.finish_delete_session(
+            "s1",
+            WorktreeRemoval::PreservedOrphan,
+            DeleteReport::Announce,
+        )
+        .expect("delete");
         for id in ["s1-slot", "tab-9"] {
             assert!(!app.engine.pty_activity.contains_key(id), "activity {id}");
             assert!(!app.engine.pty_input.contains_key(id), "input {id}");
@@ -8585,7 +8603,12 @@ mod tests {
                 ),
                 project_still_has_sessions: false,
             };
-            app.apply_finish_delete_session_outcome("s1", outcome, removal.clone(), true);
+            app.apply_finish_delete_session_outcome(
+                "s1",
+                outcome,
+                removal.clone(),
+                DeleteReport::Announce,
+            );
             assert_eq!(app.status.message(), expected, "variant {removal:?}");
         }
     }
@@ -8619,7 +8642,7 @@ mod tests {
                     initial_branch: Some(dux_core::git::BranchDeletion::Deleted),
                 }),
             },
-            true,
+            DeleteReport::Announce,
         );
 
         assert_eq!(
@@ -8665,7 +8688,7 @@ mod tests {
                     ),
                 ),
             },
-            true,
+            DeleteReport::Announce,
         );
 
         assert_eq!(

@@ -11022,7 +11022,11 @@ impl App {
         // The branch box comes and goes with the worktree box, so the measured
         // height has to ask the same question the renderer and the focus ring
         // ask, or the dialog's frame stops matching its contents.
-        let offers_branch_checkbox = target.offers_branch_checkbox(*delete_worktree);
+        let offers_branch_checkbox = target.offers_branch_checkbox(if *delete_worktree {
+            dux_core::engine::WorktreeOnDelete::Remove
+        } else {
+            dux_core::engine::WorktreeOnDelete::Keep
+        });
         let warned_branches = target.warned_branches();
         let branch_label = delete_agent_branch_checkbox_prose(&warned_branches);
         // ONE measuring pass over every checkbox that will be painted, so a

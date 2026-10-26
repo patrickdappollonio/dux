@@ -4925,7 +4925,11 @@ impl App {
             ),
             (
                 DeleteAgentFocus::BranchCheckbox,
-                target.offers_branch_checkbox(*delete_worktree),
+                target.offers_branch_checkbox(if *delete_worktree {
+                    dux_core::engine::WorktreeOnDelete::Remove
+                } else {
+                    dux_core::engine::WorktreeOnDelete::Keep
+                }),
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -8346,7 +8350,18 @@ impl App {
             } => (
                 session_id.clone(),
                 *delete_worktree,
-                target.branch_answer(*delete_worktree, *delete_branch),
+                target.branch_answer(
+                    if *delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    },
+                    if *delete_branch {
+                        dux_core::worktree_manager::BranchRemoval::Delete
+                    } else {
+                        dux_core::worktree_manager::BranchRemoval::Keep
+                    },
+                ),
             ),
             _ => return false,
         };
@@ -8356,7 +8371,15 @@ impl App {
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
             let refused = self.guarded_by(&asked, |app| {
-                app.begin_delete_session(&session_id, delete_worktree, branch_answer)
+                app.begin_delete_session(
+                    &session_id,
+                    if delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    },
+                    branch_answer,
+                )
             });
             if let Some(refused) = refused {
                 self.reopen_naming_attached(asked, refused);
@@ -9460,7 +9483,11 @@ impl App {
                     target,
                     ..
                 } = &mut self.prompt
-                    && target.offers_branch_checkbox(*delete_worktree)
+                    && target.offers_branch_checkbox(if *delete_worktree {
+                        dux_core::engine::WorktreeOnDelete::Remove
+                    } else {
+                        dux_core::engine::WorktreeOnDelete::Keep
+                    })
                 {
                     *delete_branch = !*delete_branch;
                     *focus = DeleteAgentFocus::BranchCheckbox;

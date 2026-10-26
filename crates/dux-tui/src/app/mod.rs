@@ -1380,6 +1380,15 @@ impl RightSection {
     }
 }
 
+/// Whether finishing an agent delete puts its outcome on the status line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteReport {
+    /// Say what the delete did.
+    Announce,
+    /// Say nothing; whoever asked reports the outcome itself.
+    Quiet,
+}
+
 /// How a launched agent's pane should land once its child is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LaunchView {
@@ -2530,8 +2539,11 @@ impl DeleteAgentTarget {
     /// with the worktree staying there is genuinely nothing on offer, and a
     /// permanently disabled box that happens to look ticked would promise
     /// exactly the deletion it cannot do.
-    pub(crate) fn offers_branch_checkbox(&self, delete_worktree: bool) -> bool {
-        delete_worktree && self.offers_worktree_checkbox()
+    pub(crate) fn offers_branch_checkbox(
+        &self,
+        worktree: dux_core::engine::WorktreeOnDelete,
+    ) -> bool {
+        (worktree == dux_core::engine::WorktreeOnDelete::Remove) && self.offers_worktree_checkbox()
     }
 
     /// The branch answer this dialog sends with its delete request, given the
@@ -2544,9 +2556,13 @@ impl DeleteAgentTarget {
     /// override it with. So the answer travels only where the box was actually
     /// on screen, which is the same question the renderer and the focus ring
     /// ask.
-    pub(crate) fn branch_answer(&self, delete_worktree: bool, delete_branch: bool) -> Option<bool> {
-        self.offers_branch_checkbox(delete_worktree)
-            .then_some(delete_branch)
+    pub(crate) fn branch_answer(
+        &self,
+        worktree: dux_core::engine::WorktreeOnDelete,
+        branch: dux_core::worktree_manager::BranchRemoval,
+    ) -> Option<bool> {
+        self.offers_branch_checkbox(worktree)
+            .then_some(branch == dux_core::worktree_manager::BranchRemoval::Delete)
     }
 
     /// Every branch the box names and the unpushed count is about: the one the
@@ -8425,15 +8441,33 @@ mod tests {
             branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
             worktree_shared: shared,
         };
-        assert_eq!(managed(false).branch_answer(true, true), Some(true));
-        assert_eq!(managed(false).branch_answer(true, false), Some(false));
         assert_eq!(
-            managed(false).branch_answer(false, true),
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Keep
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            managed(false).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Keep,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "with the worktree kept there is no branch box, so nothing was asked"
         );
         assert_eq!(
-            managed(true).branch_answer(true, true),
+            managed(true).branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "a shared worktree is preserved whatever is ticked, so no box is shown"
         );
@@ -8441,7 +8475,10 @@ mod tests {
             DeleteAgentTarget::Folder {
                 folder_label: "~/notes".to_string(),
             }
-            .branch_answer(true, true),
+            .branch_answer(
+                dux_core::engine::WorktreeOnDelete::Remove,
+                dux_core::worktree_manager::BranchRemoval::Delete
+            ),
             None,
             "a standalone agent has no branch to answer about"
         );

@@ -1198,7 +1198,7 @@ impl App {
                 WorktreeRemoval::Performed {
                     branches: branches.clone(),
                 },
-                false,
+                DeleteReport::Quiet,
             );
             if let Err(error) = cleanup {
                 // The delete's own busy is dismissed first, so it does not
@@ -1269,7 +1269,9 @@ impl App {
                         dux_core::git::RemoveResult::default(),
                     ),
                 };
-                if let Err(error) = self.finish_delete_session(&session_id, removal, false) {
+                if let Err(error) =
+                    self.finish_delete_session(&session_id, removal, DeleteReport::Quiet)
+                {
                     self.set_error(format!("Failed to delete agent: {error:#}"));
                 } else {
                     let op = self.build_delete_status_op(&session_id, busy_message.to_string());
@@ -1279,7 +1281,9 @@ impl App {
                 }
             }
             BeginDeleteSessionOutcome::Inline { removal } => {
-                if let Err(error) = self.finish_delete_session(&session_id, removal, true) {
+                if let Err(error) =
+                    self.finish_delete_session(&session_id, removal, DeleteReport::Announce)
+                {
                     self.set_error(format!("{error:#}"));
                 }
             }
@@ -1291,7 +1295,11 @@ impl App {
             &view.session_id,
             view.outcome,
             view.removal,
-            view.update_status,
+            if view.update_status {
+                DeleteReport::Announce
+            } else {
+                DeleteReport::Quiet
+            },
         );
     }
 
@@ -4371,7 +4379,7 @@ mod tests {
 
         crate::app::test_support::wait_for_pty_eof(&mut app, &slot);
         app.drain_events();
-        app.do_delete_session("session-1", false, None)
+        app.do_delete_session("session-1", dux_core::engine::WorktreeOnDelete::Keep, None)
             .expect("delete the agent");
 
         assert!(
