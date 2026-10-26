@@ -275,7 +275,7 @@ When shelling out to git, **always ensure the command output is immune to user-s
 
 ## Recommendations For Editing
 
-- Follow the existing `crates/dux-tui/src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with `use super::*;` and an `impl App` block.
+- Follow the existing `crates/dux-tui/src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with an `impl App` block that imports what it uses by name (no `use super::*;` outside `mod tests`).
 - Keep changes scoped to one submodule at a time; avoid cross-cutting edits across multiple app submodules in the same PR when possible.
 - Use `theme.rs` constants for all colors and styles; never use raw `Color::*` values in rendering code. `theme.rs` is the single source of truth for visual styling.
 - The canonical config renderer produces a fully commented config on first creation. Subsequent saves preserve user edits via `toml_edit`. Users can run `dux config diff` to see what changed or `dux config regenerate` to get the latest canonical template.
