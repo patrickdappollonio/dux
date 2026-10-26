@@ -390,12 +390,11 @@ mod tests {
 
         render(&mut app);
         app.engine.dispatch_policy = Some(Policy::default());
-        let refused = match app
+        let Err(refused) = app
             .engine
             .reserve_destruction(app.engine.agent_scope(&session_id))
-        {
-            Ok(_) => panic!("the drawn pane did not block the delete"),
-            Err(refused) => refused,
+        else {
+            panic!("the drawn pane did not block the delete")
         };
         assert_eq!(refused.blockers.len(), 1);
         assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);
@@ -654,12 +653,11 @@ mod tests {
                     .is_ok(),
                 "deleting the browser's agent is not refused for this surface"
             );
-            let refused = match app
+            let Err(refused) = app
                 .engine
                 .reserve_destruction(app.engine.agent_scope("session-1"))
-            {
-                Ok(_) => panic!("the pane drawn here did not block its delete"),
-                Err(refused) => refused,
+            else {
+                panic!("the pane drawn here did not block its delete")
             };
             assert_eq!(refused.blockers.len(), 1);
             assert_eq!(refused.blockers[0].surface, Surface::TerminalUi);

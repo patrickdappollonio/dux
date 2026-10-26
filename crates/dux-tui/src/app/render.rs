@@ -1603,7 +1603,7 @@ impl App {
     /// and would leave a blank band the user reads as a missing control.
     fn render_delete_agent_frame(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         body_lines: Vec<Line<'static>>,
         focus: DeleteAgentFocus,
         confirm_label: &str,
@@ -1630,7 +1630,7 @@ impl App {
 
     fn render_overlay_checkbox(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         label: &str,
         mark: CheckMark,
@@ -1716,7 +1716,7 @@ impl App {
     /// every name in `label` renders as the shared name chip.
     fn render_overlay_prose_checkbox(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         label: &Prose,
         mark: CheckMark,
@@ -1729,7 +1729,7 @@ impl App {
 
     fn render_overlay_checkbox_widget(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         checkbox: Checkbox<'_>,
         mark: CheckMark,
@@ -1793,7 +1793,7 @@ impl App {
         )
     }
 
-    pub(crate) fn render(&mut self, frame: &mut Frame) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
         // The panes this frame draws are the terminals this surface is
         // attached to (see `attachment_presence`).
         self.drawn_ptys.clear();
@@ -1802,7 +1802,7 @@ impl App {
         self.publish_drawn_attachments();
     }
 
-    fn render_frame(&mut self, frame: &mut Frame) {
+    fn render_frame(&mut self, frame: &mut Frame<'_>) {
         self.redraw.renders = self.redraw.renders.wrapping_add(1);
         if let Some(viewer) = self.server_log_viewer.as_mut() {
             viewer.render(frame, &self.theme, &self.bindings);
@@ -1882,7 +1882,7 @@ impl App {
         self.reconcile_startup_log_wrap_width();
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
+    fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let bg = self.theme.header_bg;
         let sep_fg = self.theme.header_separator_fg;
         let label_fg = self.theme.header_label_fg;
@@ -2610,7 +2610,7 @@ impl App {
         }
     }
 
-    fn render_collapsed_left(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
+    fn render_collapsed_left(&mut self, frame: &mut Frame<'_>, area: Rect, focused: FocusState) {
         self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
         let collapsed_left_items = self.left_items();
         let items = collapsed_left_items
@@ -2837,7 +2837,7 @@ impl App {
 
     fn render_agent_sidebar_section(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         projects_area: Rect,
         focused: FocusState,
     ) -> bool {
@@ -2952,7 +2952,7 @@ impl App {
 
     fn render_terminal_sidebar_section(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         focused: FocusState,
         terminal_render_data: &[TerminalSidebarRow],
@@ -3007,7 +3007,7 @@ impl App {
                 )
             })
         });
-        let term_items: Vec<ListItem> = terminal_render_data
+        let term_items: Vec<ListItem<'_>> = terminal_render_data
             .iter()
             .map(|row| {
                 // Terminal state precedence is typing, working, then idle;
@@ -3082,7 +3082,7 @@ impl App {
         }
     }
 
-    fn render_left(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_left(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let focused = FocusState::of(self.focus, FocusPane::Left);
 
         if self.panes.left_collapsed {
@@ -3130,7 +3130,7 @@ impl App {
         }
     }
 
-    fn render_center(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_center(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let focused = FocusState::of(self.focus, FocusPane::Center);
 
         // Determine if a PR banner should be shown above the center pane.
@@ -3204,7 +3204,7 @@ impl App {
         }
     }
 
-    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: FocusState) {
+    fn render_diff(&mut self, frame: &mut Frame<'_>, area: Rect, focused: FocusState) {
         let (lines, scroll, gutter_width) = match &self.center_mode {
             CenterMode::Diff {
                 lines,
@@ -3212,7 +3212,7 @@ impl App {
                 gutter_width,
                 ..
             } => (Arc::clone(lines), *scroll, *gutter_width),
-            _ => return,
+            CenterMode::Agent => return,
         };
 
         let outer_block = self.themed_block("Diff", focused);
@@ -3354,7 +3354,7 @@ impl App {
     /// frame. Every colour comes from `theme.rs`.
     fn render_pane_card(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         title: &str,
         preferred_inner: u16,
@@ -3442,7 +3442,7 @@ impl App {
     /// geometry decision stays in the component's pure planner.
     fn paint_pane_card(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         title: &str,
         plan: &CardPlan,
         blocks: &[PaneCardBlock],
@@ -3539,7 +3539,12 @@ impl App {
     /// worktree only when this is its sole live-or-launching tab
     /// (`Engine::tab_resume_decision`); the copy states that rule rather than
     /// promising either outcome.
-    fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect, tab_id: Option<&str>) {
+    fn render_dormant_extra_tab(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        tab_id: Option<&str>,
+    ) {
         self.welcome_logo.visible = false;
         self.mouse_layout.dormant_tab_button = None;
 
@@ -3633,7 +3638,7 @@ impl App {
     /// Render the ASCII "dux" logo centered in the given area, with an optional
     /// feature tip displayed below. The idle screen of a workspace with nothing
     /// running in the pane.
-    fn render_ascii_logo(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_ascii_logo(&mut self, frame: &mut Frame<'_>, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
         }
@@ -3668,7 +3673,7 @@ impl App {
 
         // --- logo ---
         let style = Style::default().fg(self.theme.border_normal);
-        let lines: Vec<Line> = logo.iter().map(|l| Line::styled(*l, style)).collect();
+        let lines: Vec<Line<'_>> = logo.iter().map(|l| Line::styled(*l, style)).collect();
         Paragraph::new(lines).render(Rect::new(x, y, logo_w, logo_h), frame.buffer_mut());
 
         // --- tip pill ---
@@ -3696,7 +3701,7 @@ impl App {
                 .fg(self.theme.tip_highlight_fg)
                 .add_modifier(Modifier::BOLD);
 
-            let mut spans: Vec<Span> = vec![pill_span, Span::raw(" ")];
+            let mut spans: Vec<Span<'_>> = vec![pill_span, Span::raw(" ")];
             let mut inside_backtick = false;
             for segment in tip_text.split('`') {
                 if !segment.is_empty() {
@@ -3724,7 +3729,7 @@ impl App {
 
     fn render_terminal_placeholder(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         status: CompanionTerminalStatus,
         command_name: Option<&str>,
@@ -3793,7 +3798,7 @@ impl App {
     /// tab strip at the top of `area` and return the reduced rect for the terminal
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
     /// single-tab agents look exactly as before.
-    fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
         self.agent_tab_regions.clear();
 
         let Some(session) = self.selected_session() else {
@@ -4251,7 +4256,7 @@ impl App {
     /// the title that names the act, so neither prints a stand-in device name.
     pub(crate) fn render_takeover_card(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         card: &crate::app::pty_ownership::PtyTakeoverCard,
     ) {
@@ -4419,7 +4424,7 @@ impl App {
     /// publication of its rect for the mouse. Shared by the boxed card and the
     /// bare-button degrade so the two can never disagree about where the button
     /// is or what state it is in.
-    fn render_takeover_button(&mut self, frame: &mut Frame, area: Rect, label: &str) {
+    fn render_takeover_button(&mut self, frame: &mut Frame<'_>, area: Rect, label: &str) {
         let state = button_state_for(
             ButtonPressedTarget::TakeOverCard,
             self.takeover_press,
@@ -4512,7 +4517,7 @@ impl App {
 
     fn render_terminal_client_content(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         provider_name: Option<&str>,
         active_surface: SessionSurface,
@@ -4541,7 +4546,7 @@ impl App {
 
     pub(super) fn render_terminal_loading(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         provider_name: Option<&str>,
         active_surface: SessionSurface,
@@ -4626,7 +4631,7 @@ impl App {
 
     fn render_terminal_grid(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         caret: Caret,
         screen: dux_core::pty::ScreenBuffer,
@@ -4643,7 +4648,7 @@ impl App {
 
     fn paint_terminal_cells(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         selection_origin: SelectionOrigin,
     ) {
@@ -4690,7 +4695,7 @@ impl App {
         }
     }
 
-    fn render_terminal_caret(&self, frame: &mut Frame, term_area: Rect, caret: Caret) {
+    fn render_terminal_caret(&self, frame: &mut Frame<'_>, term_area: Rect, caret: Caret) {
         if caret == Caret::Hidden {
             return;
         }
@@ -4709,7 +4714,7 @@ impl App {
 
     fn render_terminal_scrollback_indicator(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         screen: dux_core::pty::ScreenBuffer,
     ) {
@@ -4742,7 +4747,7 @@ impl App {
 
     fn render_terminal_empty_state(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         term_area: Rect,
         context: &AgentTerminalContext,
     ) {
@@ -4782,7 +4787,7 @@ impl App {
 
     fn render_agent_terminal_hint(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         hint_area: Rect,
         context: &AgentTerminalContext,
         cover: CardCover,
@@ -4925,7 +4930,7 @@ impl App {
 
     fn render_agent_terminal(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         title: &str,
         focused: FocusState,
@@ -5012,7 +5017,7 @@ impl App {
         self.render_agent_terminal_hint(frame, hint_area, &context, cover, scrollback_offset);
     }
 
-    fn render_files(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_files(&mut self, frame: &mut Frame<'_>, area: Rect) {
         if self.panes.right_hidden {
             return;
         }
@@ -5048,7 +5053,7 @@ impl App {
                     window_end.saturating_sub(unstaged_rows),
                 ))
                 .collect();
-            let items: Vec<ListItem> = rows
+            let items: Vec<ListItem<'_>> = rows
                 .into_iter()
                 .map(|row| {
                     // A placeholder row inside an expanded folder has no status.
@@ -5113,7 +5118,7 @@ impl App {
     /// separate bordered blocks (bubbles).
     fn render_staged_with_commit(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         pane_focused: FocusState,
     ) {
@@ -5176,7 +5181,7 @@ impl App {
     /// about. Wrapped rather than truncated, because a clipped reason tells the
     /// user nothing about what to do next. The card is untitled, since the pane
     /// frame already says "Changes".
-    fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
+    fn render_quiet_changes(&mut self, frame: &mut Frame<'_>, area: Rect, reason: &str) {
         let focused = FocusState::of(self.focus, FocusPane::Files);
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
@@ -5214,7 +5219,7 @@ impl App {
 
     fn render_file_list(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         title_prefix: &str,
         section: RightSection,
@@ -5491,7 +5496,7 @@ impl App {
 
     fn render_commit_input_inner(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         pane_focused: FocusState,
     ) {
@@ -5576,7 +5581,7 @@ impl App {
         }
     }
 
-    fn render_footer(&self, frame: &mut Frame, area: Rect) {
+    fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
         let hints = self.footer_hints_for(self.footer_hint_context());
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -6018,7 +6023,7 @@ impl App {
         lines
     }
 
-    fn render_help(&mut self, frame: &mut Frame) {
+    fn render_help(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         self.clear_overlay_area(frame, area);
@@ -6113,7 +6118,7 @@ impl App {
         }
     }
 
-    fn render_command_prompt(&mut self, frame: &mut Frame) {
+    fn render_command_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::Command { input, selected } = &self.prompt else {
             return;
         };
@@ -6203,7 +6208,7 @@ impl App {
         };
     }
 
-    fn render_set_tailscale_mode_prompt(&mut self, frame: &mut Frame) {
+    fn render_set_tailscale_mode_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::SetTailscaleMode(prompt) = &self.prompt else {
             return;
         };
@@ -6327,7 +6332,7 @@ impl App {
         };
     }
 
-    fn render_change_theme_prompt(&mut self, frame: &mut Frame) {
+    fn render_change_theme_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ChangeTheme(prompt) = &self.prompt else {
             return;
         };
@@ -6420,7 +6425,7 @@ impl App {
         };
     }
 
-    fn render_browse_projects_prompt(&mut self, frame: &mut Frame) {
+    fn render_browse_projects_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::BrowseProjects {
             purpose,
             current_dir,
@@ -6461,7 +6466,7 @@ impl App {
         // The loading line and every "nothing here" sentence are the list's
         // EMPTY state, not rows: nothing on them can be picked, so nothing
         // highlights them and a click on them selects nothing.
-        let empty: Line = if *editing_path {
+        let empty: Line<'_> = if *editing_path {
             Line::from("No matching directories.")
         } else if *loading {
             let idx = self.spinner_frame_index();
@@ -6644,7 +6649,7 @@ impl App {
         modal_hint_line(&self.theme, &hints, width)
     }
 
-    fn render_change_agent_provider_prompt(&mut self, frame: &mut Frame) {
+    fn render_change_agent_provider_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ChangeAgentProvider(prompt) = &self.prompt else {
             return;
         };
@@ -6751,7 +6756,7 @@ impl App {
         };
     }
 
-    fn render_change_default_provider_prompt(&mut self, frame: &mut Frame) {
+    fn render_change_default_provider_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ChangeDefaultProvider(prompt) = &self.prompt else {
             return;
         };
@@ -6840,7 +6845,7 @@ impl App {
         };
     }
 
-    fn render_change_project_default_provider_prompt(&mut self, frame: &mut Frame) {
+    fn render_change_project_default_provider_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ChangeProjectDefaultProvider(prompt) = &self.prompt else {
             return;
         };
@@ -6964,7 +6969,7 @@ impl App {
         };
     }
 
-    fn render_pick_editor_prompt(&mut self, frame: &mut Frame) {
+    fn render_pick_editor_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::PickEditor {
             session_label,
             worktree_path,
@@ -7056,7 +7061,7 @@ impl App {
         };
     }
 
-    fn render_manage_worktrees_prompt(&mut self, frame: &mut Frame) {
+    fn render_manage_worktrees_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ManageWorktrees(prompt) = &self.prompt else {
             return;
         };
@@ -7233,7 +7238,7 @@ impl App {
         };
     }
 
-    fn render_confirm_delete_worktree_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_delete_worktree_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return;
         };
@@ -7362,7 +7367,7 @@ impl App {
         };
     }
 
-    fn render_pick_project_worktree_prompt(&mut self, frame: &mut Frame) {
+    fn render_pick_project_worktree_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::PickProjectWorktree(prompt) = &self.prompt else {
             return;
         };
@@ -7516,7 +7521,7 @@ impl App {
         };
     }
 
-    fn render_pick_project_prompt(&mut self, frame: &mut Frame) {
+    fn render_pick_project_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::PickProject {
             intent,
             entries,
@@ -7699,7 +7704,7 @@ impl App {
     /// `manage-projects`' second step: the project (or orphaned group) named in
     /// a header, then its actions as picker rows. An unavailable row is dimmed
     /// and says why beside its words; picking it says so on the status line.
-    fn render_project_actions_prompt(&mut self, frame: &mut Frame) {
+    fn render_project_actions_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ProjectActions(prompt) = &self.prompt else {
             return;
         };
@@ -7835,7 +7840,7 @@ impl App {
     /// the fetch note (or the search row) beneath, and every branch the folder
     /// can switch to. A branch another worktree holds is dimmed and names its
     /// holder; the current base carries the picker's marker.
-    fn render_change_base_branch_prompt(&mut self, frame: &mut Frame) {
+    fn render_change_base_branch_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ChangeBaseBranch(prompt) = &self.prompt else {
             return;
         };
@@ -8023,7 +8028,7 @@ impl App {
     /// "Change base branch?": the shared prose both surfaces print and a
     /// Cancel / Change base branch pair, Cancel focused. The act is the safe
     /// kind, like "Check out default branch": the switch loses nothing.
-    fn render_confirm_change_base_branch_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_change_base_branch_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmChangeBaseBranch(prompt) = &self.prompt else {
             return;
         };
@@ -8062,7 +8067,7 @@ impl App {
 
     /// The read-only Project info screen: the project's name, then one row per
     /// fact, a name as a chip, and a Close that steps back to the action list.
-    fn render_project_info_prompt(&mut self, frame: &mut Frame) {
+    fn render_project_info_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ProjectInfo(prompt) = &self.prompt else {
             return;
         };
@@ -8143,7 +8148,7 @@ impl App {
         };
     }
 
-    fn render_confirm_kill_running_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_kill_running_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmKillRunning(confirm_prompt) = &self.prompt else {
             return;
         };
@@ -8217,7 +8222,7 @@ impl App {
         };
     }
 
-    fn render_config_reload_failed_prompt(&mut self, frame: &mut Frame) {
+    fn render_config_reload_failed_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfigReloadFailed {
             error,
             recover_old_config,
@@ -8328,7 +8333,7 @@ impl App {
         };
     }
 
-    fn render_add_project_failed_prompt(&mut self, frame: &mut Frame) {
+    fn render_add_project_failed_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::AddProjectFailed {
             message, scroll, ..
         } = &self.prompt
@@ -8387,7 +8392,7 @@ impl App {
         self.overlay_layout.active = OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
     }
 
-    fn render_first_load_prompt_overlay(&mut self, frame: &mut Frame) {
+    fn render_first_load_prompt_overlay(&mut self, frame: &mut Frame<'_>) {
         let PromptState::FirstLoad(prompt) = &self.prompt else {
             return;
         };
@@ -8406,7 +8411,7 @@ impl App {
         };
     }
 
-    fn render_agent_info_prompt(&mut self, frame: &mut Frame) {
+    fn render_agent_info_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::AgentInfo(prompt) = &self.prompt else {
             return;
         };
@@ -8482,7 +8487,7 @@ impl App {
         };
     }
 
-    fn render_confirm_delete_terminal_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_delete_terminal_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDeleteTerminal {
             terminal_label,
             foreground_cmd,
@@ -8539,7 +8544,7 @@ impl App {
         };
     }
 
-    fn render_confirm_close_tab_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_close_tab_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmCloseTab {
             session_id,
             tab_id,
@@ -8632,7 +8637,7 @@ impl App {
 
     /// The stop-tab confirmation; its sentences match the browser's
     /// `ConfirmStopTabDialog.tsx`.
-    fn render_confirm_stop_tab_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_stop_tab_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmStopTab {
             session_id,
             provider_label,
@@ -8708,7 +8713,7 @@ impl App {
     /// The body is `dux_core::engine::detach_confirm_body`, the same sentence
     /// the browser's dialog renders, so the two surfaces cannot promise
     /// different things about the same act.
-    fn render_confirm_detach_agent_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_detach_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDetachAgent {
             label,
             grace_seconds,
@@ -8760,7 +8765,7 @@ impl App {
     /// The body is `dux_core::working_copy::recreate_confirm_body` and the
     /// checkbox `recreate_restart_checkbox_prose`, the same words the browser's
     /// dialog renders.
-    fn render_confirm_recreate_working_copy_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_recreate_working_copy_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmRecreateWorkingCopy {
             worktree_path,
             branch_name,
@@ -8865,7 +8870,7 @@ impl App {
     /// Confirm family, Cancel focused. The body is
     /// `dux_core::engine::checkout_default_branch_confirm_body`, the same words
     /// the browser's dialog prints.
-    fn render_confirm_checkout_default_branch_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_checkout_default_branch_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmCheckoutDefaultBranch {
             project_name,
             stored_base,
@@ -8912,7 +8917,7 @@ impl App {
     /// browser's Delete project dialog prints, and a Cancel / Delete pair with
     /// Cancel focused. Delete is the Danger kind: the cascade removes every
     /// agent's worktree from disk.
-    fn render_confirm_delete_project_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_delete_project_prompt(&mut self, frame: &mut Frame<'_>) {
         self.repaint_project_confirm_count();
         let PromptState::ConfirmDeleteProject {
             project_name,
@@ -8950,7 +8955,7 @@ impl App {
     /// words, and a Cancel / Remove pair with Cancel focused. Remove is the
     /// Danger kind like the browser's destructive button: it takes the project
     /// (and any orphaned agents' records) out of dux.
-    fn render_confirm_remove_project_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_remove_project_prompt(&mut self, frame: &mut Frame<'_>) {
         self.repaint_project_confirm_count();
         let PromptState::ConfirmRemoveProject {
             project_name,
@@ -9014,7 +9019,7 @@ impl App {
     /// for the caller to publish under its own layout variant.
     fn render_project_confirm(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         dialog: &ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
         let mut body = self.prose_body(dialog.body);
@@ -9051,7 +9056,7 @@ impl App {
         (layout.cancel, layout.act)
     }
 
-    fn render_confirm_quit_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_quit_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmQuit {
             agent_count,
             terminal_count,
@@ -9114,7 +9119,7 @@ impl App {
         };
     }
 
-    fn render_confirm_discard_file_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_discard_file_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDiscardFile {
             file_path,
             kind,
@@ -9244,7 +9249,7 @@ impl App {
         };
     }
 
-    fn render_confirm_initial_commit_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_initial_commit_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmCreateInitialCommit { path, focus, .. } = &self.prompt else {
             return;
         };
@@ -9292,7 +9297,7 @@ impl App {
         };
     }
 
-    fn render_confirm_init_repo_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_init_repo_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmInitRepo {
             path,
             candidates,
@@ -9361,7 +9366,7 @@ impl App {
         };
     }
 
-    fn render_confirm_non_default_branch_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_non_default_branch_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmNonDefaultBranch {
             current_branch,
             kind,
@@ -9535,7 +9540,7 @@ impl App {
         };
     }
 
-    fn render_confirm_use_existing_branch_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_use_existing_branch_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmUseExistingBranch {
             branch_name,
             location,
@@ -9594,7 +9599,7 @@ impl App {
         };
     }
 
-    fn render_rename_session_prompt(&mut self, frame: &mut Frame) {
+    fn render_rename_session_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::RenameSession {
             session_id,
             input,
@@ -9796,7 +9801,7 @@ impl App {
         };
     }
 
-    fn render_clone_project_prompt(&mut self, frame: &mut Frame) {
+    fn render_clone_project_prompt(&mut self, frame: &mut Frame<'_>) {
         if matches!(
             self.prompt,
             PromptState::CloneProject {
@@ -9971,7 +9976,7 @@ impl App {
     /// agreeing to, the address read-only, the folder, the agent's name, the
     /// review copy question when there is one, and the way to an existing
     /// project.
-    fn render_pull_request_clone_prompt(&mut self, frame: &mut Frame) {
+    fn render_pull_request_clone_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::CloneProject {
             address,
             destination,
@@ -10219,7 +10224,7 @@ impl App {
         };
     }
 
-    fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame) {
+    fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ResourceMonitor {
             rows,
             scroll_offset,
@@ -10246,7 +10251,7 @@ impl App {
         );
     }
 
-    fn render_debug_input_prompt(&mut self, frame: &mut Frame) {
+    fn render_debug_input_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::DebugInput {
             lines,
             scroll_offset,
@@ -10288,7 +10293,7 @@ impl App {
             offset
         };
 
-        let visible: Vec<Line> = lines.iter().skip(start).take(visible_h).cloned().collect();
+        let visible: Vec<Line<'_>> = lines.iter().skip(start).take(visible_h).cloned().collect();
 
         let paragraph = Paragraph::new(visible);
         paragraph.render(inner, frame.buffer_mut());
@@ -10308,7 +10313,7 @@ impl App {
         render_centered_lines(frame.buffer_mut(), hint_area, &[hint], Style::default());
     }
 
-    fn render_pull_request_input_prompt(&mut self, frame: &mut Frame) {
+    fn render_pull_request_input_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::PullRequestInput {
             project,
             input,
@@ -10450,7 +10455,7 @@ impl App {
         };
     }
 
-    fn render_attach_pull_request_input_prompt(&mut self, frame: &mut Frame) {
+    fn render_attach_pull_request_input_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::AttachPullRequestInput {
             current_pr, input, ..
         } = &self.prompt
@@ -10536,7 +10541,7 @@ impl App {
     /// placeholder spells it out. The folder is on its own line underneath,
     /// home-collapsed: the browser is gone by the time this modal is up, and the
     /// path is what says which folder was picked.
-    fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame) {
+    fn render_name_standalone_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::NameStandaloneAgent { folder, input } = &self.prompt else {
             return;
         };
@@ -10612,7 +10617,7 @@ impl App {
         self.overlay_layout.active = OverlayMouseLayout::NameStandaloneAgent { input: input_inner };
     }
 
-    fn render_configure_prompt(&mut self, frame: &mut Frame) {
+    fn render_configure_prompt(&mut self, frame: &mut Frame<'_>) {
         let (PromptState::ConfigureStartupCommand {
             project_name,
             input,
@@ -10853,7 +10858,7 @@ impl App {
         };
     }
 
-    fn render_startup_command_logs_prompt(&mut self, frame: &mut Frame) {
+    fn render_startup_command_logs_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::StartupCommandLogs(prompt) = &self.prompt else {
             return;
         };
@@ -11121,7 +11126,7 @@ impl App {
         };
     }
 
-    fn render_kill_running_prompt(&mut self, frame: &mut Frame) {
+    fn render_kill_running_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::KillRunning(prompt) = &self.prompt else {
             return;
         };
@@ -11369,7 +11374,7 @@ impl App {
             .collect()
     }
 
-    fn render_confirm_delete_agent_prompt(&mut self, frame: &mut Frame) {
+    fn render_confirm_delete_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDeleteAgent {
             agent_label,
             target,
@@ -11577,7 +11582,7 @@ impl App {
         };
     }
 
-    fn render_name_new_agent_prompt(&mut self, frame: &mut Frame) {
+    fn render_name_new_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::NameNewAgent {
             request,
             input,
@@ -11872,7 +11877,7 @@ impl App {
         };
     }
 
-    fn render_prompt(&mut self, frame: &mut Frame) {
+    fn render_prompt(&mut self, frame: &mut Frame<'_>) {
         if self.render_standalone_delete_prompt(frame) {
             return;
         }
@@ -11885,7 +11890,7 @@ impl App {
         self.render_editor_prompt_family(frame);
     }
 
-    fn render_standalone_delete_prompt(&mut self, frame: &mut Frame) -> bool {
+    fn render_standalone_delete_prompt(&mut self, frame: &mut Frame<'_>) -> bool {
         let PromptState::ConfirmDeleteAgent {
             agent_label,
             target: DeleteAgentTarget::Folder { folder_label },
@@ -11926,7 +11931,7 @@ impl App {
         true
     }
 
-    fn render_picker_prompt_family(&mut self, frame: &mut Frame) -> bool {
+    fn render_picker_prompt_family(&mut self, frame: &mut Frame<'_>) -> bool {
         match &self.prompt {
             PromptState::Command { .. } => self.render_command_prompt(frame),
             PromptState::BrowseProjects { .. } => self.render_browse_projects_prompt(frame),
@@ -11952,7 +11957,7 @@ impl App {
         true
     }
 
-    fn render_dialog_prompt_family(&mut self, frame: &mut Frame) -> bool {
+    fn render_dialog_prompt_family(&mut self, frame: &mut Frame<'_>) -> bool {
         match &self.prompt {
             PromptState::ConfirmDeleteWorktree(_) => {
                 self.render_confirm_delete_worktree_prompt(frame);
@@ -12010,7 +12015,7 @@ impl App {
         true
     }
 
-    fn render_editor_prompt_family(&mut self, frame: &mut Frame) {
+    fn render_editor_prompt_family(&mut self, frame: &mut Frame<'_>) {
         match &self.prompt {
             PromptState::ConfigureStartupCommand { .. }
             | PromptState::ConfigureProjectEnv { .. }
@@ -12034,7 +12039,7 @@ impl App {
         }
     }
 
-    fn render_edit_macros(&mut self, frame: &mut Frame) {
+    fn render_edit_macros(&mut self, frame: &mut Frame<'_>) {
         // Pre-compute the popup layout so we can set the display width for
         // soft-wrapping before taking the immutable borrow on self.prompt.
         let popup = centered_rect_exact(MACRO_EDIT_POPUP.0, MACRO_EDIT_POPUP.1, frame.area());
@@ -12099,7 +12104,7 @@ impl App {
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .areas(inner);
 
-            let items: Vec<ListItem> = entries
+            let items: Vec<ListItem<'_>> = entries
                 .iter()
                 .map(|(name, text, surface)| {
                     let surface_label = format!(" ({})", surface.label());
@@ -12182,7 +12187,7 @@ impl App {
     /// Cancel/Save buttons, and the hint row. Every one of the five controls is
     /// a focus stop and every one renders its focus, because focus you cannot
     /// see is not focus.
-    fn render_macro_editor(&mut self, frame: &mut Frame, popup: Rect, state: &MacroEditState) {
+    fn render_macro_editor(&mut self, frame: &mut Frame<'_>, popup: Rect, state: &MacroEditState) {
         let title = match &state.id {
             Some(name) => Prose::new().text("Edit Macro: ").name(name.as_str()),
             None => Prose::from("New Macro"),
@@ -12335,7 +12340,7 @@ impl App {
 
     fn render_macro_surface_selector(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         state: &MacroEditState,
         label_style: Style,
@@ -12378,7 +12383,7 @@ impl App {
 
     fn render_macro_editor_buttons(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         focus: MacroEditFocus,
     ) -> (Rect, Rect) {
@@ -12466,7 +12471,7 @@ impl App {
     /// engaged and names the key that leaves edit mode.
     fn render_modal_text_field_frame(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         area: Rect,
         focused: FocusState,
         engaged_exit_key: Option<String>,
@@ -12494,7 +12499,12 @@ impl App {
         inner
     }
 
-    fn render_confirm_delete_macro(&mut self, frame: &mut Frame, name: &str, focus: ConfirmFocus) {
+    fn render_confirm_delete_macro(
+        &mut self,
+        frame: &mut Frame<'_>,
+        name: &str,
+        focus: ConfirmFocus,
+    ) {
         let lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -12593,7 +12603,7 @@ impl App {
         ]
     }
 
-    fn render_overlay(&mut self, frame: &mut Frame) {
+    fn render_overlay(&mut self, frame: &mut Frame<'_>) {
         // No fullscreen surface draws a tab strip, and the windowed center
         // pane skips `render_agent_tab_strip_if_needed` (the only place that
         // clears the registry) while one is up. Drop the rects here so the
@@ -12626,7 +12636,7 @@ impl App {
         }
     }
 
-    fn render_fullscreen_agent(&mut self, frame: &mut Frame) {
+    fn render_fullscreen_agent(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         self.paint_modal_surface(frame, area, self.theme.app_bg);
@@ -12655,7 +12665,7 @@ impl App {
         self.session_surface = saved;
     }
 
-    fn render_fullscreen_terminal(&mut self, frame: &mut Frame) {
+    fn render_fullscreen_terminal(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         self.paint_modal_surface(frame, area, self.theme.app_bg);
@@ -12665,7 +12675,7 @@ impl App {
         self.session_surface = saved;
     }
 
-    fn render_fullscreen_startup_log(&mut self, frame: &mut Frame) {
+    fn render_fullscreen_startup_log(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         self.paint_modal_surface(frame, area, self.theme.app_bg);
@@ -12787,7 +12797,7 @@ impl App {
         }
     }
 
-    fn render_startup_log_search_bar(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_startup_log_search_bar(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let Some(viewer) = &self.startup_log_viewer else {
             return;
         };
@@ -12840,7 +12850,7 @@ impl App {
         }
     }
 
-    fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
+    fn render_macro_bar(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let (query, selected, cursor, cursor_fg, cursor_bg) = {
             let Some(bar) = &self.macro_bar else {
                 return;
@@ -12930,7 +12940,7 @@ impl App {
         let inner_w = list_area.width.saturating_sub(3) as usize; // borders + padding
         let gap = 2usize;
 
-        let items: Vec<ListItem> = if filtered.is_empty() {
+        let items: Vec<ListItem<'_>> = if filtered.is_empty() {
             let msg = "No matching macros.";
             vec![ListItem::new(Span::styled(
                 msg,
@@ -13009,12 +13019,12 @@ impl App {
     /// is gone by the time a click arrives, so the chokepoint every modal already
     /// passes through is what stores it. Last write wins, so a nested modal is
     /// the rect that ends up stored, see [`OverlayMouseLayoutState::frame`].
-    pub(super) fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn clear_overlay_area(&self, frame: &mut Frame<'_>, area: Rect) {
         self.overlay_layout.frame.set(Some(area));
         self.paint_modal_surface(frame, area, self.theme.overlay_bg);
     }
 
-    fn paint_modal_surface(&self, frame: &mut Frame, area: Rect, surface_bg: Color) {
+    fn paint_modal_surface(&self, frame: &mut Frame<'_>, area: Rect, surface_bg: Color) {
         // The surface carries the body text color as well as its background,
         // so text a dialog paints with no color of its own reads in the
         // theme's `text_fg` rather than the host terminal's default
@@ -13036,7 +13046,7 @@ impl App {
     /// are not dismissible modals, and recording them would hand the dismissal
     /// engine a rect that is smaller than, or unrelated to, the modal the
     /// user sees, turning clicks inside the real modal into dismissals.
-    fn clear_overlay_bar_area(&self, frame: &mut Frame, area: Rect) {
+    fn clear_overlay_bar_area(&self, frame: &mut Frame<'_>, area: Rect) {
         Clear.render(area, frame.buffer_mut());
         frame
             .buffer_mut()
@@ -13117,7 +13127,7 @@ impl App {
     /// squeezed out by a long error and the rest is reached by scrolling.
     fn render_error_dialog_body(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         title: &str,
         dialog_width: u16,
         body_lines: &[Line<'static>],
@@ -13227,7 +13237,7 @@ impl App {
 
     fn render_resource_monitor(
         &mut self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         rows: &[ResourceStats],
         scroll_offset: u16,
         selected_row: usize,
@@ -13274,7 +13284,7 @@ impl App {
         let visual = build_visual_rows(rows, expanded);
         let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
 
-        let table_rows: Vec<Row> = visual
+        let table_rows: Vec<Row<'_>> = visual
             .iter()
             .map(|vr| match vr {
                 VisualRow::Parent(idx) => {
@@ -13440,7 +13450,7 @@ impl App {
         Rect::new(full.x, full.y, full.width, dim_h)
     }
 
-    pub(super) fn render_dim_overlay(&self, frame: &mut Frame) {
+    pub(super) fn render_dim_overlay(&self, frame: &mut Frame<'_>) {
         let area = self.dim_overlay_area(frame.area());
         let buf = frame.buffer_mut();
         for y in area.y..area.bottom() {
@@ -14172,7 +14182,7 @@ impl App {
     /// opens the pull request, the way the web banner is one link across the
     /// whole strip. The rect is published only where the band is actually
     /// painted, so every early return below leaves it unset.
-    fn render_pr_banner(&mut self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
+    fn render_pr_banner(&mut self, frame: &mut Frame<'_>, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 
         if area.height < 1 || area.width < 6 {
@@ -14462,6 +14472,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use dux_core::ids::TabId;
     use dux_core::worker::ProcessInfo;
+    use dux_core::worker::ReviewCopyConsent;
     use std::time::Duration;
 
     use crate::app::test_support::{
@@ -16013,8 +16024,8 @@ mod tests {
         let width = 40;
         let rendered: Vec<(String, Color)> = (0..4u128)
             .map(|step| {
-                let elapsed = step * dux_core::working_cue::ELLIPSIS_STEP_MS as u128
-                    + dux_core::working_cue::ELLIPSIS_STEP_MS as u128 / 2;
+                let elapsed = step * u128::from(dux_core::working_cue::ELLIPSIS_STEP_MS)
+                    + u128::from(dux_core::working_cue::ELLIPSIS_STEP_MS) / 2;
                 let (_, line2) = terminal_row_lines(
                     &theme,
                     &crate::theme::Glyphs::PLAIN,
@@ -16074,13 +16085,13 @@ mod tests {
     fn terminal_row_lines_render_two_content_lines_and_a_spacer() {
         let theme = crate::theme::Theme::default_dark();
         let width = 40;
-        let line_text = |line: &Line| -> String {
+        let line_text = |line: &Line<'_>| -> String {
             line.spans
                 .iter()
                 .map(|s| s.content.as_ref())
                 .collect::<String>()
         };
-        let word_span = |line: &Line, word: &str| {
+        let word_span = |line: &Line<'_>, word: &str| {
             line.spans
                 .iter()
                 .find(|s| s.content.as_ref() == word)
@@ -18540,7 +18551,7 @@ mod tests {
                 &session_id,
                 &format!("tab-{i}"),
                 "codex",
-                i as i64,
+                i64::from(i),
             );
         }
         app.set_focused_tab(&session_id, "tab-8");
@@ -18581,7 +18592,7 @@ mod tests {
                 &session_id,
                 &format!("tab-{i}"),
                 "codex",
-                i as i64,
+                i64::from(i),
             );
         }
         // Focus the last tab so the scroll-into-view logic is exercised too.
@@ -18671,7 +18682,7 @@ mod tests {
                     &session_id,
                     &format!("tab-{i}"),
                     "a-very-long-custom-provider-name",
-                    i as i64,
+                    i64::from(i),
                 );
             }
             let focused_tab_id = format!("tab-{focus_idx}");
@@ -19293,7 +19304,7 @@ mod tests {
                 &session_id,
                 &format!("tab-{i}"),
                 "a-very-long-custom-provider-name",
-                i as i64,
+                i64::from(i),
             );
         }
         app.set_focused_tab(&session_id, "tab-98");
@@ -19567,7 +19578,7 @@ mod tests {
                     &session_id,
                     &format!("tab-{i}"),
                     "codex",
-                    i as i64,
+                    i64::from(i),
                 );
             }
             app.set_focused_tab(&session_id, "tab-5");
@@ -23514,9 +23525,8 @@ mod tests {
         // wrapped text, and that is the unit the marker must be fed.
         let (app, buf) = palette_frame((120, 40), "", 0);
         let (list, border_column) = palette_rects(&app);
-        let items = match app.overlay_layout.active {
-            OverlayMouseLayout::Command { items, .. } => items,
-            _ => unreachable!(),
+        let OverlayMouseLayout::Command { items, .. } = app.overlay_layout.active else {
+            unreachable!()
         };
         assert!(
             items > list.height as usize + 1,
@@ -23613,9 +23623,8 @@ mod tests {
         // A filter narrow enough that every match is on screen.
         let (app, buf) = palette_frame((120, 40), "toggle-github", 0);
         let (list, border_column) = palette_rects(&app);
-        let items = match app.overlay_layout.active {
-            OverlayMouseLayout::Command { items, .. } => items,
-            _ => unreachable!(),
+        let OverlayMouseLayout::Command { items, .. } = app.overlay_layout.active else {
+            unreachable!()
         };
         assert!(
             items > 0 && items <= list.height as usize,
@@ -25113,7 +25122,7 @@ mod tests {
                 head_branch: "pr-head".to_string(),
                 custom_name: Some("pr-head".to_string()),
                 use_existing_branch: false,
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
                 ask_id: None,
                 agents: Vec::new(),
                 cloned: None,

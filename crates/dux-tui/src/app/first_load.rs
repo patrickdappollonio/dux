@@ -589,7 +589,7 @@ pub(crate) struct FirstLoadRender {
 /// `Action::CloseOverlay`; the binding is looked up by the caller, which has the
 /// `RuntimeBindings` this function deliberately does not take.
 pub(crate) fn render_modal(
-    frame: &mut Frame,
+    frame: &mut Frame<'_>,
     area: Rect,
     prompt: &FirstLoadPrompt,
     theme: &Theme,
@@ -637,7 +637,7 @@ pub(crate) fn render_modal(
 
         let duck_rows = u16::try_from(DUCK.len()).unwrap_or(u16::MAX);
         let top = art_col.height.saturating_sub(duck_rows) / 2;
-        let art: Vec<Line> = std::iter::repeat_n(Line::from(""), top as usize)
+        let art: Vec<Line<'_>> = std::iter::repeat_n(Line::from(""), top as usize)
             .chain(DUCK.iter().map(|row| {
                 Line::from(Span::styled(
                     format!(" {row}"),
@@ -647,7 +647,7 @@ pub(crate) fn render_modal(
             .collect();
         Paragraph::new(art).render(art_col, frame.buffer_mut());
 
-        let rule: Vec<Line> = (0..rule_col.height)
+        let rule: Vec<Line<'_>> = (0..rule_col.height)
             .map(|_| Line::from(Span::styled(" │ ", Style::default().fg(colors.rule))))
             .collect();
         Paragraph::new(rule).render(rule_col, frame.buffer_mut());
@@ -2039,7 +2039,7 @@ mod tests {
         // which is silent. A user who asks while it is running must still be told
         // when it fails: the escalation flag is shared with the running thread.
         let flag = Arc::new(AtomicBool::new(false));
-        let op = notes_status_op(NotesFetchPurpose::Automatic, flag.clone());
+        let op = notes_status_op(NotesFetchPurpose::Automatic, Arc::clone(&flag));
         flag.store(true, Ordering::SeqCst);
         let resolved = op.resolve(&Err(dux_core::release_notes::FetchError::Transient(
             anyhow::anyhow!("connection refused"),
@@ -2049,7 +2049,9 @@ mod tests {
                 assert_eq!(tone, dux_core::statusline::StatusTone::Error);
                 assert!(text.contains("connection refused"), "{text}");
             }
-            other => panic!("an escalated failure must surface an error, got {other:?}"),
+            other @ dux_core::engine::Final::Clear => {
+                panic!("an escalated failure must surface an error, got {other:?}")
+            }
         }
     }
 

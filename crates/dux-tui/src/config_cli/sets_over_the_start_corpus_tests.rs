@@ -4,6 +4,7 @@
 //! each surface matches that surface's start, and a set is never refused on
 //! a file when it is accepted on a clean one.
 use super::*;
+use dux_core::config::ServerCliOverrides;
 
 /// Sets of plain settings across sections, providers included.
 const SETS: &[(&str, &str)] = &[
@@ -66,7 +67,12 @@ fn dux_server_starts(text: &str) -> bool {
     match dux_core::config::load_config(&paths) {
         Err(_) => false,
         Ok(config) => {
-            dux_core::config::resolve_server_plan(&config.server, &Default::default(), None).is_ok()
+            dux_core::config::resolve_server_plan(
+                &config.server,
+                &ServerCliOverrides::default(),
+                None,
+            )
+            .is_ok()
                 && dux_core::config::start_refusal(text, dux_core::config::Surface::DuxServer)
                     .is_none()
         }

@@ -449,7 +449,7 @@ impl App {
     /// cells, or by content.
     pub(crate) fn open_modal_frame(
         &self,
-        frame: &mut Frame,
+        frame: &mut Frame<'_>,
         title: &str,
         area: Rect,
     ) -> ModalFrame {

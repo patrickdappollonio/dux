@@ -1667,7 +1667,7 @@ mod tests {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("upsert project");
         store
@@ -2157,7 +2157,7 @@ mod tests {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("upsert project");
         drop(store);

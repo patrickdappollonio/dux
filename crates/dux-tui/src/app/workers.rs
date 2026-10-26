@@ -7,6 +7,7 @@ use dux_core::engine::{
     EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
     PrunedPty, PrunedPtyKind, StatusUpdate, WorktreeRemoval, closed_tab_exit_notice,
 };
+use dux_core::worker::ReviewCopyConsent;
 
 use super::background_server::CompanionRouting;
 use super::text_input::TextInput;
@@ -1538,7 +1539,7 @@ impl App {
             head_branch: pr.head_ref_name.clone(),
             custom_name: Some(dux_core::bidi::strip_bidi_controls(&pr.head_ref_name)),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -2411,7 +2412,11 @@ mod tests {
     use crate::app::{BrowsePurpose, TermGridPos, TerminalSelection};
     use crate::config::DuxPaths;
     use crate::model::{AgentSession, ProjectBranchStatus, SessionStatus};
+    use dux_core::agent_job::CreateJobRegistries;
+    use dux_core::process_sessions::SpawnGate;
+    use dux_core::term_identity::TerminalIdentity;
     use dux_core::worker::AgentLaunchRequest;
+    use std::collections::BTreeMap;
 
     /// An agent detaching is a fact about the workspace: a browser has always
     /// been told, and this surface used to speak only for the selected agent.
@@ -3735,7 +3740,7 @@ mod tests {
             pty_size: (24, 80),
             scrollback_lines: 1_000,
             env: Vec::new(),
-            identity: Default::default(),
+            identity: TerminalIdentity::default(),
             kind: AgentLaunchKind::Reconnect {
                 status_message: "reconnect".to_string().into(),
             },
@@ -3743,7 +3748,7 @@ mod tests {
             status_quiet: dux_core::statusline::QuietSurfaces::LOUD,
         };
 
-        dux_core::agent_job::run_agent_launch_job(request, &worker_tx, &Default::default());
+        dux_core::agent_job::run_agent_launch_job(request, &worker_tx, &SpawnGate::default());
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::AgentLaunchFailed(data) => {
@@ -3891,7 +3896,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -3937,7 +3942,7 @@ mod tests {
             (80, 24),
             "op-test".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            CreateJobRegistries::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -4223,7 +4228,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -4246,7 +4251,7 @@ mod tests {
             (80, 24),
             "op-create-1".to_string(),
             dux_core::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            CreateJobRegistries::default(),
         );
 
         match worker_rx.recv().expect("worker event") {

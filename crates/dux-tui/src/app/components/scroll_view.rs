@@ -36,7 +36,7 @@ pub(crate) fn scroll_indicator_color(theme: &Theme) -> Color {
 /// [`render_scroll_marker`] documents: wrapped rows for a paragraph, whole
 /// items for a list.
 pub(crate) fn render_scroll_indicator(
-    frame: &mut Frame,
+    frame: &mut Frame<'_>,
     outer: Rect,
     content: Rect,
     offset: usize,
@@ -84,7 +84,7 @@ impl ScrollViewRender {
 /// `lines` must already be wrapped to `content`'s width: the clamp counts them,
 /// and a wrapping paragraph would draw more rows than it was given.
 pub(crate) fn render_scroll_view(
-    frame: &mut Frame,
+    frame: &mut Frame<'_>,
     outer: Rect,
     content: Rect,
     lines: Vec<Line<'static>>,
@@ -94,7 +94,7 @@ pub(crate) fn render_scroll_view(
     let total = lines.len();
     let viewport = usize::from(content.height);
     let offset = scroll.min(total.saturating_sub(viewport));
-    let slice: Vec<Line> = lines.into_iter().skip(offset).take(viewport).collect();
+    let slice: Vec<Line<'_>> = lines.into_iter().skip(offset).take(viewport).collect();
     Paragraph::new(slice).render(content, frame.buffer_mut());
     render_scroll_indicator(frame, outer, content, offset, viewport, total, theme);
     ScrollViewRender {

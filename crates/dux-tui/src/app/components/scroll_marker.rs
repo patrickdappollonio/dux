@@ -62,7 +62,7 @@ pub(crate) fn scroll_marker_rect(area: Rect, content: Rect) -> Rect {
 /// Nothing is drawn when the content fits, when the pane has no room, or when
 /// the cell would fall outside the frame.
 pub(crate) fn render_scroll_marker(
-    frame: &mut Frame,
+    frame: &mut Frame<'_>,
     area: Rect,
     content: Rect,
     offset: usize,

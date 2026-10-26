@@ -22,10 +22,12 @@ use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind, Ses
 use crate::statusline::StatusTone;
 use crate::{git, logger};
 use anyhow::Result;
+use dux_core::clone_project::UpfrontReviewCopy;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 use dux_core::model::TerminalOwner;
 use dux_core::project_browser::leading_branch_for_project;
+use dux_core::worker::ReviewCopyConsent;
 use dux_core::worker::{
     AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, CreateAgentBranchInspection,
     CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget, WorkerEvent,
@@ -993,7 +995,7 @@ impl App {
                     project,
                     &raw_input,
                     None,
-                    Default::default(),
+                    ReviewCopyConsent::default(),
                     None,
                     &worker_tx,
                     Some(op_id),
@@ -1200,7 +1202,7 @@ impl App {
             random_name: *randomize_name,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: UpfrontReviewCopy::default(),
         };
         match self.engine.apply(command) {
             Ok(reaction) => {
@@ -3880,7 +3882,7 @@ impl App {
             }
         };
         let previous = self.engine.config.ui.theme.clone();
-        self.engine.config.ui.theme = selected.id.clone();
+        self.engine.config.ui.theme.clone_from(&selected.id);
         if let Err(err) = self
             .engine
             .config_writer
@@ -4231,7 +4233,7 @@ impl App {
                 scroll,
                 ..
             } => (worktree_path.clone(), rel_path.clone(), *scroll),
-            _ => return,
+            CenterMode::Agent => return,
         };
         self.begin_diff_computation(worktree_path, rel_path, scroll);
     }
@@ -5045,6 +5047,8 @@ pub(super) fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ChangesTreeState;
+    use crate::app::background_server::ReloadListenerChanges;
     use crate::app::redraw::RedrawGate;
     use crate::app::{
         ConfirmAnswer, InactiveTailState, LeftRowsState, MouseLayoutState, OneShotNotes,
@@ -5055,13 +5059,27 @@ mod tests {
     use crate::config::DuxPaths;
     use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
     use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+    use crate::statusline::LiveStatusKeys;
+    use crate::statusline::StatusScope;
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use dux_core::attachments::Attachments;
+    use dux_core::changes_status::ChangedFilesFailures;
+    use dux_core::clone_project::Clones;
     use dux_core::config_sync::portable_project_path;
+    use dux_core::engine::BranchSyncWait;
+    use dux_core::engine::GhProbeState;
+    use dux_core::engine::PrSyncControl;
+    use dux_core::engine::RemovalCoordination;
     use dux_core::engine::{ProjectPersistenceOutcome, ProjectPersistenceView};
     use dux_core::model::CompanionTerminal;
+    use dux_core::operations::Operations;
+    use dux_core::process_sessions::AgentProcessRegistry;
+    use dux_core::serve_log::StartupNotes;
+    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
@@ -5110,7 +5128,7 @@ mod tests {
             github_integration_enabled: false,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
@@ -5120,49 +5138,53 @@ mod tests {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
             pr_overrides: std::collections::HashMap::new(),
             pr_suppressions: std::collections::HashSet::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync: Arc::new(Default::default()),
+            pr_sync: Arc::new(PrSyncControl::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: std::collections::HashMap::new(),
             resumed_tab_runs: std::collections::HashSet::new(),
             pending_deletions: std::collections::HashSet::new(),
             folder_repo_statuses: std::collections::HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
-            current_origin: Default::default(),
+            current_origin: StatusScope::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             in_flight: std::collections::HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -5181,23 +5203,23 @@ mod tests {
             pending_change_base_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_recreate_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_delete_reports_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
-            live_status_keys: Default::default(),
+            live_status_keys: LiveStatusKeys::default(),
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         let app_live_status_keys = engine.live_status_keys.clone();
         let mut app = App {
@@ -5261,7 +5283,7 @@ mod tests {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
-            tui_launched_ptys: Default::default(),
+            tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -5304,7 +5326,7 @@ mod tests {
             welcome_tip_selection: usize::MAX,
             syntax_cache: Arc::new(crate::diff::SyntaxCache::new()),
             pending_diff: None,
-            changes_tree: Default::default(),
+            changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -5320,10 +5342,10 @@ mod tests {
             companion: None,
             left_rows: Vec::new(),
             terminal_cursor: None,
-            tui_fallback_tabs: Default::default(),
+            tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
-            reload_listener_changes: Default::default(),
+            reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
@@ -5501,7 +5523,7 @@ mod tests {
             github_integration_enabled: false,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
@@ -5511,49 +5533,53 @@ mod tests {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: std::collections::HashMap::new(),
             agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
             pr_overrides: std::collections::HashMap::new(),
             pr_suppressions: std::collections::HashSet::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync: Arc::new(Default::default()),
+            pr_sync: Arc::new(PrSyncControl::default()),
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: std::collections::HashMap::new(),
             resumed_tab_runs: std::collections::HashSet::new(),
             pending_deletions: std::collections::HashSet::new(),
             folder_repo_statuses: std::collections::HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
-            current_origin: Default::default(),
+            current_origin: StatusScope::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             in_flight: std::collections::HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -5572,23 +5598,23 @@ mod tests {
             pending_change_base_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: std::collections::HashMap::new(),
             pending_recreate_ops: std::collections::HashMap::new(),
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_delete_reports_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
-            live_status_keys: Default::default(),
+            live_status_keys: LiveStatusKeys::default(),
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: std::collections::HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         (engine, tmp)
     }
@@ -5749,7 +5775,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(
             !app.serving.flip_preflight_pending,
@@ -5762,7 +5788,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url])),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(app.pending_server_flip.is_some());
         app.start_web_server();
@@ -5809,7 +5835,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
 
         let flip = app
@@ -5863,7 +5889,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Ok((vec![listener], vec![url.clone()])),
             warning: Some("Tailscale not detected, serving on loopback only.".to_string()),
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(app.pending_server_flip.is_some());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
@@ -5886,7 +5912,7 @@ mod tests {
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
-            startup: Default::default(),
+            startup: StartupNotes::default(),
         });
         assert!(
             app.pending_server_flip.is_none(),
@@ -6786,7 +6812,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -7619,7 +7645,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

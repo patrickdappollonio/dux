@@ -70,7 +70,12 @@ impl<'a> PickerList<'a> {
     }
 
     /// Paint the list into `area` and return what a click needs.
-    pub(crate) fn render(self, frame: &mut Frame, area: Rect, theme: &Theme) -> PickerListLayout {
+    pub(crate) fn render(
+        self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+    ) -> PickerListLayout {
         let list = self.block.as_ref().map_or(area, |block| block.inner(area));
         let indicator_frame = self.indicator_frame.unwrap_or(area);
         let items = self.rows.len();

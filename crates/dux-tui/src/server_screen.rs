@@ -638,7 +638,7 @@ impl ServerStatusScreen {
                         .split(area);
 
                     // ── Header (centered, no border) ────────────────────────────
-                    let header_text: Vec<Line> =
+                    let header_text: Vec<Line<'_>> =
                         header.iter().map(|s| header_line(s, theme)).collect();
                     let header_para = Paragraph::new(header_text)
                         .alignment(Alignment::Center)
@@ -783,7 +783,7 @@ fn browsers_title(browsers: usize) -> String {
 /// the scrolling area's height and whether the startup stuck on top, to size a page by.
 #[allow(clippy::too_many_arguments)]
 fn draw_log_panel(
-    frame: &mut ratatui::Frame,
+    frame: &mut ratatui::Frame<'_>,
     area: Rect,
     theme: &Theme,
     bindings: &RuntimeBindings,
@@ -1271,7 +1271,7 @@ impl ServerLogViewer {
     /// Draw the viewer over the whole frame.
     pub(crate) fn render(
         &mut self,
-        frame: &mut ratatui::Frame,
+        frame: &mut ratatui::Frame<'_>,
         theme: &Theme,
         bindings: &RuntimeBindings,
     ) {

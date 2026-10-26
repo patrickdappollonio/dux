@@ -1110,6 +1110,8 @@ pub(crate) mod tests {
     use super::*;
     use dux_core::engine::Engine;
     use dux_core::ids::{TabId, TabIdRef};
+    use dux_core::worker::ReviewCopyConsent;
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     /// What a [`FakeCompanion`] saw and what it was told to do, shared with the
@@ -1405,7 +1407,7 @@ pub(crate) mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: crate::model::ProjectBranchStatus::Leading,
             path_missing: false,
@@ -1423,7 +1425,7 @@ pub(crate) mod tests {
             state: "OPEN".to_string(),
             head_ref_name: "feature/pr-42".to_string(),
             custom_name: None,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
         }
     }
@@ -1450,7 +1452,7 @@ pub(crate) mod tests {
                 repository_key: None,
                 mode: dux_core::clone_project::CloneMode::Clone,
                 destination: std::path::PathBuf::new(),
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
             },
         );
         id

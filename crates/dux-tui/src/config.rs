@@ -3572,7 +3572,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: Some("npm install".to_string()),
-            env: Default::default(),
+            env: BTreeMap::default(),
         });
         let rendered = render_config_default(&config);
         assert!(rendered.contains("[[projects]]"));
@@ -3716,7 +3716,7 @@ name = "test"
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: Some("echo ready".to_string()),
-            env: Default::default(),
+            env: BTreeMap::default(),
         });
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save config");

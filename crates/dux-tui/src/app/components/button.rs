@@ -245,7 +245,7 @@ impl<'a> Button<'a> {
     /// Render into `area` using the theme's button colors: a rounded-border
     /// block 3 rows tall with the label centered on the middle row. The caller
     /// sizes `area` (see [`Button::width`]); the widget does not clip or wrap.
-    pub(crate) fn render(self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub(crate) fn render(self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let (border_color, fg) = match self.state {
             ButtonState::Focused => match self.kind {
                 ButtonKind::Confirm => (theme.button_confirm_border, theme.button_active_fg),

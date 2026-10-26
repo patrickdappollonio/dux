@@ -1,6 +1,7 @@
 //! `set` and `get` on files holding a misspelled minimum, projects, a
 //! provider that would turn into a retired stock block, and malformed paths.
 use super::*;
+use dux_core::config::ServerCliOverrides;
 
 struct NoSecrets;
 impl SecretSource for NoSecrets {
@@ -51,7 +52,12 @@ fn dux_server_starts(text: &str) -> bool {
     match dux_core::config::load_config(&paths) {
         Err(_) => false,
         Ok(config) => {
-            dux_core::config::resolve_server_plan(&config.server, &Default::default(), None).is_ok()
+            dux_core::config::resolve_server_plan(
+                &config.server,
+                &ServerCliOverrides::default(),
+                None,
+            )
+            .is_ok()
                 && dux_core::config::start_refusal(text, dux_core::config::Surface::DuxServer)
                     .is_none()
         }

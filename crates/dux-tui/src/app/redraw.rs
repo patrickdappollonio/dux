@@ -214,9 +214,9 @@ impl App {
                 ((elapsed / crate::theme::SPINNER_FRAME_MS) as usize)
                     % crate::theme::SPINNER_FRAMES.len()
             }),
-            cue: self
-                .any_row_working()
-                .then_some((elapsed / dux_core::working_cue::ELLIPSIS_STEP_MS as u128) as usize),
+            cue: self.any_row_working().then_some(
+                (elapsed / u128::from(dux_core::working_cue::ELLIPSIS_STEP_MS)) as usize,
+            ),
             attention_on: self
                 .attention_cue_visible()
                 .then(|| attention_blink_phase(elapsed)),

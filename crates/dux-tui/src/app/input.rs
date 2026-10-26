@@ -1147,7 +1147,7 @@ impl App {
         let pane_scope = match self.focus {
             FocusPane::Center => Some(BindingScope::Center),
             FocusPane::Files => Some(BindingScope::Files),
-            _ => None,
+            FocusPane::Left => None,
         };
         pane_scope.is_some_and(|scope| self.bindings.lookup(key, scope).is_some())
     }
@@ -2135,9 +2135,8 @@ impl App {
     }
 
     fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
-        let provider = match self.selected_terminal_surface_client() {
-            Some(provider) => provider,
-            None => return,
+        let Some(provider) = self.selected_terminal_surface_client() else {
+            return;
         };
         provider.scroll(direction, amount);
         self.note_user_scroll();
@@ -6708,7 +6707,7 @@ impl App {
         *editing = None;
         if let Some(old_name) = old_id {
             if let Some(existing) = entries.iter_mut().find(|(n, _, _)| *n == old_name) {
-                existing.0 = name.clone();
+                existing.0.clone_from(&name);
                 existing.1 = text;
                 existing.2 = surface;
             } else {
@@ -7827,9 +7826,11 @@ impl App {
     }
 
     fn set_command_palette_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::Command { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::Command {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::Command { input, .. } = &mut self.prompt {
             let prefix_width = 2; // "> "
@@ -7893,11 +7894,12 @@ impl App {
     }
 
     fn set_browser_input_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::BrowseProjects {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::BrowseProjects {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::BrowseProjects {
             filter,
@@ -7931,11 +7933,12 @@ impl App {
     /// Land the caret in the project chooser's `/`-search field. The renderer
     /// pads it with the two-cell `"/ "` prefix.
     fn set_pick_project_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::PickProject {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::PickProject {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::PickProject { list, .. } = &mut self.prompt {
             list.filter.cursor = cursor_from_single_line_click(
@@ -7952,11 +7955,12 @@ impl App {
     /// Land the caret in the Change base branch picker's `/`-search field. The
     /// renderer pads it with the two-cell `"/ "` prefix, like the project list.
     fn set_change_base_branch_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::ChangeBaseBranch {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::ChangeBaseBranch {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::ChangeBaseBranch(prompt) = &mut self.prompt {
             prompt.list.filter.cursor = cursor_from_single_line_click(
@@ -7972,11 +7976,12 @@ impl App {
 
     /// Land the caret in the startup-log filter. Its field carries no prefix.
     fn set_startup_command_logs_filter_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::StartupCommandLogs {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::StartupCommandLogs {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
             prompt.filter.cursor = cursor_from_single_line_click(
@@ -8007,11 +8012,12 @@ impl App {
     }
 
     fn set_kill_running_search_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::KillRunning {
-                input: Some(input), ..
-            } => input,
-            _ => return,
+        let OverlayMouseLayout::KillRunning {
+            input: Some(input_area),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
             prompt.list.filter.cursor = cursor_from_single_line_click(
@@ -8157,7 +8163,7 @@ impl App {
             && let Some(entry) = visible.get(*selected)
         {
             let new_dir = entry.path.clone();
-            *current_dir = new_dir.clone();
+            current_dir.clone_from(&new_dir);
             entries.clear();
             *loading = true;
             *selected = 0;
@@ -8302,10 +8308,10 @@ impl App {
         let max = self
             .last_error_dialog_lines
             .saturating_sub(self.last_error_dialog_height.max(1));
-        let scroll = match &mut self.prompt {
-            PromptState::ConfigReloadFailed { scroll, .. }
-            | PromptState::AddProjectFailed { scroll, .. } => scroll,
-            _ => return,
+        let (PromptState::ConfigReloadFailed { scroll, .. }
+        | PromptState::AddProjectFailed { scroll, .. }) = &mut self.prompt
+        else {
+            return;
         };
         let next = if delta >= 0 {
             scroll.saturating_add(delta as u16)
@@ -9327,9 +9333,11 @@ impl App {
     }
 
     fn set_rename_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::RenameSession { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::RenameSession {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9340,9 +9348,11 @@ impl App {
     }
 
     fn set_pull_request_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::PullRequestInput { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::PullRequestInput {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::PullRequestInput { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9355,9 +9365,10 @@ impl App {
     }
 
     fn set_attach_pull_request_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::AttachPullRequestInput { input } => input,
-            _ => return,
+        let OverlayMouseLayout::AttachPullRequestInput { input: input_area } =
+            self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::AttachPullRequestInput { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
@@ -9368,9 +9379,10 @@ impl App {
     }
 
     fn set_standalone_name_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::NameStandaloneAgent { input } => input,
-            _ => return,
+        let OverlayMouseLayout::NameStandaloneAgent { input: input_area } =
+            self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::NameStandaloneAgent { input, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space. No focus to
@@ -9381,9 +9393,11 @@ impl App {
     }
 
     fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::NameNewAgent { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::NameNewAgent {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
             // The single-line renderer pads by one leading space.
@@ -9424,9 +9438,11 @@ impl App {
     }
 
     fn set_startup_command_cursor_from_mouse(&mut self, column: u16, row: u16) {
-        let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::ConfigureStartupCommand { input, .. } => input,
-            _ => return,
+        let OverlayMouseLayout::ConfigureStartupCommand {
+            input: input_area, ..
+        } = self.overlay_layout.active
+        else {
+            return;
         };
         if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
             let display_row = usize::from(row.saturating_sub(input_area.y));
@@ -12236,9 +12252,8 @@ impl App {
         // been judged unfollowable.
         self.refresh_snapshot_buf();
         self.drop_drifted_selection();
-        let sel = match self.terminal_selection.clone() {
-            Some(s) => s,
-            None => return String::new(),
+        let Some(sel) = self.terminal_selection.clone() else {
+            return String::new();
         };
         let (start, end) = sel.ordered();
 
@@ -12616,6 +12631,8 @@ mod tests {
         startup_command_log_visual_lines,
     };
     use crate::app::{ConfirmAnswer, ConfirmFocus};
+    use dux_core::worker::ReviewCopyConsent;
+    use std::collections::BTreeMap;
 
     /// The commit success message advertises the push key only where pushing can
     /// succeed. A standalone agent has no branch, so the key it used to name
@@ -16644,7 +16661,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["alpha", "bravo", "charlie"]);
@@ -16705,7 +16722,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect()
     }
@@ -16786,7 +16803,7 @@ not_a_real_action = ["x"]
             .iter()
             .filter_map(|item| match item {
                 LeftItem::Session(i) => Some(app.engine.sessions[*i].id.clone()),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(ids, vec!["s-web".to_string()]);
@@ -17049,7 +17066,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                _ => None,
+                LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["charlie", "alpha", "bravo"]);
@@ -17462,7 +17479,7 @@ not_a_real_action = ["x"]
                 custom_name: Some("feature/pr-42".to_string()),
                 use_existing_branch: false,
                 agents: Vec::new(),
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
                 ask_id: None,
                 cloned: None,
             },
@@ -17693,7 +17710,7 @@ not_a_real_action = ["x"]
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -17758,7 +17775,7 @@ not_a_real_action = ["x"]
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -22954,7 +22971,7 @@ not_a_real_action = ["x"]
 
         match app.center_mode {
             CenterMode::Diff { scroll, .. } => assert_eq!(scroll, 3),
-            _ => panic!("expected diff mode"),
+            CenterMode::Agent => panic!("expected diff mode"),
         }
     }
 
@@ -22984,7 +23001,7 @@ not_a_real_action = ["x"]
                 .unwrap();
             match app.center_mode {
                 CenterMode::Diff { scroll, .. } => assert_eq!(scroll, expected),
-                _ => panic!("expected diff mode"),
+                CenterMode::Agent => panic!("expected diff mode"),
             }
         }
     }
@@ -24568,7 +24585,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -24620,7 +24637,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: crafted.to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -24688,7 +24705,7 @@ not_a_real_action = ["x"]
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
-                    review_copy: Default::default(),
+                    review_copy: ReviewCopyConsent::default(),
                     ask_id: None,
                 }),
                 purpose: dux_core::worker::PrLookupPurpose::CreateAgent,
@@ -36861,7 +36878,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -37023,7 +37040,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -37884,7 +37901,7 @@ cyan = "#00ffff"
                 head_branch: "pr-head".to_string(),
                 custom_name: Some("pr-head".to_string()),
                 use_existing_branch: false,
-                review_copy: Default::default(),
+                review_copy: ReviewCopyConsent::default(),
                 ask_id: None,
                 agents: Vec::new(),
                 cloned: None,
@@ -37981,7 +37998,7 @@ cyan = "#00ffff"
             head_branch: "pr-head".to_string(),
             custom_name: Some(name.to_string()),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,

@@ -1,4 +1,6 @@
+use crate::app::background_server::ReloadListenerChanges;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::io::{Write as _, stdout};
 use std::path::{Path, PathBuf};
@@ -53,10 +55,16 @@ use crate::pty::TerminalSnapshot;
 use crate::statusline::{BUSY_TIMEOUT, KeyedStatusController, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
+use dux_core::attachments::Attachments;
+use dux_core::changes_status::ChangedFilesFailures;
+use dux_core::clone_project::Clones;
+use dux_core::engine::{BranchSyncWait, GhProbeState, PrSyncControl, RemovalCoordination};
 use dux_core::engine::{Command, Engine};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 pub(crate) use dux_core::model::CompanionTerminal;
 pub(crate) use dux_core::model::{TerminalOwner, TerminalOwnerRef};
+use dux_core::operations::Operations;
+use dux_core::process_sessions::AgentProcessRegistry;
 
 use text_input::TextInput;
 
@@ -3842,7 +3850,7 @@ impl TerminalSelection {
     pub(crate) fn to_origin_row(&self, live_row: u16, now: SelectionOrigin) -> Option<u16> {
         let offset_delta = now.scrollback_offset as i64 - self.origin.scrollback_offset as i64;
         let total_delta = now.scrollback_total as i64 - self.origin.scrollback_total as i64;
-        let origin_row = live_row as i64 - offset_delta + total_delta;
+        let origin_row = i64::from(live_row) - offset_delta + total_delta;
         u16::try_from(origin_row).ok()
     }
 
@@ -4677,7 +4685,7 @@ impl App {
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
         let pr_sync_sessions = Arc::new(Mutex::new(Vec::new()));
-        let pr_sync: Arc<dux_core::engine::PrSyncControl> = Arc::new(Default::default());
+        let pr_sync: Arc<dux_core::engine::PrSyncControl> = Arc::new(PrSyncControl::default());
         let has_active_processes = Arc::new(AtomicBool::new(false));
         let initial_status = format!(
             "Press {} to add a project, {} to create an agent, {} for help.",
@@ -4688,7 +4696,7 @@ impl App {
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let live_status_keys = dux_core::statusline::LiveStatusKeys::default();
         let status = boot_status(
-            Duration::from_secs(config.ui.status_clear_seconds as u64),
+            Duration::from_secs(u64::from(config.ui.status_clear_seconds)),
             live_status_keys.clone(),
             initial_status,
             tab_reaches_agent_trap_warning(&bindings, &config),
@@ -4714,7 +4722,7 @@ impl App {
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
-            resource_collector: Default::default(),
+            resource_collector: Arc::default(),
             host_env: dux_core::term_identity::HostEnvProbe::from_env(),
             worker_tx,
             worker_rx,
@@ -4724,23 +4732,27 @@ impl App {
             command_applies: 0,
             deferred_commands: Vec::new(),
             reload_guard: None,
+            #[expect(
+                clippy::default_trait_access,
+                reason = "dux-core does not export the type's name, only its Default"
+            )]
             reload_origin: Default::default(),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
-            launched_drop_paste: Default::default(),
+            launched_drop_paste: HashMap::default(),
             companion_terminals: HashMap::new(),
             agent_tabs: agent_tabs
                 .into_iter()
                 .map(|t| (TabId::new(t.id.clone()), t))
                 .collect(),
             terminating_ptys: Vec::new(),
-            process_registry: Default::default(),
+            process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
-            gh_probe: Default::default(),
+            gh_probe: GhProbeState::default(),
             pr_statuses: HashMap::new(),
             pr_overrides: HashMap::new(),
             pr_suppressions: HashSet::new(),
@@ -4749,26 +4761,26 @@ impl App {
             pr_sync,
             pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pr_poll_inactive_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pr_inactive_sessions: Default::default(),
-            pr_inactive_sweep_at: Default::default(),
-            pr_return_checks_owed: Default::default(),
-            pr_branch_generations: Default::default(),
-            pr_branch_checks_owed: Default::default(),
+            pr_inactive_sessions: HashSet::default(),
+            pr_inactive_sweep_at: Arc::default(),
+            pr_return_checks_owed: HashSet::default(),
+            pr_branch_generations: HashMap::default(),
+            pr_branch_checks_owed: HashSet::default(),
             branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            branch_sync_wait: Arc::new(Default::default()),
+            branch_sync_wait: Arc::new(BranchSyncWait::default()),
             pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             resume_fallback_candidates: HashMap::new(),
             resumed_tab_runs: HashSet::new(),
             pending_deletions: HashSet::new(),
             folder_repo_statuses: HashMap::new(),
-            changed_files_failures: Default::default(),
+            changed_files_failures: ChangedFilesFailures::default(),
             closing_sessions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
-            changed_files_refresh: Default::default(),
+            changed_files_refresh: Arc::default(),
             watched_session_id: None,
             has_active_processes,
-            serve_memory: Default::default(),
+            serve_memory: Arc::default(),
             current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
             rename_expected: std::collections::HashMap::new(),
@@ -4788,7 +4800,7 @@ impl App {
             pending_change_base_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
-            clones: Default::default(),
+            clones: Clones::default(),
             pending_pr_attach_ops: HashMap::new(),
             pending_recreate_ops: HashMap::new(),
             pending_delete_ops_web: HashMap::new(),
@@ -4797,14 +4809,14 @@ impl App {
             pending_web_launch_ops: HashMap::new(),
             live_status_keys,
             last_created_op_id: None,
-            operations: Default::default(),
+            operations: Operations::default(),
             operation_in_dispatch: None,
-            attachments: Default::default(),
+            attachments: Attachments::default(),
             dispatch_policy: None,
             deferred_operations: Vec::new(),
             deferred_policies: Vec::new(),
             created_session_by_op: HashMap::new(),
-            removal_coordination: Default::default(),
+            removal_coordination: RemovalCoordination::default(),
         };
         Ok(Self::assemble(
             engine,
@@ -4902,7 +4914,7 @@ impl App {
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
-            tui_launched_ptys: Default::default(),
+            tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -4945,7 +4957,7 @@ impl App {
             welcome_tip_selection: usize::MAX,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
-            changes_tree: Default::default(),
+            changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -4961,10 +4973,10 @@ impl App {
             companion: None,
             left_rows: Vec::new(),
             terminal_cursor: None,
-            tui_fallback_tabs: Default::default(),
+            tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
-            reload_listener_changes: Default::default(),
+            reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
@@ -5055,7 +5067,7 @@ impl App {
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
         let status = boot_status(
-            Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
+            Duration::from_secs(u64::from(engine.config.ui.status_clear_seconds)),
             engine.live_status_keys.clone(),
             "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
             tab_reaches_agent_trap_warning(&bindings, &engine.config),
@@ -5846,7 +5858,7 @@ impl App {
                     let p = self.engine.projects.iter().find(|p| p.id == project_id)?;
                     p.path_missing.then(|| p.path.clone())
                 }
-                _ => None,
+                LeftItem::InactiveToggle => None,
             });
         if let Some(path) = missing_path {
             self.missing_project_warning_gen =
@@ -7706,7 +7718,7 @@ impl App {
     /// a browser, and without a serve there are none.
     pub(crate) fn remote_browser_count(&self, session_id: &str) -> usize {
         let scope = dux_core::attachments::Scope {
-            ptys: Default::default(),
+            ptys: BTreeSet::default(),
             agents: [session_id.to_string()].into(),
         };
         self.engine
@@ -7719,7 +7731,7 @@ impl App {
     pub(crate) fn pty_browser_count(&self, pty_id: &str) -> usize {
         let scope = dux_core::attachments::Scope {
             ptys: [pty_id.to_string()].into(),
-            agents: Default::default(),
+            agents: BTreeSet::default(),
         };
         self.engine
             .attachments
@@ -8548,6 +8560,7 @@ pub(crate) fn runtime_project_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// A changed-files read whose worker never starts still gets its keyed
     /// busy a final: the engine answers for the worker.
@@ -9935,7 +9948,7 @@ leading_branch = "main"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: Some("npm install".to_string()),
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -9984,7 +9997,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -10045,7 +10058,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -10106,7 +10119,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         // `dux config set server.port 4444` from another process.
@@ -10154,7 +10167,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         let key = dux_core::config_keys::lookup("ui.left_width_pct").unwrap();
@@ -10213,7 +10226,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
         // Deleted by hand after dux read the file, before the sync wrote.
@@ -10277,7 +10290,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: Some("pnpm install".to_string()),
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed project");
 
@@ -11073,6 +11086,7 @@ leading_branch = "main"
 #[cfg(test)]
 mod pinned_warning_tests {
     use super::*;
+    use crate::statusline::LiveStatusKeys;
     use std::time::{Duration, Instant};
 
     const WINDOW: Duration = Duration::from_secs(6);
@@ -11280,7 +11294,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             None,
@@ -11299,7 +11313,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             Some("Theme 'nope' could not be loaded.".to_string()),
@@ -11320,7 +11334,7 @@ mod pinned_warning_tests {
         let t0 = Instant::now();
         let mut status = boot_status(
             WINDOW,
-            Default::default(),
+            LiveStatusKeys::default(),
             "Press ? for help.",
             None,
             None,

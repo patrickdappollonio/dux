@@ -31,6 +31,7 @@ use dux_core::pr_reference::{
 use dux_core::prose::{Prose, ProseSegment};
 use dux_core::status_text::{ReviewCopyAsk, ReviewCopyOutlook};
 use dux_core::worker::CreateAgentRequest;
+use dux_core::worker::ReviewCopyConsent;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -849,7 +850,7 @@ impl App {
                 typed_name
             }),
             use_existing_branch: false,
-            review_copy: Default::default(),
+            review_copy: ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,

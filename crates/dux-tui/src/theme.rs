@@ -61,7 +61,7 @@ pub(crate) fn working_word_color(working: Color, muted: Color, step: usize) -> C
     else {
         return working;
     };
-    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * blend).round() as u8;
+    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * blend).round() as u8;
     Color::Rgb(mix(wr, mr), mix(wg, mg), mix(wb, mb))
 }
 
