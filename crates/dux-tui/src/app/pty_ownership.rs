@@ -3371,7 +3371,7 @@ mod tests {
     fn switching_serving_on_here_claims_every_running_agent_tab_and_terminal() {
         let (mut app, _recorded, seat) = app_running_everything_with_nothing_serving();
 
-        app.execute_command("start-background-server".to_string())
+        app.execute_command("start-background-server")
             .expect("the command runs");
         finish_a_start(&mut app, None);
 
@@ -3558,7 +3558,7 @@ mod tests {
         app.input_target = InputTarget::Agent;
         app.stop_background_server_quietly();
 
-        app.execute_command("start-background-server".to_string())
+        app.execute_command("start-background-server")
             .expect("the command runs");
         finish_a_start(&mut app, None);
         let flat = flowed(&render_rows(&mut app, 160, 40));

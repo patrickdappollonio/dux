@@ -275,7 +275,7 @@ pub(crate) fn run_set(
     crate::config::install_canonical_renderer();
     paths.ensure_dirs()?;
     let remaining = match key.policy {
-        WritePolicy::Secret(_) => set_secret(&key, parsed, paths, secrets, out)?,
+        WritePolicy::Secret(_) => set_secret(&key, &parsed, paths, secrets, out)?,
         WritePolicy::Plain => {
             if parsed.stdin {
                 bail!(
@@ -489,7 +489,7 @@ fn parse_set_args(args: &[String]) -> Result<SetArgs> {
 
 fn set_secret(
     key: &Key,
-    parsed: SetArgs,
+    parsed: &SetArgs,
     paths: &DuxPaths,
     secrets: &mut dyn SecretSource,
     out: &mut dyn Write,

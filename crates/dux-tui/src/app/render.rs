@@ -734,7 +734,7 @@ fn fit_agent_meta_line(
     word: Span<'static>,
     branch: Option<Span<'static>>,
     counts: MetaCounts,
-    style: MetaLineStyle<'_>,
+    style: &MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
     let MetaLineStyle {
         sep: sep_style,
@@ -749,7 +749,7 @@ fn fit_agent_meta_line(
     let cols = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
     let name_min_cut = |s: &Span<'static>| cols(name_cut.min_width(s.content.as_ref()));
     let branch_min_cut = |s: &Span<'static>| cols(FieldCut::End.min_width(s.content.as_ref()));
-    let sep = || Span::styled(" · ", sep_style);
+    let sep = || Span::styled(" · ", *sep_style);
     const SEP_W: u16 = 3; // " · "
     let with_sep = |s: &Span<'static>| SEP_W.saturating_add(width(s));
 
@@ -810,7 +810,7 @@ fn fit_agent_meta_line(
     let mut out: Vec<Span<'static>> = vec![marker];
     if let Some(name) = name {
         out.extend(ellipsize_field_highlighted(
-            name, name_alloc, name_cut, highlight,
+            name, name_alloc, name_cut, *highlight,
         ));
         out.push(sep());
     } else if !had_name {
@@ -823,7 +823,7 @@ fn fit_agent_meta_line(
             branch,
             branch_alloc,
             FieldCut::End,
-            highlight,
+            *highlight,
         ));
     }
     for segment in [tabs, remote].into_iter().flatten() {
@@ -1360,11 +1360,7 @@ fn delete_agent_cancel_button(focus: DeleteAgentFocus) -> ConfirmButton<'static>
         "Cancel",
         ButtonKind::Confirm,
         ButtonPressedTarget::ConfirmDeleteCancel,
-        if focus == DeleteAgentFocus::Cancel {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        },
+        FocusState::of(focus, DeleteAgentFocus::Cancel),
     )
 }
 
@@ -1375,11 +1371,7 @@ fn delete_agent_delete_button(focus: DeleteAgentFocus, label: &str) -> ConfirmBu
         label,
         ButtonKind::Danger,
         ButtonPressedTarget::ConfirmDeleteConfirm,
-        if focus == DeleteAgentFocus::Delete {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        },
+        FocusState::of(focus, DeleteAgentFocus::Delete),
     )
 }
 
@@ -1580,7 +1572,7 @@ impl App {
     ) {
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Agent",
                 body: body_lines,
                 controls_height: 0,
@@ -2358,7 +2350,7 @@ impl App {
                 tabs: tabs_span,
                 remote: remote_span,
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default().fg(muted),
                 highlight: line2_highlight,
             },
@@ -2987,10 +2979,7 @@ impl App {
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
                     self.glyphs(),
-                    dux_core::row_state::TerminalRowFacts {
-                        working: working,
-                        typing: typing,
-                    },
+                    dux_core::row_state::TerminalRowFacts { working, typing },
                     spinner,
                     row.display_title.as_deref(),
                     &row.owner_name,
@@ -3056,11 +3045,7 @@ impl App {
     }
 
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = if self.focus == FocusPane::Left {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let focused = FocusState::of(self.focus, FocusPane::Left);
 
         if self.left_collapsed {
             self.render_collapsed_left(frame, area, focused);
@@ -3108,11 +3093,7 @@ impl App {
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = if self.focus == FocusPane::Center {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let focused = FocusState::of(self.focus, FocusPane::Center);
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
@@ -5006,11 +4987,7 @@ impl App {
         }
 
         if self.right_collapsed {
-            let focused = if self.focus == FocusPane::Files {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            };
+            let focused = FocusState::of(self.focus, FocusPane::Files);
             let block = self.themed_block("", focused);
             let unstaged_rows = self.changes_row_count(RightSection::Unstaged);
             let total = unstaged_rows + self.changes_row_count(RightSection::Staged);
@@ -5060,11 +5037,7 @@ impl App {
         }
 
         let has_staged = !self.engine.staged_files.is_empty();
-        let focused = if self.focus == FocusPane::Files {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let focused = FocusState::of(self.focus, FocusPane::Files);
 
         if has_staged {
             let pct =
@@ -5166,11 +5139,7 @@ impl App {
     /// user nothing about what to do next. The card is untitled, since the pane
     /// frame already says "Changes".
     fn render_quiet_changes(&mut self, frame: &mut Frame, area: Rect, reason: &str) {
-        let focused = if self.focus == FocusPane::Files {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let focused = FocusState::of(self.focus, FocusPane::Files);
         let block = self.themed_block("Changes", focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -7309,7 +7278,7 @@ impl App {
         // the checkbox never sits flush against the destructive button.
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Worktree",
                 body: body_lines,
                 controls_height: checkbox_height,
@@ -7317,21 +7286,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                    if prompt.focus == DeleteWorktreeFocus::Cancel {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     "Delete worktree",
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                    if prompt.focus == DeleteWorktreeFocus::Delete {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Delete),
                 ),
                 reserve_labels: &[],
             },
@@ -8054,7 +8015,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Change Base Branch",
                 body: lines,
                 controls_height: 0,
@@ -8211,7 +8172,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Confirm Kill",
                 body: lines,
                 controls_height: 0,
@@ -8285,7 +8246,7 @@ impl App {
             frame,
             "Reload Config Failed",
             dialog_width,
-            body_lines,
+            &body_lines,
             1 + checkbox_height + 1 + BUTTON_HEIGHT,
             *scroll,
         );
@@ -8321,21 +8282,13 @@ impl App {
                 "Close",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedClose,
-                if *focus == ConfigReloadFailedFocus::Close {
-                    FocusState::Focused
-                } else {
-                    FocusState::Unfocused
-                },
+                FocusState::of(*focus, ConfigReloadFailedFocus::Close),
             ),
             ConfirmButton::new(
                 "Recover",
                 ButtonKind::Confirm,
                 ButtonPressedTarget::ConfigReloadFailedApply,
-                if *focus == ConfigReloadFailedFocus::Apply {
-                    FocusState::Focused
-                } else {
-                    FocusState::Unfocused
-                },
+                FocusState::of(*focus, ConfigReloadFailedFocus::Apply),
             )
             .availability(if *recover_old_config {
                 crate::app::confirm_dialog::Availability::Enabled
@@ -8383,7 +8336,7 @@ impl App {
             frame,
             "Add Project Failed",
             dialog_width,
-            body_lines,
+            &body_lines,
             3,
             *scroll,
         );
@@ -8548,7 +8501,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Terminal",
                 body: lines,
                 controls_height: 0,
@@ -8639,7 +8592,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Close Tab",
                 body: lines,
                 controls_height: 0,
@@ -8711,7 +8664,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Stop Tab",
                 body: lines,
                 controls_height: 0,
@@ -8762,7 +8715,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Detach Agent",
                 body: lines,
                 controls_height: 0,
@@ -8853,7 +8806,7 @@ impl App {
         // the checkbox never sits flush against the destructive button.
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Recreate Working Copy",
                 body: lines,
                 controls_height: checkbox_height,
@@ -8861,21 +8814,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel,
-                    if focus == RecreateWorkingCopyFocus::Cancel {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(focus, RecreateWorkingCopyFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     &confirm_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm,
-                    if focus == RecreateWorkingCopyFocus::Recreate {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(focus, RecreateWorkingCopyFocus::Recreate),
                 ),
                 reserve_labels: &[],
             },
@@ -8933,7 +8878,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Check Out Default Branch",
                 body: lines,
                 controls_height: 0,
@@ -8970,7 +8915,7 @@ impl App {
         let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
-            ProjectConfirmDialog {
+            &ProjectConfirmDialog {
                 title: "Delete Project",
                 body: &body,
                 attached: &attached,
@@ -9008,7 +8953,7 @@ impl App {
         let attached = attached.clone();
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
-            ProjectConfirmDialog {
+            &ProjectConfirmDialog {
                 title: "Remove Project",
                 body: &body,
                 attached: &attached,
@@ -9055,13 +9000,13 @@ impl App {
     fn render_project_confirm(
         &mut self,
         frame: &mut Frame,
-        dialog: ProjectConfirmDialog<'_>,
+        dialog: &ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
         let mut body = self.prose_body(dialog.body);
         body.extend(self.attached_section(dialog.attached, confirm_inner_width(frame.area())));
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: dialog.title,
                 body,
                 controls_height: 0,
@@ -9139,7 +9084,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Quit dux",
                 body: lines,
                 controls_height: 0,
@@ -9265,7 +9210,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: if deletes_folder {
                     "Delete Folder"
                 } else {
@@ -9317,7 +9262,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Repository Has No Commits",
                 body: lines,
                 controls_height: 0,
@@ -9386,7 +9331,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Not a Git Repository",
                 body: lines,
                 controls_height: 0,
@@ -9523,7 +9468,7 @@ impl App {
         };
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Non-Default Branch",
                 body: body_lines,
                 controls_height: checkbox_height,
@@ -9531,21 +9476,13 @@ impl App {
                     "Cancel",
                     ButtonKind::Confirm,
                     ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                    if *focus == ConfirmNonDefaultBranchFocus::Cancel {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(*focus, ConfirmNonDefaultBranchFocus::Cancel),
                 ),
                 act: ConfirmButton::new(
                     add_label,
                     ButtonKind::Danger,
                     ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                    if *focus == ConfirmNonDefaultBranchFocus::Add {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
+                    FocusState::of(*focus, ConfirmNonDefaultBranchFocus::Add),
                 ),
                 // Sized for every label the act button can show, so toggling
                 // the checkbox never resizes the buttons.
@@ -9635,7 +9572,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Branch Already Exists",
                 body: lines,
                 controls_height: 0,
@@ -9765,11 +9702,7 @@ impl App {
         // checkbox focused the field takes no keystrokes, so a caret
         // there would be a lie (and the key handler already drops
         // every key on that basis).
-        let input_focused = if *focus == RenameSessionFocus::Input {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let input_focused = FocusState::of(*focus, RenameSessionFocus::Input);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -9965,11 +9898,7 @@ impl App {
                 .render(label_area, frame.buffer_mut());
             // The caret only appears while the field has focus: a field that
             // takes no keystrokes must not look like it does.
-            let focused = if *focus == field {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            };
+            let focused = FocusState::of(*focus, field);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -10179,11 +10108,7 @@ impl App {
         ] {
             Paragraph::new(Line::from(Span::styled(label, label_style)))
                 .render(label_area, frame.buffer_mut());
-            let focused = if *focus == field {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            };
+            let focused = FocusState::of(*focus, field);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
@@ -11104,11 +11029,7 @@ impl App {
                 frame.set_cursor_position((cursor_x, filter_inner.y));
             }
         }
-        let list_focused = if prompt.focus == StartupCommandLogFocus::List {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let list_focused = FocusState::of(prompt.focus, StartupCommandLogFocus::List);
         let list_block = Block::default()
             .title(" Runs ")
             .borders(Borders::ALL)
@@ -11596,7 +11517,7 @@ impl App {
         let confirm_label = guarded_confirm_label("Delete", attached);
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Agent",
                 body: body_lines,
                 controls_height: checkbox_height + branch_checkbox_height,
@@ -11846,11 +11767,7 @@ impl App {
 
         // Same rule as the rename modal: the caret only appears while
         // the field itself has focus.
-        let input_focused = if *focus == NameNewAgentFocus::Input {
-            FocusState::Focused
-        } else {
-            FocusState::Unfocused
-        };
+        let input_focused = FocusState::of(*focus, NameNewAgentFocus::Input);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -12324,11 +12241,7 @@ impl App {
         let name_inner = self.render_modal_text_field_frame(
             frame,
             name_area,
-            if focus == MacroEditFocus::Name {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            },
+            FocusState::of(focus, MacroEditFocus::Name),
             None,
         );
         // The one single-line renderer, never a hand-rolled copy: it owns the
@@ -12339,11 +12252,7 @@ impl App {
             state.name_input.cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
-            if focus == MacroEditFocus::Name {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            },
+            FocusState::of(focus, MacroEditFocus::Name),
             name_inner.width,
         ))
         .render(name_inner, frame.buffer_mut());
@@ -12362,11 +12271,7 @@ impl App {
         let text_inner = self.render_modal_text_field_frame(
             frame,
             text_area,
-            if focus == MacroEditFocus::Text {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            },
+            FocusState::of(focus, MacroEditFocus::Text),
             engaged.then(|| {
                 self.bindings
                     .label_for_reaching(Action::ExitCommitInput, |_| true)
@@ -12635,7 +12540,7 @@ impl App {
         );
         let layout = self.render_confirm_dialog(
             frame,
-            ConfirmDialog {
+            &ConfirmDialog {
                 title: "Delete Macro",
                 body: lines,
                 controls_height: 0,
@@ -13241,7 +13146,7 @@ impl App {
         frame: &mut Frame,
         title: &str,
         dialog_width: u16,
-        body_lines: Vec<Line<'static>>,
+        body_lines: &[Line<'static>],
         extra_inner_rows: u16,
         scroll: u16,
     ) -> ErrorDialogLayout {
@@ -13251,7 +13156,7 @@ impl App {
         // scroll clamp and the marker are measured in. A wrapping paragraph draws
         // more rows than it has lines and never reports how many, the trap the
         // help page hit, where the bottom of the page was unreachable.
-        let wrapped = wrap_styled_lines(&body_lines, inner_width as usize);
+        let wrapped = wrap_styled_lines(body_lines, inner_width as usize);
         let total_rows = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
 
         // Cap the message pane so the dialog still fits the terminal WITH its
@@ -13739,7 +13644,7 @@ fn terminal_row_lines(
         Span::styled(word_text, Style::default().fg(word_color)),
         None,
         MetaCounts::default(),
-        MetaLineStyle {
+        &MetaLineStyle {
             sep: Style::default().fg(muted),
             highlight,
         },
@@ -21786,7 +21691,7 @@ mod tests {
             Span::raw("Idle".to_string()),
             None,
             MetaCounts::default(),
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21813,7 +21718,7 @@ mod tests {
                 tabs: Some(Span::raw("3 tabs".to_string())),
                 remote: None,
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -21844,7 +21749,7 @@ mod tests {
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
             MetaCounts::default(),
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -22013,7 +21918,7 @@ mod tests {
                 tabs: Some(Span::raw("3 tabs".to_string())),
                 remote: Some(Span::raw("1 browser".to_string())),
             },
-            MetaLineStyle {
+            &MetaLineStyle {
                 sep: Style::default(),
                 highlight: None,
             },
@@ -22186,7 +22091,7 @@ mod tests {
                     tabs: None,
                     remote: Some(Span::raw("12 browsers".to_string())),
                 },
-                MetaLineStyle {
+                &MetaLineStyle {
                     sep: Style::default(),
                     highlight: None,
                 },
@@ -22344,7 +22249,7 @@ mod tests {
                 Span::raw("Idle".to_string()),
                 Some(Span::raw(branch.to_string())),
                 MetaCounts::default(),
-                MetaLineStyle {
+                &MetaLineStyle {
                     sep: Style::default(),
                     highlight: hl,
                 },
@@ -27877,7 +27782,7 @@ mod tests {
         );
     }
 
-    /// Render the non-default-branch dialog with the box in `checked` and
+    /// Render the non-default-branch dialog with the box in `mark` and
     /// return the worktree sentence's row as (text, foreground of its first
     /// letter), plus where the Cancel button landed.
     fn render_branch_dialog(

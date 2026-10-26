@@ -128,7 +128,7 @@ fn printed(body: &str) -> Vec<(String, String)> {
 }
 
 /// What `dux env ls`, `dux macros ls` and `dux providers ls` print about
-/// `body` with no dux running, `show` passed to `env ls`, in every shape.
+/// `body` with no dux running, `held_back` passed to `env ls`, in every shape.
 fn listings(
     paths: &DuxPaths,
     body: &str,
@@ -267,7 +267,7 @@ fn documented_positions(line: &str) -> Vec<String> {
 }
 
 /// The previews of `dux config regenerate` and `dux config restore-docs`,
-/// with `show` as given, as each prints them.
+/// with `held_back` as given, as each prints them.
 fn previews(body: &str, held_back: dux_core::config_keys::HeldBack) -> Vec<(String, String)> {
     let mut said = vec![(
         format!("regenerate preview (show {held_back:?})"),

@@ -504,6 +504,15 @@ pub(crate) enum ModalKeyStep {
     FallThroughToField,
 }
 
+/// Whether a dialog's focus rests on a text field, which owns the keys a caret needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextFieldFocus {
+    /// A text field has focus.
+    Field,
+    /// A button, checkbox or list has it.
+    Elsewhere,
+}
+
 /// Whether the binding lookup must be skipped for this key.
 ///
 /// True exactly when a text field has focus and the field owns the key, which
@@ -515,15 +524,6 @@ pub(crate) enum ModalKeyStep {
 /// The renderer must ask the same question when it picks the footer's key
 /// (`RuntimeBindings::label_for_text_field_dialog`), so the hint can never name
 /// a key the field swallows.
-
-/// Whether a dialog's focus rests on a text field, which owns the keys a caret needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TextFieldFocus {
-    /// A text field has focus.
-    Field,
-    /// A button, checkbox or list has it.
-    Elsewhere,
-}
 pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, focus: TextFieldFocus) -> bool {
     focus == TextFieldFocus::Field && text_field_owns_key(key)
 }
@@ -532,7 +532,7 @@ pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, focus: TextFieldFocus)
 /// (or `None`, whether because nothing is bound or because
 /// [`binding_lookup_is_suppressed`] said not to look).
 ///
-/// `text_field_focused` only affects Space: Space is content in both kinds of
+/// `focus` only affects Space: Space is content in both kinds of
 /// text field, so it may only act on focus when focus is sitting on a button or
 /// a checkbox.
 pub(crate) fn modal_key_step(

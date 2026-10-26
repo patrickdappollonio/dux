@@ -470,7 +470,7 @@ impl App {
         self.clamp_files_cursor();
     }
 
-    /// Ask a worker for one folder's contents. `announce` raises a keyed busy
+    /// Ask a worker for one folder's contents. An announced `status` raises a keyed busy
     /// and a final for it; a quiet refresh of a folder already on screen does
     /// neither, because the rows it replaces are still there to read.
     fn spawn_folder_listing(
@@ -565,14 +565,14 @@ impl App {
         }
         let any = !landed.is_empty();
         for (pending, answer) in landed {
-            self.apply_folder_listing(pending, answer);
+            self.apply_folder_listing(&pending, answer);
         }
         any
     }
 
     fn apply_folder_listing(
         &mut self,
-        pending: PendingFolderListing,
+        pending: &PendingFolderListing,
         answer: Result<Vec<ChangedFile>, String>,
     ) {
         // Only the listing that raised the key's busy may finish or clear it:
@@ -823,13 +823,17 @@ impl App {
                     FolderOp::Unstage => {
                         git::unstage_file(&worktree, &path).map(|()| FolderOpDone::default())
                     }
-                    FolderOp::Delete => {
-                        delete_untracked_folder(&worktree, &path, confirmed, &destructive, claim)
-                            .map(|deleted_files| FolderOpDone {
-                                deleted_files,
-                                ..FolderOpDone::default()
-                            })
-                    }
+                    FolderOp::Delete => delete_untracked_folder(
+                        &worktree,
+                        &path,
+                        confirmed,
+                        &destructive,
+                        claim.as_ref(),
+                    )
+                    .map(|deleted_files| FolderOpDone {
+                        deleted_files,
+                        ..FolderOpDone::default()
+                    }),
                 };
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
             });
@@ -974,14 +978,14 @@ fn delete_untracked_folder(
     path: &str,
     confirmed: git::ConfirmedEntry,
     check: &dux_core::destructive::DestructiveCheck,
-    claim: Option<dux_core::worktree_ops::DestructiveClaim>,
+    claim: Option<&dux_core::worktree_ops::DestructiveClaim>,
 ) -> anyhow::Result<usize> {
     if !git::discard_classify(worktree, path)? {
         anyhow::bail!(
             "it is no longer untracked, so dux left it alone; refresh the changes and look again"
         );
     }
-    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.iter().collect();
+    let claims: Vec<&dux_core::worktree_ops::DestructiveClaim> = claim.into_iter().collect();
     git::discard_confirmed(
         worktree,
         path,
@@ -1876,7 +1880,7 @@ mod tests {
         assert_eq!(app.status.tone(), StatusTone::Busy);
 
         let superseded = app.changes_tree.pending_listings.remove(0);
-        app.apply_folder_listing(superseded, Ok(Vec::new()));
+        app.apply_folder_listing(&superseded, Ok(Vec::new()));
 
         assert_eq!(app.status.tone(), StatusTone::Busy, "{}", app.status.text());
         assert!(app.status.text().contains("Listing what is inside"));

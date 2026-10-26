@@ -268,7 +268,7 @@ impl App {
     pub(crate) fn render_confirm_dialog(
         &self,
         frame: &mut Frame,
-        dialog: ConfirmDialog<'_>,
+        dialog: &ConfirmDialog<'_>,
     ) -> ConfirmLayout {
         let screen = frame.area();
         let wrapped = wrap_styled_lines(&dialog.body, usize::from(confirm_inner_width(screen)));

@@ -1421,8 +1421,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A clone's op waiting for its worker, as a browser (`from_web`) or this
-    /// surface would have left it.
+    /// A clone's op waiting for its worker, as a browser or this
+    /// surface (`asked_by`) would have left it.
     fn a_clone_op(app: &mut App, asked_by: dux_core::engine::CloneAskedBy) -> String {
         let op = dux_core::engine::status_op("Cloning…".to_string()).resolve_in_handler(
             |outcome: &dux_core::clone_project::CloneOutcome| outcome.final_status(),
@@ -2888,7 +2888,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        app.execute_command("view-server-log".to_string()).unwrap();
+        app.execute_command("view-server-log").unwrap();
         assert!(app.server_log_viewer.is_some());
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut screen = String::new();
@@ -2929,7 +2929,7 @@ pub(crate) mod tests {
     #[test]
     fn view_server_log_with_nothing_serving_says_so_and_opens_nothing() {
         let mut app = test_app(default_bindings());
-        app.execute_command("view-server-log".to_string()).unwrap();
+        app.execute_command("view-server-log").unwrap();
         assert!(app.server_log_viewer.is_none());
         let (_, message) = app.status.most_recent_tui().expect("a status");
         assert!(message.contains("start-background-server"), "{message}");
@@ -2938,7 +2938,7 @@ pub(crate) mod tests {
         // Serving, but with no log open: nothing to follow, and it says why.
         let (companion, _recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
-        app.execute_command("view-server-log".to_string()).unwrap();
+        app.execute_command("view-server-log").unwrap();
         assert!(app.server_log_viewer.is_none());
         let (_, message) = app.status.most_recent_tui().expect("a status");
         assert!(message.contains("not writing"), "{message}");

@@ -136,8 +136,8 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
-        let path = match self.engine.validate_project_add_path(&raw_path) {
+    pub(crate) fn add_project(&mut self, raw_path: &str, name: String) -> Result<()> {
+        let path = match self.engine.validate_project_add_path(raw_path) {
             Ok(path) => path,
             Err(message) => {
                 self.set_error(message);
@@ -214,7 +214,7 @@ impl App {
         )
         .into_branch();
         let path_str = path.to_string_lossy().to_string();
-        self.finish_add_project(path_str, name, branch, leading_branch)
+        self.finish_add_project(&path_str, &name, branch, leading_branch)
     }
 
     /// Saves the project to SQLite and config.toml inline, with no background
@@ -223,8 +223,8 @@ impl App {
     /// final status by the time this returns.
     pub(crate) fn finish_add_project(
         &mut self,
-        path: String,
-        name: String,
+        path: &str,
+        name: &str,
         branch: String,
         leading_branch: String,
     ) -> Result<()> {
@@ -244,8 +244,8 @@ impl App {
 
     pub(crate) fn finish_add_project_with_status(
         &mut self,
-        path: String,
-        name: String,
+        path: &str,
+        name: &str,
         branch: String,
         leading_branch: String,
         status_message: String,
@@ -264,7 +264,7 @@ impl App {
         let project = Project {
             id: project_id,
             name: display_name.clone(),
-            path: path.clone(),
+            path: path.to_string(),
             explicit_default_provider: None,
             default_provider: self.engine.config.default_provider(),
             leading_branch: Some(leading_branch),
@@ -820,7 +820,7 @@ impl App {
     pub(crate) fn apply_pull_request_reference_resolution(
         &mut self,
         raw_input: String,
-        repository: String,
+        repository: &str,
         result: Result<dux_core::pr_reference::ReferenceResolution, String>,
         offer: Option<dux_core::pr_reference::PullRequestCloneFacts>,
         clone_unavailable: Option<String>,
@@ -1189,7 +1189,7 @@ impl App {
         &mut self,
         action: NonDefaultBranchAction,
         target_branch: String,
-        reason: String,
+        reason: &str,
         carried_op_id: Option<String>,
     ) {
         let path = action.repo_path().to_string();
@@ -1233,7 +1233,7 @@ impl App {
     /// to a background worker, since the commit can hit slow filesystem or lock
     /// work. Serialized per repo path through `InFlightKey::InitialCommit` so a
     /// repeat confirm cannot double-commit.
-    pub(crate) fn dispatch_create_initial_commit(&mut self, path: String, name: String) {
+    pub(crate) fn dispatch_create_initial_commit(&mut self, path: &str, name: String) {
         // Real branch the commit will land on. A git error propagates rather than
         // silently defaulting the branch, which would mis-tag the project and
         // break the next agent creation. The non-default-branch heuristic warning
@@ -1258,7 +1258,7 @@ impl App {
         match git::repo_commit_state(Path::new(&path)) {
             git::CommitState::Unborn => {}
             git::CommitState::Born => {
-                if let Err(e) = self.finish_add_project(path, name, branch, leading_branch) {
+                if let Err(e) = self.finish_add_project(path, &name, branch, leading_branch) {
                     self.set_error(format!("{e:#}"));
                 }
                 return;
@@ -1272,7 +1272,9 @@ impl App {
         }
         if !self
             .engine
-            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(path.clone()))
+            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(
+                path.to_string(),
+            ))
         {
             self.set_warning(format!(
                 "An initial commit is already being created for \"{path}\". Please wait for it to finish."
@@ -1280,7 +1282,7 @@ impl App {
             return;
         }
         let add = dux_core::worker::InitialCommitAdd {
-            path: path.clone(),
+            path: path.to_string(),
             name,
             branch,
             leading_branch,
@@ -1330,10 +1332,12 @@ impl App {
     /// initial commit, then add the project) to a background worker. Shares
     /// `InFlightKey::InitialCommit` so init-and-commit and commit-only on the
     /// same path are mutually exclusive.
-    pub(crate) fn dispatch_init_repo(&mut self, path: String, name: String) {
+    pub(crate) fn dispatch_init_repo(&mut self, path: &str, name: String) {
         if !self
             .engine
-            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(path.clone()))
+            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(
+                path.to_string(),
+            ))
         {
             self.set_warning(format!(
                 "A repository is already being initialized in \"{path}\". Please wait for it to finish."
@@ -1341,7 +1345,7 @@ impl App {
             return;
         }
         let add = dux_core::worker::InitialCommitAdd {
-            path: path.clone(),
+            path: path.to_string(),
             name,
             // The worker resolves the real branch after the commit lands;
             // these placeholders are rewritten by `init_repo_and_commit`.
@@ -1413,7 +1417,7 @@ impl App {
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 super::workers::run_create_agent_branch_inspection_job(
                     project,
-                    worker_tx,
+                    &worker_tx,
                     Some(status_op_id),
                 );
             })) {
@@ -1681,7 +1685,7 @@ impl App {
     }
 
     /// Whether a launch dispatched right now should land fullscreen on
-    /// completion. `seek_fullscreen` is the caller's explicit intent; on top of
+    /// completion. `view` is the caller's explicit intent; on top of
     /// that, a launch started while the fullscreen relaunch screen is up keeps
     /// the user fullscreen rather than dropping them to the 3-pane layout.
     pub(crate) fn launch_seeks_fullscreen(&self, view: LaunchView) -> bool {
@@ -1866,7 +1870,7 @@ impl App {
     /// fullscreen is appended here with the key resolved through the bindings.
     pub(crate) fn launch_completion_message(
         &self,
-        engine_message: String,
+        engine_message: &str,
         view: LaunchView,
     ) -> String {
         let key = self.bindings.label_for(Action::ToggleFullscreen);
@@ -2490,8 +2494,8 @@ impl App {
     /// may have deleted the project before the worker replies.
     ///
     /// `removal` records what happened to the worktree and drives the success
-    /// message variant. `update_status` says whether to write that message at
-    /// all: the async worker handler passes `false` when an unrelated operation
+    /// message variant. `report` says whether to write that message at
+    /// all: the async worker handler passes [`DeleteReport::Quiet`] when an unrelated operation
     /// has already overwritten the status line.
     pub(crate) fn finish_delete_session(
         &mut self,
@@ -2512,7 +2516,7 @@ impl App {
         &mut self,
         session_id: &str,
         outcome: FinishDeleteSessionOutcome,
-        removal: WorktreeRemoval,
+        removal: &WorktreeRemoval,
         report: DeleteReport,
     ) {
         let FinishDeleteSessionOutcome {
@@ -2543,7 +2547,7 @@ impl App {
                 &session,
                 project.as_ref().map(|p| p.name.clone()),
             );
-            let message = dux_core::wire::delete_session_status_message(&facts, &removal);
+            let message = dux_core::wire::delete_session_status_message(&facts, removal);
             // A branch git refused to delete is still on disk and only the user
             // can clear it, so the line is a warning. The web makes the same one
             // sticky; this surface answers with warning retention instead.
@@ -3507,7 +3511,7 @@ impl App {
             prompt.scroll_offset = 0;
         }
         self.startup_log_selection = None;
-        self.spawn_startup_command_log_content_load(path, display_name);
+        self.spawn_startup_command_log_content_load(path, &display_name);
     }
 
     /// Apply a run body that finished reading off-thread.
@@ -3722,9 +3726,9 @@ impl App {
     /// The final is [`Final::clear`]: the output appearing in the pane IS the
     /// confirmation, and a success line per arrow-key press would be noise on a
     /// status surface that is most-recent-wins. A failure still speaks up.
-    fn spawn_startup_command_log_content_load(&mut self, path: PathBuf, display_name: String) {
+    fn spawn_startup_command_log_content_load(&mut self, path: PathBuf, display_name: &str) {
         let tx = self.engine.worker_tx.clone();
-        let failure_name = display_name.clone();
+        let failure_name = display_name.to_string();
         let op =
             dux_core::engine::status_op(format!("Reading startup command log {display_name}..."))
                 .on_success(|_: &String| dux_core::engine::Final::clear())
@@ -3952,7 +3956,7 @@ impl App {
     /// Remove a real, agent-less project from dux, keeping its files. Runs only
     /// once the removal is confirmed, and refuses a project that has gained an
     /// agent behind the open dialog.
-    pub(crate) fn run_remove_project(&mut self, project: Project) -> Result<()> {
+    pub(crate) fn run_remove_project(&mut self, project: &Project) -> Result<()> {
         // Removing one that still has agents here would orphan them. Use
         // "delete project" to remove agents too.
         if self.project_agent_count(&project.id) > 0 {
@@ -4021,7 +4025,7 @@ impl App {
 
     /// Delete a project, every agent in it and their worktrees. Runs only once
     /// the deletion is confirmed.
-    pub(crate) fn run_delete_project(&mut self, project: Project) -> Result<()> {
+    pub(crate) fn run_delete_project(&mut self, project: &Project) -> Result<()> {
         // The whole delete (guards, the per-session cascade with worktree
         // removal, and the project record and config removal) is owned by the
         // core `Command::DeleteProject`, so the two surfaces cannot disagree on
@@ -4060,8 +4064,8 @@ impl App {
         )
     }
 
-    /// `seek_fullscreen` marks a fullscreen-seeking relaunch: only the fullscreen
-    /// toggle passes `true`, and every other caller lands the completed launch
+    /// `view` marks a fullscreen-seeking relaunch: only the fullscreen
+    /// toggle passes [`LaunchView::Fullscreen`], and every other caller lands the completed launch
     /// focused but minimized. See `launch_seeks_fullscreen`.
     pub(crate) fn reconnect_selected_session(&mut self, view: LaunchView) -> Result<()> {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
@@ -5848,8 +5852,8 @@ mod tests {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
 
         app.finish_add_project_with_status(
-            repo.path().to_string_lossy().into_owned(),
-            "Demo".to_string(),
+            &repo.path().to_string_lossy(),
+            "Demo",
             "main".to_string(),
             "main".to_string(),
             "Added project \"Demo\" to the workspace.".to_string(),
@@ -5894,7 +5898,7 @@ mod tests {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
 
-        app.add_project(path, "Fresh".to_string())
+        app.add_project(&path, "Fresh".to_string())
             .expect("add_project");
 
         assert!(
@@ -5913,7 +5917,7 @@ mod tests {
     fn resolving_create_initial_commit_births_head_and_adds_project() {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(path.clone(), "Fresh".to_string())
+        app.add_project(&path.clone(), "Fresh".to_string())
             .expect("add_project");
 
         // Confirming dispatches a background worker; the commit + registration
@@ -5969,7 +5973,7 @@ mod tests {
         std::fs::set_permissions(&objects, ro).unwrap();
 
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(path.clone(), "Fresh".to_string())
+        app.add_project(&path.clone(), "Fresh".to_string())
             .expect("add_project");
         app.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm);
         // The gate is keyed by the repository's real path, which macOS reaches
@@ -6019,7 +6023,7 @@ mod tests {
         let path = repo.path().to_string_lossy().to_string();
 
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(path, "Trunk".to_string()).expect("add");
+        app.add_project(&path, "Trunk".to_string()).expect("add");
         assert!(
             matches!(app.prompt, PromptState::ConfirmCreateInitialCommit { .. }),
             "unborn repo must prompt for a commit, not the branch warning, got {:?}",
@@ -6031,7 +6035,7 @@ mod tests {
     fn cancelling_create_initial_commit_leaves_repo_and_workspace_untouched() {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(path.clone(), "Fresh".to_string())
+        app.add_project(&path.clone(), "Fresh".to_string())
             .expect("add_project");
 
         app.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
@@ -6294,8 +6298,8 @@ mod tests {
             dux_core::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
 
         app.finish_add_project_with_status(
-            repo.path().to_string_lossy().into_owned(),
-            "Demo".to_string(),
+            &repo.path().to_string_lossy(),
+            "Demo",
             "main".to_string(),
             "main".to_string(),
             "Added project \"Demo\" to the workspace.".to_string(),
@@ -6352,8 +6356,8 @@ mod tests {
             dux_core::config_queue::ConfigWriteQueue::new(queue_target.clone());
 
         app.finish_add_project_with_status(
-            raw_path.clone(),
-            "Demo".to_string(),
+            &raw_path.clone(),
+            "Demo",
             "main".to_string(),
             "main".to_string(),
             "Added project \"Demo\" to the workspace.".to_string(),
@@ -7132,7 +7136,7 @@ mod tests {
         app.selected_left = 0;
         assert!(app.selected_session().is_none());
 
-        app.execute_command("configure-project-env".to_string())
+        app.execute_command("configure-project-env")
             .expect("open the list");
         let pick_empty = match &app.prompt {
             PromptState::PickProject {
@@ -7187,7 +7191,7 @@ mod tests {
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("the agent row");
 
-        app.execute_command("configure-project-env".to_string())
+        app.execute_command("configure-project-env")
             .expect("open the editor");
 
         match &app.prompt {
@@ -8044,7 +8048,7 @@ mod tests {
         dux_core::engine::fail_next_worker_spawn();
         app.apply_rename_session(
             "s1",
-            "renamed-agent".to_string(),
+            "renamed-agent",
             dux_core::engine::BranchRename::AlsoTheBranch,
         );
         assert_eq!(
@@ -8599,7 +8603,7 @@ mod tests {
             app.apply_finish_delete_session_outcome(
                 "s1",
                 outcome,
-                removal.clone(),
+                &removal.clone(),
                 DeleteReport::Announce,
             );
             assert_eq!(app.status.message(), expected, "variant {removal:?}");
@@ -8629,7 +8633,7 @@ mod tests {
         app.apply_finish_delete_session_outcome(
             "s1",
             outcome,
-            WorktreeRemoval::Performed {
+            &WorktreeRemoval::Performed {
                 branches: dux_core::engine::RemovedBranches::Deleted(dux_core::git::RemoveResult {
                     branch: dux_core::git::BranchDeletion::Deleted,
                     initial_branch: Some(dux_core::git::BranchDeletion::Deleted),
@@ -8674,7 +8678,7 @@ mod tests {
         app.apply_finish_delete_session_outcome(
             "s1",
             outcome,
-            WorktreeRemoval::Performed {
+            &WorktreeRemoval::Performed {
                 branches: dux_core::engine::RemovedBranches::Kept(
                     dux_core::model::BranchKeptReason::NotDuxs(
                         dux_core::model::BranchProvenance::AttachedExisting,
@@ -9549,7 +9553,7 @@ mod tests {
     /// opens, and the highlighted project (the only one, in these journeys) is
     /// picked the way a person picks it.
     fn run_via_project_list(app: &mut App, command: &str) -> Result<()> {
-        app.execute_command(command.to_string())?;
+        app.execute_command(command)?;
         assert!(
             matches!(app.prompt, PromptState::PickProject { .. }),
             "{command} with no agent selected opens the project list, got {:?}",
@@ -9574,7 +9578,7 @@ mod tests {
     fn the_delete_project_command_asks_first_and_deletes_nothing() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
 
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
 
         match &app.prompt {
@@ -9598,7 +9602,7 @@ mod tests {
     #[test]
     fn escape_cancels_the_project_delete_and_keeps_the_worktree() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
 
         app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
@@ -9620,7 +9624,7 @@ mod tests {
     #[test]
     fn pressing_cancel_on_the_project_delete_deletes_nothing_either() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
 
         // Cancel has focus; activating it is the same answer as Escape.
@@ -9643,7 +9647,7 @@ mod tests {
     #[test]
     fn confirming_the_project_delete_runs_the_cascade_and_removes_the_worktree() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         let agent = app.engine.sessions[0].id.clone();
         let tab = app.engine.sessions[0].slot_tab_id().to_string();
@@ -9686,7 +9690,7 @@ mod tests {
     #[test]
     fn confirming_the_project_delete_after_the_project_is_gone_says_so() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         // The project leaves behind the open dialog (the browser removed it).
         app.engine.projects.clear();
@@ -9729,7 +9733,7 @@ mod tests {
     fn clicking_the_project_delete_buttons_cancels_and_confirms() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
 
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         render_once(&mut app);
         let OverlayMouseLayout::ConfirmDeleteProject { cancel_button, .. } =
@@ -9742,7 +9746,7 @@ mod tests {
         assert_eq!(app.engine.projects.len(), 1, "Cancel deletes nothing");
         assert!(worktree.is_dir());
 
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         render_once(&mut app);
         let OverlayMouseLayout::ConfirmDeleteProject { confirm_button, .. } =
@@ -9798,7 +9802,7 @@ mod tests {
     #[test]
     fn the_project_delete_dialog_counts_an_agent_added_while_it_is_open() {
         let (_root, mut app, _worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         assert!(rendered_text(&mut app).contains("its 1 agent,"));
 
@@ -9822,7 +9826,7 @@ mod tests {
     #[test]
     fn confirming_after_the_project_gained_an_agent_deletes_nothing_and_asks_again() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
-        app.execute_command("delete-project".to_string())
+        app.execute_command("delete-project")
             .expect("open the confirmation");
         rendered_text(&mut app);
         if let PromptState::ConfirmDeleteProject { focus, .. } = &mut app.prompt {
@@ -9863,7 +9867,7 @@ mod tests {
             .iter()
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("the orphaned agent's row");
-        app.execute_command("remove-project".to_string())
+        app.execute_command("remove-project")
             .expect("open the confirmation");
         rendered_text(&mut app);
 
@@ -10029,8 +10033,7 @@ mod tests {
     fn removing_a_project_that_still_has_agents_is_refused_without_asking() {
         let (_root, mut app, worktree) = project_with_a_real_agent();
 
-        app.execute_command("remove-project".to_string())
-            .expect("refuse");
+        app.execute_command("remove-project").expect("refuse");
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(
@@ -10053,7 +10056,7 @@ mod tests {
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("the orphaned agent's row");
 
-        app.execute_command("remove-project".to_string())
+        app.execute_command("remove-project")
             .expect("open the confirmation");
         match &app.prompt {
             PromptState::ConfirmRemoveProject { agent_count, .. } => {
@@ -10371,7 +10374,7 @@ mod tests {
         let (_root, repo, feature_commit) = clone_on_a_feature_branch();
         let mut app = journey_app();
 
-        app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
             .expect("add_project");
         answer_branch_dialog(
             &mut app,
@@ -10403,7 +10406,7 @@ mod tests {
         let (_root, repo, feature_commit) = clone_on_a_feature_branch();
         let mut app = journey_app();
 
-        app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
             .expect("add_project");
         answer_branch_dialog(
             &mut app,
@@ -10433,7 +10436,7 @@ mod tests {
         let (root, repo, _) = clone_on_a_feature_branch();
         crate::app::test_support::run_git_output(&repo, &["switch", "-q", "-c", "develop"]);
         let mut app = journey_app();
-        app.add_project(repo.to_string_lossy().to_string(), "repo".to_string())
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
             .expect("add_project");
         answer_branch_dialog(
             &mut app,
@@ -10645,7 +10648,7 @@ mod tests {
     /// Open `manage-projects` and pick the project whose id is `id` the way a
     /// person does: move down to it and press Enter.
     fn manage_project(app: &mut App, id: &str) {
-        app.execute_command("manage-projects".to_string())
+        app.execute_command("manage-projects")
             .expect("open the project list");
         let row = match &app.prompt {
             PromptState::PickProject {
@@ -10936,7 +10939,7 @@ mod tests {
         app.engine.projects.clear();
         app.rebuild_left_items();
 
-        app.execute_command("manage-projects".to_string())
+        app.execute_command("manage-projects")
             .expect("open the project list");
         match &app.prompt {
             PromptState::PickProject { entries, .. } => {
@@ -11601,7 +11604,7 @@ mod tests {
             .cloned()
             .expect("project-2");
 
-        app.run_delete_project(project).expect("delete project-2");
+        app.run_delete_project(&project).expect("delete project-2");
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s2"),

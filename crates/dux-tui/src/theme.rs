@@ -647,6 +647,17 @@ pub(crate) enum FocusState {
     Unfocused,
 }
 
+impl FocusState {
+    /// Whether the control at `stop` has focus while focus rests on `current`.
+    pub(crate) fn of<T: PartialEq>(current: T, stop: T) -> Self {
+        if current == stop {
+            Self::Focused
+        } else {
+            Self::Unfocused
+        }
+    }
+}
+
 impl Theme {
     /// Whether the app background is lighter than the body text, which is what
     /// decides how a QR code is drawn in the theme's own two colors: the darker

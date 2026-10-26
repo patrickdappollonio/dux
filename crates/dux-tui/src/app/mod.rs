@@ -3545,7 +3545,7 @@ impl MacroEditFocus {
         MacroEditFocus::Save,
     ];
 
-    /// The next focus stop in `forward` direction, wrapping at both ends.
+    /// The next focus stop in `direction`, wrapping at both ends.
     pub(crate) fn step(self, direction: FocusStep) -> Self {
         let order = Self::ORDER;
         let index = order
@@ -3597,7 +3597,7 @@ pub(crate) enum ConfigureFieldFocus {
 }
 
 impl ConfigureFieldFocus {
-    /// The next focus stop in `forward` direction, wrapping at both ends.
+    /// The next focus stop in `direction`, wrapping at both ends.
     /// Every stop is unconditional here, but the shared ring is used anyway so
     /// this modal's focus order is declared as data like everyone else's.
     pub(crate) fn step(self, direction: FocusStep) -> Self {
@@ -4768,7 +4768,7 @@ impl App {
             signals,
             status,
             theme,
-            SessionRestore::Restore,
+            &SessionRestore::Restore,
         )
     }
 
@@ -4787,7 +4787,7 @@ impl App {
         signals: SignalHandles,
         status: KeyedStatusController,
         theme: Theme,
-        restore: SessionRestore,
+        restore: &SessionRestore,
     ) -> Result<Self> {
         let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
             &engine.config.ui.pr_banner_position,
@@ -5008,7 +5008,7 @@ impl App {
             signals,
             status,
             theme,
-            SessionRestore::Skip,
+            &SessionRestore::Skip,
         )
     }
 
@@ -5993,7 +5993,7 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn execute_command(&mut self, command: String) -> Result<()> {
+    pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
@@ -6428,7 +6428,7 @@ impl App {
     /// Everything a reload owes once `engine.config` holds the new config,
     /// compared with `before`, the config it replaced: the view, the project
     /// list, the GitHub integration, the serve and Tailscale switches.
-    /// `github_was_enabled` is whether the integration was on before; the
+    /// `github` is whether the integration was on before; the
     /// `gh` probe a reload owes is asked for here, by the engine's one rule
     /// ([`dux_core::engine::Engine::probe_gh_after_reload`]), and nowhere
     /// else on this surface. Runs after a successful apply and after one
@@ -7485,12 +7485,12 @@ impl App {
     pub(crate) fn apply_rename_session(
         &mut self,
         session_id: &str,
-        new_name: String,
+        new_name: &str,
         rename: dux_core::engine::BranchRename,
     ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
-        match self.engine.rename_agent(session_id, &new_name, rename) {
+        match self.engine.rename_agent(session_id, new_name, rename) {
             Ok(reaction) => {
                 self.apply_reaction(reaction);
                 true
@@ -8245,7 +8245,7 @@ fn preflight_server_listeners(
     port: u16,
     tailscale_ip: Option<std::net::IpAddr>,
 ) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
-    bind_preflight_addrs(dux_core::config::local_addrs(port, tailscale_ip))
+    bind_preflight_addrs(&dux_core::config::local_addrs(port, tailscale_ip))
 }
 
 /// How many times a pre-flight on port 0 picks a port before a clash on the
@@ -8256,7 +8256,7 @@ const PREFLIGHT_PORT_PICKS: usize = 5;
 type Preflight = (Vec<std::net::TcpListener>, Vec<String>, Vec<String>);
 
 /// The binding half of [`preflight_server_listeners`], over a given plan.
-fn bind_preflight_addrs(addrs: Vec<dux_core::config::PlanAddr>) -> Result<Preflight> {
+fn bind_preflight_addrs(addrs: &[dux_core::config::PlanAddr]) -> Result<Preflight> {
     bind_preflight_addrs_with(addrs, std::net::TcpListener::bind)
 }
 
@@ -8270,12 +8270,12 @@ fn bind_preflight_addrs(addrs: Vec<dux_core::config::PlanAddr>) -> Result<Prefli
 /// whole pick starts over, up to [`PREFLIGHT_PORT_PICKS`] times. A configured
 /// port is never re-picked.
 fn bind_preflight_addrs_with(
-    addrs: Vec<dux_core::config::PlanAddr>,
+    addrs: &[dux_core::config::PlanAddr],
     mut bind: impl FnMut(std::net::SocketAddr) -> std::io::Result<std::net::TcpListener>,
 ) -> Result<Preflight> {
     let mut attempt = 1;
     loop {
-        match bind_preflight_once(&addrs, &mut bind) {
+        match bind_preflight_once(addrs, &mut bind) {
             Err(PreflightFailure::PickedPortTaken(_)) if attempt < PREFLIGHT_PORT_PICKS => {
                 attempt += 1;
             }
@@ -8435,7 +8435,7 @@ mod tests {
             app.server_flip_preflight_pending = true;
             // An `Err` is a real arm refusing on this bare fixture; only the
             // catch-all's status says the name was never matched.
-            let _ = app.execute_command(command.name.to_string());
+            let _ = app.execute_command(command.name);
             if let Some((_, message)) = app.status.most_recent_tui()
                 && message.contains("Unknown command")
             {
@@ -8454,7 +8454,7 @@ mod tests {
         app.focus = FocusPane::Center;
         app.left_collapsed = true;
 
-        app.execute_command("filter-agents".to_string()).unwrap();
+        app.execute_command("filter-agents").unwrap();
 
         assert!(app.agent_filter.is_some(), "the filter must be open");
         assert_eq!(app.focus, FocusPane::Left, "typing must reach the filter");
@@ -8468,7 +8468,7 @@ mod tests {
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
-        app.execute_command("delete-terminal".to_string()).unwrap();
+        app.execute_command("delete-terminal").unwrap();
 
         assert!(
             matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
@@ -8484,7 +8484,7 @@ mod tests {
         app.left_section = LeftSection::Projects;
         app.selected_terminal_index = 0;
 
-        app.execute_command("delete-terminal".to_string()).unwrap();
+        app.execute_command("delete-terminal").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -8500,7 +8500,7 @@ mod tests {
     fn the_palette_asks_before_checking_out_the_default_branch() {
         let mut app = test_support::test_app(test_support::default_bindings());
 
-        app.execute_command("checkout-project-default-branch".to_string())
+        app.execute_command("checkout-project-default-branch")
             .unwrap();
 
         assert!(
@@ -8994,7 +8994,7 @@ mod tests {
         };
         let mut picks = 0;
         let (listeners, urls, _) =
-            bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+            bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
                 if addr.port() == 0 {
                     picks += 1;
                     if picks == 1 {
@@ -9021,7 +9021,7 @@ mod tests {
             return;
         };
         let mut picks = 0;
-        let err = bind_preflight_addrs_with(dux_core::config::local_addrs(0, None), |addr| {
+        let err = bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
             if addr.port() == 0 {
                 picks += 1;
                 return std::net::TcpListener::bind((addr.ip(), clash));
@@ -9047,7 +9047,7 @@ mod tests {
         };
         let port = held.local_addr().expect("held addr").port();
 
-        let err = bind_preflight_addrs(vec![dux_core::config::PlanAddr::ipv6_loopback(port)])
+        let err = bind_preflight_addrs(&[dux_core::config::PlanAddr::ipv6_loopback(port)])
             .expect_err("a program on [::1] must stop the start");
         let text = format!("{err:#}");
         assert!(
@@ -9078,7 +9078,7 @@ mod tests {
         let held_addr = held.local_addr().expect("held addr");
         let port = held_addr.port();
 
-        let (listeners, urls, warnings) = bind_preflight_addrs(vec![
+        let (listeners, urls, warnings) = bind_preflight_addrs(&[
             dux_core::config::PlanAddr::required((std::net::Ipv4Addr::LOCALHOST, port).into()),
             dux_core::config::PlanAddr::best_effort(held_addr),
         ])
@@ -10465,21 +10465,21 @@ leading_branch = "main"
         app.engine.config.ui.github_integration = false;
         assert_eq!(app.engine.gh_probe.generation, 0);
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle on");
         assert_eq!(
             app.engine.gh_probe.generation, 1,
             "enabling re-runs the probe",
         );
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle off");
         assert_eq!(
             app.engine.gh_probe.generation, 1,
             "disabling asks gh nothing new",
         );
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("toggle on again");
         assert_eq!(
             app.engine.gh_probe.generation, 2,
@@ -10531,7 +10531,7 @@ leading_branch = "main"
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = crate::model::GhStatus::Unreachable;
 
-        app.execute_command("recheck-github".to_string())
+        app.execute_command("recheck-github")
             .expect("palette re-check");
 
         assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
@@ -10557,7 +10557,7 @@ leading_branch = "main"
         // the integration was last on, and nothing has re-checked since.
         app.engine.gh_status = crate::model::GhStatus::Available;
 
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("palette toggle on");
         assert_eq!(
             (
@@ -10570,7 +10570,7 @@ leading_branch = "main"
         assert_eq!(app.engine.gh_probe.generation, 1, "it launched the probe");
 
         // The same flip arriving through a config reload.
-        app.execute_command("toggle-github-integration".to_string())
+        app.execute_command("toggle-github-integration")
             .expect("palette toggle off");
         let mut config = app.engine.config.clone();
         config.ui.github_integration = true;

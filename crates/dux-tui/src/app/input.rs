@@ -817,7 +817,7 @@ pub(crate) struct LinkPressDecision {
 
 /// Decide what a press means. `link_uri` is the address under the pressed cell
 /// (already resolved through the rendered snapshot, `None` when the cell
-/// carries no link or hyperlinks are off), and `child_wants_mouse` says whether
+/// carries no link or hyperlinks are off), and `mouse_reporting` says whether
 /// the child has mouse reporting on.
 ///
 /// Shift is deliberately absent from the rule on this surface, unlike the web:
@@ -1669,7 +1669,7 @@ impl App {
                 self.open_current_pr_in_browser();
             }
             Action::ReconnectAgent => {
-                self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?
+                self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
             }
             _ => {}
         }
@@ -3036,7 +3036,7 @@ impl App {
         self.selection_changes_directory(GitUse::Read)
     }
 
-    /// `mutating` picks which of the two engine predicates decides. Both set the
+    /// `git_use` picks which of the two engine predicates decides. Both set the
     /// folder's own refusal sentence and answer `None`.
     fn selection_changes_directory(&mut self, git_use: GitUse) -> Option<PathBuf> {
         let session_id = self.selected_session()?.id.clone();
@@ -4413,7 +4413,7 @@ impl App {
             return;
         };
         match purpose {
-            BrowsePurpose::AddProject => self.add_project_from_browser_path(path),
+            BrowsePurpose::AddProject => self.add_project_from_browser_path(&path),
             BrowsePurpose::StandaloneAgent => self.open_standalone_agent_name_prompt(path),
         }
     }
@@ -4626,7 +4626,7 @@ impl App {
             }
             Some(Action::SearchToggle) => prompt.searching = true,
             Some(Action::MoveDown) => {
-                self.move_startup_command_log_selection(ScrollDirection::Down)
+                self.move_startup_command_log_selection(ScrollDirection::Down);
             }
             Some(Action::MoveUp) => self.move_startup_command_log_selection(ScrollDirection::Up),
             Some(Action::ScrollPageDown) => scroll_startup_command_log(prompt, body, page),
@@ -5624,7 +5624,7 @@ impl App {
                 // Any other refusal keeps it up too, with the name as typed.
                 if self.apply_rename_session(
                     &id,
-                    new_name,
+                    &new_name,
                     if also_rename_branch {
                         dux_core::engine::BranchRename::AlsoTheBranch
                     } else {
@@ -7858,7 +7858,7 @@ impl App {
             String::new()
         };
         self.prompt = PromptState::None;
-        if let Err(e) = self.execute_command(command) {
+        if let Err(e) = self.execute_command(&command) {
             self.set_error(format!("{e:#}"));
         }
     }
@@ -8234,14 +8234,14 @@ impl App {
         }
     }
 
-    fn add_project_from_browser_path(&mut self, path: String) {
+    fn add_project_from_browser_path(&mut self, path: &str) {
         let return_prompt = self.prompt.clone();
-        if let Err(message) = self.engine.validate_project_add_path(&path) {
+        if let Err(message) = self.engine.validate_project_add_path(path) {
             // Not addable as-is. A plain folder gets the adopt-a-folder prompt
             // (git init + seed + initial commit); anything else (a subfolder,
             // a .git dir, an already-registered path) keeps the failure modal
             // with the ORIGINAL add error, which now names the enclosing root.
-            if let Ok(canonical) = self.engine.validate_project_init_path(&path) {
+            if let Ok(canonical) = self.engine.validate_project_init_path(path) {
                 let candidates = dux_core::gitignore_seed::matched_candidates(&canonical)
                     .iter()
                     .map(|c| c.dir.to_string())
@@ -8822,7 +8822,7 @@ impl App {
             ));
             return false;
         };
-        let outcome = self.guarded_by(&asked, |app| app.run_delete_project(project));
+        let outcome = self.guarded_by(&asked, |app| app.run_delete_project(&project));
         self.settle_guarded(asked, outcome);
         false
     }
@@ -8922,7 +8922,7 @@ impl App {
                 self.set_warning(gone);
                 return false;
             };
-            self.guarded_by(&asked, |app| app.run_remove_project(project))
+            self.guarded_by(&asked, |app| app.run_remove_project(&project))
         };
         self.settle_guarded(asked, outcome);
         false
@@ -9193,7 +9193,7 @@ impl App {
         // The commit runs on a worker (it can invoke slow filesystem/lock work);
         // completion posts `InitialCommitCreated`, whose reaction registers the
         // project. Keeps the UI thread free per the CLAUDE.md workers tenet.
-        self.dispatch_create_initial_commit(path, name);
+        self.dispatch_create_initial_commit(&path, name);
         false
     }
 
@@ -9223,7 +9223,7 @@ impl App {
             self.prompt = *return_prompt;
             return false;
         }
-        self.dispatch_init_repo(path, name);
+        self.dispatch_init_repo(&path, name);
         false
     }
 
@@ -9273,10 +9273,11 @@ impl App {
             self.dispatch_non_default_branch_checkout(
                 action,
                 target,
-                "before adding the project".to_string(),
+                "before adding the project",
                 None,
             );
-        } else if let Err(e) = self.finish_add_project(add.path, add.name, branch, leading_branch) {
+        } else if let Err(e) = self.finish_add_project(&add.path, &add.name, branch, leading_branch)
+        {
             self.set_error(format!("{e:#}"));
         }
         false
@@ -10621,10 +10622,10 @@ impl App {
         false
     }
 
-    /// Activate the selected Projects-pane item. `allow_launch` distinguishes the
+    /// Activate the selected Projects-pane item. `on_dormant` distinguishes the
     /// explicit activate action, which always launches a dormant agent, from the
     /// fullscreen toggle, which never does: focus alone never launches. With
-    /// `allow_launch` false and the target dormant, this minimizes a fullscreen
+    /// [`OnDormant::Leave`] and the target dormant, this minimizes a fullscreen
     /// overlay or is a no-op.
     ///
     /// The two callers also part ways on a live agent: the explicit activate
@@ -10680,12 +10681,13 @@ impl App {
 
     /// Activate the focused tab of the Center pane's selected agent.
     ///
-    /// `allow_launch` distinguishes the explicit activate actions, which always
+    /// `on_dormant` distinguishes the explicit activate actions, which always
     /// launch a dormant tab, from the fullscreen toggle, which never does. See
     /// `activate_selected_left_item` for the same distinction in the Projects
-    /// pane. `seek_fullscreen` marks a fullscreen-seeking activation: a launch it
-    /// starts lands fullscreen rather than focused but minimized, and only the
-    /// fullscreen toggle and the double-click maximize gesture pass `true`.
+    /// pane. `view` marks a fullscreen-seeking activation: a launch it starts
+    /// lands fullscreen rather than focused but minimized, and only the
+    /// fullscreen toggle and the double-click maximize gesture pass
+    /// [`LaunchView::Fullscreen`].
     pub(crate) fn activate_center_agent(
         &mut self,
         on_dormant: OnDormant,
@@ -13946,7 +13948,7 @@ mod tests {
         )
         .expect("write valid config");
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         assert_eq!(app.status.message(), "Reloading config.toml.");
@@ -13976,7 +13978,7 @@ not_a_real_action = ["x"]
         )
         .expect("write invalid config");
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
 
@@ -14025,7 +14027,7 @@ not_a_real_action = ["x"]
             let before = app.engine.config.clone();
             std::fs::write(&app.engine.paths.config_path, body).expect("write config");
 
-            app.execute_command("reload-config".to_string())
+            app.execute_command("reload-config")
                 .expect("start reload config");
             drain_until(&mut app, |app| {
                 matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
@@ -14081,7 +14083,7 @@ not_a_real_action = ["x"]
         let before = app.engine.config.clone();
         let _ = std::fs::remove_file(&app.engine.paths.config_path);
 
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         drain_until(&mut app, |app| {
             matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
@@ -14236,7 +14238,7 @@ not_a_real_action = ["x"]
             crate::config::render_config_with(&config, &bindings),
         )
         .expect("write valid config");
-        app.execute_command("reload-config".to_string())
+        app.execute_command("reload-config")
             .expect("start reload config");
         drain_until(&mut app, |app| app.engine.config.server.auth.has_password());
         assert_eq!(app.engine.config.server.auth, config.server.auth);
@@ -15725,7 +15727,7 @@ not_a_real_action = ["x"]
 
         app.apply_rename_session(
             "session-1",
-            "new-title".to_string(),
+            "new-title",
             dux_core::engine::BranchRename::NameOnly,
         );
 
@@ -16239,7 +16241,7 @@ not_a_real_action = ["x"]
 
         app.apply_rename_session(
             &sid,
-            "brand-new-name".to_string(),
+            "brand-new-name",
             dux_core::engine::BranchRename::AlsoTheBranch,
         );
 
@@ -16274,7 +16276,7 @@ not_a_real_action = ["x"]
 
         app.apply_rename_session(
             &sid,
-            "brand-new-name".to_string(),
+            "brand-new-name",
             dux_core::engine::BranchRename::NameOnly,
         );
 
@@ -17686,8 +17688,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         // Flat model: new-agent-from-worktree opens the project chooser first;
         // confirming a project then loads that project's worktrees.
-        app.execute_command("new-agent-from-worktree".to_string())
-            .unwrap();
+        app.execute_command("new-agent-from-worktree").unwrap();
         assert!(matches!(
             app.prompt,
             PromptState::PickProject {
@@ -17737,7 +17738,7 @@ not_a_real_action = ["x"]
         // agent-less project so the chooser must surface both.
         add_agentless_project(&mut app, "project-2", "empty");
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
 
         match &app.prompt {
             PromptState::PickProject {
@@ -17761,7 +17762,7 @@ not_a_real_action = ["x"]
         app.engine.projects.clear();
         app.rebuild_left_items();
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -17793,7 +17794,7 @@ not_a_real_action = ["x"]
             created_at: None,
         });
 
-        app.execute_command("new-agent".to_string()).unwrap();
+        app.execute_command("new-agent").unwrap();
         // Move to the agent-less second project and confirm.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
@@ -17835,8 +17836,7 @@ not_a_real_action = ["x"]
         // fast without opening the chooser.
         assert!(!app.github_pr_agent_command_available());
 
-        app.execute_command("new-agent-from-pr".to_string())
-            .unwrap();
+        app.execute_command("new-agent-from-pr").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
@@ -17860,7 +17860,7 @@ not_a_real_action = ["x"]
             "the palette must offer refresh-changes"
         );
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         // The read runs on a worker, so the final lands on a later drain.
         drain_until(&mut app, |app| {
@@ -17908,7 +17908,7 @@ not_a_real_action = ["x"]
         app.engine.staged_files = vec![ghost.clone()];
         app.engine.unstaged_files = vec![ghost];
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
@@ -17946,7 +17946,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
 
         assert_eq!(
@@ -17984,7 +17984,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         init_git_repo_with_modified_file(&app, "tracked.txt", "before\n", "after\n");
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         // The user moves on before the answer lands.
         *app.engine.watched_worktree.lock().expect("watch lock") =
@@ -18022,7 +18022,7 @@ not_a_real_action = ["x"]
             .expect("managed test session")
             .worktree_path = not_a_repo.path().to_string_lossy().into_owned();
 
-        app.execute_command("refresh-changes".to_string())
+        app.execute_command("refresh-changes")
             .expect("refresh changes");
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
@@ -18054,7 +18054,7 @@ not_a_real_action = ["x"]
     fn esc_closes_the_project_chooser() {
         let mut app = test_app(default_bindings());
         let other = add_agentless_project(&mut app, "project-2", "empty");
-        app.execute_command("manage-projects".to_string()).unwrap();
+        app.execute_command("manage-projects").unwrap();
         assert!(matches!(app.prompt, PromptState::PickProject { .. }));
         let row_of_other = match &app.prompt {
             PromptState::PickProject { entries, .. } => entries
@@ -18116,7 +18116,7 @@ not_a_real_action = ["x"]
             .position(|item| matches!(item, LeftItem::Session(_)))
             .expect("a session row");
 
-        app.execute_command("manage-projects".to_string()).unwrap();
+        app.execute_command("manage-projects").unwrap();
         let row_of_other = match &app.prompt {
             PromptState::PickProject { entries, .. } => entries
                 .iter()
@@ -18140,8 +18140,7 @@ not_a_real_action = ["x"]
             app.selected_project().map(|p| p.id.clone()),
             Some(own.clone())
         );
-        app.execute_command("configure-project-env".to_string())
-            .unwrap();
+        app.execute_command("configure-project-env").unwrap();
         match &app.prompt {
             PromptState::ConfigureProjectEnv { project_id, .. } => assert_eq!(project_id, &own),
             other => panic!("expected the environment editor, got {other:?}"),
@@ -18707,7 +18706,7 @@ not_a_real_action = ["x"]
             .expect("inactive toggle row");
         assert!(app.selected_session().is_none());
 
-        app.execute_command("copy-path".to_string()).unwrap();
+        app.execute_command("copy-path").unwrap();
         let row = match &app.prompt {
             PromptState::PickProject {
                 intent, entries, ..
@@ -24224,7 +24223,7 @@ not_a_real_action = ["x"]
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
 
-        app.execute_command("attach-pull-request".to_string())
+        app.execute_command("attach-pull-request")
             .expect("open the attach modal");
         assert!(
             matches!(app.prompt, PromptState::AttachPullRequestInput { .. }),
@@ -24292,8 +24291,7 @@ not_a_real_action = ["x"]
             .pr_overrides
             .insert("session-1".to_string(), stored);
 
-        app.execute_command("detach-pull-request".to_string())
-            .expect("detach");
+        app.execute_command("detach-pull-request").expect("detach");
         assert!(app.engine.pr_overrides.is_empty(), "the pin must be gone");
         assert!(
             app.engine
@@ -24321,7 +24319,7 @@ not_a_real_action = ["x"]
         // resume message is right to wait its turn. This test wants to read the
         // second message without waiting a window for it.
         app.set_info(String::new());
-        app.execute_command("resume-pull-request-autodetection".to_string())
+        app.execute_command("resume-pull-request-autodetection")
             .expect("resume");
         assert!(app.engine.pr_suppressions.is_empty());
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
@@ -24424,7 +24422,7 @@ not_a_real_action = ["x"]
         app.rebuild_left_items();
         app.selected_left = 2; // s3
 
-        app.execute_command("move-agent-top".to_string()).unwrap();
+        app.execute_command("move-agent-top").unwrap();
 
         let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(order, vec!["s3", "s1", "s2"]);
@@ -25452,7 +25450,7 @@ cyan = "#00ffff"
         std::fs::create_dir_all(&project_dir).expect("project dir");
         init_test_repo(&project_dir);
 
-        app.add_project(project_dir.to_string_lossy().to_string(), String::new())
+        app.add_project(project_dir.to_string_lossy().as_ref(), String::new())
             .expect("add project");
         drain_until(&mut app, |app| {
             app.status
@@ -27570,7 +27568,7 @@ cyan = "#00ffff"
         // An agent is selected (default fixture selects the session row's index).
         app.selected_left = 1;
 
-        app.execute_command("new-terminal-for-project".to_string())
+        app.execute_command("new-terminal-for-project")
             .expect("open project chooser");
 
         // The chooser is open with the ProjectTerminal intent.
@@ -27671,7 +27669,7 @@ cyan = "#00ffff"
         app.engine.sessions.clear();
         app.engine.projects.clear();
 
-        app.execute_command("new-standalone-agent".to_string())
+        app.execute_command("new-standalone-agent")
             .expect("should open the folder browser");
 
         match &app.prompt {
@@ -27771,7 +27769,7 @@ cyan = "#00ffff"
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         ] {
             let mut app = test_app(default_bindings());
-            app.execute_command("new-agent".to_string())
+            app.execute_command("new-agent")
                 .expect("the chooser must open");
             assert!(matches!(app.prompt, PromptState::PickProject { .. }));
 
@@ -27822,7 +27820,7 @@ cyan = "#00ffff"
     #[test]
     fn the_searching_project_chooser_types_the_letter_and_fires_on_the_chord() {
         let mut app = test_app(default_bindings());
-        app.execute_command("new-agent".to_string())
+        app.execute_command("new-agent")
             .expect("the chooser must open");
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
             .expect("search engages");
@@ -27850,7 +27848,7 @@ cyan = "#00ffff"
     #[test]
     fn the_project_chooser_confirm_key_still_picks_the_highlighted_project() {
         let mut app = test_app(default_bindings());
-        app.execute_command("new-agent".to_string())
+        app.execute_command("new-agent")
             .expect("the chooser must open");
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -28187,11 +28185,11 @@ cyan = "#00ffff"
         app.set_info("something happened");
         app.open_command_palette();
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "", "the line is empty");
 
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "The status line is already clear.");
     }
@@ -28204,7 +28202,7 @@ cyan = "#00ffff"
         app.open_command_palette();
         app.set_info("arrived while the palette was open");
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "arrived while the palette was open");
     }
@@ -28218,7 +28216,7 @@ cyan = "#00ffff"
         app.set_info("a confirmation waiting its turn");
         app.open_command_palette();
         app.prompt = PromptState::None;
-        app.execute_command("clear-status-line".to_string())
+        app.execute_command("clear-status-line")
             .expect("the command runs");
         assert_eq!(app.status.message(), "a confirmation waiting its turn");
     }
@@ -28231,7 +28229,7 @@ cyan = "#00ffff"
         let folder = tempfile::tempdir().expect("folder");
         let mut palette = test_app(default_bindings());
         palette
-            .execute_command("new-standalone-agent".to_string())
+            .execute_command("new-standalone-agent")
             .expect("the palette command must open the browser");
         aim_and_pick(&mut palette, folder.path());
         assert!(
@@ -28258,7 +28256,7 @@ cyan = "#00ffff"
         // the key that works there whether or not the search is engaged.
         let mut chooser = test_app(default_bindings());
         chooser
-            .execute_command("new-agent".to_string())
+            .execute_command("new-agent")
             .expect("the chooser must open");
         chooser
             .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
@@ -28281,7 +28279,7 @@ cyan = "#00ffff"
         app.engine.sessions.clear();
         app.engine.projects.clear();
 
-        app.execute_command("new-standalone-terminal".to_string())
+        app.execute_command("new-standalone-terminal")
             .expect("should spawn a standalone terminal");
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
@@ -28319,7 +28317,7 @@ cyan = "#00ffff"
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
-        app.execute_command("new-standalone-terminal".to_string())
+        app.execute_command("new-standalone-terminal")
             .expect("should spawn a standalone terminal");
         let new_id = app.active_terminal_id.clone().expect("a new terminal");
         app.exit_interactive_mode();
@@ -28360,8 +28358,7 @@ cyan = "#00ffff"
         }
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
-        app.execute_command("new-standalone-terminal".to_string())
-            .unwrap();
+        app.execute_command("new-standalone-terminal").unwrap();
         let new_id = app.active_terminal_id.clone().unwrap();
         app.engine
             .pty_input
@@ -28393,8 +28390,7 @@ cyan = "#00ffff"
         // Away from the top, where the typed-into terminal sorts, so a cursor
         // left alone cannot land on it by accident.
         app.selected_terminal_index = 3;
-        app.execute_command("new-standalone-terminal".to_string())
-            .unwrap();
+        app.execute_command("new-standalone-terminal").unwrap();
         let new_id = app.active_terminal_id.clone().unwrap();
         app.engine
             .pty_input
@@ -30338,7 +30334,7 @@ cyan = "#00ffff"
     }
 
     /// Hand the form a folder check's answer for the fields as they stand,
-    /// as the press that asked for it (`pressed`) or as the check on open.
+    /// as the press that asked for it or as the check on open (`purpose`).
     fn apply_pr_answer(
         app: &mut App,
         purpose: crate::app::pr_clone::PrFolderCheck,
@@ -30374,7 +30370,7 @@ cyan = "#00ffff"
     fn open_pr_clone_form(app: &mut App, offer: dux_core::pr_reference::PullRequestCloneFacts) {
         app.apply_pull_request_reference_resolution(
             PR_REFERENCE.to_string(),
-            "github.com/acme/widget".to_string(),
+            "github.com/acme/widget",
             Ok(resolved(Vec::new())),
             Some(offer),
             None,
@@ -30425,7 +30421,7 @@ cyan = "#00ffff"
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
 
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let (address, destination, _, focus) = clone_prompt_fields(&app);
         assert_eq!(address, "");
         assert_eq!(destination, format!("{}/", start.path().display()));
@@ -30445,7 +30441,7 @@ cyan = "#00ffff"
     fn clone_destination_stops_following_the_address_once_edited() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         type_text(&mut app, "https://example.com/acme/widget");
 
         tap(&mut app, KeyCode::Tab);
@@ -30472,7 +30468,7 @@ cyan = "#00ffff"
             .config
             .defaults
             .enable_randomized_pet_name_by_default = true;
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let PromptState::CloneProject {
             randomize_name,
             agent_name,
@@ -30489,7 +30485,7 @@ cyan = "#00ffff"
             .config
             .defaults
             .enable_randomized_pet_name_by_default = false;
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
 
         let mut seen = Vec::new();
         for _ in 0..4 {
@@ -30569,7 +30565,7 @@ cyan = "#00ffff"
      {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
 
         // An empty address is refused and the form stays for a correction.
         tap(&mut app, KeyCode::Enter);
@@ -30619,7 +30615,7 @@ cyan = "#00ffff"
             ),
             other => panic!("expected the clone form, got {other:?}"),
         };
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         let (address, destination, _, _) = typed(&app);
         assert_eq!(
             address,
@@ -30648,7 +30644,7 @@ cyan = "#00ffff"
         let key = InFlightKey::Clone(taken.canonicalize().unwrap());
         drain_until(&mut app, |app| !app.engine.is_in_flight(&key));
         assert!(!app.engine.is_in_flight(&key), "the clone is still running");
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(typed(&app), submitted);
         type_text(&mut app, "x");
         assert_eq!(
@@ -30697,7 +30693,7 @@ cyan = "#00ffff"
             !app.engine.is_in_flight(&key) && !app.engine.is_in_flight(&InFlightKey::CreateAgent)
         });
         assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(typed(&app).0, "");
 
         // The same form for a pull request no project has the repository of.
@@ -30809,7 +30805,7 @@ cyan = "#00ffff"
             randomized_name: None,
             pull_request: Some(offer.clone()),
         });
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         assert_eq!(
             clone_prompt_fields(&app).0,
             "",
@@ -31184,7 +31180,10 @@ cyan = "#00ffff"
         // The press goes out for its folder check, and the name is edited
         // before the answer lands.
         tap(&mut app, KeyCode::Enter);
-        assert!(pr_form(&app).check_purpose == crate::app::pr_clone::PrFolderCheck::Submit);
+        assert_eq!(
+            pr_form(&app).check_purpose,
+            crate::app::pr_clone::PrFolderCheck::Submit
+        );
         tap(&mut app, KeyCode::Tab);
         type_text(&mut app, "x");
         assert_eq!(
@@ -31359,7 +31358,7 @@ cyan = "#00ffff"
     fn clone_form_escape_closes_with_nothing_dispatched() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         type_text(
             &mut app,
             &format!("{}/no-such-remote", start.path().display()),
@@ -31382,7 +31381,7 @@ cyan = "#00ffff"
     fn clone_form_click_lands_the_caret_in_each_field_and_toggles_the_checkbox() {
         let start = tempdir().expect("start folder");
         let mut app = app_with_start_folder(start.path());
-        app.execute_command("clone-project".to_string()).unwrap();
+        app.execute_command("clone-project").unwrap();
         if let PromptState::CloneProject {
             address,
             destination,
@@ -31587,14 +31586,12 @@ cyan = "#00ffff"
         assert!(!app.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
+        app.execute_command("toggle-remove-git-pane").unwrap();
         assert!(app.right_hidden);
         // The toggle keeps the persisted setting in sync with the pane state.
         assert!(!app.engine.config.ui.show_changes_pane);
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
+        app.execute_command("toggle-remove-git-pane").unwrap();
         assert!(!app.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
     }
@@ -31604,12 +31601,10 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         assert!(!app.engine.config.ui.always_show_tab_strip);
 
-        app.execute_command("toggle-always-show-tabs".to_string())
-            .unwrap();
+        app.execute_command("toggle-always-show-tabs").unwrap();
         assert!(app.engine.config.ui.always_show_tab_strip);
 
-        app.execute_command("toggle-always-show-tabs".to_string())
-            .unwrap();
+        app.execute_command("toggle-always-show-tabs").unwrap();
         assert!(!app.engine.config.ui.always_show_tab_strip);
     }
 
@@ -31618,12 +31613,10 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         assert!(!app.engine.config.ui.tab_reaches_agent);
 
-        app.execute_command("toggle-tab-to-agent".to_string())
-            .unwrap();
+        app.execute_command("toggle-tab-to-agent").unwrap();
         assert!(app.engine.config.ui.tab_reaches_agent);
 
-        app.execute_command("toggle-tab-to-agent".to_string())
-            .unwrap();
+        app.execute_command("toggle-tab-to-agent").unwrap();
         assert!(!app.engine.config.ui.tab_reaches_agent);
     }
 
@@ -31632,8 +31625,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Files;
 
-        app.execute_command("toggle-remove-git-pane".to_string())
-            .unwrap();
+        app.execute_command("toggle-remove-git-pane").unwrap();
 
         assert!(app.right_hidden);
         assert_eq!(app.focus, FocusPane::Center);
@@ -37056,7 +37048,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         // Flat model: resolves the selected agent's project (projects[0]).
 
-        app.execute_command("toggle-project-auto-reopen-agents".to_string())
+        app.execute_command("toggle-project-auto-reopen-agents")
             .expect("toggle project auto-reopen");
         drain_until(&mut app, |app| {
             app.status
@@ -37082,7 +37074,7 @@ cyan = "#00ffff"
     fn toggle_agent_auto_reopen_persists_session_opt_out() {
         let mut app = test_app(default_bindings());
 
-        app.execute_command("toggle-agent-auto-reopen".to_string())
+        app.execute_command("toggle-agent-auto-reopen")
             .expect("toggle agent auto-reopen");
 
         assert!(!app.engine.sessions[0].auto_reopen_enabled);
@@ -38354,7 +38346,7 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(vec![project.clone()])),
             None,
             None,
@@ -38379,7 +38371,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Err("worker panicked: boom".to_string()),
             None,
             None,
@@ -38403,7 +38395,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(dux_core::pr_reference::ReferenceResolution {
                 matches: Vec::new(),
                 uninspected: vec![dux_core::pr_reference::UninspectedProject {
@@ -38443,7 +38435,7 @@ cyan = "#00ffff"
 
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(vec![first.clone(), second.clone()])),
             None,
             None,
@@ -38474,7 +38466,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
-            "github.com/acme/unknown".to_string(),
+            "github.com/acme/unknown",
             Ok(resolved(Vec::new())),
             None,
             None,
@@ -38502,7 +38494,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.apply_pull_request_reference_resolution(
             "https://github.com/acme/unknown/pull/3".to_string(),
-            "github.com/acme/unknown".to_string(),
+            "github.com/acme/unknown",
             Ok(resolved(Vec::new())),
             None,
             Some("Failed to resolve PR #3 from acme/unknown: not found".to_string()),
@@ -38556,7 +38548,7 @@ cyan = "#00ffff"
         let mut app = app_with_start_folder(start.path());
         app.apply_pull_request_reference_resolution(
             PR_REFERENCE.to_string(),
-            "github.com/acme/widget".to_string(),
+            "github.com/acme/widget",
             Ok(dux_core::pr_reference::ReferenceResolution {
                 matches: Vec::new(),
                 uninspected: vec![dux_core::pr_reference::UninspectedProject {
@@ -38586,7 +38578,7 @@ cyan = "#00ffff"
         let project = app.engine.projects[0].clone();
         app.apply_pull_request_reference_resolution(
             "acme/widget#7".to_string(),
-            "acme/widget".to_string(),
+            "acme/widget",
             Ok(resolved(Vec::new())),
             None,
             None,
@@ -40312,12 +40304,12 @@ cyan = "#00ffff"
             }
             "ConfirmCreateInitialCommit" => {
                 let repo = scratch_unborn_repo(&mut app);
-                app.add_project(repo, "Fresh".to_string())
+                app.add_project(&repo, "Fresh".to_string())
                     .expect("add an unborn repo");
             }
             "ConfirmInitRepo" => {
                 let dir = scratch_plain_dir(&mut app);
-                app.add_project_from_browser_path(dir);
+                app.add_project_from_browser_path(&dir);
             }
             "ConfirmUseExistingBranch" => {
                 let project = app.engine.projects[0].clone();

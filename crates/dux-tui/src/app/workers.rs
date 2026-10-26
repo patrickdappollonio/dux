@@ -525,7 +525,7 @@ impl App {
             self.resolve_pr_lookup_completion(completion);
         }
         if let Some(id) = metadata.checkout_inspect_completion {
-            self.resolve_checkout_inspect_completion(id, follow_up);
+            self.resolve_checkout_inspect_completion(&id, follow_up);
         }
         if let Some((id, refused_or_failed)) = metadata.clone_completion {
             self.settle_clone_draft(
@@ -563,7 +563,7 @@ impl App {
             self.pending_pr_reference_op = None;
             if let Err(error) = self.apply_pull_request_reference_resolution(
                 answer.raw_input,
-                answer.repository,
+                &answer.repository,
                 answer.result,
                 answer.offer,
                 answer.clone_unavailable,
@@ -590,9 +590,9 @@ impl App {
         }
     }
 
-    fn resolve_checkout_inspect_completion(&mut self, id: String, follow_up: InspectFollowUp) {
+    fn resolve_checkout_inspect_completion(&mut self, id: &str, follow_up: InspectFollowUp) {
         if follow_up == InspectFollowUp::Done
-            && let Some(op) = self.pending_checkout_inspect_ops.remove(&id)
+            && let Some(op) = self.pending_checkout_inspect_ops.remove(id)
         {
             self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
         }
@@ -750,14 +750,14 @@ impl App {
             }
 
             EventReaction::BrowserEntriesArrived { dir, entries } => {
-                self.apply_browser_entries(dir, entries);
+                self.apply_browser_entries(&dir, entries);
             }
             EventReaction::ProjectWorktreesArrived {
                 project_id,
                 result,
                 status_op_id,
             } => {
-                self.apply_project_worktrees_arrived(project_id, result, status_op_id);
+                self.apply_project_worktrees_arrived(&project_id, result, status_op_id);
             }
 
             EventReaction::ManageableWorktreesArrived {
@@ -765,27 +765,27 @@ impl App {
                 result,
                 status_op_id,
             } => {
-                self.apply_manageable_worktrees_arrived(project_id, result, status_op_id);
+                self.apply_manageable_worktrees_arrived(&project_id, result, status_op_id);
             }
 
             EventReaction::OpenNewAgentPromptForPr {
                 pr,
                 status_op_id: _,
             } => {
-                self.apply_open_new_agent_prompt_for_pr(*pr);
+                self.apply_open_new_agent_prompt_for_pr(&pr);
             }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branches,
                 our_busy_message: _,
             } => {
-                self.apply_worktree_remove_succeeded(session_id, branches);
+                self.apply_worktree_remove_succeeded(&session_id, branches);
             }
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,
             } => {
-                self.apply_worktree_remove_failed(session_id, message);
+                self.apply_worktree_remove_failed(&session_id, message);
             }
             EventReaction::WorktreeRemoveWaiting {
                 session_id,
@@ -817,9 +817,9 @@ impl App {
                 status_op_id: _,
             } => {
                 self.apply_add_project_after_branch_checkout(
-                    path,
-                    name,
-                    target_branch,
+                    &path,
+                    &name,
+                    &target_branch,
                     leading_branch,
                 );
             }
@@ -835,8 +835,8 @@ impl App {
                 status_op_id: _,
             } => {
                 self.apply_add_project_after_initial_commit(
-                    path,
-                    name,
+                    &path,
+                    &name,
                     branch,
                     leading_branch,
                     (initialized_repo, seeded_gitignore, seed_warning),
@@ -888,7 +888,7 @@ impl App {
                 github_was_enabled,
                 error,
             } => self.apply_config_adopted(
-                *before,
+                &before,
                 if github_was_enabled {
                     dux_core::engine::GithubIntegration::Enabled
                 } else {
@@ -948,19 +948,19 @@ impl App {
 
     fn apply_add_project_after_branch_checkout(
         &mut self,
-        path: String,
-        name: String,
-        target_branch: String,
+        path: &str,
+        name: &str,
+        target_branch: &str,
         leading_branch: String,
     ) {
-        let display_name = project_display_name(&path, &name);
+        let display_name = project_display_name(path, name);
         let status_message = format!(
             "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
         );
         if let Err(error) = self.finish_add_project_with_status(
             path,
             name,
-            target_branch.clone(),
+            target_branch.to_string(),
             leading_branch,
             status_message,
         ) {
@@ -970,14 +970,14 @@ impl App {
 
     fn apply_add_project_after_initial_commit(
         &mut self,
-        path: String,
-        name: String,
+        path: &str,
+        name: &str,
         branch: String,
         leading_branch: String,
         setup: (bool, bool, Option<String>),
     ) {
         let (initialized_repo, seeded_gitignore, seed_warning) = setup;
-        let display_name = project_display_name(&path, &name);
+        let display_name = project_display_name(path, name);
         let repo = match (initialized_repo, seeded_gitignore) {
             (true, true) => RepoSetup::InitializedWithGitignore,
             (true, false) => RepoSetup::Initialized,
@@ -1047,7 +1047,7 @@ impl App {
         self.dispatch_non_default_branch_checkout(
             NonDefaultBranchAction::CheckoutProjectDefault { project },
             default_branch,
-            "for the selected project".to_string(),
+            "for the selected project",
             status_op_id,
         );
     }
@@ -1103,12 +1103,12 @@ impl App {
     /// (see `EventReaction::ConfigAdopted`): the view takes it, everything a
     /// reload's swap owes runs against `before`, the config it replaced, and
     /// the reload answers as an apply that failed, the same answer the
-    /// terminal UI's own failed apply gives. `github_was_enabled` is the
+    /// terminal UI's own failed apply gives. `github` is the
     /// engine's own state before the reload; its apply asked `gh` for
     /// nothing, so this surface asks where a reload owes it.
     fn apply_config_adopted(
         &mut self,
-        before: Config,
+        before: &Config,
         github: dux_core::engine::GithubIntegration,
         error: String,
     ) {
@@ -1116,8 +1116,8 @@ impl App {
         // The failure is the message, so the theme's own warning is left to
         // the next reload.
         let _ = self.take_reload_view_state(&adopted);
-        self.run_config_swap_effects(&before, github);
-        self.note_config_adopted(&before);
+        self.run_config_swap_effects(before, github);
+        self.note_config_adopted(before);
         let outcome = TuiConfigReloadOutcome::ApplyFailed(error.clone());
         if let Some(op) = self.pending_config_reload_op.take() {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
@@ -1248,7 +1248,7 @@ impl App {
         });
     }
 
-    fn apply_browser_entries(&mut self, dir: PathBuf, entries: Vec<BrowserEntry>) {
+    fn apply_browser_entries(&mut self, dir: &Path, entries: Vec<BrowserEntry>) {
         if let PromptState::BrowseProjects {
             current_dir,
             entries: current_entries,
@@ -1256,7 +1256,7 @@ impl App {
             selected,
             ..
         } = &mut self.prompt
-            && *current_dir == dir
+            && current_dir.as_path() == dir
         {
             *current_entries = entries;
             *loading = false;
@@ -1266,13 +1266,13 @@ impl App {
 
     fn apply_worktree_remove_succeeded(
         &mut self,
-        session_id: String,
+        session_id: &str,
         branches: dux_core::engine::RemovedBranches,
     ) {
-        let op = self.pending_delete_ops.remove(&session_id);
+        let op = self.pending_delete_ops.remove(session_id);
         if self.engine.sessions.iter().any(|s| s.id == session_id) {
             let cleanup = self.finish_delete_session(
-                &session_id,
+                session_id,
                 WorktreeRemoval::Performed {
                     branches: branches.clone(),
                 },
@@ -1313,9 +1313,9 @@ impl App {
         }
     }
 
-    fn apply_worktree_remove_failed(&mut self, session_id: String, message: String) {
+    fn apply_worktree_remove_failed(&mut self, session_id: &str, message: String) {
         let session_present = self.engine.sessions.iter().any(|s| s.id == session_id);
-        if let Some(op) = self.pending_delete_ops.remove(&session_id) {
+        if let Some(op) = self.pending_delete_ops.remove(session_id) {
             let outcome = if session_present {
                 TuiDeleteOutcome::FailedNamed { message }
             } else {
@@ -1372,7 +1372,7 @@ impl App {
         self.apply_finish_delete_session_outcome(
             &view.session_id,
             view.outcome,
-            view.removal,
+            &view.removal,
             if view.update_status {
                 DeleteReport::Announce
             } else {
@@ -1430,7 +1430,7 @@ impl App {
 
     fn apply_project_worktrees_arrived(
         &mut self,
-        project_id: String,
+        project_id: &str,
         result: Result<Vec<ProjectWorktreeEntry>, String>,
         status_op_id: Option<String>,
     ) {
@@ -1457,12 +1457,12 @@ impl App {
         } else {
             WorktreesFinalOutcome::Dismissed
         };
-        self.resolve_worktree_listing_op(status_op_id, outcome);
+        self.resolve_worktree_listing_op(status_op_id, &outcome);
     }
 
     fn apply_manageable_worktrees_arrived(
         &mut self,
-        project_id: String,
+        project_id: &str,
         result: Result<Vec<dux_core::worktree_manager::ManagedWorktree>, String>,
         status_op_id: Option<String>,
     ) {
@@ -1487,22 +1487,22 @@ impl App {
         } else {
             WorktreesFinalOutcome::Dismissed
         };
-        self.resolve_worktree_listing_op(status_op_id, outcome);
+        self.resolve_worktree_listing_op(status_op_id, &outcome);
     }
 
     fn resolve_worktree_listing_op(
         &mut self,
         status_op_id: Option<String>,
-        outcome: WorktreesFinalOutcome,
+        outcome: &WorktreesFinalOutcome,
     ) {
         if let Some(id) = status_op_id
             && let Some(op) = self.pending_worktree_ops.remove(&id)
         {
-            self.apply_reaction(op.resolve(&outcome).into_reaction());
+            self.apply_reaction(op.resolve(outcome).into_reaction());
         }
     }
 
-    fn apply_open_new_agent_prompt_for_pr(&mut self, pr: dux_core::worker::ResolvedPullRequest) {
+    fn apply_open_new_agent_prompt_for_pr(&mut self, pr: &dux_core::worker::ResolvedPullRequest) {
         let request = CreateAgentRequest::PullRequest {
             project: pr.project.clone(),
             host: pr.host.clone(),
@@ -1560,7 +1560,7 @@ impl App {
     fn resolve_persist_op(
         &mut self,
         status_op_id: Option<&str>,
-        outcome: PersistFinalOutcome,
+        outcome: &PersistFinalOutcome,
     ) -> bool {
         let Some(id) = status_op_id else {
             return false;
@@ -1568,7 +1568,7 @@ impl App {
         let Some(op) = self.pending_persist_ops.remove(id) else {
             return false;
         };
-        let resolved = op.resolve(&outcome);
+        let resolved = op.resolve(outcome);
         self.apply_reaction(resolved.into_reaction());
         true
     }
@@ -1576,13 +1576,16 @@ impl App {
     fn apply_project_persistence_failure(
         &mut self,
         action: ProjectPersistenceAction,
-        error: String,
+        error: &str,
         status_op_id: Option<&str>,
     ) {
-        if self.resolve_persist_op(status_op_id, PersistFinalOutcome::DbFailed(error.clone())) {
+        if self.resolve_persist_op(
+            status_op_id,
+            &PersistFinalOutcome::DbFailed(error.to_string()),
+        ) {
             return;
         }
-        self.set_error(project_persistence_failure_message(action, &error));
+        self.set_error(project_persistence_failure_message(action, error));
     }
 
     fn apply_added_project(&mut self, status_message: String) {
@@ -1610,9 +1613,9 @@ impl App {
 
     fn apply_default_provider_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         provider: Option<ProviderKind>,
-        global_default: ProviderKind,
+        global_default: &ProviderKind,
         status_op_id: Option<&str>,
     ) {
         self.rebuild_left_items();
@@ -1639,7 +1642,7 @@ impl App {
 
     fn apply_auto_reopen_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         auto_reopen_agents: Option<bool>,
         status_op_id: Option<&str>,
     ) {
@@ -1659,7 +1662,7 @@ impl App {
 
     fn apply_startup_command_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         startup_command: Option<String>,
         status_op_id: Option<&str>,
     ) {
@@ -1680,11 +1683,11 @@ impl App {
 
     fn apply_env_update(
         &mut self,
-        project_name: String,
+        project_name: &str,
         env_count: usize,
         status_op_id: Option<&str>,
     ) {
-        let success_message = super::render::project_env_saved_message(env_count, &project_name);
+        let success_message = super::render::project_env_saved_message(env_count, project_name);
         self.save_runtime_projects_and_finish_status(
             status_op_id,
             &format!(
@@ -1707,7 +1710,7 @@ impl App {
             .save_eager(self.engine.config.clone())
         {
             Ok(()) => {
-                if !self.resolve_persist_op(status_op_id, PersistFinalOutcome::Saved) {
+                if !self.resolve_persist_op(status_op_id, &PersistFinalOutcome::Saved) {
                     self.set_info(success_message);
                 }
             }
@@ -1715,7 +1718,7 @@ impl App {
                 let error = error.clone();
                 if !self.resolve_persist_op(
                     status_op_id,
-                    PersistFinalOutcome::ConfigWriteFailed(error.clone()),
+                    &PersistFinalOutcome::ConfigWriteFailed(error.clone()),
                 ) {
                     self.set_error(format!("{config_error_prefix}: {error}"));
                 }
@@ -1732,7 +1735,7 @@ impl App {
 
         match view {
             ProjectPersistenceView::PersistenceFailed { error } => {
-                self.apply_project_persistence_failure(action, error, status_op_id.as_deref());
+                self.apply_project_persistence_failure(action, &error, status_op_id.as_deref());
             }
             ProjectPersistenceView::Added {
                 project_id: _,
@@ -1760,9 +1763,9 @@ impl App {
                 global_default,
             } => {
                 self.apply_default_provider_update(
-                    project_name,
+                    &project_name,
                     provider,
-                    global_default,
+                    &global_default,
                     status_op_id.as_deref(),
                 );
             }
@@ -1771,7 +1774,7 @@ impl App {
                 auto_reopen_agents,
             } => {
                 self.apply_auto_reopen_update(
-                    project_name,
+                    &project_name,
                     auto_reopen_agents,
                     status_op_id.as_deref(),
                 );
@@ -1781,7 +1784,7 @@ impl App {
                 startup_command,
             } => {
                 self.apply_startup_command_update(
-                    project_name,
+                    &project_name,
                     startup_command,
                     status_op_id.as_deref(),
                 );
@@ -1790,7 +1793,7 @@ impl App {
                 project_name,
                 env_count,
             } => {
-                self.apply_env_update(project_name, env_count, status_op_id.as_deref());
+                self.apply_env_update(&project_name, env_count, status_op_id.as_deref());
             }
         }
     }
@@ -1907,7 +1910,7 @@ impl App {
                     // Land minimized unless the launch sought
                     // fullscreen (see CreateCommitted above).
                     self.land_completed_launch(view);
-                    self.launch_completion_message(status_message.to_string(), view)
+                    self.launch_completion_message(&status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };
@@ -1918,7 +1921,7 @@ impl App {
                 // resolving the slot tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
-                    dux_core::engine::LaunchOutcome::Ready {
+                    &dux_core::engine::LaunchOutcome::Ready {
                         status_message: status_message.into(),
                         quiet_on: outcome.status_quiet,
                     },
@@ -1950,13 +1953,13 @@ impl App {
                     // unselected agent moves no focus, so promising a typeable
                     // pane there would be a lie.
                     self.land_completed_launch(view);
-                    self.launch_completion_message(status_message.to_string(), view)
+                    self.launch_completion_message(&status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::Ready {
+                    &dux_core::engine::LaunchOutcome::Ready {
                         status_message: status_message.into(),
                         quiet_on: outcome.status_quiet,
                     },
@@ -2012,7 +2015,7 @@ impl App {
                 // stashed (the message is byte-identical either way).
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::ReconnectFailed {
+                    &dux_core::engine::LaunchOutcome::ReconnectFailed {
                         branch_name: agent_label,
                         message,
                     },
@@ -2025,7 +2028,7 @@ impl App {
             } => {
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    dux_core::engine::LaunchOutcome::ForceReconnectFailed {
+                    &dux_core::engine::LaunchOutcome::ForceReconnectFailed {
                         branch_name: agent_label,
                         message,
                     },
@@ -2071,15 +2074,15 @@ impl App {
     fn resolve_reconnect_op_or(
         &mut self,
         session_id: &str,
-        outcome: dux_core::engine::LaunchOutcome,
+        outcome: &dux_core::engine::LaunchOutcome,
     ) {
         if let Some(op) = self.pending_reconnect_ops.remove(session_id) {
-            self.apply_reaction(op.resolve(&outcome).into_reaction());
+            self.apply_reaction(op.resolve(outcome).into_reaction());
             return;
         }
         // No op stashed: apply the SAME final anonymously (no key), preserving the
         // pre-op behavior. `reconnect_final` is the single wording source.
-        match dux_core::engine::launch_outcome_final(&outcome) {
+        match dux_core::engine::launch_outcome_final(outcome) {
             // An extra tab has no op under its id, so this is the only path its
             // final takes; it honours the surface flag or a quieted launch would
             // still print here.
@@ -2332,7 +2335,7 @@ pub(crate) fn server_restart_warning(serving: BackgroundServing, settings: &[&st
 
 pub(crate) fn run_create_agent_branch_inspection_job(
     project: Project,
-    worker_tx: Sender<WorkerEvent>,
+    worker_tx: &Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
@@ -2508,7 +2511,7 @@ mod tests {
             .expect("the reload is asked for");
     }
 
-    /// dux writes the no-password warning's dismissal (`value`) to the file
+    /// dux writes the no-password warning's dismissal (`warning`) to the file
     /// itself, as the route does, and asks for the reload it owes.
     fn dismiss_and_reload(app: &mut App, warning: NoAuthWarning) {
         let key = dux_core::config_keys::lookup("server.auth.disable_no_auth_warning").unwrap();
@@ -4273,7 +4276,7 @@ mod tests {
         );
         assert_eq!(app.status.tone(), StatusTone::Busy);
 
-        app.resolve_reconnect_op_or("session-1", dux_core::engine::LaunchOutcome::Missing);
+        app.resolve_reconnect_op_or("session-1", &dux_core::engine::LaunchOutcome::Missing);
 
         assert!(
             app.status.most_recent_tui().is_none(),
