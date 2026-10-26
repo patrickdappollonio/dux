@@ -7,8 +7,20 @@
 //! folder on the staged side once it has been staged whole, and lists one
 //! folder's contents a level at a time for a surface that expands it.
 
-use super::*;
-use crate::model::ChangedFileKind;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use anyhow::{Result, anyhow};
+
+use super::{
+    ContentSide, DiffStat, UNTRACKED_STATS_MAX_FILES, apply_stat, countless_paths,
+    diff_excluded_rows, parse_numstat, parse_status_porcelain_z, paths_excluded_from_diffs,
+    rename_source, untracked_file_stat,
+};
+use crate::logger;
+use crate::model::{ChangedFile, ChangedFileKind};
 
 /// Which half of the changes panel a folder row belongs to. The two halves
 /// answer "what is inside this folder" from different places: the working
@@ -1453,7 +1465,10 @@ fn staged_numstat_in(worktree: &Path, dir: &str, skip: &[String]) -> HashMap<Str
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support;
+    use super::super::{
+        ConfirmedEntry, changed_files_for_display, discard_classify, discard_file, stage_file,
+        stage_files, stage_with_report, staged_numstat, test_support, unstage_file, unstage_files,
+    };
     use super::*;
 
     /// The discard under test, cleared for any path: these tests are about
@@ -1464,7 +1479,7 @@ mod tests {
         tracking: crate::git::FileTracking,
         confirmed: Option<ConfirmedEntry>,
     ) -> Result<usize> {
-        super::discard_confirmed(worktree_path, file_path, tracking, confirmed, || {
+        super::super::discard_confirmed(worktree_path, file_path, tracking, confirmed, || {
             Ok(crate::destructive::Cleared::any_for_tests())
         })
     }
