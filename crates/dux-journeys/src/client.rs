@@ -177,12 +177,14 @@ impl Client {
 
     /// Send this header on every request from now on (a forged forwarding
     /// header, say).
+    #[must_use]
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
 
     /// Stop sending `Origin` on mutations, like a script rather than a browser.
+    #[must_use]
     pub fn without_origin(mut self) -> Self {
         self.origin = None;
         self
@@ -190,6 +192,7 @@ impl Client {
 
     /// A second client sharing nothing with this one but the address (and the
     /// certificate authority it trusts, and the headers it sends).
+    #[must_use]
     pub fn fresh(&self) -> Client {
         let mut other = Client::build(
             self.base.as_str(),

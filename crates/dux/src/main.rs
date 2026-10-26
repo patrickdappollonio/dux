@@ -29,7 +29,9 @@ fn main() -> Result<()> {
             Ok(remote) => remote,
             Err(error) => client_commands::finish(Err(error)),
         };
-        if let Err(message) = commands::check_config_target(remote.as_deref(), selection.local) {
+        if let Err(message) =
+            commands::check_config_target(remote.as_deref(), selection.local_flag())
+        {
             usage_error(&message);
         }
         // A config command that ends with one of the command line's own codes
@@ -47,10 +49,11 @@ fn main() -> Result<()> {
         remote: cli.remote.clone(),
         local: cli.local,
     };
+    let local = selection.local_flag();
     match cli.command {
         None => {
             if let Err(message) =
-                commands::check_terminal_ui_start_target(cli.remote.as_deref(), cli.local)
+                commands::check_terminal_ui_start_target(cli.remote.as_deref(), local)
             {
                 usage_error(&message);
             }
@@ -62,18 +65,15 @@ fn main() -> Result<()> {
             }
             if server.command.is_none()
                 && let Err(message) =
-                    commands::check_server_start_target(cli.remote.as_deref(), cli.local)
+                    commands::check_server_start_target(cli.remote.as_deref(), local)
             {
                 usage_error(&message);
             }
             match server.command {
-                None => run_server(server.into_overrides()),
-                Some(commands::ServerSub::Logs { follow, lines }) => {
-                    client_commands::finish(client_commands::server_logs(follow, lines, &selection))
+                None => run_server(&server.into_overrides()),
+                Some(command) => {
+                    client_commands::finish(client_commands::server(command, &selection))
                 }
-                Some(commands::ServerSub::Connections { command }) => client_commands::finish(
-                    client_commands::server_connections(command, &selection),
-                ),
             }
         }
         // Every well-formed `config` line was split off above; clap only
@@ -290,7 +290,7 @@ fn init_server_logger(
     dux_core::file_modes::restrict_to_owner_best_effort(&paths.root, "directory");
 }
 
-fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
+fn run_server(overrides: &dux_core::config::ServerCliOverrides) -> Result<()> {
     let paths = dux_core::config::DuxPaths::discover()?;
     create_config_root(&paths)?;
     // `dux server` never calls `ensure_config`, so without this the bootstrap's
@@ -326,7 +326,7 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
     // on the configured host only, never blocks, and under `auto` the serve path
     // keeps watching, so the warning says so rather than sounding final.
     let tailscale_mode =
-        dux_core::config::effective_tailscale_mode(config.server.tailscale_mode(), &overrides);
+        dux_core::config::effective_tailscale_mode(config.server.tailscale_mode(), overrides);
     // Warnings raised here print as the first lines of the server's log (the
     // same timestamped warning lines the flip's viewer shows), ahead of any bind.
     let mut startup_warnings = Vec::new();
@@ -343,7 +343,7 @@ fn run_server(overrides: dux_core::config::ServerCliOverrides) -> Result<()> {
         None
     };
 
-    let plan = match dux_core::config::resolve_server_plan(&config.server, &overrides, tailscale_ip)
+    let plan = match dux_core::config::resolve_server_plan(&config.server, overrides, tailscale_ip)
     {
         Ok(plan) => plan,
         Err(e) => {

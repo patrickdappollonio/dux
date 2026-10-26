@@ -73,10 +73,10 @@ async fn journey_06_require_decides_who_has_to_sign_in() {
             "{network_status}"
         );
 
-        for (require, machine_allowed, tailnet_allowed) in [
-            ("network", true, true),
-            ("tailnet", true, false),
-            ("everywhere", false, false),
+        for (require, machine_password, tailnet_password) in [
+            ("network", Password::NotNeeded, Password::NotNeeded),
+            ("tailnet", Password::NotNeeded, Password::Needed),
+            ("everywhere", Password::Needed, Password::Needed),
         ] {
             set_require(&local, require).await;
             set_require(&exposed, require).await;
@@ -88,8 +88,9 @@ async fn journey_06_require_decides_who_has_to_sign_in() {
                 || async {
                     let machine = local.inside().auth_status().await["required_here"].clone();
                     let tailnet = peer.auth_status().await["required_here"].clone();
-                    (machine == json!(!machine_allowed) && tailnet == json!(!tailnet_allowed))
-                        .then_some(())
+                    (machine == machine_password.required_here()
+                        && tailnet == tailnet_password.required_here())
+                    .then_some(())
                 },
             )
             .await;
@@ -97,18 +98,18 @@ async fn journey_06_require_decides_who_has_to_sign_in() {
             let machine = local.inside().get("/api/v1/projects").await;
             let tailnet = peer.get("/api/v1/projects").await;
             let far = network.get("/api/v1/projects").await;
-            check(require, "this machine", machine_allowed, &machine);
-            check(require, "a tailnet peer", tailnet_allowed, &tailnet);
-            check(require, "the network", false, &far);
+            check(require, "this machine", machine_password, &machine);
+            check(require, "a tailnet peer", tailnet_password, &tailnet);
+            check(require, "the network", Password::Needed, &far);
 
             assert_eq!(
                 local.inside().auth_status().await["required_here"],
-                json!(!machine_allowed),
+                machine_password.required_here(),
                 "require = {require}: this machine's required_here"
             );
             assert_eq!(
                 peer.auth_status().await["required_here"],
-                json!(!tailnet_allowed),
+                tailnet_password.required_here(),
                 "require = {require}: the tailnet peer's required_here"
             );
             assert_eq!(
@@ -121,8 +122,22 @@ async fn journey_06_require_decides_who_has_to_sign_in() {
     .await;
 }
 
-fn check(require: &str, who: &str, allowed: bool, response: &dux_journeys::Response) {
-    if allowed {
+/// Whether a client needs a password under the `require` being checked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Password {
+    NotNeeded,
+    Needed,
+}
+
+impl Password {
+    /// The `required_here` the auth status reports for such a client.
+    fn required_here(self) -> serde_json::Value {
+        json!(self == Self::Needed)
+    }
+}
+
+fn check(require: &str, who: &str, password: Password, response: &dux_journeys::Response) {
+    if password == Password::NotNeeded {
         assert_eq!(
             response.status,
             200,
