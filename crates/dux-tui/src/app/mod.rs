@@ -347,6 +347,130 @@ impl PaletteOpenedOver {
     }
 }
 
+/// Which side panes are collapsed or hidden.
+#[derive(Default)]
+pub(crate) struct PaneFlags {
+    pub(crate) left_collapsed: bool,
+    pub(crate) right_collapsed: bool,
+    pub(crate) right_hidden: bool,
+}
+
+/// How the agent list's Inactive tail is folded.
+#[derive(Default)]
+pub(crate) struct InactiveTailState {
+    /// Whether the flat list's "Inactive" tail (detached/exited agents) is
+    /// collapsed. Starts collapsed, matching the web. Replaces the old
+    /// per-project collapse now that there are no project headers.
+    pub(crate) collapsed: bool,
+    /// Once the user toggles the Inactive section by hand, stop auto-managing its
+    /// collapsed state. Until then it auto-expands when every agent is inactive
+    /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
+    /// is active. See `rebuild_left_items`.
+    pub(crate) overridden: bool,
+}
+
+/// The bracketed paste being read from raw input, if any.
+#[derive(Default)]
+pub(crate) struct RawPaste {
+    /// True while processing bytes between bracket-paste markers
+    /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
+    /// skipped so pasted text doesn't trigger keybindings.
+    pub(crate) in_bracket: bool,
+    /// True while the current raw-path bracketed paste is being UNWRAPPED
+    /// for a child that never enabled DECSET 2004: dux enables host
+    /// bracketed paste globally, so every host paste arrives wrapped, and a
+    /// non-2004 child would otherwise get the literal `ESC[200~`/`ESC[201~`
+    /// markers typed at it plus LF line endings. While set, the markers are
+    /// stripped and the paste body's newlines are normalized to carriage
+    /// returns, mirroring `paste_to_center_pty`'s non-2004 arm. Decided
+    /// once, at the opening marker, from the focused surface's
+    /// `has_bracketed_paste()`.
+    pub(crate) normalize: bool,
+    /// The open paste's newline normalizer, which carries a trailing CR
+    /// across read chunks so a CR-LF pair split over two reads still
+    /// collapses to one CR instead of doubling.
+    pub(crate) newlines: crate::raw_input::PasteNewlines,
+}
+
+/// The tips screen's logo, as last drawn.
+#[derive(Default)]
+pub(crate) struct WelcomeLogo {
+    /// Whether the ASCII logo was rendered in the previous frame.
+    pub(crate) visible: bool,
+    /// When true, show the alternate (duck) logo instead of the text logo.
+    pub(crate) alt: bool,
+}
+
+/// Display settings read from config at startup and on reload.
+#[derive(Default)]
+pub(crate) struct ViewPrefs {
+    pub(crate) show_diff_line_numbers: bool,
+    pub(crate) pr_banner_at_bottom: bool,
+}
+
+/// In-flight guards and intent for the web server this surface starts.
+#[derive(Default)]
+pub(crate) struct ServingFlags {
+    /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
+    /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
+    /// would both spawn workers and the second would hit a confusing EADDRINUSE.
+    /// Set true when a worker is dispatched, cleared when its
+    /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
+    /// set, or while `pending_server_flip` is already stashed, a repeat
+    /// invocation is refused with an actionable status instead of spawning a
+    /// second worker.
+    pub(crate) flip_preflight_pending: bool,
+    /// In-flight guard for the background server's bind pre-flight, the same
+    /// shape and for the same reason as `flip_preflight_pending`: the
+    /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
+    /// would have the second report a confusing EADDRINUSE.
+    pub(crate) background_preflight_pending: bool,
+    /// Whether a background listener is currently WANTED.
+    ///
+    /// Distinct from `background_server_is_serving`, which cannot answer for the
+    /// window while the bind pre-flight is still on its worker thread. In that
+    /// window a stop command, or a reload that turns the setting off, would
+    /// otherwise be a no-op; the pre-flight would then land, start serving anyway,
+    /// and persist `serve_while_tui = true` over the value the user just chose.
+    /// The stop paths clear this and the pre-flight's apply consults it.
+    pub(crate) background_wanted: bool,
+}
+
+/// Where the agent list's cursor stands relative to its rows.
+#[derive(Default)]
+pub(crate) struct LeftRowsState {
+    /// Whether the list has been built at least once: before that, the cursor
+    /// takes the first row as it always has, and after it an empty list is a
+    /// cursor on nothing.
+    pub(crate) built: bool,
+    /// The cursor is on no row: the row it was on was deleted or went away, or
+    /// the list was empty, and only this surface moves it onto a row. Held as
+    /// an index one past the end; this surface's next move puts it on a row.
+    pub(crate) cursor_parked: bool,
+}
+
+/// One-shot facts this surface records for itself and spends later.
+#[derive(Default)]
+pub(crate) struct OneShotNotes {
+    pub(crate) force_redraw: bool,
+    /// Set when a reaction drained this iteration was the COMPANION's to follow up
+    /// on, so this surface skipped its own arm for it.
+    ///
+    /// A web-owned follow-up mutates shared state this surface renders (the
+    /// inline project add writes `engine.projects` during the fanout), and the
+    /// change did not arrive through this surface's own event stream, so nothing
+    /// here would otherwise rebuild. Folded into the per-iteration mutated answer
+    /// and cleared there.
+    pub(crate) companion_followup_ran: bool,
+    /// Whether the agent create currently in flight was started HERE.
+    ///
+    /// A create mints its session id in a worker, so unlike every other launch
+    /// there is no id to record at dispatch. A boolean is enough because the
+    /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
+    /// and it is spent by the create's own outcome, success or failure.
+    pub(crate) create_agent_started_here: bool,
+}
+
 pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -370,9 +494,6 @@ pub(crate) struct App {
     pub(crate) commit_pane_height_pct: u16,
     pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
-    pub(crate) left_collapsed: bool,
-    pub(crate) right_collapsed: bool,
-    pub(crate) right_hidden: bool,
     pub(crate) resize_mode: bool,
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
@@ -524,13 +645,6 @@ pub(crate) struct App {
     /// Populated only by this surface's own launch paths, which is what leaves a
     /// pty a browser asked for free for that browser's own attach.
     pub(crate) tui_launched_ptys: std::collections::HashSet<String>,
-    /// Whether the agent create currently in flight was started HERE.
-    ///
-    /// A create mints its session id in a worker, so unlike every other launch
-    /// there is no id to record at dispatch. A boolean is enough because the
-    /// engine allows exactly one create at a time (`InFlightKey::CreateAgent`),
-    /// and it is spent by the create's own outcome, success or failure.
-    pub(crate) create_agent_started_here: bool,
     /// The pull-request create this surface dispatched, until it succeeds or
     /// fails for a reason other than a question. A refusal that asks for the
     /// user's agreement to a review copy reopens the name prompt on this
@@ -574,7 +688,6 @@ pub(crate) struct App {
     /// scrolled-back grid, which would hand keystrokes back to the child while
     /// the user believed they were still reading history.
     pub(crate) scroll_mode: std::collections::HashSet<String>,
-    pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
     /// The diff's wrapped rows, kept so a frame draws its viewport instead of
@@ -592,15 +705,6 @@ pub(crate) struct App {
     /// running; see [`RefusalBlink`] for why it also remembers which modal
     /// armed it.
     pub(crate) refusal_blink: Option<RefusalBlink>,
-    /// Whether the flat list's "Inactive" tail (detached/exited agents) is
-    /// collapsed. Starts collapsed, matching the web. Replaces the old
-    /// per-project collapse now that there are no project headers.
-    pub(crate) inactive_collapsed: bool,
-    /// Once the user toggles the Inactive section by hand, stop auto-managing its
-    /// collapsed state. Until then it auto-expands when every agent is inactive
-    /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
-    /// is active. See `rebuild_left_items`.
-    pub(crate) inactive_collapse_overridden: bool,
     /// The normalized filter query under which the user explicitly collapsed a
     /// search-expanded Inactive tail. While the agent filter has a hit inside
     /// the tail, the tail renders open as DERIVED state (the collapse
@@ -650,24 +754,6 @@ pub(crate) struct App {
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
-    /// True while processing bytes between bracket-paste markers
-    /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
-    /// skipped so pasted text doesn't trigger keybindings.
-    pub(crate) in_bracket_paste: bool,
-    /// True while the current raw-path bracketed paste is being UNWRAPPED
-    /// for a child that never enabled DECSET 2004: dux enables host
-    /// bracketed paste globally, so every host paste arrives wrapped, and a
-    /// non-2004 child would otherwise get the literal `ESC[200~`/`ESC[201~`
-    /// markers typed at it plus LF line endings. While set, the markers are
-    /// stripped and the paste body's newlines are normalized to carriage
-    /// returns, mirroring `paste_to_center_pty`'s non-2004 arm. Decided
-    /// once, at the opening marker, from the focused surface's
-    /// `has_bracketed_paste()`.
-    pub(crate) raw_paste_normalize: bool,
-    /// The open paste's newline normalizer, which carries a trailing CR
-    /// across read chunks so a CR-LF pair split over two reads still
-    /// collapses to one CR instead of doubling.
-    pub(crate) raw_paste_newlines: crate::raw_input::PasteNewlines,
     /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
     /// Gates the per-tick "viewed" stamp so an unfocused window stops
     /// suppressing the focused agent's attention flag. Fails open until the
@@ -690,18 +776,12 @@ pub(crate) struct App {
     /// firing alongside the server's own. Empty only in tests that build the App
     /// directly without registering real handlers.
     pub(crate) shutdown_sig_ids: Vec<signal_hook::SigId>,
-    pub(crate) force_redraw: bool,
     /// The run loop's draw gate: poll cadence and draw cadence are separate
     /// questions (see [`redraw`]).
     pub(crate) redraw: RedrawGate,
     pub(crate) welcome_tip_index: usize,
-    /// Whether the ASCII logo was rendered in the previous frame.
-    pub(crate) welcome_logo_visible: bool,
     /// The left-pane selection index when the logo last rendered a tip.
     pub(crate) welcome_tip_selection: usize,
-    /// When true, show the alternate (duck) logo instead of the text logo.
-    pub(crate) welcome_logo_alt: bool,
-    pub(crate) pr_banner_at_bottom: bool,
     /// Cached syntax highlighting resources shared across diff computations.
     /// Shared by `Arc` because every computation runs on a worker thread.
     pub(crate) syntax_cache: Arc<SyntaxCache>,
@@ -757,15 +837,6 @@ pub(crate) struct App {
     /// What this surface last published to the attachment registry, with its
     /// ownership seat then, so an unchanged frame publishes nothing.
     pub(crate) published_ptys: Option<(Vec<dux_core::attachments::Target>, Option<u64>)>,
-    /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
-    /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
-    /// would both spawn workers and the second would hit a confusing EADDRINUSE.
-    /// Set true when a worker is dispatched, cleared when its
-    /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
-    /// set, or while `pending_server_flip` is already stashed, a repeat
-    /// invocation is refused with an actionable status instead of spawning a
-    /// second worker.
-    pub(crate) server_flip_preflight_pending: bool,
     /// The web server serving in this TUI's background, when one is installed.
     ///
     /// A trait object, and deliberately opaque: this crate depends only on
@@ -779,43 +850,12 @@ pub(crate) struct App {
     /// installed and serving are different states, because the mode is toggled at
     /// runtime.
     pub(crate) companion: Option<Box<dyn dux_core::background_serve::BackgroundServeCompanion>>,
-    /// In-flight guard for the background server's bind pre-flight, the same
-    /// shape and for the same reason as `server_flip_preflight_pending`: the
-    /// pre-flight races to bind the LOCAL MODE ports, so two quick invocations
-    /// would have the second report a confusing EADDRINUSE.
-    pub(crate) background_server_preflight_pending: bool,
-    /// Whether a background listener is currently WANTED.
-    ///
-    /// Distinct from `background_server_is_serving`, which cannot answer for the
-    /// window while the bind pre-flight is still on its worker thread. In that
-    /// window a stop command, or a reload that turns the setting off, would
-    /// otherwise be a no-op; the pre-flight would then land, start serving anyway,
-    /// and persist `serve_while_tui = true` over the value the user just chose.
-    /// The stop paths clear this and the pre-flight's apply consults it.
-    pub(crate) background_server_wanted: bool,
-    /// Set when a reaction drained this iteration was the COMPANION's to follow up
-    /// on, so this surface skipped its own arm for it.
-    ///
-    /// A web-owned follow-up mutates shared state this surface renders (the
-    /// inline project add writes `engine.projects` during the fanout), and the
-    /// change did not arrive through this surface's own event stream, so nothing
-    /// here would otherwise rebuild. Folded into the per-iteration mutated answer
-    /// and cleared there.
-    pub(crate) companion_followup_ran: bool,
     /// What each row of `left_items_cache` is, by identity, built with it. The
     /// cursor is an index into the list as this surface last built it, so the
     /// row it names here is what this surface is on, whatever a browser, the
     /// command line or a reloaded config has since done to the sessions the
     /// cached indexes point into. Every rebuild finds that row again by id.
     pub(crate) left_rows: Vec<LeftRow>,
-    /// Whether the list has been built at least once: before that, the cursor
-    /// takes the first row as it always has, and after it an empty list is a
-    /// cursor on nothing.
-    pub(crate) left_rows_built: bool,
-    /// The cursor is on no row: the row it was on was deleted or went away, or
-    /// the list was empty, and only this surface moves it onto a row. Held as
-    /// an index one past the end; this surface's next move puts it on a row.
-    pub(crate) left_cursor_parked: bool,
     /// The terminal row the terminal cursor is on, by id, with the index it was
     /// on when this surface put it there. A rebuild follows the id; an index
     /// set by hand since (it no longer matches) is taken as it is.
@@ -995,6 +1035,22 @@ pub(crate) struct App {
     /// so it drops after every field that may still hold a file inside it open.
     #[cfg(test)]
     pub(crate) test_scratch_dirs: dux_core::test_scratch::ScratchDirs,
+    /// Which side panes are collapsed or hidden.
+    pub(crate) panes: PaneFlags,
+    /// How the agent list's Inactive tail is folded.
+    pub(crate) inactive_tail: InactiveTailState,
+    /// The bracketed paste being read from raw input, if any.
+    pub(crate) raw_paste: RawPaste,
+    /// The tips screen's logo, as last drawn.
+    pub(crate) welcome_logo: WelcomeLogo,
+    /// Display settings read from config at startup and on reload.
+    pub(crate) view_prefs: ViewPrefs,
+    /// In-flight guards and intent for the web server this surface starts.
+    pub(crate) serving: ServingFlags,
+    /// Where the agent list's cursor stands relative to its rows.
+    pub(crate) left_list: LeftRowsState,
+    /// One-shot facts this surface records for itself and spends later.
+    pub(crate) notes: OneShotNotes,
 }
 
 /// Handler-resolved outcome for the server-flip op (see
@@ -4802,7 +4858,6 @@ impl App {
         let staged_pane_height_pct = engine.config.ui.staged_pane_height_pct;
         let commit_pane_height_pct = engine.config.ui.commit_pane_height_pct;
         let mut app = Self {
-            show_diff_line_numbers,
             left_width_pct,
             right_width_pct,
             terminal_pane_height_pct,
@@ -4821,9 +4876,6 @@ impl App {
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
             pending_commit: None,
-            left_collapsed: false,
-            right_collapsed: false,
-            right_hidden,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,
@@ -4862,7 +4914,6 @@ impl App {
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
-            create_agent_started_here: false,
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -4877,9 +4928,7 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             refusal_blink: None,
-            inactive_collapsed: true,
             inactive_search_dismissed: None,
-            inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -4894,24 +4943,17 @@ impl App {
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
-            in_bracket_paste: false,
-            raw_paste_normalize: false,
-            raw_paste_newlines: crate::raw_input::PasteNewlines::default(),
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
             sigwinch_sig_id: signals.sigwinch_sig_id,
             shutdown_flag: signals.shutdown_flag,
             shutdown_sig_ids: signals.shutdown_sig_ids,
-            force_redraw: false,
             redraw: RedrawGate::default(),
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as usize),
-            welcome_logo_visible: false,
-            welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            pr_banner_at_bottom,
             syntax_cache: Arc::new(SyntaxCache::new()),
             pending_diff: None,
             changes_tree: Default::default(),
@@ -4928,18 +4970,12 @@ impl App {
             drawn_ptys: Vec::new(),
             published_ptys: None,
             companion: None,
-            background_server_preflight_pending: false,
-            background_server_wanted: false,
-            companion_followup_ran: false,
             left_rows: Vec::new(),
-            left_rows_built: false,
-            left_cursor_parked: false,
             terminal_cursor: None,
             tui_fallback_tabs: Default::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
-            server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
@@ -4957,6 +4993,42 @@ impl App {
             agent_filter: None,
             #[cfg(test)]
             test_scratch_dirs: dux_core::test_scratch::ScratchDirs::new(),
+            panes: PaneFlags {
+                left_collapsed: false,
+                right_collapsed: false,
+                right_hidden,
+            },
+            inactive_tail: InactiveTailState {
+                collapsed: true,
+                overridden: false,
+            },
+            raw_paste: RawPaste {
+                in_bracket: false,
+                normalize: false,
+                newlines: crate::raw_input::PasteNewlines::default(),
+            },
+            welcome_logo: WelcomeLogo {
+                visible: false,
+                alt: false,
+            },
+            view_prefs: ViewPrefs {
+                show_diff_line_numbers,
+                pr_banner_at_bottom,
+            },
+            serving: ServingFlags {
+                flip_preflight_pending: false,
+                background_preflight_pending: false,
+                background_wanted: false,
+            },
+            left_list: LeftRowsState {
+                built: false,
+                cursor_parked: false,
+            },
+            notes: OneShotNotes {
+                force_redraw: false,
+                companion_followup_ran: false,
+                create_agent_started_here: false,
+            },
         };
         // First boot relaunches prior sessions; a resume must not, because the
         // engine handed back from the web server already owns the live providers, and
@@ -5147,10 +5219,10 @@ impl App {
             }
         }
 
-        if !self.force_redraw {
+        if !self.notes.force_redraw {
             return;
         }
-        self.force_redraw = false;
+        self.notes.force_redraw = false;
         self.mark_frame_dirty();
         if let Err(err) = terminal.clear() {
             self.report_runtime_error("force redraw failed", &err);
@@ -6214,12 +6286,12 @@ impl App {
                 Ok(())
             }
             "toggle-sidebar" => {
-                self.left_collapsed = !self.left_collapsed;
+                self.panes.left_collapsed = !self.panes.left_collapsed;
                 Ok(())
             }
             "toggle-git-pane" => {
-                self.right_collapsed = !self.right_collapsed;
-                if self.right_collapsed && self.focus == FocusPane::Files {
+                self.panes.right_collapsed = !self.panes.right_collapsed;
+                if self.panes.right_collapsed && self.focus == FocusPane::Files {
                     self.focus = FocusPane::Center;
                 }
                 Ok(())
@@ -6275,13 +6347,14 @@ impl App {
                 Ok(())
             }
             "toggle-diff-line-numbers" => {
-                self.show_diff_line_numbers = !self.show_diff_line_numbers;
-                self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
+                self.view_prefs.show_diff_line_numbers = !self.view_prefs.show_diff_line_numbers;
+                self.engine.config.ui.show_diff_line_numbers =
+                    self.view_prefs.show_diff_line_numbers;
                 self.engine
                     .config_writer
                     .save_lazy(self.engine.config.clone());
                 self.refresh_current_diff();
-                let state = if self.show_diff_line_numbers {
+                let state = if self.view_prefs.show_diff_line_numbers {
                     "enabled"
                 } else {
                     "disabled"
@@ -6360,8 +6433,8 @@ impl App {
                 Ok(())
             }
             "toggle-pr-banner-position" => {
-                self.pr_banner_at_bottom = !self.pr_banner_at_bottom;
-                let pos = if self.pr_banner_at_bottom {
+                self.view_prefs.pr_banner_at_bottom = !self.view_prefs.pr_banner_at_bottom;
+                let pos = if self.view_prefs.pr_banner_at_bottom {
                     "bottom"
                 } else {
                     "top"
@@ -6374,7 +6447,7 @@ impl App {
                 Ok(())
             }
             "force-redraw" => {
-                self.force_redraw = true;
+                self.notes.force_redraw = true;
                 self.set_info("Interface redrawn. All screen contents have been repainted.");
                 Ok(())
             }
@@ -6459,7 +6532,7 @@ impl App {
     /// only a reload has to re-seed them.
     pub(crate) fn sync_view_state_from_config(&mut self) {
         let ui = &self.engine.config.ui;
-        self.pr_banner_at_bottom =
+        self.view_prefs.pr_banner_at_bottom =
             dux_core::config_effective::effective_pr_banner_position(&ui.pr_banner_position)
                 == dux_core::config_effective::PrBannerPosition::Bottom;
         let clear_after = Duration::from_secs(ui.status_clear_seconds.into());
@@ -6467,8 +6540,8 @@ impl App {
         self.status.set_clear_after(clear_after);
         // If the changes pane just became hidden while the Files pane was
         // focused, move focus to the center, matching the toggle.
-        self.right_hidden = hide_right;
-        if self.right_hidden && self.focus == FocusPane::Files {
+        self.panes.right_hidden = hide_right;
+        if self.panes.right_hidden && self.focus == FocusPane::Files {
             self.focus = FocusPane::Center;
         }
     }
@@ -6484,7 +6557,7 @@ impl App {
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&config.ui.theme, &self.engine.paths);
         self.theme = theme;
-        self.show_diff_line_numbers = config.ui.show_diff_line_numbers;
+        self.view_prefs.show_diff_line_numbers = config.ui.show_diff_line_numbers;
         self.left_width_pct = config.ui.left_width_pct;
         self.right_width_pct = config.ui.right_width_pct;
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
@@ -6649,13 +6722,13 @@ impl App {
         // Until the user toggles the Inactive section by hand, auto-manage it:
         // expand when every agent is inactive (don't hide a wholly-dormant
         // workspace behind a collapsed toggle), collapse once any agent is active.
-        if !self.inactive_collapse_overridden {
+        if !self.inactive_tail.overridden {
             let has_active = self
                 .engine
                 .sessions
                 .iter()
                 .any(|s| matches!(s.status, crate::model::SessionStatus::Active));
-            self.inactive_collapsed = has_active;
+            self.inactive_tail.collapsed = has_active;
         }
         // Expire a stale query-scoped dismissal: it applies only to the exact
         // query it was made under, so a changed or cleared query drops it and
@@ -6670,13 +6743,14 @@ impl App {
         }
         // Derived search expansion: while the filter query hits something in
         // the Inactive tail (and the user has not dismissed it for this exact
-        // query), the tail renders OPEN without mutating `inactive_collapsed`,
+        // query), the tail renders OPEN without mutating `inactive_tail.collapsed`,
         // so clearing the query restores the user's collapse preference.
-        let effective_collapsed = if self.inactive_collapsed && !self.inactive_tail_forced_open() {
-            InactiveTail::Collapsed
-        } else {
-            InactiveTail::Expanded
-        };
+        let effective_collapsed =
+            if self.inactive_tail.collapsed && !self.inactive_tail_forced_open() {
+                InactiveTail::Collapsed
+            } else {
+                InactiveTail::Expanded
+            };
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         // Precompute the "hot" bit (working || needs-attention) per session so the
         // predicate can borrow this Vec while `build_left_items` borrows
@@ -6718,7 +6792,7 @@ impl App {
             })
             .collect();
         self.put_left_cursor_back(was_on);
-        self.left_rows_built = true;
+        self.left_list.built = true;
         self.ensure_selectable_left_item();
         // The same query prunes the terminal list (`terminal_items`), so the
         // terminal cursor is repaired in the same breath as the agent one: this
@@ -6792,7 +6866,7 @@ impl App {
 
     /// Whether the Inactive tail is currently held open by the search: a live
     /// query with at least one visible inactive hit, not dismissed for this
-    /// exact query. Pure derivation; `inactive_collapsed` is never consulted or
+    /// exact query. Pure derivation; `inactive_tail.collapsed` is never consulted or
     /// mutated here.
     fn inactive_tail_forced_open(&self) -> bool {
         // The decision is the core-owned `quiet_tail::quiet_tail_forced_open`
@@ -6818,7 +6892,7 @@ impl App {
     /// palette can run from anywhere, so it brings the pane into view and gives
     /// it focus, or the query would be typed into nothing.
     pub(crate) fn filter_agents_from_palette(&mut self) {
-        self.left_collapsed = false;
+        self.panes.left_collapsed = false;
         self.focus = FocusPane::Left;
         self.left_section = LeftSection::Projects;
         self.open_agent_filter();
@@ -6925,10 +6999,10 @@ impl App {
     /// What the agent cursor is on, read from the list as this surface last
     /// built it.
     fn left_cursor_row(&self) -> LeftCursorOn {
-        if !self.left_rows_built {
+        if !self.left_list.built {
             return LeftCursorOn::Unknown;
         }
-        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
+        if self.left_list.cursor_parked && self.selected_left >= self.left_rows.len() {
             return LeftCursorOn::Nothing;
         }
         match self.left_rows.get(self.selected_left) {
@@ -6957,7 +7031,7 @@ impl App {
                     .position(|candidate| *candidate == row)
                 {
                     self.selected_left = pos;
-                    self.left_cursor_parked = false;
+                    self.left_list.cursor_parked = false;
                 } else {
                     self.park_left_cursor();
                 }
@@ -6974,7 +7048,7 @@ impl App {
 
     fn park_left_cursor(&mut self) {
         self.selected_left = self.left_rows.len();
-        self.left_cursor_parked = true;
+        self.left_list.cursor_parked = true;
     }
 
     /// Rebuild the agent list after the filter changed: the user is choosing
@@ -6983,8 +7057,8 @@ impl App {
     pub(crate) fn rebuild_left_items_for_filter(&mut self) {
         let row = self.selected_left;
         self.rebuild_left_items();
-        if self.left_cursor_parked && self.selected_left >= self.left_rows.len() {
-            self.left_cursor_parked = false;
+        if self.left_list.cursor_parked && self.selected_left >= self.left_rows.len() {
+            self.left_list.cursor_parked = false;
             self.selected_left = row;
             self.ensure_selectable_left_item();
         }
@@ -6995,7 +7069,7 @@ impl App {
             self.selected_left = 0;
             return;
         }
-        if self.left_cursor_parked && self.selected_left >= self.left_items_cache.len() {
+        if self.left_list.cursor_parked && self.selected_left >= self.left_items_cache.len() {
             return;
         }
         if self.selected_left >= self.left_items_cache.len() {
@@ -7031,21 +7105,21 @@ impl App {
     /// the `InactiveToggle` row. Keeps the cursor on the toggle row afterward.
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
         // A manual toggle takes over from the auto-manage in `rebuild_left_items`.
-        self.inactive_collapse_overridden = true;
+        self.inactive_tail.overridden = true;
         if self.inactive_tail_forced_open() {
             // Collapsing a tail the search is holding open is an explicit act:
             // record the dismissal for THIS query (it expires when the query
             // changes) and collapse the base state too, so clearing the query
             // lands on the state the user last chose. Mirrors the web QuietTail.
             self.inactive_search_dismissed = self.active_filter_query();
-            self.inactive_collapsed = true;
+            self.inactive_tail.collapsed = true;
         } else if self.active_filter_query().is_some() && self.inactive_search_dismissed.is_some() {
             // Reopening under the query that was dismissed: drop the dismissal
             // so the derivation applies again.
             self.inactive_search_dismissed = None;
-            self.inactive_collapsed = false;
+            self.inactive_tail.collapsed = false;
         } else {
-            self.inactive_collapsed = !self.inactive_collapsed;
+            self.inactive_tail.collapsed = !self.inactive_tail.collapsed;
         }
         self.rebuild_left_items();
         if let Some(new_index) = self
@@ -8528,7 +8602,7 @@ mod tests {
             let mut app = test_support::test_app(test_support::default_bindings());
             // Both ways to serve refuse early while a flip is starting, so the
             // sweep never binds a port or detects Tailscale.
-            app.server_flip_preflight_pending = true;
+            app.serving.flip_preflight_pending = true;
             // An `Err` is a real arm refusing on this bare fixture; only the
             // catch-all's status says the name was never matched.
             let _ = app.execute_command(command.name);
@@ -8548,13 +8622,13 @@ mod tests {
     fn the_palette_opens_the_agent_filter_in_view_and_focused() {
         let mut app = test_support::test_app(test_support::default_bindings());
         app.focus = FocusPane::Center;
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
         app.execute_command("filter-agents").unwrap();
 
         assert!(app.agent_filter.is_some(), "the filter must be open");
         assert_eq!(app.focus, FocusPane::Left, "typing must reach the filter");
-        assert!(!app.left_collapsed, "the filter must be on screen");
+        assert!(!app.panes.left_collapsed, "the filter must be on screen");
     }
 
     #[test]
@@ -9737,7 +9811,7 @@ mod tests {
     fn quiet_tail_auto_expands_when_search_hits_an_inactive_agent() {
         let mut app = quiet_search_app();
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "an active agent auto-collapses the tail"
         );
         assert!(!app.left_items().contains(&LeftItem::Session(1)));
@@ -9749,7 +9823,7 @@ mod tests {
             "a quiet-hit query must reveal the matching quiet row"
         );
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "the derivation must not mutate the user's collapse preference"
         );
 

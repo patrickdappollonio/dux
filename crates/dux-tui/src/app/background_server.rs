@@ -205,7 +205,7 @@ impl App {
         // from inside the fanout). This surface skipped its own arm for it, so
         // nothing here has rebuilt: fold it in and clear it whether or not
         // anything is serving, so the flag never survives into a later iteration.
-        let followup_ran = std::mem::take(&mut self.companion_followup_ran);
+        let followup_ran = std::mem::take(&mut self.notes.companion_followup_ran);
         let outcome = match self.companion.as_mut() {
             Some(companion) if companion.has_core() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
@@ -354,13 +354,13 @@ impl App {
                 join_urls(&urls)
             )));
         }
-        if self.background_server_preflight_pending {
+        if self.serving.background_preflight_pending {
             return Err(StartRefusal::warning(
                 "The background web server is already starting. Wait for it to report back."
                     .to_string(),
             ));
         }
-        if self.server_flip_preflight_pending || self.pending_server_flip.is_some() {
+        if self.serving.flip_preflight_pending || self.pending_server_flip.is_some() {
             return Err(StartRefusal::warning(
                 "dux is already handing this terminal over to the web server. Wait for that to \
                  finish, or come back to the TUI and try again."
@@ -423,8 +423,8 @@ impl App {
         let pending = self.engine.begin_status_op(&op);
         self.apply_reaction(EventReaction::Status(pending));
         self.pending_background_server_start = Some(PendingBackgroundServerStart { op, trigger });
-        self.background_server_preflight_pending = true;
-        self.background_server_wanted = true;
+        self.serving.background_preflight_pending = true;
+        self.serving.background_wanted = true;
         self.spawn_background_server_preflight();
         Ok(())
     }
@@ -491,13 +491,13 @@ impl App {
         warning: Option<String>,
         startup: dux_core::serve_log::StartupNotes,
     ) {
-        self.background_server_preflight_pending = false;
+        self.serving.background_preflight_pending = false;
         // The user changed their mind while the bind was on its worker thread: a
         // stop command, or a reload that turned the setting off. Starting now
         // would serve a listener nobody wants and, worse, PERSIST
         // `serve_while_tui = true` over the value they just chose. Drop the bound
         // listeners (which releases the addresses), say so, and write nothing.
-        if !self.background_server_wanted {
+        if !self.serving.background_wanted {
             drop(result);
             self.note_reload_serve_change_done(None);
             if let Some(PendingBackgroundServerStart { op, .. }) =
@@ -558,7 +558,7 @@ impl App {
         };
         // A start that failed leaves nothing wanted, so a later stop does not
         // report on a listener that never came up.
-        self.background_server_wanted = self.background_server_is_serving();
+        self.serving.background_wanted = self.background_server_is_serving();
         let problem = match &outcome {
             BackgroundServerOutcome::Failed(message) => Some(format!(
                 "The background web server could not be started: {}",
@@ -580,8 +580,8 @@ impl App {
         // wanted flag is what the pre-flight's apply consults when it lands, and
         // config is deliberately left alone, because the start never got as far as
         // writing it.
-        if !self.background_server_is_serving() && self.background_server_preflight_pending {
-            self.background_server_wanted = false;
+        if !self.background_server_is_serving() && self.serving.background_preflight_pending {
+            self.serving.background_wanted = false;
             self.set_info(
                 "Cancelling the background web server start that is still binding its addresses. \
                  Nothing will serve and config.toml is untouched."
@@ -619,7 +619,7 @@ impl App {
         // Runtime intent, not the saved setting: quitting stops the listener
         // without deciding anything about next time, and that distinction lives in
         // config, which this deliberately does not touch.
-        self.background_server_wanted = false;
+        self.serving.background_wanted = false;
         // A mode request queued on the runtime this stop tears down has nobody
         // left to answer it, so answer it here rather than leaving its busy for
         // the leak guard to expire.
@@ -864,7 +864,7 @@ impl App {
         // A start still in its bind pre-flight counts as on: otherwise a reload
         // that turns the setting off looks like it has nothing to do, and the
         // pre-flight lands afterwards and starts serving anyway.
-        let on = self.background_server_is_serving() || self.background_server_preflight_pending;
+        let on = self.background_server_is_serving() || self.serving.background_preflight_pending;
         match (on, (wanted == ServeWanted::On)) {
             // A user request, not the startup autostart: a reload turning it on
             // is a live act and reports like the palette command.
@@ -1940,7 +1940,7 @@ pub(crate) mod tests {
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
         app.engine.config.ui.show_changes_pane = true;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
         app.focus = FocusPane::Files;
         {
             let mut recorded = recorded.lock().expect("not poisoned");
@@ -1951,7 +1951,7 @@ pub(crate) mod tests {
         app.service_companion();
 
         assert!(
-            app.right_hidden,
+            app.panes.right_hidden,
             "the changes pane follows the preference the browser saved"
         );
         assert_ne!(
@@ -2132,7 +2132,7 @@ pub(crate) mod tests {
             "and how to get the flip instead: {message}"
         );
         assert!(
-            !app.server_flip_preflight_pending,
+            !app.serving.flip_preflight_pending,
             "no pre-flight may be dispatched"
         );
     }
@@ -2146,7 +2146,7 @@ pub(crate) mod tests {
         let (companion, _recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
         app.stop_background_server_quietly();
-        app.background_server_preflight_pending = true;
+        app.serving.background_preflight_pending = true;
 
         app.start_web_server();
 
@@ -2160,7 +2160,7 @@ pub(crate) mod tests {
             "the refusal must name the start that is in flight: {message}"
         );
         assert!(
-            !app.server_flip_preflight_pending,
+            !app.serving.flip_preflight_pending,
             "no competing pre-flight may be dispatched"
         );
     }
@@ -2185,7 +2185,7 @@ pub(crate) mod tests {
             "the message must name the address: {message}"
         );
         assert!(
-            !app.background_server_preflight_pending,
+            !app.serving.background_preflight_pending,
             "no second pre-flight may be dispatched"
         );
     }
@@ -2284,7 +2284,7 @@ pub(crate) mod tests {
 
         app.start_background_server_from_config();
 
-        assert!(!app.background_server_preflight_pending);
+        assert!(!app.serving.background_preflight_pending);
         assert!(app.status.most_recent_tui().is_none());
     }
 
@@ -2408,7 +2408,7 @@ pub(crate) mod tests {
 
         ask_for_a_reload(&mut app, "bind-ok");
         app.apply_serve_while_tui_setting(ServeWanted::On);
-        assert!(app.background_server_preflight_pending);
+        assert!(app.serving.background_preflight_pending);
         app.engine.finish_config_reload_operations(
             &dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() },
         );
@@ -2515,7 +2515,7 @@ pub(crate) mod tests {
         // the transition rather than a real bind.
         app.apply_serve_while_tui_setting(ServeWanted::On);
         assert!(
-            app.background_server_preflight_pending,
+            app.serving.background_preflight_pending,
             "a reload that turned it on must dispatch the bind pre-flight"
         );
 
@@ -2545,7 +2545,7 @@ pub(crate) mod tests {
         );
 
         ask_for_a_reload(&mut app, "start-refused");
-        app.server_flip_preflight_pending = true;
+        app.serving.flip_preflight_pending = true;
         app.apply_serve_while_tui_setting(ServeWanted::On);
         app.engine.finish_config_reload_operations(&applied);
         assert_eq!(
@@ -2560,7 +2560,7 @@ pub(crate) mod tests {
 
         // A reload that turns off a start still binding is over once that
         // start has been cancelled.
-        app.server_flip_preflight_pending = false;
+        app.serving.flip_preflight_pending = false;
         app.apply_serve_while_tui_setting(ServeWanted::On);
         ask_for_a_reload(&mut app, "cancels");
         app.apply_serve_while_tui_setting(ServeWanted::Off);
@@ -2645,7 +2645,7 @@ pub(crate) mod tests {
             "the browser's clone dispatches one create, from the web layer"
         );
         assert!(
-            !app.create_agent_started_here,
+            !app.notes.create_agent_started_here,
             "the browser's agent was taken for this surface's"
         );
 
@@ -2671,7 +2671,7 @@ pub(crate) mod tests {
             "the web layer drove a clone this surface started"
         );
         assert!(
-            app.create_agent_started_here,
+            app.notes.create_agent_started_here,
             "the agent this surface's clone starts is this surface's"
         );
     }
@@ -2784,7 +2784,7 @@ pub(crate) mod tests {
         app.stop_background_server_quietly();
         app.engine.config.server.serve_while_tui = false;
         app.start_background_server(BackgroundServerStart::UserRequest);
-        assert!(app.background_server_preflight_pending);
+        assert!(app.serving.background_preflight_pending);
 
         app.stop_background_server();
 
@@ -2826,7 +2826,7 @@ pub(crate) mod tests {
         app.stop_background_server_quietly();
         app.engine.config.server.serve_while_tui = false;
         app.start_background_server(BackgroundServerStart::UserRequest);
-        assert!(app.background_server_preflight_pending);
+        assert!(app.serving.background_preflight_pending);
 
         app.apply_serve_while_tui_setting(ServeWanted::Off);
 
@@ -3283,7 +3283,7 @@ pub(crate) mod tests {
             let mut app = test_app(default_bindings());
             let (companion, _recorded) = FakeCompanion::serving();
             app.companion = Some(companion);
-            app.background_server_wanted = true;
+            app.serving.background_wanted = true;
             app.engine.config.server.serve_while_tui = true;
             app.save_and_apply_tailscale_mode(dux_core::config::TailscaleMode::Yes);
             assert!(
@@ -3341,7 +3341,7 @@ pub(crate) mod tests {
         let mut app = test_app(default_bindings());
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
-        app.background_server_wanted = true;
+        app.serving.background_wanted = true;
         app.engine.config.server.tailscale = "auto".to_string();
         app.engine.config.server.serve_while_tui = true;
 
@@ -3361,7 +3361,7 @@ pub(crate) mod tests {
         let mut app = test_app(default_bindings());
         let (companion, recorded) = FakeCompanion::serving();
         app.companion = Some(companion);
-        app.background_server_wanted = true;
+        app.serving.background_wanted = true;
         app.engine.config.server.tailscale = "auto".to_string();
         app.engine.config.server.serve_while_tui = true;
 

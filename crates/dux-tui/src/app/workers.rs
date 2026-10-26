@@ -495,12 +495,12 @@ impl App {
             WorkerEvent::AgentLaunchFailed(data) => {
                 self.tui_launched_ptys.remove(data.request.tab_id.as_str());
                 if matches!(data.request.kind, AgentLaunchKind::Create { .. }) {
-                    self.create_agent_started_here = false;
+                    self.notes.create_agent_started_here = false;
                     self.pull_request_create = None;
                 }
             }
             WorkerEvent::CreateAgentFailed { message, .. } => {
-                self.create_agent_started_here = false;
+                self.notes.create_agent_started_here = false;
                 // A question keeps the request: the reply reopens the prompt on it.
                 if message.ask().is_none() {
                     self.pull_request_create = None;
@@ -627,7 +627,7 @@ impl App {
             // its view even though it did no work itself. `service_companion`
             // folds this into its own post-mutation refresh at the end of the
             // iteration.
-            self.companion_followup_ran = true;
+            self.notes.companion_followup_ran = true;
             return;
         }
         match reaction {
@@ -849,7 +849,7 @@ impl App {
                 let was_in_flight = self.engine.is_in_flight(&create);
                 let finished = self.engine.finish_clone(&done);
                 if !was_in_flight && self.engine.is_in_flight(&create) {
-                    self.create_agent_started_here = true;
+                    self.notes.create_agent_started_here = true;
                 }
                 self.apply_routed_reaction(finished, routing);
             }
@@ -1196,7 +1196,7 @@ impl App {
         warning: Option<String>,
         startup: dux_core::serve_log::StartupNotes,
     ) {
-        self.server_flip_preflight_pending = false;
+        self.serving.flip_preflight_pending = false;
         match result {
             Ok((listeners, urls)) => {
                 self.apply_server_flip_preflight_success(listeners, urls, warning, startup);
@@ -1803,7 +1803,7 @@ impl App {
             &outcome.view,
             AgentLaunchReadyView::CreateCommitted { .. }
                 | AgentLaunchReadyView::CreatePersistFailed { .. }
-        ) && std::mem::take(&mut self.create_agent_started_here);
+        ) && std::mem::take(&mut self.notes.create_agent_started_here);
         if created_here {
             self.pull_request_create = None;
         }
@@ -2796,7 +2796,7 @@ mod tests {
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
@@ -2818,7 +2818,7 @@ mod tests {
     fn assert_agent_input_cleared(app: &crate::app::App) {
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
-        assert!(!app.in_bracket_paste);
+        assert!(!app.raw_paste.in_bracket);
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(!app.raw_input_parser.in_bracket_paste());
@@ -2960,7 +2960,7 @@ mod tests {
     fn create_failure_disarms_the_tui_origin_before_the_event_is_processed() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
         app.engine
             .worker_tx
             .send(WorkerEvent::CreateAgentFailed {
@@ -2972,7 +2972,7 @@ mod tests {
 
         app.drain_events();
 
-        assert!(!app.create_agent_started_here);
+        assert!(!app.notes.create_agent_started_here);
     }
 
     /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a `StatusOp`)
@@ -3301,7 +3301,7 @@ mod tests {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: session.id.clone(),
@@ -3352,7 +3352,7 @@ mod tests {
         app.selected_terminal_index = 0;
 
         let newest = app.engine.sessions[19].clone();
-        app.create_agent_started_here = true;
+        app.notes.create_agent_started_here = true;
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             tab_id: newest.id.clone(),
             session: newest.clone(),

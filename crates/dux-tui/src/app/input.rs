@@ -1177,7 +1177,7 @@ impl App {
             }
         } else {
             self.focus = self.focus.next();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.next();
             }
             if self.focus == FocusPane::Files {
@@ -1201,7 +1201,7 @@ impl App {
             self.left_section = LeftSection::Projects;
         } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Projects {
             self.focus = self.focus.previous();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.previous();
             }
             if self.focus == FocusPane::Files {
@@ -1218,7 +1218,7 @@ impl App {
             }
         } else {
             self.focus = self.focus.previous();
-            if self.focus == FocusPane::Files && self.right_hidden {
+            if self.focus == FocusPane::Files && self.panes.right_hidden {
                 self.focus = self.focus.previous();
             }
             if self.focus == FocusPane::Files {
@@ -1261,16 +1261,16 @@ impl App {
                 self.help_scroll = self.help_scroll.is_none().then_some(0);
             }
             Action::ForceRedraw => {
-                self.force_redraw = true;
+                self.notes.force_redraw = true;
                 self.set_ui_hint("Interface redrawn. All screen contents have been repainted.");
             }
             Action::OpenPalette => self.open_command_palette(),
             Action::FocusNext => self.focus_next_pane(),
             Action::FocusPrev => self.focus_previous_pane(),
-            Action::ToggleSidebar => self.left_collapsed = !self.left_collapsed,
+            Action::ToggleSidebar => self.panes.left_collapsed = !self.panes.left_collapsed,
             Action::ToggleGitPane => {
-                self.right_collapsed = !self.right_collapsed;
-                if self.right_collapsed && self.focus == FocusPane::Files {
+                self.panes.right_collapsed = !self.panes.right_collapsed;
+                if self.panes.right_collapsed && self.focus == FocusPane::Files {
                     self.focus = FocusPane::Center;
                 }
             }
@@ -3186,7 +3186,7 @@ impl App {
     pub(super) fn reset_raw_input_state(&mut self) {
         self.input_target = InputTarget::None;
         self.terminal_selection = None;
-        self.in_bracket_paste = false;
+        self.raw_paste.in_bracket = false;
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
@@ -3336,7 +3336,7 @@ impl App {
             });
         }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
-        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         sequences
     }
 
@@ -3397,25 +3397,25 @@ impl App {
             ));
         }
         if seq == crate::raw_input::BRACKET_PASTE_START {
-            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-            self.raw_paste_normalize = !self
+            self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
+            self.raw_paste.normalize = !self
                 .selected_terminal_surface_client()
                 .is_some_and(dux_core::pty::PtyClient::has_bracketed_paste);
-            self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
-            return (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+            self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
+            return (!self.raw_paste.normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
         }
         if seq == crate::raw_input::BRACKET_PASTE_END {
-            self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
-            let action = (!self.raw_paste_normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
-            self.raw_paste_normalize = false;
-            self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
+            self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
+            let action = (!self.raw_paste.normalize).then(|| RawSeqAction::Forward(seq.to_vec()));
+            self.raw_paste.normalize = false;
+            self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
             return action;
         }
         if parsed.in_bracket_paste {
-            if !self.raw_paste_normalize {
+            if !self.raw_paste.normalize {
                 return Some(RawSeqAction::Forward(seq.to_vec()));
             }
-            let bytes = self.raw_paste_newlines.normalize(seq);
+            let bytes = self.raw_paste.newlines.normalize(seq);
             if bytes.is_empty() {
                 return None;
             }
@@ -7685,11 +7685,11 @@ impl App {
             self.mouse_layout.center.x + self.mouse_layout.center.width.saturating_sub(1);
         let right_left = self.mouse_layout.right.x;
 
-        if !self.left_collapsed && (column == left_edge || column == center_left) {
+        if !self.panes.left_collapsed && (column == left_edge || column == center_left) {
             return Some(ResizeDragState::LeftDivider);
         }
 
-        if !self.right_hidden && (column == center_right || column == right_left) {
+        if !self.panes.right_hidden && (column == center_right || column == right_left) {
             return Some(ResizeDragState::RightDivider);
         }
 
@@ -11390,11 +11390,11 @@ impl App {
     /// palette command so both stay in sync; mirrors `persist_pane_widths`'
     /// lazy config write.
     pub(crate) fn toggle_git_pane_removed(&mut self) {
-        self.right_hidden = !self.right_hidden;
-        if self.right_hidden && self.focus == FocusPane::Files {
+        self.panes.right_hidden = !self.panes.right_hidden;
+        if self.panes.right_hidden && self.focus == FocusPane::Files {
             self.focus = FocusPane::Center;
         }
-        self.engine.config.ui.show_changes_pane = !self.right_hidden;
+        self.engine.config.ui.show_changes_pane = !self.panes.right_hidden;
         self.engine
             .config_writer
             .save_lazy(self.engine.config.clone());
@@ -11756,7 +11756,7 @@ impl App {
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
     fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
-        if self.left_collapsed {
+        if self.panes.left_collapsed {
             // The collapsed rail is a column of glyphs: there is no room to show a
             // row being carried or a gap opening, so it does not drag.
             self.row_drag = None;
@@ -12422,9 +12422,9 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
-        self.in_bracket_paste = false;
-        self.raw_paste_normalize = false;
-        self.raw_paste_newlines = crate::raw_input::PasteNewlines::default();
+        self.raw_paste.in_bracket = false;
+        self.raw_paste.normalize = false;
+        self.raw_paste.newlines = crate::raw_input::PasteNewlines::default();
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
@@ -12537,7 +12537,7 @@ impl App {
     pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
         let sequences = self.raw_input_parser.feed_sequences(new_bytes);
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
-        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
         self.scan_loading_phase_focus(&sequences);
         self.scan_loading_phase_exit()
     }
@@ -13708,7 +13708,7 @@ mod tests {
     #[test]
     fn the_collapsed_rail_arms_no_drag() {
         let mut app = drag_test_app();
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -13932,7 +13932,7 @@ mod tests {
         drain_until(&mut app, |app| app.engine.config.ui.right_width_pct == 37);
 
         assert_eq!(app.right_width_pct, 37);
-        assert!(app.show_diff_line_numbers);
+        assert!(app.view_prefs.show_diff_line_numbers);
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(
             app.status.message(),
@@ -14125,7 +14125,7 @@ not_a_real_action = ["x"]
             error: "the session database could not be read".to_string(),
         });
         assert_eq!(app.left_width_pct, 37);
-        assert!(app.right_hidden);
+        assert!(app.panes.right_hidden);
         assert!(
             !matches!(app.prompt, PromptState::ConfigReloadFailed { .. }),
             "the config was not refused"
@@ -14167,7 +14167,10 @@ not_a_real_action = ["x"]
         )
         .unwrap();
         let reloaded = dux_core::config::load_config(&app.engine.paths).unwrap();
-        assert!(!app.right_hidden, "precondition: the changes pane shows");
+        assert!(
+            !app.panes.right_hidden,
+            "precondition: the changes pane shows"
+        );
         rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
             .unwrap()
             .execute("DROP TABLE projects", [])
@@ -14180,7 +14183,7 @@ not_a_real_action = ["x"]
         );
         assert_eq!(app.left_width_pct, 33, "the view follows the kept config");
         assert!(
-            app.right_hidden,
+            app.panes.right_hidden,
             "every view setting follows the kept config"
         );
 
@@ -14940,7 +14943,7 @@ not_a_real_action = ["x"]
 
         // The user asked again (a line-numbers toggle, say) before the first
         // answer was drained, so the pending key moved on.
-        app.show_diff_line_numbers = !app.show_diff_line_numbers;
+        app.view_prefs.show_diff_line_numbers = !app.view_prefs.show_diff_line_numbers;
         app.refresh_current_diff();
         let live_key = app.pending_diff.as_ref().expect("pending").key.clone();
         assert_ne!(live_key, stale_key);
@@ -19274,7 +19277,7 @@ not_a_real_action = ["x"]
         // The fixture seeds a single Detached agent and no active ones.
         app.rebuild_left_items();
         assert!(
-            !app.inactive_collapsed,
+            !app.inactive_tail.collapsed,
             "a wholly-inactive workspace expands the Inactive section by default",
         );
 
@@ -19285,17 +19288,17 @@ not_a_real_action = ["x"]
         app.engine.sessions.push(active);
         app.rebuild_left_items();
         assert!(
-            app.inactive_collapsed,
+            app.inactive_tail.collapsed,
             "an active agent collapses the Inactive tail",
         );
 
         // A manual toggle takes over and sticks across rebuilds.
         app.toggle_collapse_selected_project();
-        assert!(app.inactive_collapse_overridden);
-        let after = app.inactive_collapsed;
+        assert!(app.inactive_tail.overridden);
+        let after = app.inactive_tail.collapsed;
         app.rebuild_left_items();
         assert_eq!(
-            app.inactive_collapsed, after,
+            app.inactive_tail.collapsed, after,
             "a manual toggle overrides the auto-manage",
         );
     }
@@ -19577,8 +19580,8 @@ not_a_real_action = ["x"]
         app.focus = FocusPane::Left;
         app.left_section = LeftSection::Projects;
         // Expand the Inactive section by hand so the inactive agent renders.
-        app.inactive_collapsed = false;
-        app.inactive_collapse_overridden = true;
+        app.inactive_tail.collapsed = false;
+        app.inactive_tail.overridden = true;
         app.rebuild_left_items();
         // Select the inactive agent (the Session that sorts after the toggle).
         let sel = app
@@ -31485,15 +31488,15 @@ cyan = "#00ffff"
     #[test]
     fn toggle_git_pane_collapses_right() {
         let mut app = test_app(default_bindings());
-        assert!(!app.right_collapsed);
+        assert!(!app.panes.right_collapsed);
 
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
-        assert!(app.right_collapsed);
+        assert!(app.panes.right_collapsed);
 
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
-        assert!(!app.right_collapsed);
+        assert!(!app.panes.right_collapsed);
     }
 
     #[test]
@@ -31504,23 +31507,23 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
 
-        assert!(app.right_collapsed);
+        assert!(app.panes.right_collapsed);
         assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
     fn remove_git_pane_hides_right() {
         let mut app = test_app(default_bindings());
-        assert!(!app.right_hidden);
+        assert!(!app.panes.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
 
         app.execute_command("toggle-remove-git-pane").unwrap();
-        assert!(app.right_hidden);
+        assert!(app.panes.right_hidden);
         // The toggle keeps the persisted setting in sync with the pane state.
         assert!(!app.engine.config.ui.show_changes_pane);
 
         app.execute_command("toggle-remove-git-pane").unwrap();
-        assert!(!app.right_hidden);
+        assert!(!app.panes.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
     }
 
@@ -31555,14 +31558,14 @@ cyan = "#00ffff"
 
         app.execute_command("toggle-remove-git-pane").unwrap();
 
-        assert!(app.right_hidden);
+        assert!(app.panes.right_hidden);
         assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
     fn focus_skips_removed_git_pane_forward() {
         let mut app = test_app(default_bindings());
-        app.right_hidden = true;
+        app.panes.right_hidden = true;
         app.focus = FocusPane::Center;
 
         // Tab from Center should skip Files and go to Left
@@ -31575,7 +31578,7 @@ cyan = "#00ffff"
     #[test]
     fn focus_skips_removed_git_pane_backward() {
         let mut app = test_app(default_bindings());
-        app.right_hidden = true;
+        app.panes.right_hidden = true;
         app.focus = FocusPane::Left;
 
         // Shift-Tab from Left should skip Files and go to Center
@@ -33955,7 +33958,7 @@ cyan = "#00ffff"
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
@@ -33963,7 +33966,7 @@ cyan = "#00ffff"
 
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
-        assert!(!app.in_bracket_paste);
+        assert!(!app.raw_paste.in_bracket);
         assert!(app.raw_input_buf.is_empty());
         assert!(app.raw_input_parser.pending().is_empty());
         assert!(!app.raw_input_parser.in_bracket_paste());
@@ -35296,7 +35299,7 @@ cyan = "#00ffff"
         chunk1.extend_from_slice(b"abc");
         app.process_raw_input_bytes(&chunk1);
         assert!(
-            app.in_bracket_paste,
+            app.raw_paste.in_bracket,
             "should be in bracket paste after start marker"
         );
 
@@ -35306,7 +35309,7 @@ cyan = "#00ffff"
         chunk2.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
         app.process_raw_input_bytes(&chunk2);
         assert!(
-            !app.in_bracket_paste,
+            !app.raw_paste.in_bracket,
             "should exit bracket paste after end marker"
         );
     }
@@ -35332,15 +35335,15 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Enter bracket paste state.
-        app.in_bracket_paste = true;
+        app.raw_paste.in_bracket = true;
 
         // Now send ToggleFullscreen (Ctrl-g) outside of paste context.
         // Reset in_bracket_paste first to simulate that the end marker
         // was never received (e.g. malformed paste), but we exit.
-        app.in_bracket_paste = false;
+        app.raw_paste.in_bracket = false;
         app.process_raw_input_bytes(b"\x07");
 
-        assert!(!app.in_bracket_paste, "should be reset after exit");
+        assert!(!app.raw_paste.in_bracket, "should be reset after exit");
         assert_eq!(app.input_target, InputTarget::None);
     }
 

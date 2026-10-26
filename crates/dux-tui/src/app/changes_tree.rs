@@ -1081,7 +1081,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
         load_lists(&mut app, &worktree);
         (app, worktree)
     }
@@ -1247,7 +1247,7 @@ mod tests {
         app.right_section = RightSection::Unstaged;
         // Selected, so the row is drawn unabridged in this narrow pane.
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let screen = render_text(&mut app, 140, 40);
 
@@ -1283,7 +1283,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Staged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
         // Wide enough for the whole label.
         app.right_width_pct = 50;
 

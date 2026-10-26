@@ -3149,7 +3149,7 @@ mod tests {
         )
         .expect("a refused create comes back as a status, not an error");
         assert!(
-            !app.create_agent_started_here,
+            !app.notes.create_agent_started_here,
             "a create the engine refused must arm nothing"
         );
 

@@ -1572,7 +1572,7 @@ impl App {
                 .engine
                 .is_in_flight(&dux_core::engine::InFlightKey::CreateAgent)
         {
-            self.create_agent_started_here = true;
+            self.notes.create_agent_started_here = true;
             // Armed only now that the create is accepted, under the key its
             // answer will carry.
             self.pull_request_create = self.engine.last_created_op_id.clone().zip(pull_request);
@@ -4211,7 +4211,7 @@ impl App {
         let key = crate::diff::DiffRequestKey {
             worktree_path,
             rel_path: rel_path.clone(),
-            show_line_numbers: self.show_diff_line_numbers,
+            show_line_numbers: self.view_prefs.show_diff_line_numbers,
             tab_width: self.engine.config.ui.diff_tab_width,
             seq: self.diff_request_seq,
         };
@@ -4887,7 +4887,7 @@ impl App {
     /// while a successful flip is stashed waiting for the run loop, is refused
     /// rather than racing to bind the same ports and reporting EADDRINUSE.
     pub(crate) fn start_web_server(&mut self) {
-        if self.server_flip_preflight_pending || self.pending_server_flip.is_some() {
+        if self.serving.flip_preflight_pending || self.pending_server_flip.is_some() {
             self.set_warning("Web server start already in progress.".to_string());
             return;
         }
@@ -4896,7 +4896,7 @@ impl App {
         // collision against dux itself. Refuse with the honest reason instead,
         // and point at the two ways out. A background start still in its own
         // pre-flight counts, because that worker already has the ports.
-        if self.background_server_preflight_pending {
+        if self.serving.background_preflight_pending {
             self.set_warning(
                 "dux is already starting the web server in the background. Wait for it to \
                  report back, then run stop-background-server if you want the terminal handed \
@@ -4933,7 +4933,7 @@ impl App {
         let pending = self.engine.begin_status_op(&op);
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         self.pending_server_flip_op = Some(op);
-        self.server_flip_preflight_pending = true;
+        self.serving.flip_preflight_pending = true;
         let port = self.engine.config.server.port;
         let tailscale = self.engine.config.server.tailscale_mode();
         let tx = self.engine.worker_tx.clone();
@@ -5171,7 +5171,6 @@ mod tests {
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
             pending_commit: None,
-            show_diff_line_numbers: false,
             left_width_pct: 20,
             right_width_pct: 23,
             terminal_pane_height_pct: 35,
@@ -5179,9 +5178,6 @@ mod tests {
             commit_pane_height_pct: 40,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
-            left_collapsed: false,
-            right_collapsed: false,
-            right_hidden: false,
             resize_mode: false,
             help_scroll: None,
             last_help_height: 0,
@@ -5220,7 +5216,6 @@ mod tests {
             last_pty_size: (0, 0),
             last_pty_resize_target: None,
             tui_launched_ptys: Default::default(),
-            create_agent_started_here: false,
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
@@ -5235,9 +5230,7 @@ mod tests {
             tick_count: 0,
             start_time: std::time::Instant::now(),
             refusal_blink: None,
-            inactive_collapsed: false,
             inactive_search_dismissed: None,
-            inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -5254,22 +5247,15 @@ mod tests {
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
-            in_bracket_paste: false,
-            raw_paste_normalize: false,
-            raw_paste_newlines: crate::raw_input::PasteNewlines::default(),
             terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             sigwinch_sig_id: None,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_sig_ids: Vec::new(),
-            force_redraw: false,
             redraw: RedrawGate::default(),
             welcome_tip_index: 0,
-            welcome_logo_visible: false,
-            welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            pr_banner_at_bottom: true,
             syntax_cache: Arc::new(crate::diff::SyntaxCache::new()),
             pending_diff: None,
             changes_tree: Default::default(),
@@ -5286,18 +5272,12 @@ mod tests {
             drawn_ptys: Vec::new(),
             published_ptys: None,
             companion: None,
-            background_server_preflight_pending: false,
-            background_server_wanted: false,
-            companion_followup_ran: false,
             left_rows: Vec::new(),
-            left_rows_built: false,
-            left_cursor_parked: false,
             terminal_cursor: None,
             tui_fallback_tabs: Default::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
             reload_listener_changes: Default::default(),
-            server_flip_preflight_pending: false,
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
@@ -5313,6 +5293,42 @@ mod tests {
             pending_branch_listing: None,
             agent_filter: None,
             test_scratch_dirs: tmp.into(),
+            panes: PaneFlags {
+                left_collapsed: false,
+                right_collapsed: false,
+                right_hidden: false,
+            },
+            inactive_tail: InactiveTailState {
+                collapsed: false,
+                overridden: false,
+            },
+            raw_paste: RawPaste {
+                in_bracket: false,
+                normalize: false,
+                newlines: crate::raw_input::PasteNewlines::default(),
+            },
+            welcome_logo: WelcomeLogo {
+                visible: false,
+                alt: false,
+            },
+            view_prefs: ViewPrefs {
+                show_diff_line_numbers: false,
+                pr_banner_at_bottom: true,
+            },
+            serving: ServingFlags {
+                flip_preflight_pending: false,
+                background_preflight_pending: false,
+                background_wanted: false,
+            },
+            left_list: LeftRowsState {
+                built: false,
+                cursor_parked: false,
+            },
+            notes: OneShotNotes {
+                force_redraw: false,
+                companion_followup_ran: false,
+                create_agent_started_here: false,
+            },
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -5666,7 +5682,7 @@ mod tests {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
         app.start_web_server();
         assert!(
-            app.server_flip_preflight_pending,
+            app.serving.flip_preflight_pending,
             "first trigger arms guard"
         );
         assert!(app.status.message().contains("Starting the web server"));
@@ -5679,7 +5695,7 @@ mod tests {
             "second trigger while pending must be refused"
         );
         assert!(
-            app.server_flip_preflight_pending,
+            app.serving.flip_preflight_pending,
             "guard stays armed after a refused retry"
         );
 
@@ -5690,7 +5706,7 @@ mod tests {
             startup: Default::default(),
         });
         assert!(
-            !app.server_flip_preflight_pending,
+            !app.serving.flip_preflight_pending,
             "guard clears when the worker event lands"
         );
 
@@ -11470,7 +11486,7 @@ mod tests {
     fn assert_resting_on_the_tips_screen(app: &mut App) {
         let _ = rendered_text(app);
         assert_eq!(app.selected_session().map(|s| s.id.clone()), None);
-        assert!(app.welcome_logo_visible, "the centre shows the tips screen");
+        assert!(app.welcome_logo.visible, "the centre shows the tips screen");
         let attached: Vec<String> = app
             .engine
             .attachments

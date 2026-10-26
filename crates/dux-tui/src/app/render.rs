@@ -1800,21 +1800,21 @@ impl App {
             ])
             .areas(frame.area());
         self.render_header(frame, header);
-        let right_constraint = if self.right_hidden {
+        let right_constraint = if self.panes.right_hidden {
             Constraint::Length(0)
-        } else if self.right_collapsed {
+        } else if self.panes.right_collapsed {
             Constraint::Length(3)
         } else {
             Constraint::Percentage(self.right_width_pct)
         };
 
-        let [left, center, right] = if self.left_collapsed {
+        let [left, center, right] = if self.panes.left_collapsed {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(4), Constraint::Min(20), right_constraint])
                 .areas(body)
         } else {
-            let right_pct = if self.right_hidden || self.right_collapsed {
+            let right_pct = if self.panes.right_hidden || self.panes.right_collapsed {
                 0
             } else {
                 self.right_width_pct
@@ -2726,7 +2726,7 @@ impl App {
             .iter()
             .map(|item| match item {
                 LeftItem::InactiveToggle => {
-                    let icon = if self.inactive_collapsed {
+                    let icon = if self.inactive_tail.collapsed {
                         self.glyphs().collapsed
                     } else {
                         self.glyphs().expanded
@@ -3047,7 +3047,7 @@ impl App {
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
         let focused = FocusState::of(self.focus, FocusPane::Left);
 
-        if self.left_collapsed {
+        if self.panes.left_collapsed {
             self.render_collapsed_left(frame, area, focused);
             return;
         }
@@ -3115,7 +3115,7 @@ impl App {
         };
         let pr_banner_height: u16 = u16::from(pr_info.is_some());
 
-        let (pr_area, pane_area) = if self.pr_banner_at_bottom {
+        let (pr_area, pane_area) = if self.view_prefs.pr_banner_at_bottom {
             let [pane_area, pr_area] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(pr_banner_height)])
@@ -3502,7 +3502,7 @@ impl App {
     /// (`Engine::tab_resume_decision`); the copy states that rule rather than
     /// promising either outcome.
     fn render_dormant_extra_tab(&mut self, frame: &mut Frame, area: Rect, tab_id: Option<&str>) {
-        self.welcome_logo_visible = false;
+        self.welcome_logo.visible = false;
         self.mouse_layout.dormant_tab_button = None;
 
         // Read the verdict OFF the engine first and own it: the paint below
@@ -3603,18 +3603,18 @@ impl App {
         // Rotate the tip and randomly pick a logo variant when the logo
         // becomes visible again after being hidden, or when the selected
         // left-pane item changes while the logo stays visible.
-        if !self.welcome_logo_visible || self.welcome_tip_selection != self.selected_left {
+        if !self.welcome_logo.visible || self.welcome_tip_selection != self.selected_left {
             self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
-            self.welcome_logo_alt = std::time::SystemTime::now()
+            self.welcome_logo.alt = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .is_ok_and(|d| d.subsec_nanos() % 2 == 0);
         }
-        self.welcome_logo_visible = true;
+        self.welcome_logo.visible = true;
         self.welcome_tip_selection = self.selected_left;
 
         // Pick the active logo variant. Fall back to the text logo when the
         // area is too short for the taller duck.
-        let use_alt = self.welcome_logo_alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
+        let use_alt = self.welcome_logo.alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
         let (logo, logo_w, logo_h) = if use_alt {
             (ASCII_LOGO_ALT, ASCII_LOGO_ALT_WIDTH, ASCII_LOGO_ALT_HEIGHT)
         } else {
@@ -4725,13 +4725,13 @@ impl App {
         };
         match context.active_surface {
             SessionSurface::Agent if show_card => {
-                self.welcome_logo_visible = false;
+                self.welcome_logo.visible = false;
                 let tab_id = context.focused_tab.clone();
                 self.render_dormant_extra_tab(frame, term_area, tab_id.as_deref());
             }
             SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
             SessionSurface::Terminal => {
-                self.welcome_logo_visible = false;
+                self.welcome_logo.visible = false;
                 self.render_terminal_placeholder(
                     frame,
                     term_area,
@@ -4952,7 +4952,7 @@ impl App {
         );
 
         if rendered_content {
-            self.welcome_logo_visible = false;
+            self.welcome_logo.visible = false;
         } else {
             self.render_terminal_empty_state(frame, term_area, &context);
         }
@@ -4975,7 +4975,7 @@ impl App {
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
-        if self.right_hidden {
+        if self.panes.right_hidden {
             return;
         }
 
@@ -4986,7 +4986,7 @@ impl App {
             return;
         }
 
-        if self.right_collapsed {
+        if self.panes.right_collapsed {
             let focused = FocusState::of(self.focus, FocusPane::Files);
             let block = self.themed_block("", focused);
             let unstaged_rows = self.changes_row_count(RightSection::Unstaged);
@@ -16760,7 +16760,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
         let expected_items = app.left_items().len();
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -17205,7 +17205,7 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.engine.projects[0].path_missing = true;
-        app.left_collapsed = true;
+        app.panes.left_collapsed = true;
 
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -19656,7 +19656,7 @@ mod tests {
         seed_render_tab(&mut app, &session_id, "dormant-tab", "codex", 1);
         app.set_focused_tab(&session_id, "dormant-tab");
         app.session_surface = SessionSurface::Agent;
-        app.welcome_logo_visible = true;
+        app.welcome_logo.visible = true;
 
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
@@ -19665,7 +19665,7 @@ mod tests {
             .expect("render frame");
 
         assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
-        assert!(!app.welcome_logo_visible);
+        assert!(!app.welcome_logo.visible);
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         // This tab has no recorded verdict, so the card's ranked content is the
         // standing resume rule, the key hint and the button. A ten-row pane
@@ -27237,7 +27237,7 @@ mod tests {
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
         app.files_index = 0;
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
         terminal
@@ -27302,7 +27302,7 @@ mod tests {
         for at_bottom in [false, true] {
             let mut app = test_app(default_bindings());
             install_pr(&mut app);
-            app.pr_banner_at_bottom = at_bottom;
+            app.view_prefs.pr_banner_at_bottom = at_bottom;
 
             let buf = draw(&mut app);
             let band = app
@@ -27675,7 +27675,7 @@ mod tests {
                 kind: dux_core::model::ChangedFileKind::File,
             },
         ];
-        app.right_hidden = false;
+        app.panes.right_hidden = false;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("terminal");
         terminal
