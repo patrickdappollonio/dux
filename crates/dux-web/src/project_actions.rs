@@ -387,13 +387,50 @@ async fn remove_project(
 #[derive(Deserialize)]
 struct PatchProjectBody {
     #[serde(default)]
-    provider: Option<Option<String>>,
+    provider: Patch<String>,
     #[serde(default)]
-    auto_reopen_agents: Option<Option<bool>>,
+    auto_reopen_agents: Patch<bool>,
     #[serde(default)]
-    startup_command: Option<Option<String>>,
+    startup_command: Patch<String>,
     #[serde(default)]
     env: Option<BTreeMap<String, String>>,
+}
+
+/// One tri-state field of a PATCH body. An `Option<Option<T>>` cannot carry it:
+/// serde reads a present `null` into the outer `None`, the same as an absent
+/// field, so clearing a setting was silently ignored. An absent field is
+/// [`Patch::Untouched`] through `#[serde(default)]`; a present one is read
+/// here, where `null` is the only way to reach [`Patch::Clear`].
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Patch<T> {
+    #[default]
+    Untouched,
+    Clear,
+    Set(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            None => Self::Clear,
+            Some(value) => Self::Set(value),
+        })
+    }
+}
+
+impl<T> Patch<T> {
+    /// Whether the body named this field at all.
+    fn sent(&self) -> bool {
+        !matches!(self, Self::Untouched)
+    }
+
+    /// The value the command carries for a sent field: `None` clears it.
+    fn into_value(self) -> Option<T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Untouched | Self::Clear => None,
+        }
+    }
 }
 
 async fn patch_project(
@@ -412,19 +449,19 @@ async fn patch_project(
 
     // Validate a provider before the independently applied fields so an invalid
     // value cannot leave earlier fields partially committed.
-    if let Some(Some(provider)) = body.provider.as_ref()
+    if let Patch::Set(provider) = &body.provider
         && let Err(rejection) = require_configured_provider(&state.engine, provider).await
     {
         return rejection.into_response();
     }
 
-    if let Some(provider) = body.provider
+    if body.provider.sent()
         && let Err(e) = state
             .engine
             .apply_wire_scoped(
                 WireCommand::UpdateProjectProvider {
                     project_id: id.clone(),
-                    provider,
+                    provider: body.provider.into_value(),
                 },
                 scope.clone(),
             )
@@ -433,13 +470,13 @@ async fn patch_project(
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
 
-    if let Some(auto_reopen_agents) = body.auto_reopen_agents
+    if body.auto_reopen_agents.sent()
         && let Err(e) = state
             .engine
             .apply_wire_scoped(
                 WireCommand::UpdateProjectAutoReopen {
                     project_id: id.clone(),
-                    auto_reopen_agents,
+                    auto_reopen_agents: body.auto_reopen_agents.into_value(),
                 },
                 scope.clone(),
             )
@@ -448,13 +485,13 @@ async fn patch_project(
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
 
-    if let Some(startup_command) = body.startup_command
+    if body.startup_command.sent()
         && let Err(e) = state
             .engine
             .apply_wire_scoped(
                 WireCommand::UpdateProjectStartupCommand {
                     project_id: id.clone(),
-                    startup_command,
+                    startup_command: body.startup_command.into_value(),
                 },
                 scope.clone(),
             )
@@ -1335,6 +1372,93 @@ mod tests {
             before,
             "a born repo must not gain a second commit"
         );
+    }
+
+    /// PATCH a project's settings and assert the route took it.
+    async fn patch_settings(app: &axum::Router, id: &str, body: serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/projects/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "{body}");
+    }
+
+    /// Wait until the project's three scalar settings read `expected`, as the
+    /// projects listing reports them (`[provider, auto_reopen_agents,
+    /// startup_command]`); the save lands on a worker, after the PATCH answers.
+    async fn wait_for_settings(app: &axum::Router, id: &str, expected: serde_json::Value) {
+        let mut seen = serde_json::Value::Null;
+        for _ in 0..100 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/projects")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let projects = json_body(resp).await;
+            let project = projects
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .expect("the project is listed")
+                .clone();
+            seen = serde_json::json!([
+                project["explicit_default_provider"],
+                project["auto_reopen_agents"],
+                project["startup_command"],
+            ]);
+            if seen == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the settings never read {expected}; last seen {seen}");
+    }
+
+    /// Each scalar setting is tri-state on the wire: an absent field is left
+    /// alone, `null` clears it (what the web's Inherit and empty fields send),
+    /// and a value sets it.
+    #[tokio::test]
+    async fn a_project_patch_sets_clears_and_leaves_each_setting_alone() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let (_tmp, app) = router_no_auth();
+        let id = add_project_and_id(&app, &repo.path().to_string_lossy()).await;
+        wait_for_settings(&app, &id, serde_json::json!([null, null, null])).await;
+
+        patch_settings(
+            &app,
+            &id,
+            serde_json::json!({
+                "provider": "codex",
+                "auto_reopen_agents": false,
+                "startup_command": "make setup",
+            }),
+        )
+        .await;
+        wait_for_settings(&app, &id, serde_json::json!(["codex", false, "make setup"])).await;
+
+        patch_settings(&app, &id, serde_json::json!({ "startup_command": null })).await;
+        wait_for_settings(&app, &id, serde_json::json!(["codex", false, null])).await;
+
+        patch_settings(&app, &id, serde_json::json!({ "provider": null })).await;
+        wait_for_settings(&app, &id, serde_json::json!([null, false, null])).await;
+
+        patch_settings(&app, &id, serde_json::json!({ "auto_reopen_agents": null })).await;
+        wait_for_settings(&app, &id, serde_json::json!([null, null, null])).await;
     }
 
     /// Add a committed repo as a project through the same router and return its id.
