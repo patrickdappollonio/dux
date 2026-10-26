@@ -653,7 +653,7 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 selected_row: 0,
                 expanded: HashSet::new(),
                 last_refresh: Instant::now(),
-                short_window_sample: false,
+                cpu_window: crate::app::CpuWindow::Full,
             };
             PickerFixture {
                 tall: monitor(&labels),

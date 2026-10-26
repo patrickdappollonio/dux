@@ -44,6 +44,7 @@ use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
     SessionSurface,
 };
+use crate::theme::FocusState;
 use components::FocusStep;
 // `Utc` and `SessionStatus` are now referenced only by the `#[cfg(test)]`
 // submodules (via their `use super::*`): the non-test call sites that used them
@@ -3227,10 +3228,19 @@ pub(crate) enum PromptState {
         /// "first sample since the overlay opened" guess: reopening the
         /// overlay within `STALE_BASELINE` of the collector's last refresh
         /// does not re-baseline, so it must not show `~` either. Starts
-        /// `true` on open, since the very first sample of the app's lifetime
+        /// `Short` on open, since the very first sample of the app's lifetime
         /// (or after any real gap) always re-baselines.
-        short_window_sample: bool,
+        cpu_window: CpuWindow,
     },
+}
+
+/// How long the window behind a resource sample's CPU figures was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CpuWindow {
+    /// The collector re-baselined, so the figures cover a short window.
+    Short,
+    /// The figures cover the normal poll interval.
+    Full,
 }
 
 pub(crate) use dux_core::project_browser::leading_branch_for_project;
@@ -5747,7 +5757,7 @@ impl App {
             selected_row: 0,
             expanded: HashSet::new(),
             last_refresh: Instant::now(),
-            short_window_sample: true,
+            cpu_window: CpuWindow::Short,
         };
         self.engine.spawn_resource_stats_worker();
     }
@@ -10876,7 +10886,10 @@ mod pinned_warning_tests {
 
         // No project is missing here: the restart warning is the only thing on
         // the line, and it is owed until the user restarts.
-        app.set_pinned_warning(workers::server_restart_warning(true, &["port"]));
+        app.set_pinned_warning(workers::server_restart_warning(
+            workers::BackgroundServing::Serving,
+            &["port"],
+        ));
         app.select_left_agent_item(agent_row);
         app.select_left_agent_item(elsewhere);
         assert!(

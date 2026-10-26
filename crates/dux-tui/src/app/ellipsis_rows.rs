@@ -487,7 +487,7 @@ fn the_resource_monitor_marks_a_wide_name_cut_by_its_column() {
         selected_row: 0,
         expanded: std::collections::HashSet::new(),
         last_refresh: std::time::Instant::now(),
-        short_window_sample: false,
+        cpu_window: crate::app::CpuWindow::Full,
     };
     for (w, h) in [(120, 40), (80, 24)] {
         let buf = render_at(&mut app, w, h);

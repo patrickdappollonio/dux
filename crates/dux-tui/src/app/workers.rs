@@ -114,6 +114,34 @@ impl DrainedEventMetadata {
     }
 }
 
+/// Whether a drained worker reaction carries a checkout inspection on into a
+/// default-branch checkout, which keeps the inspection's status op open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectFollowUp {
+    /// The reaction dispatches the checkout; its own final closes the op.
+    ChainsCheckout,
+    /// Nothing follows; the inspection is done.
+    Done,
+}
+
+/// How a project clone a draft was kept for ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloneEnding {
+    /// It cloned; the draft is no longer needed.
+    Cloned,
+    /// It was refused or failed; the draft can be restored.
+    RefusedOrFailed,
+}
+
+/// Whether a background server is serving when server settings change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackgroundServing {
+    /// A listener is bound and keeps its old settings until restarted.
+    Serving,
+    /// Nothing is serving.
+    Idle,
+}
+
 impl App {
     pub(crate) fn drain_events(&mut self) {
         // The release-notes worker's PAYLOAD rides its own channel (the keyed
@@ -186,8 +214,13 @@ impl App {
         let Some(session_id) = session_owner_id(pty) else {
             return false;
         };
-        let was_focused_tab = context.selected_session.as_deref() == Some(session_id)
-            && context.focused_tab.as_deref() == Some(pty.id.as_str());
+        let was_focused_tab = if context.selected_session.as_deref() == Some(session_id)
+            && context.focused_tab.as_deref() == Some(pty.id.as_str())
+        {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let support_provider = (!self
             .engine
             .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(&pty.id)))
@@ -207,13 +240,13 @@ impl App {
         }
     }
 
-    fn apply_closed_agent_tab(&mut self, pty: &PrunedPty, session_id: &str, was_focused_tab: bool) {
+    fn apply_closed_agent_tab(&mut self, pty: &PrunedPty, session_id: &str, tab_focus: FocusState) {
         // The prune's own account of the close, in the sentence the browser
         // gets: the row is gone, so nothing here could look these facts up.
         if let Some(closed) = &pty.closed_tab {
             self.set_info(closed_tab_exit_notice(closed));
         }
-        if !was_focused_tab {
+        if tab_focus == FocusState::Unfocused {
             return;
         }
         let target = self
@@ -230,13 +263,13 @@ impl App {
         }
     }
 
-    fn apply_exited_agent_tab(&mut self, support_provider: Option<String>, was_focused_tab: bool) {
+    fn apply_exited_agent_tab(&mut self, support_provider: Option<String>, tab_focus: FocusState) {
         if let Some(provider) = support_provider {
             self.set_info(format!("Tab ({provider}) exited."));
         }
         if self.input_target == InputTarget::Agent
             && self.session_surface == SessionSurface::Agent
-            && was_focused_tab
+            && (tab_focus == FocusState::Focused)
         {
             self.reset_raw_input_state();
         }
@@ -368,10 +401,14 @@ impl App {
             self.disarm_tui_launch_for_failed_event(&event);
             let reaction = self.engine.process_worker_event(event);
             self.note_changed_files_owner(&metadata);
-            let chains_forward = matches!(
+            let chains_forward = if matches!(
                 reaction,
                 EventReaction::DispatchProjectDefaultBranchCheckout { .. }
-            );
+            ) {
+                InspectFollowUp::ChainsCheckout
+            } else {
+                InspectFollowUp::Done
+            };
             let routing = self.companion_routing();
             self.notify_companion(&reaction);
             self.apply_routed_reaction(reaction, &routing);
@@ -476,7 +513,7 @@ impl App {
     fn apply_drained_event_metadata(
         &mut self,
         metadata: DrainedEventMetadata,
-        chains_forward: bool,
+        follow_up: InspectFollowUp,
     ) {
         if let Some(answer) = metadata.changed_files_answer {
             self.apply_changed_files_refresh_outcome(&answer.worktree, answer.error);
@@ -488,24 +525,31 @@ impl App {
             self.resolve_pr_lookup_completion(completion);
         }
         if let Some(id) = metadata.checkout_inspect_completion {
-            self.resolve_checkout_inspect_completion(id, chains_forward);
+            self.resolve_checkout_inspect_completion(id, follow_up);
         }
         if let Some((id, refused_or_failed)) = metadata.clone_completion {
-            self.settle_clone_draft(&id, refused_or_failed);
+            self.settle_clone_draft(
+                &id,
+                if refused_or_failed {
+                    CloneEnding::RefusedOrFailed
+                } else {
+                    CloneEnding::Cloned
+                },
+            );
         }
     }
 
     /// A clone this form started has answered: keep its draft for the next
     /// open when it was refused or failed, and drop it otherwise, since the
     /// clone is on disk and the same request would only be refused.
-    fn settle_clone_draft(&mut self, op_id: &str, refused_or_failed: bool) {
+    fn settle_clone_draft(&mut self, op_id: &str, ending: CloneEnding) {
         let Some(draft) = self.clone_draft.as_mut() else {
             return;
         };
         if draft.op_id != op_id {
             return;
         }
-        if refused_or_failed {
+        if ending == CloneEnding::RefusedOrFailed {
             draft.restorable = true;
         } else {
             self.clone_draft = None;
@@ -546,8 +590,10 @@ impl App {
         }
     }
 
-    fn resolve_checkout_inspect_completion(&mut self, id: String, chains_forward: bool) {
-        if !chains_forward && let Some(op) = self.pending_checkout_inspect_ops.remove(&id) {
+    fn resolve_checkout_inspect_completion(&mut self, id: String, follow_up: InspectFollowUp) {
+        if (follow_up == InspectFollowUp::Done)
+            && let Some(op) = self.pending_checkout_inspect_ops.remove(&id)
+        {
             self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
         }
     }
@@ -753,7 +799,14 @@ impl App {
             }
 
             EventReaction::ResourceStatsArrived(stats, was_baseline) => {
-                self.apply_resource_stats(stats, was_baseline);
+                self.apply_resource_stats(
+                    stats,
+                    if was_baseline {
+                        CpuWindow::Short
+                    } else {
+                        CpuWindow::Full
+                    },
+                );
             }
 
             EventReaction::AddProjectAfterBranchCheckout {
@@ -917,8 +970,12 @@ impl App {
     ) {
         let (initialized_repo, seeded_gitignore, seed_warning) = setup;
         let display_name = project_display_name(&path, &name);
-        let status_message =
-            initial_commit_project_status(&display_name, initialized_repo, seeded_gitignore);
+        let repo = match (initialized_repo, seeded_gitignore) {
+            (true, true) => RepoSetup::InitializedWithGitignore,
+            (true, false) => RepoSetup::Initialized,
+            (false, _) => RepoSetup::Existing,
+        };
+        let status_message = initial_commit_project_status(&display_name, repo);
         if let Err(error) =
             self.finish_add_project_with_status(path, name, branch, leading_branch, status_message)
         {
@@ -1069,7 +1126,11 @@ impl App {
             &self.engine.config.server,
         ));
         if !changed.is_empty() {
-            let serving = self.background_server_is_serving();
+            let serving = if self.background_server_is_serving() {
+                BackgroundServing::Serving
+            } else {
+                BackgroundServing::Idle
+            };
             owed.push(server_restart_warning(serving, &changed));
         }
         owed.extend(dux_core::control_socket::moved_warning(
@@ -1453,19 +1514,19 @@ impl App {
         }
     }
 
-    fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, was_baseline: bool) {
+    fn apply_resource_stats(&mut self, stats: Vec<ResourceStats>, window: CpuWindow) {
         if let PromptState::ResourceMonitor {
             rows,
             selected_row,
             expanded,
             last_refresh,
-            short_window_sample,
+            cpu_window,
             ..
         } = &mut self.prompt
         {
             *rows = stats;
             *last_refresh = Instant::now();
-            *short_window_sample = was_baseline;
+            *cpu_window = window;
             let max_row = build_visual_rows(rows, expanded).len().saturating_sub(1);
             if *selected_row > max_row {
                 *selected_row = max_row;
@@ -2086,21 +2147,28 @@ fn project_display_name(path: &str, name: &str) -> String {
     }
 }
 
-fn initial_commit_project_status(
-    display_name: &str,
-    initialized_repo: bool,
-    seeded_gitignore: bool,
-) -> String {
-    if initialized_repo && seeded_gitignore {
-        format!(
+/// What adding a project with an initial commit did to its folder first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepoSetup {
+    /// The folder was already a repository.
+    Existing,
+    /// A repository was initialized.
+    Initialized,
+    /// A repository was initialized and a starter .gitignore seeded.
+    InitializedWithGitignore,
+}
+
+fn initial_commit_project_status(display_name: &str, repo: RepoSetup) -> String {
+    match repo {
+        RepoSetup::InitializedWithGitignore => format!(
             "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to workspace."
-        )
-    } else if initialized_repo {
-        format!(
+        ),
+        RepoSetup::Initialized => format!(
             "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to workspace."
-        )
-    } else {
-        format!("Created an initial commit and added project \"{display_name}\" to workspace.")
+        ),
+        RepoSetup::Existing => {
+            format!("Created an initial commit and added project \"{display_name}\" to workspace.")
+        }
     }
 }
 
@@ -2217,9 +2285,9 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 
 /// The warning for a reloaded `[server]` change that only a restart applies,
 /// naming the changed `settings`.
-pub(crate) fn server_restart_warning(serving_in_background: bool, settings: &[&str]) -> String {
+pub(crate) fn server_restart_warning(serving: BackgroundServing, settings: &[&str]) -> String {
     let named = settings.join(", ");
-    if serving_in_background {
+    if serving == BackgroundServing::Serving {
         format!(
             "Server settings changed in config ({named}), but a listener that is already bound \
          cannot adopt them. Stop the background server and start it again to apply them."
@@ -3974,7 +4042,10 @@ mod tests {
         });
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
     }
 
     #[test]
@@ -3988,7 +4059,10 @@ mod tests {
         app.apply_reaction(EventReaction::ApplyReloadedConfig(Box::new(config)));
 
         let (_, message) = app.status.most_recent_tui().expect("a status");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
         assert_eq!(
             message,
             "Server settings changed in config (port). Nothing is serving right now, so they apply the next time a server starts."
@@ -4028,13 +4102,16 @@ mod tests {
             .status
             .most_recent_tui()
             .expect("the restart warning must survive the warning window");
-        assert_eq!(message, server_restart_warning(false, &["port"]));
+        assert_eq!(
+            message,
+            server_restart_warning(BackgroundServing::Idle, &["port"])
+        );
     }
 
     #[test]
     fn the_server_restart_warning_names_the_background_server_only_while_it_serves() {
-        let serving = server_restart_warning(true, &["port"]);
-        let idle = server_restart_warning(false, &["port"]);
+        let serving = server_restart_warning(BackgroundServing::Serving, &["port"]);
+        let idle = server_restart_warning(BackgroundServing::Idle, &["port"]);
         assert_ne!(serving, idle);
         assert!(
             serving.contains("background server"),

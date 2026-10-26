@@ -9885,7 +9885,7 @@ impl App {
             scroll_offset,
             selected_row,
             expanded,
-            short_window_sample,
+            cpu_window,
             ..
         } = &self.prompt
         else {
@@ -9895,14 +9895,14 @@ impl App {
         let scroll_offset = *scroll_offset;
         let selected_row = *selected_row;
         let expanded = expanded.clone();
-        let short_window_sample = *short_window_sample;
+        let cpu_window = *cpu_window;
         self.render_resource_monitor(
             frame,
             &rows,
             scroll_offset,
             selected_row,
             &expanded,
-            short_window_sample,
+            cpu_window,
         );
     }
 
@@ -12862,7 +12862,7 @@ impl App {
         scroll_offset: u16,
         selected_row: usize,
         expanded: &HashSet<u32>,
-        short_window_sample: bool,
+        cpu_window: CpuWindow,
     ) {
         use ratatui::widgets::{Cell, Row, Table, TableState};
 
@@ -12915,7 +12915,7 @@ impl App {
                     // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
                     // monitor's poll interval: real numbers, noisier because they
                     // cover less wall-clock time. See `ResourceCollector::sample`.
-                    let cpu_str = if short_window_sample {
+                    let cpu_str = if cpu_window == CpuWindow::Short {
                         format!("~{:.1}%", stat.cpu_percent)
                     } else {
                         format!("{:.1}%", stat.cpu_percent)
@@ -12962,7 +12962,7 @@ impl App {
                         child.name.clone()
                     };
                     let label = ellipsize_end(&format!("    {connector} {name}"), name_w);
-                    let cpu_str = if short_window_sample {
+                    let cpu_str = if cpu_window == CpuWindow::Short {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
                         format!("{:.1}%", child.cpu_percent)
@@ -22025,7 +22025,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -22094,7 +22094,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -22140,7 +22140,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -22189,7 +22189,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
         let rendered: String = terminal
@@ -22217,7 +22217,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, rows, 0, 0, expanded, false);
+                app.render_resource_monitor(frame, rows, 0, 0, expanded, CpuWindow::Full);
             })
             .expect("render frame");
         terminal
@@ -22371,7 +22371,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, CpuWindow::Full);
             })
             .expect("render frame");
 

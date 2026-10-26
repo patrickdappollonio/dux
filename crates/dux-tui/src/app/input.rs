@@ -24748,7 +24748,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 3);
 
@@ -24820,7 +24820,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 3);
 
@@ -24862,7 +24862,7 @@ cyan = "#00ffff"
             selected_row: 4,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         install_resource_monitor_overlay(&mut app, 10);
 
@@ -39795,7 +39795,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         }
     }
 
@@ -40649,7 +40649,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            short_window_sample: false,
+            cpu_window: crate::app::CpuWindow::Full,
         };
         let selected = |app: &App| match &app.prompt {
             PromptState::ResourceMonitor { selected_row, .. } => *selected_row,
