@@ -4513,6 +4513,12 @@ fn read_raw_config(engine: &Engine) -> Result<RawConfig, String> {
     }
 }
 
+/// Carry out one request the engine loop does not handle inline.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one delegating arm per engine request kind; splitting the match needs a catch-all \
+              arm, which gives up the compile-time check that every request kind is handled"
+)]
 fn handle_request(
     engine: &mut Engine,
     req: EngineRequest,
@@ -4567,11 +4573,9 @@ fn handle_request(
         EngineRequest::ClearStatus(key) => {
             status_tx.clear(key);
         }
-        EngineRequest::TakeLateStatusFinals(reply) => {
-            let _ = reply.send(status_tx.take_late_finals());
-        }
+        EngineRequest::TakeLateStatusFinals(reply) => answer(reply, status_tx.take_late_finals()),
         EngineRequest::LateStatusFinalsWaiting(reply) => {
-            let _ = reply.send(status_tx.late_finals_waiting());
+            answer(reply, status_tx.late_finals_waiting());
         }
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
             handle_attach_pull_request(engine, &session_id, &raw, origin, reply, status_tx);
@@ -4580,381 +4584,485 @@ fn handle_request(
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
-        EngineRequest::WritePty(id, bytes) => {
-            handle_pty_write(engine, &id, &bytes);
-        }
+        EngineRequest::WritePty(id, bytes) => handle_pty_write(engine, &id, &bytes),
         EngineRequest::ResizePty(id, rows, cols, seq) => {
             handle_pty_resize(engine, input_owners, &id, rows, cols, seq);
         }
         EngineRequest::PtyGridSize(id, reply) => {
-            let _ = reply.send(pty_for(engine, &id).and_then(dux_core::pty::PtyClient::grid_size));
+            answer(
+                reply,
+                pty_for(engine, &id).and_then(dux_core::pty::PtyClient::grid_size),
+            );
         }
-        EngineRequest::NoteViewed(id) => {
-            // The engine gates on the id resolving to a real agent tab, so a
-            // companion-terminal id or a stale/bogus id is a harmless no-op and
-            // `agent_viewed` never accumulates junk entries.
-            engine.note_agent_viewed_if_known(&id);
-        }
-        EngineRequest::SubscribeTerminal(terminal_id, reply) => {
-            let res = match engine.companion_terminals.get(&terminal_id) {
-                Some(terminal) => Ok(terminal.client.subscribe_with_repaint()),
-                None => Err("unknown terminal".to_string()),
-            };
-            let _ = reply.send(res);
+        // The engine gates on the id resolving to a real agent tab, so a
+        // companion-terminal id or a stale/bogus id is a harmless no-op and
+        // `agent_viewed` never accumulates junk entries.
+        EngineRequest::NoteViewed(id) => engine.note_agent_viewed_if_known(&id),
+        EngineRequest::SubscribeTerminal(id, reply) => {
+            answer(reply, subscribe_terminal(engine, &id));
         }
         EngineRequest::CreateTerminal(session_id, ticket, reply) => {
-            // Headless spawn: seed a default 24x80 and let the first attaching
-            // client resize the PTY to its real viewport.
-            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
-            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
-                engine.create_companion_terminal(&session_id, 24, 80)
-            });
-            let _ = reply.send(res);
+            let owner = dux_core::model::TerminalOwner::Session(session_id);
+            answer(
+                reply,
+                create_owned_terminal(engine, &owner, ticket.as_ref()),
+            );
         }
         EngineRequest::CreateProjectTerminal(project_id, ticket, reply) => {
-            let owner = dux_core::model::TerminalOwner::Project(project_id.clone());
-            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
-                engine.create_project_terminal(&project_id, 24, 80)
-            });
-            let _ = reply.send(res);
+            let owner = dux_core::model::TerminalOwner::Project(project_id);
+            answer(
+                reply,
+                create_owned_terminal(engine, &owner, ticket.as_ref()),
+            );
         }
         EngineRequest::CreateStandaloneTerminal(ticket, reply) => {
             let owner = dux_core::model::TerminalOwner::Standalone;
-            let res = create_terminal_operation(engine, &owner, ticket.as_ref(), |engine| {
-                engine.create_standalone_terminal(24, 80)
-            });
-            let _ = reply.send(res);
+            answer(
+                reply,
+                create_owned_terminal(engine, &owner, ticket.as_ref()),
+            );
         }
-        EngineRequest::TerminalOwnerOf(terminal_id, reply) => {
-            let owner = engine
-                .companion_terminals
-                .get(&terminal_id)
-                .map(|t| t.owner.clone());
-            let _ = reply.send(owner);
-        }
-        EngineRequest::TerminalRoot(terminal_id, reply) => {
-            let root = engine
-                .companion_terminals
-                .get(&terminal_id)
-                .map(|t| (t.owner.clone(), t.client.spawn_dir().to_path_buf()));
-            let _ = reply.send(root);
-        }
+        EngineRequest::TerminalOwnerOf(id, reply) => answer(reply, terminal_owner_of(engine, &id)),
+        EngineRequest::TerminalRoot(id, reply) => answer(reply, terminal_root(engine, &id)),
         EngineRequest::CreateAgentTab(session_id, provider, ticket, reply) => {
-            if let Some(ticket) = &ticket {
-                engine.open_operation(&ticket.id, ticket.kind);
-            }
-            let owner = dux_core::model::TerminalOwner::Session(session_id.clone());
-            let res = engine
-                .admit(
-                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
-                    &engine.inside_admission(&owner),
-                )
-                .map_err(|e| e.to_string())
-                .and_then(|()| create_agent_tab_inner(engine, &session_id, provider));
-            if let Some(ticket) = &ticket {
-                match &res {
-                    // Whether the tab came up is its launch report's to say, so
-                    // the record holds the tab until that report.
-                    Ok((tab_id, _)) => {
-                        engine.operations.hold(
-                            &ticket.id,
-                            &dux_core::operations::Hold::exclusive(
-                                dux_core::engine::InFlightKey::Tab(TabId::new(tab_id.clone())),
-                            ),
-                        );
-                        engine.operations.note(
-                            &ticket.id,
-                            &dux_core::operations::OperationNotes {
-                                created: vec![tab_id.clone()],
-                                ..Default::default()
-                            },
-                        );
-                        engine.operations.await_key(
-                            &ticket.id,
-                            &dux_core::operations::launch_binding_key(tab_id),
-                        );
-                        ticket.hand_back(engine);
-                    }
-                    Err(_) => engine.operations.discard(&ticket.id),
-                }
-            }
-            let _ = reply.send(res);
+            answer(
+                reply,
+                create_agent_tab_request(engine, &session_id, provider, ticket.as_ref()),
+            );
         }
         EngineRequest::StartAgentTab(tab_id, ticket, reply) => {
-            if let Some(ticket) = &ticket {
-                engine.open_operation(&ticket.id, ticket.kind);
-            }
-            // Refused while another change holds the tab or its agent.
-            let admitted = match engine.owning_session_for_tab(&tab_id) {
-                Some(session_id) => engine.admit(
-                    ticket.as_ref().map(|ticket| ticket.id.as_str()),
-                    &engine.tab_admission(&session_id, TabId::new(tab_id.clone())),
-                ),
-                None => Ok(()),
-            };
-            // Already running is success, not a second launch: the card can be
-            // pressed from a page whose spine has not caught up yet.
-            let running = engine.providers.contains_key(TabIdRef::new(&tab_id));
-            let res = match admitted {
-                Err(in_the_way) => Err(in_the_way.to_string()),
-                Ok(()) if running => Ok(()),
-                Ok(()) => launch_agent(engine, &tab_id),
-            };
-            if let Some(ticket) = &ticket {
-                match &res {
-                    // Nothing was started, so this is the end of it.
-                    Ok(()) if running => {
-                        engine.operations.finish(
-                            &ticket.id,
-                            StatusTone::Info,
-                            "",
-                            None,
-                            Instant::now(),
-                        );
-                        ticket.hand_back(engine);
-                    }
-                    // A launch started here or already in flight: its report is the
-                    // outcome, keyed by the slot tab's stored id whatever the route's spelling.
-                    Ok(()) => {
-                        let launched = engine
-                            .session_for_slot_tab(TabIdRef::new(&tab_id))
-                            .map_or_else(
-                                || tab_id.clone(),
-                                |session| session.slot_tab_id().to_string(),
-                            );
-                        engine.operations.await_key(
-                            &ticket.id,
-                            &dux_core::operations::launch_binding_key(&launched),
-                        );
-                        ticket.hand_back(engine);
-                    }
-                    Err(_) => engine.operations.discard(&ticket.id),
-                }
-            }
-            let _ = reply.send(res);
+            answer(
+                reply,
+                start_agent_tab_request(engine, &tab_id, ticket.as_ref()),
+            );
         }
         EngineRequest::SlotTabId(session_id, reply) => {
-            let slot = engine
-                .session_by_id(&session_id)
-                .map(|s| s.slot_tab_id().to_string());
-            let _ = reply.send(slot);
+            answer(reply, slot_tab_id(engine, &session_id));
         }
-        EngineRequest::TabSession(tab_id, reply) => {
-            // This answers "which session owns this EXTRA tab". Slot-ness is
-            // asked of the resolver rather than inferred from "the slot tab has
-            // no `agent_tabs` row", which is a fact about today's storage shape.
-            //
-            // The per-tab route accepts the slot tab and reaches its PTY; the
-            // exclusion here is only about the stored-owner lookup, since the
-            // slot tab's owner is not stored, it is resolved. Callers that must
-            // accept the slot tab ask `is_slot_tab` first (the tab PTY socket
-            // and the REST tab verbs all do).
-            let owner = match engine.session_for_slot_tab(TabIdRef::new(&tab_id)) {
-                Some(_) => None,
-                None => engine
-                    .agent_tabs
-                    .get(TabIdRef::new(&tab_id))
-                    .map(|t| t.session_id.clone()),
-            };
-            let _ = reply.send(owner);
-        }
+        EngineRequest::TabSession(tab_id, reply) => answer(reply, tab_session(engine, &tab_id)),
         EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
             handle_create_agent_branch_plan(engine, &project_id, name, reply);
         }
         EngineRequest::PtyKeyForPaneId(pane_id, reply) => {
-            let _ = reply.send(engine.pty_key_for_pane_id(&pane_id));
+            answer(reply, engine.pty_key_for_pane_id(&pane_id));
         }
         EngineRequest::FileDropDestination(pty_id, reply) => {
-            let _ = reply.send(engine.file_drop_destination(&pty_id));
+            answer(reply, engine.file_drop_destination(&pty_id));
         }
         EngineRequest::FileDropTreeDestination(pty_id, dir, reply) => {
-            let _ = reply.send(engine.file_drop_tree_destination(&pty_id, &dir));
+            answer(reply, engine.file_drop_tree_destination(&pty_id, &dir));
         }
         EngineRequest::FileDropRefreshTarget(pty_id, reply) => {
-            let _ = reply.send(engine.file_drop_refresh_target(&pty_id));
+            answer(reply, engine.file_drop_refresh_target(&pty_id));
         }
-        EngineRequest::SessionWorktree(session_id, reply) => {
-            let worktree = engine
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .map(|s| s.directory().to_string());
-            let _ = reply.send(worktree);
-        }
+        EngineRequest::SessionWorktree(id, reply) => answer(reply, session_worktree(engine, &id)),
         EngineRequest::SessionBranchDeleteInputs(session_id, reply) => {
-            let _ = reply.send(engine.branch_delete_inputs(&session_id));
+            answer(reply, engine.branch_delete_inputs(&session_id));
         }
         EngineRequest::RenamePushedProbe(session_id, reply) => {
-            let _ = reply.send(engine.rename_pushed_probe(&session_id));
+            answer(reply, engine.rename_pushed_probe(&session_id));
         }
         EngineRequest::NoteChangedFilesOutcome(session_id, failure) => {
             engine.post_changed_files_outcome(&session_id, failure.as_deref());
         }
-        EngineRequest::PostStatus(status) => {
-            engine.post_status(status);
-        }
+        EngineRequest::PostStatus(status) => engine.post_status(status),
         EngineRequest::SessionMissingDirectoryReason(session_id, reply) => {
-            // Refreshed off-thread for the same reason the git access is: this
-            // call answers with the previous verdict and the next one sees the
-            // new answer, with no git subprocess on the engine thread.
-            engine.spawn_folder_repo_probe(&session_id);
-            let _ = reply.send(engine.missing_directory_reason(&session_id));
+            answer(reply, missing_directory_reason(engine, &session_id));
         }
         EngineRequest::SessionGitAccess(session_id, reply) => {
-            // Refresh first: the probe is off-thread, so this call answers with
-            // the previous verdict and the next one sees the new answer. That
-            // is how a folder that became a repository is noticed when the
-            // changes panel opens, with no git subprocess on the engine thread.
-            engine.spawn_folder_repo_probe(&session_id);
-            let _ = reply.send(engine.session_git_access(&session_id));
+            answer(reply, session_git_access(engine, &session_id));
         }
         EngineRequest::ProjectPath(project_id, reply) => {
-            let path = engine
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .map(|p| p.path.clone());
-            let _ = reply.send(path);
+            answer(reply, project_path(engine, &project_id));
         }
-        EngineRequest::ResourceTargets(reply) => {
-            let _ = reply.send(engine.resource_monitor_targets());
-        }
-        EngineRequest::Bootstrap(reply) => {
-            let _ = reply.send(engine.bootstrap());
-        }
-        EngineRequest::Spine(reply) => {
-            let _ = reply.send(owned_spine(engine, input_owners));
-        }
+        EngineRequest::ResourceTargets(reply) => answer(reply, engine.resource_monitor_targets()),
+        EngineRequest::Bootstrap(reply) => answer(reply, engine.bootstrap()),
+        EngineRequest::Spine(reply) => answer(reply, owned_spine(engine, input_owners)),
         // SpineJson is handled inline in the loop (it serves the loop-local cache).
         EngineRequest::SpineJson(_) => unreachable!("SpineJson handled in the loop"),
         EngineRequest::Session(id, reply) => {
-            let view = engine.session_view(&id).map(|mut session| {
-                // Same input-owner overlay as the spine (see `owned_spine`), so
-                // the single-session read agrees with `/spine` about who is
-                // driving each tab.
-                overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot());
-                let terminals = engine
-                    .terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(&id));
-                (session, terminals)
-            });
-            let _ = reply.send(view);
+            answer(reply, session_with_terminals(engine, input_owners, &id));
         }
         EngineRequest::CreatedSessionForOp(op_id, reply) => {
-            let _ = reply.send(engine.created_session_for_op(&op_id));
+            answer(reply, engine.created_session_for_op(&op_id));
         }
         EngineRequest::NextChangesRev(session_id, reply) => {
-            // Single chokepoint over the engine's SQLite connection. On a DB
-            // error fall back to 0 (a non-advancing rev), which the client's
-            // `rev >=` apply guard treats as a redundant refetch rather than a
-            // crash; the error is logged for diagnosis.
-            let rev = engine
-                .session_store
-                .next_changes_rev(&session_id)
-                .unwrap_or_else(|e| {
-                    dux_core::logger::error(&format!(
-                        "next_changes_rev failed for session {session_id}: {e}"
-                    ));
-                    0
-                });
-            let _ = reply.send(rev);
+            answer(reply, next_changes_rev(engine, &session_id));
         }
-        EngineRequest::EditorDefault(reply) => {
-            let _ = reply.send(engine.config.editor.default.clone());
-        }
-        EngineRequest::BrowseStartDir(reply) => {
-            let dir = dux_core::project_browser::resolve_start_dir(&engine.config)
-                .to_string_lossy()
-                .to_string();
-            let _ = reply.send(dir);
-        }
+        EngineRequest::EditorDefault(reply) => answer(reply, engine.config.editor.default.clone()),
+        EngineRequest::BrowseStartDir(reply) => answer(reply, browse_start_dir(engine)),
+        // Spawn the off-thread refresh unconditionally. If this worktree is
+        // not the currently-watched one, the resulting `ChangedFilesReady`
+        // (worktree-tagged) is dropped by `events.rs`. In practice the git
+        // HTTP handler only refreshes the worktree it just mutated, which is
+        // normally the watched one.
         EngineRequest::RefreshChangedFiles(worktree) => {
-            // Spawn the off-thread refresh unconditionally. If this worktree is
-            // not the currently-watched one, the resulting `ChangedFilesReady`
-            // (worktree-tagged) is dropped by `events.rs`. In practice the git
-            // HTTP handler only refreshes the worktree it just mutated, which is
-            // normally the watched one.
             engine.spawn_changed_files_refresh(std::path::PathBuf::from(worktree));
         }
         EngineRequest::PullRequestResolutionInputs(reply) => {
-            let _ = reply.send(PullRequestResolutionInputs {
-                projects: engine.projects.clone(),
-                policy: engine.github_host_policy(),
-                protocols: engine.github_git_protocols(),
-                gh_program: engine.gh_probe.program.clone(),
-                gh_available: engine.pr_agent_command_available(),
-                worktrees_root: engine.paths.worktrees_root.clone(),
-            });
+            answer(reply, pull_request_resolution_inputs(engine));
         }
         EngineRequest::DestructiveCheck(path, reply) => {
-            let _ = reply.send(engine.destructive_check(&path));
+            answer(reply, engine.destructive_check(&path));
         }
         EngineRequest::AdmitManagerRemoval {
             project_id,
             path,
             branch,
             reply,
-        } => {
-            let _ = reply.send(engine.admit_manager_removal(&project_id, &path, branch));
-        }
+        } => answer(
+            reply,
+            engine.admit_manager_removal(&project_id, &path, branch),
+        ),
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
-            let inputs = engine
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .cloned()
-                .map(|project| ProjectWorktreeInputs {
-                    project,
-                    paths: engine.paths.clone(),
-                    sessions: engine.sessions.clone(),
-                    busy: engine.busy_folders(),
-                });
-            let _ = reply.send(inputs);
+            answer(reply, project_worktree_inputs(engine, &project_id));
         }
         EngineRequest::SessionStartupLogContext(session_id, reply) => {
-            let context = engine
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                // A standalone agent has no project, so it has no startup-command
-                // log directory either: startup commands are a project's
-                // worktree provisioning step.
-                .and_then(|session| {
-                    session
-                        .project_id()
-                        .map(|project_id| (engine.paths.clone(), project_id.to_string()))
-                });
-            let _ = reply.send(context);
+            answer(reply, session_startup_log_context(engine, &session_id));
         }
         EngineRequest::ProjectStartupLogContext(project_id, reply) => {
-            let context = engine
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .map(|_| engine.paths.clone());
-            let _ = reply.send(context);
+            answer(reply, project_startup_log_context(engine, &project_id));
         }
-        EngineRequest::ReadRawConfig(reply) => {
-            let _ = reply.send(read_raw_config(engine));
-        }
+        EngineRequest::ReadRawConfig(reply) => answer(reply, read_raw_config(engine)),
         EngineRequest::WriteRawConfig(content, token, reply) => {
-            let _ = reply.send(write_raw_config_on_engine(
-                engine,
-                &content,
-                token.as_deref(),
-                config_disk_ahead,
-            ));
+            let written =
+                write_raw_config_on_engine(engine, &content, token.as_deref(), config_disk_ahead);
+            answer(reply, written);
         }
-        EngineRequest::FirstLoadInputs(reply) => {
-            let _ = reply.send(first_load_inputs(engine));
-        }
+        EngineRequest::FirstLoadInputs(reply) => answer(reply, first_load_inputs(engine)),
         EngineRequest::MarkVersionSeen(version, reply) => {
-            let result = engine
-                .session_store
-                .set_last_seen_version(&version)
-                .map_err(|err| format!("could not record the version as seen: {err:#}"));
-            let _ = reply.send(result);
+            answer(reply, mark_version_seen(engine, &version));
         }
     }
+}
+
+/// Send `value` on a request's reply channel. A requester that stopped waiting
+/// dropped its receiver, and nothing is owed to it.
+fn answer<T>(reply: oneshot::Sender<T>, value: T) {
+    let _ = reply.send(value);
+}
+
+/// Attach to an already running companion terminal; an unknown id is an
+/// error, never a spawn.
+fn subscribe_terminal(engine: &Engine, terminal_id: &str) -> Result<PtySubscription, String> {
+    match engine.companion_terminals.get(terminal_id) {
+        Some(terminal) => Ok(terminal.client.subscribe_with_repaint()),
+        None => Err("unknown terminal".to_string()),
+    }
+}
+
+/// Create a terminal for `owner`, followed by `ticket` when the client follows
+/// it. Headless spawn: seed a default 24x80 and let the first attaching client
+/// resize the PTY to its real viewport.
+fn create_owned_terminal(
+    engine: &mut Engine,
+    owner: &dux_core::model::TerminalOwner,
+    ticket: Option<&OperationTicket>,
+) -> Result<(String, String), String> {
+    create_terminal_operation(engine, owner, ticket, |engine| match owner {
+        dux_core::model::TerminalOwner::Session(session_id) => {
+            engine.create_companion_terminal(session_id, 24, 80)
+        }
+        dux_core::model::TerminalOwner::Project(project_id) => {
+            engine.create_project_terminal(project_id, 24, 80)
+        }
+        dux_core::model::TerminalOwner::Standalone => engine.create_standalone_terminal(24, 80),
+    })
+}
+
+/// Who owns a live companion terminal, `None` when the id names nothing.
+fn terminal_owner_of(engine: &Engine, terminal_id: &str) -> Option<TerminalOwner> {
+    engine
+        .companion_terminals
+        .get(terminal_id)
+        .map(|t| t.owner.clone())
+}
+
+/// A live companion terminal's owner and the directory it was spawned in.
+fn terminal_root(
+    engine: &Engine,
+    terminal_id: &str,
+) -> Option<(TerminalOwner, std::path::PathBuf)> {
+    engine
+        .companion_terminals
+        .get(terminal_id)
+        .map(|t| (t.owner.clone(), t.client.spawn_dir().to_path_buf()))
+}
+
+/// Create an agent tab, followed by `ticket` when the client follows it.
+fn create_agent_tab_request(
+    engine: &mut Engine,
+    session_id: &str,
+    provider: Option<String>,
+    ticket: Option<&OperationTicket>,
+) -> Result<(String, String), String> {
+    if let Some(ticket) = ticket {
+        engine.open_operation(&ticket.id, ticket.kind);
+    }
+    let owner = dux_core::model::TerminalOwner::Session(session_id.to_string());
+    let res = engine
+        .admit(
+            ticket.map(|ticket| ticket.id.as_str()),
+            &engine.inside_admission(&owner),
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|()| create_agent_tab_inner(engine, session_id, provider));
+    if let Some(ticket) = ticket {
+        match &res {
+            // Whether the tab came up is its launch report's to say, so
+            // the record holds the tab until that report.
+            Ok((tab_id, _)) => {
+                engine.operations.hold(
+                    &ticket.id,
+                    &dux_core::operations::Hold::exclusive(dux_core::engine::InFlightKey::Tab(
+                        TabId::new(tab_id.clone()),
+                    )),
+                );
+                engine.operations.note(
+                    &ticket.id,
+                    &dux_core::operations::OperationNotes {
+                        created: vec![tab_id.clone()],
+                        ..Default::default()
+                    },
+                );
+                engine.operations.await_key(
+                    &ticket.id,
+                    &dux_core::operations::launch_binding_key(tab_id),
+                );
+                ticket.hand_back(engine);
+            }
+            Err(_) => engine.operations.discard(&ticket.id),
+        }
+    }
+    res
+}
+
+/// Start a dormant tab, followed by `ticket` when the client follows it.
+fn start_agent_tab_request(
+    engine: &mut Engine,
+    tab_id: &str,
+    ticket: Option<&OperationTicket>,
+) -> Result<(), String> {
+    if let Some(ticket) = ticket {
+        engine.open_operation(&ticket.id, ticket.kind);
+    }
+    // Refused while another change holds the tab or its agent.
+    let admitted = match engine.owning_session_for_tab(tab_id) {
+        Some(session_id) => engine.admit(
+            ticket.map(|ticket| ticket.id.as_str()),
+            &engine.tab_admission(&session_id, TabId::new(tab_id.to_string())),
+        ),
+        None => Ok(()),
+    };
+    // Already running is success, not a second launch: the card can be
+    // pressed from a page whose spine has not caught up yet.
+    let running = engine.providers.contains_key(TabIdRef::new(tab_id));
+    let res = match admitted {
+        Err(in_the_way) => Err(in_the_way.to_string()),
+        Ok(()) if running => Ok(()),
+        Ok(()) => launch_agent(engine, tab_id),
+    };
+    if let Some(ticket) = ticket {
+        match &res {
+            // Nothing was started, so this is the end of it.
+            Ok(()) if running => {
+                engine
+                    .operations
+                    .finish(&ticket.id, StatusTone::Info, "", None, Instant::now());
+                ticket.hand_back(engine);
+            }
+            // A launch started here or already in flight: its report is the
+            // outcome, keyed by the slot tab's stored id whatever the route's spelling.
+            Ok(()) => {
+                let launched = engine
+                    .session_for_slot_tab(TabIdRef::new(tab_id))
+                    .map_or_else(
+                        || tab_id.to_string(),
+                        |session| session.slot_tab_id().to_string(),
+                    );
+                engine.operations.await_key(
+                    &ticket.id,
+                    &dux_core::operations::launch_binding_key(&launched),
+                );
+                ticket.hand_back(engine);
+            }
+            Err(_) => engine.operations.discard(&ticket.id),
+        }
+    }
+    res
+}
+
+/// The id of a session's first tab, `None` when the session is unknown.
+fn slot_tab_id(engine: &Engine, session_id: &str) -> Option<String> {
+    engine
+        .session_by_id(session_id)
+        .map(|s| s.slot_tab_id().to_string())
+}
+
+/// Which session owns this EXTRA tab.
+///
+/// Slot-ness is asked of the resolver rather than inferred from "the slot tab
+/// has no `agent_tabs` row", which is a fact about today's storage shape. The
+/// per-tab route accepts the slot tab and reaches its PTY; the exclusion here
+/// is only about the stored-owner lookup, since the slot tab's owner is not
+/// stored, it is resolved. Callers that must accept the slot tab ask
+/// `is_slot_tab` first (the tab PTY socket and the REST tab verbs all do).
+fn tab_session(engine: &Engine, tab_id: &str) -> Option<String> {
+    match engine.session_for_slot_tab(TabIdRef::new(tab_id)) {
+        Some(_) => None,
+        None => engine
+            .agent_tabs
+            .get(TabIdRef::new(tab_id))
+            .map(|t| t.session_id.clone()),
+    }
+}
+
+/// The directory an agent works in, `None` when the session is unknown.
+fn session_worktree(engine: &Engine, session_id: &str) -> Option<String> {
+    engine
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .map(|s| s.directory().to_string())
+}
+
+/// Why an agent's directory is gone, if it is. Refreshed off-thread for the
+/// same reason the git access is: this call answers with the previous verdict
+/// and the next one sees the new answer, with no git subprocess on the engine
+/// thread.
+fn missing_directory_reason(engine: &mut Engine, session_id: &str) -> Option<String> {
+    engine.spawn_folder_repo_probe(session_id);
+    engine.missing_directory_reason(session_id)
+}
+
+/// What git may do in an agent's folder. Refresh first: the probe is
+/// off-thread, so this call answers with the previous verdict and the next one
+/// sees the new answer. That is how a folder that became a repository is
+/// noticed when the changes panel opens, with no git subprocess on the engine
+/// thread.
+fn session_git_access(
+    engine: &mut Engine,
+    session_id: &str,
+) -> Option<dux_core::engine::SessionGitAccess> {
+    engine.spawn_folder_repo_probe(session_id);
+    engine.session_git_access(session_id)
+}
+
+/// A project's path, `None` when the project is unknown.
+fn project_path(engine: &Engine, project_id: &str) -> Option<String> {
+    engine
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.path.clone())
+}
+
+/// One session's view with the same input-owner overlay as the spine (see
+/// `owned_spine`), so the single-session read agrees with `/spine` about who is
+/// driving each tab, and the terminals it owns.
+fn session_with_terminals(
+    engine: &Engine,
+    input_owners: &PtySizeOwners,
+    id: &str,
+) -> Option<(
+    dux_core::viewmodel::SessionView,
+    Vec<dux_core::viewmodel::TerminalView>,
+)> {
+    engine.session_view(id).map(|mut session| {
+        overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot());
+        let terminals =
+            engine.terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(id));
+        (session, terminals)
+    })
+}
+
+/// The next changed-files revision for a session, through the single
+/// chokepoint over the engine's SQLite connection. On a DB error it falls back
+/// to 0 (a non-advancing rev), which the client's `rev >=` apply guard treats as
+/// a redundant refetch rather than a crash; the error is logged for diagnosis.
+fn next_changes_rev(engine: &Engine, session_id: &str) -> u64 {
+    engine
+        .session_store
+        .next_changes_rev(session_id)
+        .unwrap_or_else(|e| {
+            dux_core::logger::error(&format!(
+                "next_changes_rev failed for session {session_id}: {e}"
+            ));
+            0
+        })
+}
+
+/// Where the project browser starts.
+fn browse_start_dir(engine: &Engine) -> String {
+    dux_core::project_browser::resolve_start_dir(&engine.config)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Everything the pull-request reference resolver needs, cloned off the engine.
+fn pull_request_resolution_inputs(engine: &Engine) -> PullRequestResolutionInputs {
+    PullRequestResolutionInputs {
+        projects: engine.projects.clone(),
+        policy: engine.github_host_policy(),
+        protocols: engine.github_git_protocols(),
+        gh_program: engine.gh_probe.program.clone(),
+        gh_available: engine.pr_agent_command_available(),
+        worktrees_root: engine.paths.worktrees_root.clone(),
+    }
+}
+
+/// The inputs to classify a project's managed worktrees, `None` when the
+/// project is unknown.
+fn project_worktree_inputs(engine: &Engine, project_id: &str) -> Option<ProjectWorktreeInputs> {
+    engine
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .cloned()
+        .map(|project| ProjectWorktreeInputs {
+            project,
+            paths: engine.paths.clone(),
+            sessions: engine.sessions.clone(),
+            busy: engine.busy_folders(),
+        })
+}
+
+/// Where an agent's startup-command logs live. A standalone agent has no
+/// project, so it has no startup-command log directory either: startup
+/// commands are a project's worktree provisioning step.
+fn session_startup_log_context(
+    engine: &Engine,
+    session_id: &str,
+) -> Option<(dux_core::config::DuxPaths, String)> {
+    engine
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .and_then(|session| {
+            session
+                .project_id()
+                .map(|project_id| (engine.paths.clone(), project_id.to_string()))
+        })
+}
+
+/// Where a project's startup-command logs live, `None` when it is unknown.
+fn project_startup_log_context(
+    engine: &Engine,
+    project_id: &str,
+) -> Option<dux_core::config::DuxPaths> {
+    engine
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .map(|_| engine.paths.clone())
+}
+
+/// Record `version` as the last one the user has seen.
+fn mark_version_seen(engine: &Engine, version: &str) -> Result<(), String> {
+    engine
+        .session_store
+        .set_last_seen_version(version)
+        .map_err(|err| format!("could not record the version as seen: {err:#}"))
 }
 
 /// Why the raw config editor refused an edit that sets, changes or clears the
@@ -9099,7 +9207,7 @@ mod tests {
     /// somebody answers for it). What it pins is the ANSWERS: an arm that
     /// silently answers `false` for a mutator below fails here.
     fn request_kind_answers() -> Vec<(&'static str, EngineRequest, bool)> {
-        vec![
+        let mut answers = vec![
             (
                 "ApplyWire",
                 EngineRequest::ApplyWire(
@@ -9156,6 +9264,16 @@ mod tests {
                 EngineRequest::CreateProjectTerminal("p1".into(), None, dead_reply()),
                 true,
             ),
+        ];
+        answers.extend(request_kind_answers_second());
+        answers.extend(request_kind_answers_third());
+        answers.extend(request_kind_answers_fourth());
+        answers
+    }
+
+    /// The second part of [`request_kind_answers`].
+    fn request_kind_answers_second() -> Vec<(&'static str, EngineRequest, bool)> {
+        vec![
             (
                 "CreateStandaloneTerminal",
                 EngineRequest::CreateStandaloneTerminal(None, dead_reply()),
@@ -9211,6 +9329,12 @@ mod tests {
                 EngineRequest::PtyKeyForPaneId("s1".into(), dead_reply()),
                 false,
             ),
+        ]
+    }
+
+    /// The third part of [`request_kind_answers`].
+    fn request_kind_answers_third() -> Vec<(&'static str, EngineRequest, bool)> {
+        vec![
             (
                 "FileDropDestination",
                 EngineRequest::FileDropDestination("s1".into(), dead_reply()),
@@ -9269,6 +9393,12 @@ mod tests {
                 EngineRequest::RefreshChangedFiles("/tmp/wt".into()),
                 false,
             ),
+        ]
+    }
+
+    /// The fourth part of [`request_kind_answers`].
+    fn request_kind_answers_fourth() -> Vec<(&'static str, EngineRequest, bool)> {
+        vec![
             (
                 "ProjectWorktreeInputs",
                 EngineRequest::ProjectWorktreeInputs("p1".into(), dead_reply()),
