@@ -58,7 +58,9 @@ impl std::fmt::Debug for RemovalCoordination {
 /// What a startup-command rerun holds while it runs: the agent's one run, and
 /// its hold on the worktree. Both are released when this drops.
 pub struct StartupRerunClaim {
+    /// The agent's one startup-command run.
     pub run: crate::process_sessions::StartupRunGuard,
+    /// The hold on the worktree.
     pub hold: crate::worktree_ops::WorktreeOpGuard,
 }
 

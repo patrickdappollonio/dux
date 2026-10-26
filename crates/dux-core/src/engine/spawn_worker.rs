@@ -485,7 +485,9 @@ pub struct LoopWorkerSpec {
 /// another iteration; `Break` exits the loop.
 #[derive(Debug)]
 pub enum LoopControl {
+    /// Run another iteration.
     Continue,
+    /// Stop the loop.
     Break,
 }
 

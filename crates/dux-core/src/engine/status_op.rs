@@ -42,6 +42,7 @@ pub enum Final {
     /// `sticky` marks the rare outcome that must wait for the user rather than
     /// retiring on a timer; see [`Final::sticky`].
     Message {
+        /// How the sentence reads.
         tone: StatusTone,
         /// The plain sentence the terminal UI prints.
         text: String,
@@ -50,6 +51,8 @@ pub enum Final {
         segments: Option<Vec<ProseSegment>>,
         /// The question the sentence puts to the user, when it is one.
         ask: Option<StatusAsk>,
+        /// Whether the message waits for the user instead of retiring on a
+        /// timer.
         sticky: bool,
         /// Which surfaces withhold this outcome. A quieted keyed final still
         /// retires its spinner; only the sentence is withheld.
@@ -61,6 +64,7 @@ pub enum Final {
 }
 
 impl Final {
+    /// An info-toned final saying `text`.
     pub fn info(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -74,6 +78,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A warning-toned final saying `text`.
     pub fn warning(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -87,6 +92,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// An error-toned final saying `text`.
     pub fn error(text: impl Into<StatusText>) -> Self {
         let text = text.into();
         let ask = text.ask().cloned();
@@ -100,6 +106,7 @@ impl Final {
             quiet_on: QuietSurfaces::LOUD,
         }
     }
+    /// A final that retires the busy with no message.
     pub fn clear() -> Self {
         Final::Clear
     }
@@ -161,6 +168,7 @@ impl Final {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFinal {
     pub(crate) key: String,
+    /// What the op ends on.
     pub outcome: Final,
     /// Delivery audience captured at dispatch time, while
     /// `Engine::current_origin` is still set, and copied onto the emitted
@@ -171,6 +179,7 @@ pub struct ResolvedFinal {
 }
 
 impl ResolvedFinal {
+    /// The final `outcome` for the op keyed `key`, to every surface.
     pub fn new(key: impl Into<String>, outcome: Final) -> Self {
         Self {
             key: key.into(),
@@ -234,6 +243,8 @@ pub fn status_op(pending: impl Into<StatusText>) -> NeedsSuccess {
     }
 }
 
+/// A status op with its busy text and key, before its success final is
+/// declared.
 #[derive(Debug)]
 pub struct NeedsSuccess {
     key: String,
@@ -241,6 +252,7 @@ pub struct NeedsSuccess {
 }
 
 impl NeedsSuccess {
+    /// Declare the final the op ends on when it succeeds.
     pub fn on_success<T, F>(self, f: F) -> NeedsFailure<T>
     where
         F: FnOnce(&T) -> Final + Send + 'static,
@@ -298,6 +310,7 @@ impl<O> std::fmt::Debug for HandlerStatusOp<O> {
 }
 
 impl<O> HandlerStatusOp<O> {
+    /// The op's key, which its busy and final share.
     pub fn id(&self) -> &str {
         &self.key
     }
@@ -391,7 +404,9 @@ impl crate::engine::Engine {
 /// under it, so [`Engine::begin_status_op`] is one method rather than one per
 /// flavour.
 pub trait PendingStatusOp {
+    /// The key the op's busy and final share.
     fn status_key(&self) -> &str;
+    /// The keyed busy shown while the op runs.
     fn pending_status(&self) -> StatusUpdate;
 }
 
@@ -413,6 +428,7 @@ impl<T, E> PendingStatusOp for StatusOp<T, E> {
     }
 }
 
+/// A status op whose success final is declared, before its failure final is.
 pub struct NeedsFailure<T> {
     key: String,
     pending: StatusText,
@@ -430,6 +446,7 @@ impl<T> std::fmt::Debug for NeedsFailure<T> {
 }
 
 impl<T> NeedsFailure<T> {
+    /// Declare the final the op ends on when it fails, completing it.
     pub fn on_failure<E, F>(self, f: F) -> StatusOp<T, E>
     where
         F: FnOnce(&E) -> Final + Send + 'static,

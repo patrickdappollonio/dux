@@ -31,8 +31,11 @@ use super::{Engine, EventReaction};
 /// engine or from a snapshot. One trait, so the exhaustive match in
 /// [`owner_of_reaction`] cannot drift between the live and snapshot forms.
 pub trait WebFollowupOpsView {
+    /// Whether a web pull-request lookup op with this id is pending.
     fn has_pr_lookup(&self, id: &str) -> bool;
+    /// Whether a web add-project op with this id is pending.
     fn has_add_project(&self, id: &str) -> bool;
+    /// Whether a web checkout op with this id is pending.
     fn has_checkout(&self, id: &str) -> bool;
     /// A clone a browser asked for: one the terminal UI started is its own.
     fn has_web_clone(&self, id: &str) -> bool;

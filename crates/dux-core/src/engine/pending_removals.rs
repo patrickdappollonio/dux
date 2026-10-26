@@ -839,6 +839,7 @@ impl Engine {
         )
     }
 
+    /// The guard every checkout move and folder removal coordinate through.
     pub fn checkout_move_guard(&self) -> crate::checkout_move::CheckoutMoveGuard {
         crate::checkout_move::CheckoutMoveGuard::new(
             self.process_registry.clone(),

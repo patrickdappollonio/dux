@@ -96,7 +96,10 @@ pub enum ResumeFallbackOutcome {
     ///
     /// `reaction` is boxed because `EventReaction` is large next to the unit
     /// variants beside it, and clippy's `large_enum_variant` is a CI gate.
-    Retried { reaction: Box<EventReaction> },
+    Retried {
+        /// The relaunch to apply.
+        reaction: Box<EventReaction>,
+    },
     /// A launch is already in flight for this session, so the engine left the
     /// candidate, provider and pin untouched. Treat the session as protected:
     /// skip the destructive exit cleanup and the post-exit UI and PR follow-ups

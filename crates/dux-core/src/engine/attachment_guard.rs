@@ -23,6 +23,7 @@ use crate::wire::WireCommand;
 /// would end. Nothing was changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attached {
+    /// Who is attached to each thing the change would end.
     pub blockers: Vec<Blocker>,
 }
 

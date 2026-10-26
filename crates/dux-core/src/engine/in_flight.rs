@@ -9,6 +9,7 @@ use std::collections::HashSet;
 /// lock of their own as the `pr_sync_control` module has.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum InFlightKey {
+    /// An agent create is running; only one runs at a time.
     CreateAgent,
     /// A provider launch is in flight for this tab. Keyed by tab id, never by
     /// session id: `Engine::tab_resume_decision` asks per tab whether a
@@ -21,6 +22,7 @@ pub enum InFlightKey {
     /// `BranchRenameCompleted`). While set, the branch-sync poller must NOT
     /// classify this session's in-progress rename as external drift.
     BranchRename(String),
+    /// A pull is running in this repository path.
     Pull(String),
     /// A standalone agent's folder is being classified by
     /// `Engine::spawn_folder_repo_probe`. Bounds the probe to one at a time per
@@ -35,6 +37,7 @@ pub enum InFlightKey {
     /// by the `WorkingCopyRecreated` handler, which the worker sends whether the
     /// recreate succeeded or failed.
     RecreateWorkingCopy(String),
+    /// A resource monitor sample is running.
     ResourceStats,
     /// A one-shot PR check (foreground/create/exit trigger) is running for
     /// this session id. Bounds concurrent `gh` subprocesses for one session (a
@@ -87,14 +90,19 @@ pub enum InFlightKey {
     /// [`super::Engine::end_project_folder_action`] at every ending of the
     /// operation.
     ProjectFolder {
+        /// The project folder.
         path: String,
+        /// Which of the three folder operations holds it.
         action: ProjectFolderAction,
     },
     /// The admission keys, one per thing a client can change, held by an
     /// operation record from admission until it finishes ([`crate::operations`]).
     Agent(String),
+    /// One agent tab.
     Tab(TabId),
+    /// One terminal.
     Terminal(String),
+    /// One project.
     Project(String),
     /// The `[macros]` list, as one thing.
     MacroList,
@@ -213,7 +221,12 @@ pub enum BranchRenamePlan {
     /// caller asked for title-only, or the new name already matches the current
     /// branch. `sync_branches` is true only on the title-only path, which also
     /// refreshes branch-sync state, and false for the name-equals-branch no-op.
-    TitleWritten { name: String, sync_branches: bool },
+    TitleWritten {
+        /// The name written.
+        name: String,
+        /// Whether branch-sync state is refreshed too.
+        sync_branches: bool,
+    },
     /// The name was empty, so the custom title was removed and the label is
     /// back to the branch name (for a standalone agent, the folder's name).
     TitleCleared,

@@ -204,7 +204,9 @@ fn log_session_survivors_after_close(
 /// Which kind of PTY was pruned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrunedPtyKind {
+    /// An agent tab's provider.
     Agent,
+    /// A companion terminal.
     Terminal,
 }
 
@@ -422,6 +424,7 @@ pub struct KillTabRuntimeOutcome {
 /// A PTY that `prune_exited_ptys` removed because its child process exited.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
+    /// Whether an agent tab or a terminal was pruned.
     pub kind: PrunedPtyKind,
     /// The tab id (for an agent, the id of whichever tab exited) or terminal
     /// id (for a companion terminal).
@@ -820,7 +823,9 @@ enum ResumedRestart {
 /// of the recreates whose restart is complete.
 #[derive(Debug, Default)]
 pub struct RecreateRestartSweep {
+    /// The relaunches the sweep dispatched, for the surface to apply.
     pub launches: Vec<crate::engine::EventReaction>,
+    /// The finals of the recreates whose restart is complete.
     pub finals: Vec<crate::engine::ResolvedFinal>,
 }
 
@@ -831,10 +836,14 @@ pub enum DetachSessionOutcome {
     /// No such agent (a stale row id from a client that has not caught up).
     UnknownSession,
     /// The agent has no live process, so there is nothing to ask to shut down.
-    NotRunning { label: String },
+    NotRunning {
+        /// The agent's name, for the sentence.
+        label: String,
+    },
     /// Every live tab was asked to shut down and the agent is already listed as
     /// `Detached`; the reaper resolves `key` when the last of them is gone.
     Started {
+        /// The agent's name, for the sentence.
         label: String,
         /// The status key correlating the busy with the reaper's eventual final.
         key: String,
@@ -850,16 +859,21 @@ pub enum DetachSessionOutcome {
 /// What [`Engine::force_detach_session`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForceDetachOutcome {
+    /// No such agent.
     UnknownSession,
     /// Nothing of the agent was running, so nothing was stopped.
     NotRunning {
+        /// The agent's name, for the sentence.
         label: String,
     },
     /// Every process the agent had is gone. `clear_key` is set when this
     /// overtook a polite detach whose spinner the caller must now retire.
     Stopped {
+        /// The agent's name, for the sentence.
         label: String,
+        /// How many processes were stopped.
         stopped: usize,
+        /// The polite detach's status key, when this overtook one.
         clear_key: Option<String>,
     },
 }
@@ -870,7 +884,10 @@ pub enum ForceDetachOutcome {
 /// spinners of completed detach requests.
 #[derive(Debug, Default)]
 pub struct ReapedTerminations {
+    /// Worktree removals that may run now that their agent's processes are
+    /// gone.
     pub removals: Vec<DeferredWorktreeRemoval>,
+    /// The finals of detach requests whose last process is gone.
     pub detach_finals: Vec<crate::engine::ResolvedFinal>,
 }
 
