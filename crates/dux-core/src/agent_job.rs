@@ -3307,7 +3307,7 @@ mod tests {
         request: CreateAgentRequest,
         setup: impl FnOnce(&DuxPaths),
     ) -> JobRun {
-        drive_create_job_run_with(repo, request, setup, Default::default())
+        drive_create_job_run_with(repo, request, setup, CreateJobRegistries::default())
     }
 
     /// Same, with the registries the engine would hand the job.
@@ -3688,7 +3688,7 @@ mod tests {
             (80, 24),
             "op-standalone".to_string(),
             crate::term_identity::TerminalIdentity::default(),
-            Default::default(),
+            CreateJobRegistries::default(),
         );
         let mut run = StandaloneRun::default();
         while let Ok(event) = rx.try_recv() {
@@ -3731,7 +3731,7 @@ mod tests {
             head_branch: "pr-head".to_string(),
             custom_name: Some("pr-agent".to_string()),
             use_existing_branch: true,
-            review_copy: Default::default(),
+            review_copy: crate::worker::ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -3888,7 +3888,7 @@ mod tests {
             head_branch: "pr-head".to_string(),
             custom_name: Some("pr-agent".to_string()),
             use_existing_branch: true,
-            review_copy: Default::default(),
+            review_copy: crate::worker::ReviewCopyConsent::default(),
             ask_id: None,
             agents: Vec::new(),
             cloned: None,
@@ -6353,9 +6353,9 @@ mod tests {
         let db = tempfile::tempdir().unwrap();
         let registries = CreateJobRegistries {
             moves: crate::checkout_move::CheckoutMoveGuard::new(
-                Default::default(),
+                crate::process_sessions::AgentProcessRegistry::default(),
                 db.path().join("sessions.sqlite3"),
-                Default::default(),
+                crate::worktree_ops::WorktreeOps::default(),
                 Vec::new(),
                 vec![("other".to_string(), other.to_string_lossy().into_owned())],
                 Vec::new(),

@@ -1747,7 +1747,7 @@ mod resolution_tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

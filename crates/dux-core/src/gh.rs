@@ -448,7 +448,7 @@ fn run_entries(
     // cares about what is left, not what was spent), so the total is
     // accumulated here instead.
     let mut points = 0i64;
-    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = BTreeMap::default();
     for (i, p) in planned.iter().enumerate() {
         by_host.entry(p.host.clone()).or_default().push(i);
     }
@@ -1435,7 +1435,7 @@ fn looks_rate_limited(text: &str) -> bool {
 fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize>) {
     // Group the chunk's sessions by repo → one aliased `repository(...)` block
     // each. `pos` is the session's index within the chunk (its `s{pos}` alias).
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = Default::default();
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = BTreeMap::default();
     for (pos, &i) in chunk.iter().enumerate() {
         groups
             .entry((planned[i].owner.clone(), planned[i].repo.clone()))
@@ -2228,7 +2228,14 @@ pub(crate) fn run_attach_pull_request_lookup_job(
         };
 
     let result = look_up_pull_request(OsStr::new("gh"), &lookup).map(|metadata| {
-        resolved_pull_request(metadata, project, &lookup, None, Default::default(), None)
+        resolved_pull_request(
+            metadata,
+            project,
+            &lookup,
+            None,
+            crate::worker::ReviewCopyConsent::default(),
+            None,
+        )
     });
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
@@ -2664,7 +2671,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                    protocols: Default::default(),
+                    protocols: BTreeMap::default(),
                 },
                 "{decisive}",
             );
@@ -2767,7 +2774,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
 
@@ -3038,7 +3045,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3061,7 +3068,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
         let calls: Vec<String> = std::fs::read_to_string(&log)
@@ -3216,7 +3223,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3265,7 +3272,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: true,
                 policy: GithubHostPolicy::LegacyNameRule,
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3308,7 +3315,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }
@@ -3347,7 +3354,7 @@ mod host_policy_tests {
                 GhProbe::Decided {
                     available: false,
                     policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                    protocols: Default::default(),
+                    protocols: BTreeMap::default(),
                 },
                 "a rejected credential decides",
             );
@@ -3380,7 +3387,7 @@ mod host_policy_tests {
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         );
     }

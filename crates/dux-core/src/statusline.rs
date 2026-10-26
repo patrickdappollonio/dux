@@ -427,7 +427,7 @@ pub struct StatusTickChanges {
     /// The keys whose statuses cleared; `None` for the anonymous slot.
     pub cleared_keys: Vec<Option<String>>, // None = the anonymous slot cleared
     /// The busy statuses replaced by a warning.
-    pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
+    pub upgraded: Vec<KeyedWireStatus>, // busy→warning replacements
     /// Busy entries whose operation is still registered as running, re-stamped
     /// instead of upgraded. The caller must re-broadcast each one as a live
     /// `busy` status.

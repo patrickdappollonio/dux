@@ -266,7 +266,7 @@ fn project(id: &str, path: &str, name: &str) -> crate::config::ProjectConfig {
         leading_branch: None,
         auto_reopen_agents: None,
         startup_command: None,
-        env: Default::default(),
+        env: std::collections::BTreeMap::default(),
     }
 }
 
@@ -799,7 +799,7 @@ fn hand_edits_and_dux_project_changes_mixed_over_several_saves() {
         leading_branch: None,
         auto_reopen_agents: None,
         startup_command: None,
-        env: Default::default(),
+        env: std::collections::BTreeMap::default(),
     });
     q.save_eager(m.clone()).unwrap();
     let t = read(&path);

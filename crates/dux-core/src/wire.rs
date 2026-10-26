@@ -7616,8 +7616,8 @@ mod tests {
         for outcome in [
             crate::gh::GhProbe::Decided {
                 available: false,
-                policy: crate::gh::GithubHostPolicy::Hosts(Default::default()),
-                protocols: Default::default(),
+                policy: crate::gh::GithubHostPolicy::Hosts(std::collections::BTreeSet::default()),
+                protocols: BTreeMap::default(),
             },
             crate::gh::GhProbe::NotInstalled,
         ] {
@@ -7630,7 +7630,7 @@ mod tests {
                     policy: crate::gh::GithubHostPolicy::Hosts(
                         ["github.com".to_string()].into_iter().collect(),
                     ),
-                    protocols: Default::default(),
+                    protocols: BTreeMap::default(),
                 },
             });
             assert!(engine.pr_sync.is_armed(), "a success arms the work");
@@ -7666,7 +7666,7 @@ mod tests {
                 policy: crate::gh::GithubHostPolicy::Hosts(
                     ["github.com".to_string()].into_iter().collect(),
                 ),
-                protocols: Default::default(),
+                protocols: BTreeMap::default(),
             },
         });
         assert!(engine.pr_sync.is_armed());
@@ -9142,7 +9142,7 @@ mod tests {
                 leading_branch: Some("feature".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed the project row");
         (repo, engine, tmp)
@@ -9459,7 +9459,7 @@ mod tests {
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .expect("seed the project row");
         engine.projects.push(project);
@@ -9840,7 +9840,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feat".to_string(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
@@ -9934,7 +9934,7 @@ mod tests {
             state: "OPEN".to_string(),
             head_ref_name: "feat".to_string(),
             custom_name: None,
-            review_copy: Default::default(),
+            review_copy: crate::worker::ReviewCopyConsent::default(),
             ask_id: None,
         };
         let reaction =
@@ -10141,7 +10141,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
         }
     }
 
@@ -10220,7 +10220,7 @@ mod tests {
                 number: 7,
             }),
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
         }
     }
 
@@ -10275,7 +10275,7 @@ mod tests {
                 random_name,
                 pull_request,
                 add_existing: true,
-                review_copy: Default::default(),
+                review_copy: crate::clone_project::UpfrontReviewCopy::default(),
             },
             other => other,
         }
@@ -10657,7 +10657,7 @@ mod tests {
                 random_name: false,
                 pull_request: None,
                 add_existing: false,
-                review_copy: Default::default(),
+                review_copy: crate::clone_project::UpfrontReviewCopy::default(),
             })
             .expect("a blank name is not refused");
         drive_clone_chain(&mut engine);
@@ -11385,7 +11385,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
         };
         let url = remote.to_string_lossy().into_owned();
         // A project that is already a checkout of acme/matched, and a `gh`
@@ -11515,7 +11515,7 @@ mod tests {
                     random_name: false,
                     pull_request: None,
                     add_existing: true,
-                    review_copy: Default::default(),
+                    review_copy: crate::clone_project::UpfrontReviewCopy::default(),
                 },
                 &dest,
                 &["add_existing needs a pull request."],
@@ -12156,7 +12156,7 @@ mod tests {
             random_name: false,
             pull_request: None,
             add_existing: false,
-            review_copy: Default::default(),
+            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
         };
         let (one, two) = (root.join("race-one"), root.join("race-two"));
         engine
@@ -12375,7 +12375,7 @@ mod tests {
                     destination: dest.clone(),
                     agent_name: "agent".to_string(),
                     stall: std::time::Duration::from_secs(60),
-                    processes: Default::default(),
+                    processes: crate::git::CloneProcesses::default(),
                     pull_request: None,
                     repository_key: None,
                     mode: crate::clone_project::CloneMode::Clone,
@@ -15130,7 +15130,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             // An id with no registered lookup op, so the followup returns no
@@ -15275,7 +15275,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: own_branch.to_string(),
                 custom_name: Some(own_branch.to_string()),
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: Some("req-7".to_string()),
             }),
             status_op_id: None,
@@ -15347,7 +15347,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/head".to_string(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             status_op_id: None,
@@ -15386,7 +15386,7 @@ mod tests {
                 // Legal on the remote, not a legal agent name here.
                 head_ref_name: "feature/add colons: & spaces".to_string(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             status_op_id: Some("op-lookup".to_string()),
@@ -15449,7 +15449,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feat\u{202E}txt.exe".to_string(),
                 custom_name: None,
-                review_copy: Default::default(),
+                review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
             }),
             status_op_id: None,

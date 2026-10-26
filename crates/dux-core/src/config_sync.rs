@@ -316,7 +316,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: std::collections::BTreeMap::default(),
         }
     }
 

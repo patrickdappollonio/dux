@@ -2804,7 +2804,7 @@ mod tests {
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
         }
     }
 
@@ -4389,7 +4389,7 @@ mod tests {
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
-                env: Default::default(),
+                env: BTreeMap::default(),
             })
             .unwrap();
 
@@ -5144,7 +5144,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
-            env: Default::default(),
+            env: BTreeMap::default(),
         };
         store.upsert_project(&mk("a")).unwrap();
         store.upsert_project(&mk("b")).unwrap();
