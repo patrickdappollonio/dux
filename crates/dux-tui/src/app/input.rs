@@ -9493,11 +9493,9 @@ impl App {
         }
     }
 
-    /// Move focus between the rename modal's two controls.
-    ///
-    /// `_forward` is accepted so the call site reads exactly like the new-agent
-    /// modal's, but with only two controls both directions land on the other
-    /// one, so it has nothing to decide here.
+    /// Move focus one step in `direction` between the rename modal's controls:
+    /// the name field and, when the agent has a branch the rename can follow,
+    /// the rename-branch checkbox.
     fn focus_next_rename_session_control(&mut self, direction: FocusStep) {
         if let PromptState::RenameSession {
             focus,

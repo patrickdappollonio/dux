@@ -2239,7 +2239,7 @@ pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
 /// tests that pin the first-creation render and the patch shape call it.
 #[cfg(test)]
 #[deprecated(
-    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[expect(deprecated)] with a reason"
 )]
 #[expect(
     deprecated,
