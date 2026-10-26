@@ -66,11 +66,11 @@ pub fn selected_remote(
 }
 
 /// The target a command talks to. A remote name nothing is saved under
+/// stops the command.
 ///
 /// # Errors
 ///
 /// Fails when the name the flag, the environment or the saved default gives is not a saved remote.
-/// stops the command.
 pub fn choose_target(
     flag: Option<&str>,
     local: LocalFlag,
@@ -103,12 +103,12 @@ impl std::fmt::Debug for Client {
 }
 
 /// Reach `target` and check that it speaks this client's API. `lock_path`
+/// is this machine's `dux.lock`, read only for the local target.
 ///
 /// # Errors
 ///
 /// Fails when the target cannot be reached, needs a sign-in it does not have, or does not speak
 /// this client's API.
-/// is this machine's `dux.lock`, read only for the local target.
 pub fn connect(target: &Target, lock_path: &Path) -> Result<Client, CliError> {
     let client = match target {
         Target::Local => local_client(find_local(lock_path)?),
@@ -192,11 +192,11 @@ pub(crate) fn read_auth_status(target: &str, reply: &Response) -> Result<AuthSta
 }
 
 /// The dux on this machine, ready for requests; `None` when the lock is free. A dux that
+/// holds the lock but does not answer is an error, never worked around.
 ///
 /// # Errors
 ///
 /// Fails when a dux holds the lock but does not answer, or does not speak this client's API.
-/// holds the lock but does not answer is an error, never worked around.
 pub fn connect_local_if_running(lock_path: &Path) -> Result<Option<Client>, CliError> {
     let Some(transport) = find_running_local(lock_path)? else {
         return Ok(None);
@@ -301,11 +301,11 @@ impl Client {
     }
 
     /// Send `request` with this client's sign-in. No reply is
+    /// [`Exit::NotRunning`]; a reply of any status is returned.
     ///
     /// # Errors
     ///
     /// Fails with [`Exit::NotRunning`] when no reply arrives.
-    /// [`Exit::NotRunning`]; a reply of any status is returned.
     pub fn send(&self, mut request: Request) -> Result<Response, CliError> {
         request.bearer = self.token.clone();
         self.transport
@@ -314,22 +314,22 @@ impl Client {
     }
 
     /// [`Self::send`] without mapping a missing reply, for a caller that
+    /// retries one.
     ///
     /// # Errors
     ///
     /// Fails when no whole reply arrives, as the transport reports it.
-    /// retries one.
     pub fn try_send(&self, mut request: Request) -> Result<Response, TransportError> {
         request.bearer = self.token.clone();
         self.transport.send(&request)
     }
 
     /// [`Transport::stream`] with this client's sign-in: `request`'s reply
+    /// handed to `on_body` as it arrives. A cut stream is [`Exit::NotRunning`].
     ///
     /// # Errors
     ///
     /// Fails with [`Exit::NotRunning`] when the dux cannot be reached or the stream is cut.
-    /// handed to `on_body` as it arrives. A cut stream is [`Exit::NotRunning`].
     pub fn stream(
         &self,
         mut request: Request,
@@ -353,11 +353,12 @@ impl Client {
         }
     }
 
+    /// GET `path` and read its JSON; any status but 200 is the dux's refusal.
+    ///
     /// # Errors
     ///
     /// Fails when the dux cannot be reached, answers with anything but 200, or sends a body that is
     /// not the expected JSON.
-    /// GET `path` and read its JSON; any status but 200 is the dux's refusal.
     pub fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
         let reply = self.send(Request::get(path))?;
         if reply.status != 200 {
@@ -366,10 +367,11 @@ impl Client {
         self.parse(&reply)
     }
 
+    /// `reply`'s body as `T`.
+    ///
     /// # Errors
     ///
     /// Fails when the body is not the expected JSON.
-    /// `reply`'s body as `T`.
     pub fn parse<T: DeserializeOwned>(&self, reply: &Response) -> Result<T, CliError> {
         serde_json::from_slice(&reply.body).map_err(|error| {
             CliError::new(
