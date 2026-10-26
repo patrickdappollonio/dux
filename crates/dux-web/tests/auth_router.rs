@@ -177,7 +177,7 @@ impl Dux {
                 RouterParams::plain_http()
                     .with_console(
                         dux_web::console::Console::server_log_only(Arc::new(log)),
-                        false,
+                        dux_web::server::AccessLog::Off,
                     )
                     .with_live_exposure(tailnet_exposure())
                     .with_auth_reload(Arc::new(move || {
@@ -1363,7 +1363,11 @@ async fn dismissing_the_warning_writes_the_setting_and_keeps_the_comments() {
 #[tokio::test]
 async fn host_and_origin_checks_still_run_before_and_around_the_login() {
     let dux = Dux::start_tuned(&format!("password_hash = \"{}\"", hash_of(PASSWORD)), |p| {
-        p.with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+        p.with_host_allowlist(
+            vec!["127.0.0.1".parse().unwrap()],
+            vec![],
+            dux_web::host_guard::TailscaleLiteralRule::Refuse,
+        )
     });
     let foreign = dux
         .send(
@@ -1588,7 +1592,7 @@ async fn when_dux_cannot_check_tailscale_this_machine_signs_in_and_is_told_why()
             p.with_live_exposure(cell).with_host_allowlist(
                 vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
                 Vec::new(),
-                false,
+                dux_web::host_guard::TailscaleLiteralRule::Refuse,
             )
         }
     });

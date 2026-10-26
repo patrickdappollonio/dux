@@ -589,6 +589,16 @@ pub(crate) enum ModeStep {
     Refuse,
 }
 
+/// Whether this run was started with `--no-tailscale`, which forces the `no`
+/// mode for as long as the run lasts whatever the config says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoTailscaleFlag {
+    /// The flag was given.
+    Given,
+    /// It was not: the configured mode applies.
+    Absent,
+}
+
 /// The steps a live mode change implies. Pure, so the whole transition matrix is
 /// a unit test rather than nine socket-holding integration cases.
 ///
@@ -599,9 +609,9 @@ pub(crate) fn plan_mode_change(
     prev: TailscaleMode,
     next: TailscaleMode,
     bound: Option<SocketAddr>,
-    forced_no: bool,
+    flag: NoTailscaleFlag,
 ) -> Vec<ModeStep> {
-    if forced_no && next.wants_tailscale() {
+    if flag == NoTailscaleFlag::Given && next.wants_tailscale() {
         return vec![ModeStep::Refuse];
     }
     let mut steps = Vec::new();
@@ -1179,11 +1189,10 @@ pub(crate) fn funnel_state_news(
 
 /// What a serve that does not consult Tailscale says once at start: what that
 /// choice costs, because the Funnel checks are what it turns off.
-pub(crate) fn not_checking_tailscale(forced_no: bool) -> String {
-    let why = if forced_no {
-        "--no-tailscale"
-    } else {
-        "[server] tailscale = \"no\""
+pub(crate) fn not_checking_tailscale(flag: NoTailscaleFlag) -> String {
+    let why = match flag {
+        NoTailscaleFlag::Given => "--no-tailscale",
+        NoTailscaleFlag::Absent => "[server] tailscale = \"no\"",
     };
     format!(
         "dux is not checking Tailscale ({why}), so it cannot rule out a Tailscale Funnel or \
@@ -2506,7 +2515,7 @@ mod tests {
         // → no: stop watching, drop the leg, and stop admitting Tailscale Host
         // literals, in that order.
         assert_eq!(
-            plan_mode_change(Auto, No, Some(ts), false),
+            plan_mode_change(Auto, No, Some(ts), NoTailscaleFlag::Absent),
             vec![
                 ModeStep::StopWatcher,
                 ModeStep::Unbind(ts),
@@ -2515,7 +2524,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan_mode_change(Yes, No, Some(ts), false),
+            plan_mode_change(Yes, No, Some(ts), NoTailscaleFlag::Absent),
             vec![
                 ModeStep::StopWatcher,
                 ModeStep::Unbind(ts),
@@ -2525,18 +2534,18 @@ mod tests {
             "yes watches the name, so that watcher stops too"
         );
         assert_eq!(
-            plan_mode_change(No, No, None, false),
+            plan_mode_change(No, No, None, NoTailscaleFlag::Absent),
             vec![ModeStep::SetHostLiterals(false), ModeStep::ForgetIdentity]
         );
 
         // → yes: a one-shot detection, with the literals opened first so a
         // tailnet browser is not refused between the two steps.
         assert_eq!(
-            plan_mode_change(No, Yes, None, false),
+            plan_mode_change(No, Yes, None, NoTailscaleFlag::Absent),
             vec![ModeStep::SetHostLiterals(true), ModeStep::DetectAndBind]
         );
         assert_eq!(
-            plan_mode_change(Auto, Yes, Some(ts), false),
+            plan_mode_change(Auto, Yes, Some(ts), NoTailscaleFlag::Absent),
             vec![
                 ModeStep::StopWatcher,
                 ModeStep::SetHostLiterals(true),
@@ -2547,14 +2556,14 @@ mod tests {
         // → auto: a watcher whose first probe is immediate, so the command has a
         // visible outcome rather than one a period later.
         assert_eq!(
-            plan_mode_change(No, Auto, None, false),
+            plan_mode_change(No, Auto, None, NoTailscaleFlag::Absent),
             vec![
                 ModeStep::SetHostLiterals(true),
                 ModeStep::StartWatcher { probe_now: true },
             ]
         );
         assert_eq!(
-            plan_mode_change(Yes, Auto, Some(ts), false),
+            plan_mode_change(Yes, Auto, Some(ts), NoTailscaleFlag::Absent),
             vec![
                 ModeStep::SetHostLiterals(true),
                 ModeStep::StartWatcher { probe_now: true },
@@ -2565,7 +2574,7 @@ mod tests {
         // the start is what replaces it: an explicit stop as well would be a
         // second one.
         assert_eq!(
-            plan_mode_change(Auto, Auto, Some(ts), false),
+            plan_mode_change(Auto, Auto, Some(ts), NoTailscaleFlag::Absent),
             vec![
                 ModeStep::SetHostLiterals(true),
                 ModeStep::StartWatcher { probe_now: true },
@@ -2574,7 +2583,7 @@ mod tests {
         // yes → yes still re-detects: the user asked for the address to be
         // looked up again, which is the only thing "yes" does.
         assert_eq!(
-            plan_mode_change(Yes, Yes, None, false),
+            plan_mode_change(Yes, Yes, None, NoTailscaleFlag::Absent),
             vec![
                 ModeStep::StopWatcher,
                 ModeStep::SetHostLiterals(true),
@@ -2588,7 +2597,7 @@ mod tests {
         use TailscaleMode::{Auto, No, Yes};
         for next in [Auto, Yes] {
             assert_eq!(
-                plan_mode_change(No, next, None, true),
+                plan_mode_change(No, next, None, NoTailscaleFlag::Given),
                 vec![ModeStep::Refuse],
                 "--no-tailscale outranks a live {next:?}"
             );
@@ -2596,7 +2605,7 @@ mod tests {
         // Asking for the mode the run is already in is not a refusal: the
         // ordinary plan runs, and on a forced-no run it has nothing to undo.
         assert_eq!(
-            plan_mode_change(No, No, None, true),
+            plan_mode_change(No, No, None, NoTailscaleFlag::Given),
             vec![ModeStep::SetHostLiterals(false), ModeStep::ForgetIdentity]
         );
     }

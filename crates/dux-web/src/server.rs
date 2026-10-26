@@ -147,7 +147,7 @@ pub struct AppState {
     /// Whether this run was started with `--no-tailscale`. Projected into the
     /// bootstrap document so the Preferences row can say the flag outranks the
     /// saved value for as long as this run lasts.
-    pub tailscale_forced_no: bool,
+    pub tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
     /// Overrides how long a create handler waits for its resource to surface
     /// before answering `202 Accepted`. `None` in every real serve, which uses
     /// [`crate::rest_common::CREATE_AWAIT_TIMEOUT`] and
@@ -371,7 +371,7 @@ pub struct RouterParams {
     pub console: Console,
     /// Whether the per-request access log is on (`[server] access_log`). Off by
     /// default; `dux server` and the flip set it from config.
-    pub access_log: bool,
+    pub access_log: AccessLog,
     /// Cap on concurrent EVENTS `/ws/events` connections
     /// (`[server] max_websocket_events_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS`]; the serve
@@ -443,7 +443,7 @@ pub struct RouterParams {
     /// Whether the allowlist accepts IP literals in Tailscale's own ranges
     /// (`[server] tailscale` is not `"no"`). Only meaningful when the host guard
     /// is active (see [`bound_ips`]).
-    pub tailscale_host_literals: bool,
+    pub tailscale_host_literals: crate::host_guard::TailscaleLiteralRule,
     /// The serve's Tailscale-mode cell, when a serve is behind this router. The
     /// Host guard reads rule 5 from it per request, so a mode change applied
     /// while dux serves moves the guard with the listener. `None` in tests and on
@@ -471,7 +471,7 @@ pub struct RouterParams {
     /// tests.
     pub tailscale_mode_control: Option<crate::serve_legs::TailscaleModeControl>,
     /// Whether this run was started with `--no-tailscale`.
-    pub tailscale_forced_no: bool,
+    pub tailscale_forced_no: crate::serve_legs::NoTailscaleFlag,
     /// How long a create handler waits for its resource before answering `202`.
     /// `None` uses the real windows; overridden only by tests (see
     /// [`RouterParams::with_create_await_timeout`]).
@@ -502,6 +502,26 @@ pub struct RouterParams {
     pub(crate) hand_over: Option<Arc<tokio::sync::watch::Sender<bool>>>,
 }
 
+/// Whether the per-request access log prints (`[server] access_log`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessLog {
+    /// Print a line per request.
+    On,
+    /// Print none.
+    Off,
+}
+
+impl AccessLog {
+    /// What `[server] access_log` says.
+    pub fn of(server: &dux_core::config::ServerConfig) -> Self {
+        if server.access_log {
+            Self::On
+        } else {
+            Self::Off
+        }
+    }
+}
+
 impl RouterParams {
     /// Plain-HTTP defaults: a no-op console, no access log, host guard off.
     /// Used by the loopback/Tailscale/proxy serve paths and every test harness;
@@ -510,7 +530,7 @@ impl RouterParams {
     pub fn plain_http() -> Self {
         Self {
             console: Console::noop(),
-            access_log: false,
+            access_log: AccessLog::Off,
             max_websocket_events_connections:
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections:
@@ -528,14 +548,14 @@ impl RouterParams {
             file_drop_max_concurrency: dux_core::config::DEFAULT_FILE_DROP_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
-            tailscale_host_literals: false,
+            tailscale_host_literals: crate::host_guard::TailscaleLiteralRule::Refuse,
             live_tailscale_host_literals: None,
             live_own_magicdns_name: None,
             live_exposure: None,
             auth_reload: None,
             socket_opening_hook: None,
             tailscale_mode_control: None,
-            tailscale_forced_no: false,
+            tailscale_forced_no: crate::serve_legs::NoTailscaleFlag::Absent,
             create_await_timeout: None,
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
             ownership_publisher: None,
@@ -658,7 +678,7 @@ impl RouterParams {
     /// this so handler events and the access middleware reach stdout; the flip
     /// leaves the no-op console in place.
     #[must_use]
-    pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
+    pub fn with_console(mut self, console: Console, access_log: AccessLog) -> Self {
         self.console = console;
         self.access_log = access_log;
         self
@@ -701,7 +721,7 @@ impl RouterParams {
         mut self,
         bound_ips: Vec<IpAddr>,
         configured: Vec<String>,
-        tailscale_host_literals: bool,
+        tailscale_host_literals: crate::host_guard::TailscaleLiteralRule,
     ) -> Self {
         self.bound_ips = bound_ips;
         self.configured_hosts = configured;
@@ -713,8 +733,11 @@ impl RouterParams {
     /// mode differs from the configured one that [`crate::router_params`]
     /// derived (a run started with `--no-tailscale`).
     #[must_use]
-    pub fn with_tailscale_host_literals(mut self, allowed: bool) -> Self {
-        self.tailscale_host_literals = allowed;
+    pub fn with_tailscale_host_literals(
+        mut self,
+        rule: crate::host_guard::TailscaleLiteralRule,
+    ) -> Self {
+        self.tailscale_host_literals = rule;
         self
     }
 
@@ -725,10 +748,10 @@ impl RouterParams {
     pub fn with_tailscale_mode_control(
         mut self,
         control: crate::serve_legs::TailscaleModeControl,
-        forced_no: bool,
+        no_tailscale: crate::serve_legs::NoTailscaleFlag,
     ) -> Self {
         self.tailscale_mode_control = Some(control);
-        self.tailscale_forced_no = forced_no;
+        self.tailscale_forced_no = no_tailscale;
         self
     }
 
@@ -1126,26 +1149,20 @@ pub fn build_app(
 /// response. Reads the console + toggle off [`AppState`] and delegates to the
 /// shared [`log_request`] core.
 async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    log_request(
-        &state.console,
-        state.live_limits.access_log(),
-        request,
-        next,
-    )
-    .await
+    log_request(&state.console, &state.live_limits, request, next).await
 }
 
 /// The shared access-log core, written to the console only and never to `dux.log`.
 async fn log_request(
     console: &Console,
-    access_log: bool,
+    limits: &crate::engine_actor::LiveServerLimits,
     request: Request,
     next: Next,
 ) -> Response {
     // Check the cheap gates BEFORE allocating anything: a disabled access log or a
     // no-op console pays nothing per request. /healthz is intentionally never
     // logged (probe noise). Compared against the borrowed path, no allocation.
-    let log = access_log && console.is_recording() && request.uri().path() != "/healthz";
+    let log = limits.access_log() && console.is_recording() && request.uri().path() != "/healthz";
     if !log {
         return next.run(request).await;
     }
@@ -5681,8 +5698,8 @@ mod tests {
     async fn access_log_emits_request_lines_and_skips_healthz() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
-        let (console, sink) = Console::test_capture(false);
-        let params = RouterParams::plain_http().with_console(console, true);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::On);
         let app = build_app(handle, Router::new(), params);
 
         // A 200 on an open route is logged.
@@ -5777,9 +5794,9 @@ mod tests {
     async fn access_log_toggle_off_emits_nothing() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
-        let (console, sink) = Console::test_capture(false);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
         // access_log = false.
-        let params = RouterParams::plain_http().with_console(console, false);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::Off);
         let app = build_app(handle, Router::new(), params);
 
         let _ = app
@@ -5806,8 +5823,8 @@ mod tests {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let handle = test_engine_handle(tmp.path());
         let limits = handle.live_limits();
-        let (console, sink) = Console::test_capture(false);
-        let params = RouterParams::plain_http().with_console(console, false);
+        let (console, sink) = Console::test_capture(crate::console::Coloring::Plain);
+        let params = RouterParams::plain_http().with_console(console, AccessLog::Off);
         let app = build_app(handle, Router::new(), params);
 
         let _ = app
@@ -5822,7 +5839,7 @@ mod tests {
             .unwrap();
         assert!(sink.contents().is_empty(), "bound with the log off");
 
-        limits.set_access_log(true);
+        limits.set_access_log(AccessLog::On);
         let _ = app
             .oneshot(
                 axum::http::Request::builder()
@@ -5851,7 +5868,7 @@ mod tests {
         // to prove the console-activity gate (not just the toggle) suppresses it.
         let params = RouterParams {
             console: Console::noop(),
-            access_log: true,
+            access_log: AccessLog::On,
             ..RouterParams::plain_http()
         };
         // The router still builds; nothing should panic and nothing is observable
@@ -7000,7 +7017,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec![],
-                false,
+                crate::host_guard::TailscaleLiteralRule::Refuse,
             ),
         );
 
@@ -7055,7 +7072,11 @@ mod tests {
             handle,
             Router::new(),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Refuse,
+                )
                 .with_live_tailscale_host_literals(Arc::clone(&literals)),
         );
         let tailnet_probe = || {
@@ -7113,7 +7134,11 @@ mod tests {
             handle,
             Router::new(),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Admit,
+                )
                 .with_live_tailscale_host_literals(Arc::clone(&literals))
                 .with_live_own_magicdns_name(own_name.clone()),
         );
@@ -7171,7 +7196,11 @@ mod tests {
             handle,
             Router::new().route("/probe-mutation", axum::routing::post(|| async { "ok" })),
             RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], true)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Admit,
+                )
                 .with_live_own_magicdns_name(own_name),
         );
         let relayed = axum::http::Request::builder()
@@ -7216,7 +7245,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec!["old.example.com".to_string()],
-                false,
+                crate::host_guard::TailscaleLiteralRule::Refuse,
             ),
         );
         let status = |host: &'static str| {
@@ -7255,7 +7284,7 @@ mod tests {
             RouterParams::plain_http().with_host_allowlist(
                 vec!["127.0.0.1".parse().unwrap()],
                 vec![],
-                true,
+                crate::host_guard::TailscaleLiteralRule::Admit,
             ),
         );
 

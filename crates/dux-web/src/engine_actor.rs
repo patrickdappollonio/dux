@@ -758,8 +758,9 @@ impl LiveServerLimits {
         self.access_log.load(Ordering::Relaxed)
     }
 
-    pub fn set_access_log(&self, value: bool) {
-        self.access_log.store(value, Ordering::Relaxed);
+    pub fn set_access_log(&self, value: crate::server::AccessLog) {
+        self.access_log
+            .store(value == crate::server::AccessLog::On, Ordering::Relaxed);
     }
 
     /// Deadline on one of a PTY socket's opening sends, in seconds, read when a
@@ -806,7 +807,7 @@ impl LiveServerLimits {
     /// text it was read from, when there is one (see [`crate::auth::LiveAuth::store`]).
     pub fn store_from(&self, server: &dux_core::config::ServerConfig, source: Option<&str>) {
         self.set_search_index_max_files(server.search_index_max_files);
-        self.set_access_log(server.access_log);
+        self.set_access_log(crate::server::AccessLog::of(server));
         // As dux uses them, through the functions `dux config get` reports.
         self.set_pty_send_timeout_seconds(
             dux_core::config_effective::effective_pty_send_timeout_seconds(
@@ -5355,7 +5356,7 @@ mod tests {
         let (handle, ends) = build_actor_channels(&engine);
         let limits = handle.live_limits();
         limits.set_search_index_max_files(9);
-        limits.set_access_log(false);
+        limits.set_access_log(crate::server::AccessLog::Off);
         let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
 
         let mut config = engine.config.clone();
@@ -5685,7 +5686,7 @@ mod tests {
         let (handle, ends) = build_actor_channels(&engine);
         let limits = handle.live_limits();
         limits.set_search_index_max_files(9);
-        limits.set_access_log(false);
+        limits.set_access_log(crate::server::AccessLog::Off);
         let svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
 
         let mut config = engine.config.clone();

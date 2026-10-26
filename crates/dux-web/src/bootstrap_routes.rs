@@ -32,7 +32,8 @@ async fn get_bootstrap(State(state): State<AppState>) -> Response {
             // `--no-tailscale` belongs to the process that parsed the command
             // line, not to the engine's config, so it is injected here for the
             // same reason the first-load screen is.
-            view.tailscale_forced_no = state.tailscale_forced_no;
+            view.tailscale_forced_no =
+                state.tailscale_forced_no == crate::serve_legs::NoTailscaleFlag::Given;
             Json(view).into_response()
         }
         None => (

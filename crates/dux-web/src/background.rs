@@ -148,7 +148,7 @@ impl BackgroundServer {
             &console,
             // Gated by the console too: with no `server.log` to write, the console
             // records nothing and a request line costs nothing.
-            engine.config.server.access_log,
+            crate::server::AccessLog::of(&engine.config.server),
             SignalPolicy::Inherited,
             crate::BackgroundHooks {
                 ownership_publisher: Some(Arc::clone(&publisher)),

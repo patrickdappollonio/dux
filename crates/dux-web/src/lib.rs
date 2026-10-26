@@ -84,10 +84,10 @@ use dux_core::tailscale::TailscaleUnavailable;
 use crate::console::Console;
 use crate::engine_actor::LoopControl;
 use crate::serve_legs::{
-    LegCommand, LegStatus, LegStep, ModeStep, ServeShutdown, StartupLeg, TailscaleModeControl,
-    WATCH_PERIOD, Watch, WatchEvent, admitted_own_name, desired_leg, identity_news, plan_leg_step,
-    plan_mode_change, serve_hint, tailnet_urls, wait_for_leg_shutdown, waiting_note,
-    watch_tailscale,
+    LegCommand, LegStatus, LegStep, ModeStep, NoTailscaleFlag, ServeShutdown, StartupLeg,
+    TailscaleModeControl, WATCH_PERIOD, Watch, WatchEvent, admitted_own_name, desired_leg,
+    identity_news, plan_leg_step, plan_mode_change, serve_hint, tailnet_urls,
+    wait_for_leg_shutdown, waiting_note, watch_tailscale,
 };
 use crate::server::RouterParams;
 use dux_core::serve_log::{Banner, ListenerRow, StartupNotes};
@@ -159,10 +159,13 @@ fn warn_if_ui_not_built() {
 /// Returns `(console, access_log)`. An unrecognized color value is warned about
 /// on the console it built, as its first line. The flip does NOT call this: the
 /// setting governs `dux server`'s stdout only, and the flip's viewer is themed.
-fn build_console(config: &dux_core::config::Config, paths: &DuxPaths) -> (Console, bool) {
+fn build_console(
+    config: &dux_core::config::Config,
+    paths: &DuxPaths,
+) -> (Console, server::AccessLog) {
     let setting = &config.server.color;
-    let color = crate::console::detect(setting);
-    let mut console = Console::stdout(color, dux_core::serve_log::StdStreams::current());
+    let coloring = crate::console::detect(setting);
+    let mut console = Console::stdout(coloring, dux_core::serve_log::StdStreams::current());
     if let Some(log) = open_server_log(config, paths) {
         console = console.with_server_log(log);
     }
@@ -172,8 +175,10 @@ fn build_console(config: &dux_core::config::Config, paths: &DuxPaths) -> (Consol
     }
     // Only on a terminal: a QR code in a piped log is a screenful of blocks
     // nobody can scan.
-    console.set_qr_codes(config.server.qr_codes && std::io::stdout().is_terminal());
-    (console, config.server.access_log)
+    if config.server.qr_codes && std::io::stdout().is_terminal() {
+        console.show_qr_codes();
+    }
+    (console, server::AccessLog::of(&config.server))
 }
 
 /// Open `server.log` for a serve. One that cannot be opened is a warning in `dux.log`
@@ -547,6 +552,11 @@ fn run_plain_http(
         tailscale,
         forced_no,
     } = plan;
+    let no_tailscale = if forced_no {
+        NoTailscaleFlag::Given
+    } else {
+        NoTailscaleFlag::Absent
+    };
     warn_if_ui_not_built();
     let mut engine = bootstrap_or_report(paths, startup_warnings, &mut std::io::stderr())?;
     // The lock is held and the config read, so the control socket is bound
@@ -670,11 +680,11 @@ fn run_plain_http(
                 // serves under the EFFECTIVE one, so `--no-tailscale` would otherwise
                 // leave the guard admitting tailnet literals. The live cell is what
                 // the guard actually reads, and it starts from the effective mode.
-                .with_tailscale_host_literals(tailscale.wants_tailscale())
+                .with_tailscale_host_literals(host_guard::TailscaleLiteralRule::for_mode(tailscale))
                 .with_live_tailscale_host_literals(mode_control.host_literals())
                 .with_live_own_magicdns_name(mode_control.own_magicdns_name())
                 .with_live_exposure(mode_control.exposure())
-                .with_tailscale_mode_control(mode_control.clone(), forced_no),
+                .with_tailscale_mode_control(mode_control.clone(), no_tailscale),
             );
 
             // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
@@ -763,7 +773,7 @@ fn run_plain_http(
             // On `auto`, watch the Tailscale interface for the rest of the run.
             let mut tailscale_loop = TailscaleLoop::new(
                 tailscale,
-                forced_no,
+                no_tailscale,
                 Some(primary),
                 initial_tailscale_leg,
                 &mode_control,
@@ -1025,7 +1035,7 @@ pub(crate) struct TailscaleLoop {
     mode: TailscaleMode,
     /// Set by `--no-tailscale`. Refuses every live mode that wants Tailscale for
     /// as long as this run lasts; the config value still saves for the next one.
-    forced_no: bool,
+    no_tailscale: NoTailscaleFlag,
     /// The primary listener's address, which is where the leg's PORT comes from.
     /// `None` when it could not be read, in which case there is nothing to hang a
     /// leg on.
@@ -1087,7 +1097,7 @@ pub(crate) struct TailscaleLoop {
     password_set: crate::host_guard::PasswordSet,
     /// Whether dux runs inside a container, where a Tailscale outside it is
     /// invisible. Read once; injected by tests.
-    in_container: bool,
+    container: Container,
     /// Whether any look has landed yet, so the container warning is said at
     /// start or not at all.
     first_look_landed: bool,
@@ -1095,6 +1105,16 @@ pub(crate) struct TailscaleLoop {
     /// that cannot spawn one.
     #[cfg(test)]
     refuse_watcher_threads: bool,
+}
+
+/// Whether dux runs inside a container, where a Tailscale outside it is
+/// invisible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Container {
+    /// Inside one.
+    Inside,
+    /// Not inside one.
+    Outside,
 }
 
 /// The injected name probe, see [`TailscaleLoop::with_identity`].
@@ -1120,7 +1140,7 @@ type OneShotLook = (
 impl TailscaleLoop {
     pub(crate) fn new(
         mode: TailscaleMode,
-        forced_no: bool,
+        no_tailscale: NoTailscaleFlag,
         primary: Option<SocketAddr>,
         initial_leg: Option<SocketAddr>,
         control: &TailscaleModeControl,
@@ -1129,7 +1149,7 @@ impl TailscaleLoop {
         let (leg_tx, leg_rx) = tokio::sync::mpsc::channel(LEG_COMMAND_QUEUE);
         Self {
             mode,
-            forced_no,
+            no_tailscale,
             primary,
             bound: {
                 let bound = control.bound_leg();
@@ -1158,7 +1178,11 @@ impl TailscaleLoop {
             password_set: control.password_set(),
             // Unit tests default to a plain host, so a suite run inside a
             // container is not told about it by every test.
-            in_container: !cfg!(test) && dux_core::container::running_in_container(),
+            container: if !cfg!(test) && dux_core::container::running_in_container() {
+                Container::Inside
+            } else {
+                Container::Outside
+            },
             first_look_landed: false,
             #[cfg(test)]
             refuse_watcher_threads: false,
@@ -1167,8 +1191,8 @@ impl TailscaleLoop {
 
     /// Say whether dux runs inside a container, instead of asking the system.
     #[cfg(test)]
-    pub(crate) fn in_container(mut self, in_container: bool) -> Self {
-        self.in_container = in_container;
+    pub(crate) fn in_container(mut self, container: Container) -> Self {
+        self.container = container;
         self
     }
 
@@ -1292,7 +1316,7 @@ impl TailscaleLoop {
         // Tailscale outside it. dux serves anyway (that setup is the
         // operator's), and says so once, at start.
         if first_look
-            && self.in_container
+            && self.container == Container::Inside
             && matches!(
                 reason,
                 TailscaleUnavailable::CommandMissing | TailscaleUnavailable::DaemonStopped
@@ -1341,8 +1365,8 @@ impl TailscaleLoop {
     /// that costs. Both serves call it right after building their loop; a live
     /// switch to `no` says its own sentence.
     pub(crate) fn say_not_checking(&self, console: &Console) {
-        if self.forced_no || !self.mode.wants_tailscale() {
-            let message = crate::serve_legs::not_checking_tailscale(self.forced_no);
+        if self.no_tailscale == NoTailscaleFlag::Given || !self.mode.wants_tailscale() {
+            let message = crate::serve_legs::not_checking_tailscale(self.no_tailscale);
             dux_core::logger::warn(&format!("[server] {message}"));
             console.bind_degraded(&message);
         }
@@ -1834,7 +1858,7 @@ async fn apply_mode_request(
         let _ = previous.reply.send(TailscaleModeOutcome::Superseded);
     }
 
-    let steps = plan_mode_change(ts.mode, mode, ts.bound_addr(), ts.forced_no);
+    let steps = plan_mode_change(ts.mode, mode, ts.bound_addr(), ts.no_tailscale);
     // Before the first step, not part way through one: without a primary there
     // is no port to hang a leg on, so a mode that wants one must not open the
     // Host guard's tailnet-literal rule or move the recorded mode either. A
@@ -2184,7 +2208,7 @@ pub(crate) struct BackgroundHooks {
 fn router_params(
     config: &dux_core::config::Config,
     console: Console,
-    access_log: bool,
+    access_log: server::AccessLog,
     bound_ips: Vec<std::net::IpAddr>,
     hooks: BackgroundHooks,
 ) -> RouterParams {
@@ -2220,7 +2244,7 @@ fn router_params(
         .with_host_allowlist(
             bound_ips,
             server.allowed_hosts.clone(),
-            server.tailscale_mode().wants_tailscale(),
+            host_guard::TailscaleLiteralRule::for_mode(server.tailscale_mode()),
         );
     let params = match ownership_publisher {
         Some(slot) => params.with_ownership_publisher(slot),
@@ -2348,7 +2372,7 @@ impl ServeCore {
         control_socket: Option<std::os::unix::net::UnixListener>,
         config: &dux_core::config::Config,
         console: &Console,
-        access_log: bool,
+        access_log: server::AccessLog,
         signals: SignalPolicy,
         // Passed straight through to `build_app`. Default for every serve but the
         // background one, which is the only one with a terminal UI beside it.
@@ -2444,7 +2468,7 @@ impl ServeCore {
                     .with_live_tailscale_host_literals(mode_control.host_literals())
                     .with_live_own_magicdns_name(mode_control.own_magicdns_name())
                     .with_live_exposure(mode_control.exposure())
-                    .with_tailscale_mode_control(mode_control.clone(), false),
+                    .with_tailscale_mode_control(mode_control.clone(), NoTailscaleFlag::Absent),
             )
         };
 
@@ -2453,7 +2477,7 @@ impl ServeCore {
             let _guard = runtime.enter();
             let mut tailscale_loop = TailscaleLoop::new(
                 tailscale,
-                false,
+                NoTailscaleFlag::Absent,
                 // No loopback listener address means no port to hang the leg on,
                 // so this deliberately starts no watcher rather than guessing one.
                 primary,
@@ -2608,7 +2632,7 @@ impl ServeCore {
             router_params(
                 config,
                 Console::noop(),
-                false,
+                crate::server::AccessLog::Off,
                 Vec::new(),
                 BackgroundHooks::default(),
             )
@@ -2803,7 +2827,9 @@ pub fn serve_with_engine(
     }
     // The QR codes reach the log viewer as lines, exactly as `dux server`
     // prints them.
-    console.set_qr_codes(engine.config.server.qr_codes);
+    if engine.config.server.qr_codes {
+        console.show_qr_codes();
+    }
     for warning in &startup.warnings {
         console.warn(warning);
     }
@@ -2840,7 +2866,7 @@ pub fn serve_with_engine(
 
     // The flip has taken the terminal over with its own status screen, so it OWNS
     // the process's stop signals for as long as it serves.
-    let access_log = engine.config.server.access_log;
+    let access_log = server::AccessLog::of(&engine.config.server);
     let FlipHooks { restore_terminal } = hooks;
     // Shared by the second-signal hatch and the quit's wait, so either way of
     // forcing the quit kills the children and logs the same lines.
@@ -3670,7 +3696,7 @@ mod tests {
         );
         let mut tailscale_loop = super::TailscaleLoop::new(
             TailscaleMode::Auto,
-            false,
+            crate::serve_legs::NoTailscaleFlag::Absent,
             Some("127.0.0.1:8080".parse().unwrap()),
             Some(ts),
             &control,
@@ -3912,7 +3938,8 @@ mod tests {
     /// word, for the same run.
     #[test]
     fn dux_server_and_the_flip_log_the_same_lines_for_the_same_run() {
-        let (stdout, sink) = crate::console::Console::test_capture(true);
+        let (stdout, sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Colored);
         let ring = dux_core::activity::ActivityRing::new(1000);
         let flip = crate::console::Console::test_ring_capture(ring.clone());
         a_whole_run(&stdout);
@@ -4197,7 +4224,8 @@ mod tests {
     /// when nothing settles (the shutdown never started), it exits anyway.
     #[test]
     fn a_forced_exit_does_not_wait_forever_for_the_children() {
-        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (console, _sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         // The wind-down started and never finished.
         quit.start();
@@ -4214,7 +4242,8 @@ mod tests {
     /// being wound down does not sit out the settle bound.
     #[test]
     fn a_second_ctrl_c_before_the_wind_down_exits_at_once() {
-        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (console, _sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         let force = super::ForceExit::new(console, None, quit)
             .with_settle_bound(std::time::Duration::from_secs(10));
@@ -4285,7 +4314,8 @@ mod tests {
     /// exits 130; the hatch exits only if the owner does not get there in time.
     #[test]
     fn a_second_signal_during_the_wind_down_hands_the_exit_to_the_owner() {
-        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (console, _sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         quit.start();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -4317,7 +4347,8 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (console, _sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         quit.start();
         let force = super::ForceExit::new(console, None, quit.clone())
@@ -4367,7 +4398,8 @@ mod tests {
         let mut config = engine.config.clone();
         config.server.port = 4568;
         engine.config_writer.save_lazy(config);
-        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (console, _sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let quit = std::sync::Arc::new(super::QuitForce::default());
         let (handle, join) = crate::engine_actor::spawn_engine_thread_with_console(
             engine,
@@ -4399,7 +4431,8 @@ mod tests {
     /// still reach stdout: the flush covers every way out.
     #[test]
     fn an_early_failure_still_flushes_what_was_logged() {
-        let (console, sink) = crate::console::Console::test_capture(false);
+        let (console, sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let result: anyhow::Result<()> = super::flushing(&console, || {
             console.warn("a startup warning");
             Err(anyhow::anyhow!("the runtime would not build"))
@@ -4410,7 +4443,8 @@ mod tests {
 
     #[test]
     fn a_forced_exit_flushes_the_console_before_exiting() {
-        let (console, sink) = crate::console::Console::test_capture(false);
+        let (console, sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let force = super::ForceExit::new(console, None, settled_quit());
         let printed_at_exit = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         force.run(|_| {
@@ -4443,7 +4477,7 @@ mod tests {
         let mut config = dux_core::config::Config::default();
         config.server.log_path = "logs/web.log".to_string();
         let (console, access_log) = super::build_console(&config, &paths_in(dir.path()));
-        assert!(access_log);
+        assert_eq!(access_log, crate::server::AccessLog::On);
         console.error("listener lost");
         console.flush();
         let written = std::fs::read_to_string(dir.path().join("logs/web.log")).unwrap();
@@ -4793,14 +4827,14 @@ mod live_tailscale_mode_tests {
     impl Harness {
         fn start(
             mode: TailscaleMode,
-            forced_no: bool,
+            no_tailscale: NoTailscaleFlag,
             primary: Option<SocketAddr>,
             initial_leg: Option<SocketAddr>,
             detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
         ) -> Self {
             Self::start_inner(
                 mode,
-                forced_no,
+                no_tailscale,
                 primary,
                 initial_leg,
                 detect,
@@ -4811,7 +4845,7 @@ mod live_tailscale_mode_tests {
 
         fn start_inner(
             mode: TailscaleMode,
-            forced_no: bool,
+            no_tailscale: NoTailscaleFlag,
             primary: Option<SocketAddr>,
             initial_leg: Option<SocketAddr>,
             detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
@@ -4820,14 +4854,14 @@ mod live_tailscale_mode_tests {
         ) -> Self {
             Self::start_inner_every(
                 mode,
-                forced_no,
+                no_tailscale,
                 primary,
                 initial_leg,
                 detect,
                 identify,
                 console,
                 FAST_LOOK,
-                false,
+                Container::Outside,
             )
         }
 
@@ -4836,32 +4870,32 @@ mod live_tailscale_mode_tests {
         fn start_in_container(
             identify: crate::IdentityProbe,
             console: Console,
-            in_container: bool,
+            container: Container,
         ) -> Self {
             Self::start_inner_every(
                 TailscaleMode::Auto,
-                false,
+                NoTailscaleFlag::Absent,
                 None,
                 None,
                 Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
                 Some(identify),
                 console,
                 FAST_LOOK,
-                in_container,
+                container,
             )
         }
 
         #[allow(clippy::too_many_arguments)]
         fn start_inner_every(
             mode: TailscaleMode,
-            forced_no: bool,
+            no_tailscale: NoTailscaleFlag,
             primary: Option<SocketAddr>,
             initial_leg: Option<SocketAddr>,
             detect: Arc<dyn Fn() -> Result<IpAddr, TailscaleUnavailable> + Send + Sync>,
             identify: Option<crate::IdentityProbe>,
             console: Console,
             period: Duration,
-            in_container: bool,
+            container: Container,
         ) -> Self {
             let (control, mode_rx) = TailscaleModeControl::new(
                 tokio::runtime::Handle::current(),
@@ -4875,8 +4909,8 @@ mod live_tailscale_mode_tests {
                 let _ = shutdown.register_leg(addr);
             }
             let mut ts =
-                TailscaleLoop::new(mode, forced_no, primary, initial_leg, &control, detect)
-                    .in_container(in_container);
+                TailscaleLoop::new(mode, no_tailscale, primary, initial_leg, &control, detect)
+                    .in_container(container);
             if let Some(identify) = identify {
                 ts = ts.with_identity(identify, None).with_watch_period(period);
             }
@@ -4914,7 +4948,7 @@ mod live_tailscale_mode_tests {
         ) -> Self {
             Self::start_inner(
                 mode,
-                false,
+                NoTailscaleFlag::Absent,
                 primary,
                 None,
                 detect,
@@ -4932,14 +4966,14 @@ mod live_tailscale_mode_tests {
         ) -> Self {
             Self::start_inner_every(
                 mode,
-                false,
+                NoTailscaleFlag::Absent,
                 primary,
                 None,
                 Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
                 Some(identify),
                 Console::noop(),
                 period,
-                false,
+                Container::Outside,
             )
         }
 
@@ -4953,7 +4987,7 @@ mod live_tailscale_mode_tests {
         ) -> Self {
             Self::start_inner(
                 mode,
-                false,
+                NoTailscaleFlag::Absent,
                 primary,
                 None,
                 Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
@@ -5384,7 +5418,7 @@ mod live_tailscale_mode_tests {
         let (identify, _slot) = scripted_identity(named("box.tail.ts.net", &[]));
         let mut ts = TailscaleLoop::new(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             &control,
@@ -5535,7 +5569,11 @@ mod live_tailscale_mode_tests {
             crate::test_support::test_engine_handle(tmp),
             axum::Router::new(),
             crate::server::RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Refuse,
+                )
                 .with_live_tailscale_host_literals(h.control.host_literals())
                 .with_live_own_magicdns_name(h.control.own_magicdns_name())
                 .with_live_exposure(h.control.exposure()),
@@ -5568,7 +5606,11 @@ mod live_tailscale_mode_tests {
             handle,
             axum::Router::new(),
             crate::server::RouterParams::plain_http()
-                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![], false)
+                .with_host_allowlist(
+                    vec!["127.0.0.1".parse().unwrap()],
+                    vec![],
+                    crate::host_guard::TailscaleLiteralRule::Refuse,
+                )
                 .with_live_tailscale_host_literals(h.control.host_literals())
                 .with_live_own_magicdns_name(h.control.own_magicdns_name())
                 .with_live_exposure(h.control.exposure()),
@@ -5708,7 +5750,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let ring = dux_core::activity::ActivityRing::new(2000);
         let console = Console::capture(ring.clone());
-        console.set_qr_codes(true);
+        console.show_qr_codes();
         let (identify, slot) = scripted_identity(named(
             "demo-box.old-tailnet.ts.net",
             &[("https://demo-box.old-tailnet.ts.net", false)],
@@ -5752,7 +5794,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let ring = dux_core::activity::ActivityRing::new(2000);
         let console = Console::capture(ring.clone());
-        console.set_qr_codes(true);
+        console.show_qr_codes();
         let opened = Arc::new(AtomicBool::new(false));
         let gate = Arc::clone(&opened);
         let identify: crate::IdentityProbe = Arc::new(move || {
@@ -5769,7 +5811,7 @@ mod live_tailscale_mode_tests {
             .unwrap();
         let h = Harness::start_inner(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             Some(leg),
             Arc::new(move || Ok(leg.ip())),
@@ -5816,7 +5858,15 @@ mod live_tailscale_mode_tests {
             let console = Console::capture(ring.clone());
             let answer = reason.clone();
             let probe: crate::IdentityProbe = Arc::new(move || Err(answer.clone()));
-            let h = Harness::start_in_container(probe, console, in_container);
+            let h = Harness::start_in_container(
+                probe,
+                console,
+                if in_container {
+                    Container::Inside
+                } else {
+                    Container::Outside
+                },
+            );
             let deadline = tokio::time::Instant::now() + WAIT;
             while h.control.exposure().funnel() != crate::exposure::FunnelState::Open {
                 assert!(
@@ -5844,7 +5894,7 @@ mod live_tailscale_mode_tests {
         let ring = dux_core::activity::ActivityRing::new(2000);
         let console = Console::capture(ring.clone());
         let (identify, _slot) = scripted_identity(named("box.tail.ts.net", &[]));
-        let h = Harness::start_in_container(identify, console, true);
+        let h = Harness::start_in_container(identify, console, Container::Inside);
         let deadline = tokio::time::Instant::now() + WAIT;
         while h.control.exposure().funnel() != crate::exposure::FunnelState::Open {
             assert!(tokio::time::Instant::now() < deadline);
@@ -5868,13 +5918,13 @@ mod live_tailscale_mode_tests {
         );
         let mut ts = TailscaleLoop::new(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             None,
             None,
             &control,
             Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
         )
-        .in_container(true);
+        .in_container(Container::Inside);
         ts.apply_look(
             Err(TailscaleUnavailable::CommandMissing),
             &console,
@@ -5922,7 +5972,11 @@ mod live_tailscale_mode_tests {
             let console = Console::capture(ring.clone());
             let ts = TailscaleLoop::new(
                 mode,
-                forced_no,
+                if forced_no {
+                    NoTailscaleFlag::Given
+                } else {
+                    NoTailscaleFlag::Absent
+                },
                 None,
                 None,
                 &control,
@@ -6061,7 +6115,7 @@ mod live_tailscale_mode_tests {
         let leg = SocketAddr::new(leg_ip(), primary_addr.port());
         let h = Harness::start(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             Some(leg),
             Arc::new(|| Ok(leg_ip())),
@@ -6090,7 +6144,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let h = Harness::start(
             TailscaleMode::No,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(|| Ok(leg_ip())),
@@ -6125,7 +6179,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let h = Harness::start(
             TailscaleMode::No,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
@@ -6145,7 +6199,7 @@ mod live_tailscale_mode_tests {
         let (probed_tx, probed_rx) = std::sync::mpsc::channel();
         let h = Harness::start(
             TailscaleMode::No,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(move || {
@@ -6172,7 +6226,7 @@ mod live_tailscale_mode_tests {
         let leg = SocketAddr::new(leg_ip(), primary_addr.port());
         let h = Harness::start(
             TailscaleMode::Yes,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             Some(leg),
             // The interface is still there, so the watcher's first probe plans
@@ -6193,7 +6247,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let h = Harness::start(
             TailscaleMode::No,
-            true,
+            NoTailscaleFlag::Given,
             Some(primary_addr),
             None,
             Arc::new(|| Ok(leg_ip())),
@@ -6223,7 +6277,7 @@ mod live_tailscale_mode_tests {
         let leg = SocketAddr::new(leg_ip(), primary_addr.port());
         let h = Harness::start(
             TailscaleMode::Yes,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
@@ -6266,7 +6320,7 @@ mod live_tailscale_mode_tests {
         let parked = std::sync::Mutex::new(parked);
         let h = Harness::start(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(move || {
@@ -6323,7 +6377,7 @@ mod live_tailscale_mode_tests {
         let parked = std::sync::Mutex::new(parked);
         let h = Harness::start(
             TailscaleMode::Auto,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             Some(leg),
             Arc::new(move || {
@@ -6377,7 +6431,7 @@ mod live_tailscale_mode_tests {
         for mode in [TailscaleMode::Auto, TailscaleMode::Yes] {
             let h = Harness::start(
                 TailscaleMode::No,
-                false,
+                NoTailscaleFlag::Absent,
                 None,
                 None,
                 Arc::new(|| Ok(leg_ip())),
@@ -6410,7 +6464,7 @@ mod live_tailscale_mode_tests {
         let _occupied = std::net::TcpListener::bind(leg).expect("the leg address is free");
         let h = Harness::start(
             TailscaleMode::Yes,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             Some(leg),
             Arc::new(|| Ok(leg_ip())),
@@ -6456,7 +6510,13 @@ mod live_tailscale_mode_tests {
     async fn a_superseded_request_is_answered_rather_than_left_hanging() {
         let (_primary, primary_addr) = primary_listener();
         let (detect, mut started, release) = parked_detector();
-        let h = Harness::start(TailscaleMode::No, false, Some(primary_addr), None, detect);
+        let h = Harness::start(
+            TailscaleMode::No,
+            NoTailscaleFlag::Absent,
+            Some(primary_addr),
+            None,
+            detect,
+        );
 
         let control = h.control.clone();
         let first = tokio::spawn(async move { control.set_mode(TailscaleMode::Yes).await });
@@ -6484,7 +6544,13 @@ mod live_tailscale_mode_tests {
         // cannot hold a teardown, a leg death or a watcher command behind it.
         let (_primary, primary_addr) = primary_listener();
         let (detect, mut started, release) = parked_detector();
-        let h = Harness::start(TailscaleMode::No, false, Some(primary_addr), None, detect);
+        let h = Harness::start(
+            TailscaleMode::No,
+            NoTailscaleFlag::Absent,
+            Some(primary_addr),
+            None,
+            detect,
+        );
 
         let control = h.control.clone();
         let pending = tokio::spawn(async move { control.set_mode(TailscaleMode::Yes).await });
@@ -6514,7 +6580,7 @@ mod live_tailscale_mode_tests {
         let (_primary, primary_addr) = primary_listener();
         let h = Harness::start(
             TailscaleMode::No,
-            false,
+            NoTailscaleFlag::Absent,
             Some(primary_addr),
             None,
             Arc::new(|| Err(TailscaleUnavailable::NoAddress)),
@@ -6667,7 +6733,8 @@ mod auth_warning_mode_tests {
         let engine = engine_in(tmp.path());
         let config = engine.config.clone();
         let (handle, _join) = engine_actor::spawn_engine_thread(engine);
-        let (console, sink) = crate::console::Console::test_capture(true);
+        let (console, sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Colored);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _app = {
             let _guard = runtime.enter();
@@ -6677,7 +6744,7 @@ mod auth_warning_mode_tests {
                 router_params(
                     &config,
                     console,
-                    false,
+                    crate::server::AccessLog::Off,
                     vec!["0.0.0.0".parse().unwrap()],
                     BackgroundHooks::default(),
                 ),
@@ -6705,7 +6772,8 @@ mod auth_warning_mode_tests {
     fn dux_server_says_on_its_console_that_a_new_control_socket_waits_for_a_restart() {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let engine = engine_in(tmp.path());
-        let (console, sink) = crate::console::Console::test_capture(false);
+        let (console, sink) =
+            crate::console::Console::test_capture(crate::console::Coloring::Plain);
         let (handle, _join) = engine_actor::spawn_engine_thread_with_console(
             engine,
             console,
@@ -6747,7 +6815,7 @@ mod auth_warning_mode_tests {
             None,
             &config,
             &Console::capture(ring.clone()),
-            false,
+            crate::server::AccessLog::Off,
             SignalPolicy::Inherited,
             BackgroundHooks::default(),
         )
