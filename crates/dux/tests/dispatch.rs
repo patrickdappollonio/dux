@@ -25,7 +25,7 @@ impl Run {
 fn home(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dux-dispatch-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("make the config folder");
     dir
 }
 
@@ -506,7 +506,7 @@ fn serve_as_dux(
 ) -> dux_core::lockfile::SingleInstanceLock {
     use std::io::{BufRead, BufReader, Write};
     let socket = dir.join("dux.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind the socket");
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
@@ -531,7 +531,8 @@ fn serve_as_dux(
             );
         }
     });
-    let lock = dux_core::lockfile::SingleInstanceLock::acquire(&dir.join("dux.lock")).unwrap();
+    let lock = dux_core::lockfile::SingleInstanceLock::acquire(&dir.join("dux.lock"))
+        .expect("this test plays the running dux");
     std::fs::write(
         dir.join("dux.lock"),
         format!(
@@ -540,7 +541,7 @@ fn serve_as_dux(
             socket.display()
         ),
     )
-    .unwrap();
+    .expect("name the socket in dux.lock");
     lock
 }
 
@@ -617,8 +618,8 @@ fn a_server_start_on_a_config_it_cannot_use_says_why_and_exits_one() {
 /// would. Returns the port.
 fn serve_as_remote(reply: fn(&str) -> (u16, &'static str)) -> u16 {
     use std::io::{BufRead, BufReader, Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let port = listener.local_addr().expect("the bound port").port();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };

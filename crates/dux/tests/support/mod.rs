@@ -5,8 +5,6 @@
 //! A journey that serves dux is a test binary of its own, because the dux it
 //! starts runs until the process ends.
 
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -45,11 +43,11 @@ pub(crate) fn dux(home: &Path, args: &[&str], input: &str) -> Run {
     child
         .stdin
         .take()
-        .unwrap()
+        .expect("stdin is piped")
         .write_all(input.as_bytes())
-        .unwrap();
+        .expect("feed dux its input");
     Run {
-        out: child.wait_with_output().unwrap(),
+        out: child.wait_with_output().expect("dux ends"),
     }
 }
 
@@ -57,12 +55,12 @@ pub(crate) fn dux(home: &Path, args: &[&str], input: &str) -> Run {
 pub(crate) fn home(prefix: &str, name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dux-{prefix}-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).expect("make the config folder");
     std::fs::set_permissions(
         &dir,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
-    .unwrap();
+    .expect("make the config folder owner-only");
     dir
 }
 
@@ -78,9 +76,9 @@ pub(crate) fn serve(root: &Path) -> u16 {
         socket_path: root.join("dux.sock"),
     };
     let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
+        .expect("bind a loopback port")
         .local_addr()
-        .unwrap()
+        .expect("the bound port")
         .port();
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let plan = ServerPlan {
