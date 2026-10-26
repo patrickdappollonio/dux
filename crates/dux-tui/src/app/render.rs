@@ -22,7 +22,7 @@ use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
 };
-use super::pr_clone::{PrFolder, PrReviewQuestion};
+use super::pr_clone::{PrFolder, PrReviewQuestion, PullRequestClone};
 use super::pty_ownership::PtyTakeoverCard;
 use super::text_input::TextInput;
 use super::{
@@ -223,6 +223,415 @@ enum BlinkPhase {
     Lit,
     /// The slot is blank.
     Dark,
+}
+
+/// A tab pill's top and bottom border rows: the rounded frame, with a tee where
+/// the divider between the ordinal cell (`ord_w` wide) and the label cell
+/// (`label_w` wide) meets it.
+fn tab_pill_borders(corners: &border::Set<'_>, ord_w: u16, label_w: u16) -> (String, String) {
+    let top = format!(
+        "{}{}{}{}{}",
+        corners.top_left,
+        corners.horizontal_top.repeat(usize::from(ord_w)),
+        ratatui::symbols::line::HORIZONTAL_DOWN,
+        corners.horizontal_top.repeat(usize::from(label_w)),
+        corners.top_right
+    );
+    let bottom = format!(
+        "{}{}{}{}{}",
+        corners.bottom_left,
+        corners.horizontal_bottom.repeat(usize::from(ord_w)),
+        ratatui::symbols::line::HORIZONTAL_UP,
+        corners.horizontal_bottom.repeat(usize::from(label_w)),
+        corners.bottom_right
+    );
+    (top, bottom)
+}
+
+/// The take-over card's title and sentence for `card`, about the pane's
+/// `target` ("agent" or "terminal"), with the title fitted to `inner_w`.
+///
+/// The kind sits inside a different sentence in each arm, so each arm carries
+/// its whole prose rather than an opening a shared tail is glued to: the free
+/// card's sentence names what happened to the pty, and the word `agent` or
+/// `terminal` belongs inside that first clause.
+fn takeover_card_wording(
+    card: &crate::app::pty_ownership::PtyTakeoverCard,
+    target: &str,
+    inner_w: u16,
+) -> (String, String) {
+    // `Active on {device}` is ten characters of chrome plus the two padding
+    // spaces, so a pane with no room for a name falls back to the title that
+    // needs none rather than printing an ellipsis where the device goes.
+    const NAMED_TITLE_CHROME: u16 = 12;
+    match card {
+        crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device } => {
+            let title = match device.as_deref() {
+                Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
+                    " Active on {} ",
+                    ellipsize_end(device, usize::from(inner_w - NAMED_TITLE_CHROME))
+                ),
+                _ => " Active on another device ".to_string(),
+            };
+            (
+                title,
+                format!(
+                    "Only one device can type at a time. Take over to drive this \
+                     {target} from here."
+                ),
+            )
+        }
+        crate::app::pty_ownership::PtyTakeoverCard::Free => (
+            " Running in the background ".to_string(),
+            format!(
+                "The device driving this {target} disconnected, so we kept the \
+                 {target} running in the background to avoid losing any progress. \
+                 Take over to drive it from here."
+            ),
+        ),
+    }
+}
+
+/// One file or folder row of the changes list, as the drawn window lays it out.
+#[derive(Clone, Copy)]
+struct ChangesEntryLook<'a> {
+    file: &'a ChangedFile,
+    /// How many expanded folders it sits inside.
+    depth: usize,
+    /// A folder whose contents are shown under it.
+    expanded: bool,
+    /// The row the cursor is on.
+    selected: bool,
+    base_style: Style,
+    /// The row's width, minus the reserved right-margin column.
+    content_width: usize,
+}
+
+/// Each pill's label-cell text, ordinal-cell width and whole width.
+///
+/// The label cell sits right of the ordinal segment's divider. Every pill is
+/// laid out identically: a one-column activity slot ahead of the label,
+/// mirrored by an equal gutter after it so the text sits centered. The slot is
+/// reserved as a plain space and written cell-by-cell later with a style of its
+/// own, so the pill's width never depends on what the tab is doing and the
+/// strip cannot reflow or jitter. The active tab is marked by its highlight
+/// alone, so no marker is prefixed.
+///
+/// A pill's whole width is the ordinal cell, +2 for the box's border columns,
+/// +1 for the full-height divider between the ordinal and label cells, +1 for
+/// the gap that separates adjacent boxes. Measured in real display columns
+/// (unicode-width via `CellWidth`), not `chars().count()`: a char-count
+/// measure undercounts double-width CJK/emoji glyphs in custom provider labels,
+/// which would overflow the segment's recorded region.
+fn tab_strip_segments(
+    items: &[TabStripItem],
+    seg_ordinal: &[String],
+) -> (Vec<String>, Vec<u16>, Vec<u16>) {
+    const GLYPH_SLOT: &str = " ";
+    let seg_content: Vec<String> = items
+        .iter()
+        .map(|item| {
+            let label = &item.label;
+            format!(" {GLYPH_SLOT} {label} {GLYPH_SLOT} ")
+        })
+        .collect();
+    let seg_ord_w: Vec<u16> = seg_ordinal
+        .iter()
+        .map(|t| t.as_str().cell_width())
+        .collect();
+    let seg_w: Vec<u16> = seg_content
+        .iter()
+        .zip(&seg_ord_w)
+        .map(|(t, ow)| t.as_str().cell_width() + ow + 4)
+        .collect();
+    (seg_content, seg_ord_w, seg_w)
+}
+
+/// Paint every cell of `area` blank in `style`, so leftover buffer cells never
+/// bleed through.
+fn fill_blank(buf: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buf[(x, y)].set_symbol(" ").set_style(style);
+        }
+    }
+}
+
+/// The review-copy checkbox's label on the pull request clone form.
+const PR_REVIEW_COPY_LABEL: &str = "Create a review copy";
+
+/// The pull request clone form's button that picks an existing project instead.
+const PR_CHOOSE_EXISTING_LABEL: &str = "Choose an existing project\u{2026}";
+
+/// What the pull request clone form measures before it draws.
+struct PrCloneLayout {
+    /// The form's opening prose.
+    body: Vec<Line<'static>>,
+    /// The pull request's title and branch.
+    facts_lines: Vec<Line<'static>>,
+    /// The review-copy question for the name in the field, if any.
+    question_lines: Vec<Line<'static>>,
+    /// Whether the review-copy box shows.
+    has_box: bool,
+    /// Every row's height, top to bottom.
+    rows: [u16; 17],
+}
+
+/// The plain clone form's rows inside its frame: three labelled fields, a
+/// gap, the checkbox `checkbox_height` rows tall, a gap, and the hints.
+fn clone_form_areas(inner: Rect, checkbox_height: u16) -> [Rect; 10] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Length(checkbox_height),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .areas(inner)
+}
+
+/// The name-new-agent dialog's box that copies the checkout's uncommitted
+/// changes into the new worktree.
+const NAME_NEW_AGENT_COPY_LABEL: &str = "Copy uncommitted changes from the project checkout";
+
+/// The name-new-agent dialog's review-copy box.
+const NAME_NEW_AGENT_REVIEW_LABEL: &str = "Create a review copy";
+
+/// What the name-new-agent dialog measures before it lays out.
+#[derive(Default)]
+struct NameNewAgentHeights {
+    randomize_checkbox_height: u16,
+    copy_checkbox_height: u16,
+    /// The review-copy question's warning lines, when a refused pull-request
+    /// create put it.
+    review_warning: Option<Vec<Line<'static>>>,
+    review_checkbox_height: u16,
+}
+
+/// The sentence and path that say what the new agent starts from, for the
+/// requests that start from an existing worktree.
+fn name_new_agent_context(request: &CreateAgentRequest) -> Option<(&'static str, String)> {
+    match request {
+        CreateAgentRequest::ExistingManagedWorktree { worktree_path, .. } => Some((
+            " This starts a fresh agent session in ",
+            worktree_path.display().to_string(),
+        )),
+        CreateAgentRequest::ForkExternalWorktree {
+            source_worktree_path,
+            ..
+        } => Some((
+            " External worktree will be copied into a fresh managed dux worktree: ",
+            source_worktree_path.display().to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// The macro body's visible lines, one row each, inset one column.
+fn render_macro_body_lines(frame: &mut Frame<'_>, text_inner: Rect, input: &TextInput) {
+    for (index, line_text) in input.visible_lines().iter().enumerate() {
+        if index >= usize::from(text_inner.height) {
+            break;
+        }
+        let line_area = Rect::new(
+            text_inner.x,
+            text_inner.y + usize_to_u16_wrapping(index),
+            text_inner.width,
+            1,
+        );
+        Paragraph::new(Line::from(Span::raw(format!(" {line_text}"))))
+            .render(line_area, frame.buffer_mut());
+    }
+}
+
+/// Paint the fullscreen startup log's visible rows into `term_area`, cell by
+/// cell, from `scroll` down: a row matching the search `query` in the
+/// selection style, and the cells inside a live `selection` likewise.
+fn paint_startup_log_rows(
+    frame: &mut Frame<'_>,
+    term_area: Rect,
+    (lines, scroll): (&[String], u16),
+    query: &str,
+    theme: &Theme,
+    selection: Option<&crate::app::TerminalSelection>,
+) {
+    for (row, line) in lines
+        .iter()
+        .skip(usize::from(scroll))
+        .take(usize::from(term_area.height))
+        .enumerate()
+    {
+        let line_style = if !query.is_empty() && line.to_lowercase().contains(query) {
+            theme.selection_style()
+        } else {
+            Style::default().fg(theme.text_fg)
+        };
+        let y = term_area.y + usize_to_u16_wrapping(row);
+        for (col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
+            if col >= term_area.width {
+                break;
+            }
+            let selected = selection.is_some_and(|selection| {
+                selection.anchor != selection.end
+                    && selection.contains(scroll + usize_to_u16_wrapping(row), col)
+            });
+            let style = if selected {
+                theme.selection_style()
+            } else {
+                line_style
+            };
+            frame
+                .buffer_mut()
+                .set_string(term_area.x + col, y, glyph, style);
+        }
+    }
+}
+
+/// One agent, terminal or total row of the resource monitor, in the columns
+/// that fit.
+fn resource_parent_row(
+    stat: &ResourceStats,
+    columns: &ResourceMonitorColumns,
+    (expanded, cpu_window): (&HashSet<u32>, CpuWindow),
+    glyphs: &crate::theme::Glyphs,
+) -> ratatui::widgets::Row<'static> {
+    use ratatui::widgets::{Cell, Row};
+    let name_w = usize::from(columns.name_w);
+    let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
+    // `~` marks a sample the collector had to re-establish its CPU
+    // baseline for, so the reading spans only sysinfo's short
+    // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
+    // monitor's poll interval: real numbers, noisier because they
+    // cover less wall-clock time. See `ResourceCollector::sample`.
+    let cpu_str = if cpu_window == CpuWindow::Short {
+        format!("~{:.1}%", stat.cpu_percent)
+    } else {
+        format!("{:.1}%", stat.cpu_percent)
+    };
+    let rss_str = format_bytes(stat.rss_bytes);
+    let procs_str = stat.process_count.to_string();
+
+    // Classify by `kind`, never by matching the label string:
+    // an agent or terminal literally titled "TOTAL" is a
+    // real, distinct row and must not render as the totals
+    // row just because its name happens to match.
+    let is_total = stat.kind == ResourceKind::Total;
+    let style = if is_total {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let indicator = resource_row_expand_indicator(stat, expanded, glyphs);
+    let label = ellipsize_end(&format!("{indicator}{}", stat.label), name_w);
+
+    let mut cells = vec![Cell::from(label)];
+    if columns.show_pid {
+        cells.push(Cell::from(pid_str));
+    }
+    if columns.show_procs {
+        cells.push(Cell::from(procs_str));
+    }
+    cells.push(Cell::from(cpu_str));
+    cells.push(Cell::from(rss_str));
+    Row::new(cells).style(style)
+}
+
+/// One process row under an expanded resource monitor row, in the columns that
+/// fit, with its tree connector.
+fn resource_child_row(
+    parent: &ResourceStats,
+    child_idx: usize,
+    columns: &ResourceMonitorColumns,
+    cpu_window: CpuWindow,
+) -> ratatui::widgets::Row<'static> {
+    use ratatui::widgets::{Cell, Row};
+    let name_w = usize::from(columns.name_w);
+    let child = &parent.children[child_idx];
+    let is_last = child_idx == parent.children.len().saturating_sub(1);
+    let connector = if is_last { "└" } else { "├" };
+    // The root is part of its own breakdown on purpose (that is
+    // what makes the rows sum to the parent's total), so say so
+    // instead of letting it read as a phantom duplicate of the
+    // row above.
+    let name = if child.is_root {
+        format!("{} (this process)", child.name)
+    } else {
+        child.name.clone()
+    };
+    let label = ellipsize_end(&format!("    {connector} {name}"), name_w);
+    let cpu_str = if cpu_window == CpuWindow::Short {
+        format!("~{:.1}%", child.cpu_percent)
+    } else {
+        format!("{:.1}%", child.cpu_percent)
+    };
+    let rss_str = format_bytes(child.rss_bytes);
+
+    let mut cells = vec![Cell::from(label)];
+    if columns.show_pid {
+        cells.push(Cell::from(child.pid.to_string()));
+    }
+    if columns.show_procs {
+        cells.push(Cell::from(""));
+    }
+    cells.push(Cell::from(cpu_str));
+    cells.push(Cell::from(rss_str));
+    Row::new(cells)
+}
+
+/// Stack the `rows` heights from the top of `inner`, then one more row (the
+/// `M`th, so `M` is one more than the heights given) that takes whatever is left.
+fn rows_then_rest<const N: usize, const M: usize>(inner: Rect, rows: [u16; N]) -> [Rect; M] {
+    debug_assert_eq!(M, N + 1, "one row past the given heights");
+    let constraints: [Constraint; M] = std::array::from_fn(|index| {
+        rows.get(index)
+            .map_or(Constraint::Min(1), |&height| Constraint::Length(height))
+    });
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .areas(inner)
+}
+
+/// What the name-new-agent dialog publishes for clicks: its field and the
+/// boxes it painted.
+fn name_new_agent_layout(
+    input: Rect,
+    (randomized, copy, review): (Rect, Option<Rect>, Option<Rect>),
+) -> OverlayMouseLayout {
+    OverlayMouseLayout::NameNewAgent {
+        input,
+        checkbox: Some(OverlayCheckbox {
+            id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
+            rect: randomized,
+        }),
+        copy_checkbox: copy.map(|rect| OverlayCheckbox {
+            id: OverlayCheckboxId::NameNewAgentCopyChanges,
+            rect,
+        }),
+        review_copy_checkbox: review.map(|rect| OverlayCheckbox {
+            id: OverlayCheckboxId::NameNewAgentReviewCopy,
+            rect,
+        }),
+    }
+}
+
+/// What the configure dialog edits, read from the prompt that opened it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigureKind {
+    /// A project's startup command.
+    StartupCommand,
+    /// A project's environment.
+    ProjectEnv,
+    /// The environment every project gets.
+    GlobalEnv,
 }
 
 /// Resolve a tab pill's glyph slot from that tab's snapshot.
@@ -1885,7 +2294,6 @@ impl App {
 
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let bg = self.theme.header_bg;
-        let sep_fg = self.theme.header_separator_fg;
         let label_fg = self.theme.header_label_fg;
         let mut spans = vec![
             Span::styled(" dux ", Style::default().fg(label_fg).bg(bg)),
@@ -1910,46 +2318,18 @@ impl App {
             .and_then(|session| session.folder_path())
             .map(|folder| dux_core::home_path::shorten_home(std::path::Path::new(folder)))
         {
-            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-            spans.push(Span::styled(
-                "folder: ",
-                Style::default().fg(label_fg).bg(bg),
-            ));
-            spans.push(Span::styled(
-                folder,
-                Style::default().fg(self.theme.branch_fg).bg(bg),
-            ));
+            self.push_header_crumb(&mut spans, "folder: ", folder);
             if let Some(session) = self.selected_session() {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                spans.push(Span::styled(
+                self.push_header_crumb(
+                    &mut spans,
                     "provider: ",
-                    Style::default().fg(label_fg).bg(bg),
-                ));
-                spans.push(Span::styled(
                     session.provider.as_str().to_string(),
-                    Style::default().fg(self.theme.branch_fg).bg(bg),
-                ));
+                );
             }
             self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         } else if let Some(project) = self.selected_project() {
-            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-            spans.push(Span::styled(
-                "project: ",
-                Style::default().fg(label_fg).bg(bg),
-            ));
-            spans.push(Span::styled(
-                project.name.clone(),
-                Style::default().fg(self.theme.branch_fg).bg(bg),
-            ));
-            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-            spans.push(Span::styled(
-                "branch: ",
-                Style::default().fg(label_fg).bg(bg),
-            ));
-            spans.push(Span::styled(
-                project.current_branch.clone(),
-                Style::default().fg(self.theme.branch_fg).bg(bg),
-            ));
+            self.push_header_crumb(&mut spans, "project: ", project.name.clone());
+            self.push_header_crumb(&mut spans, "branch: ", project.current_branch.clone());
             if let Some(session) = self.selected_session() {
                 // Two independent reasons to show the agent crumb: the agent sits
                 // on a different branch than the project's current one, or its
@@ -1968,18 +2348,9 @@ impl App {
                     // "agent: " label and style the value ourselves.
                     let value =
                         top_bar_branch_suffix(&managed.branch_name, &managed.initial_branch);
-                    spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                    spans.push(Span::styled(
-                        "agent: ",
-                        Style::default().fg(label_fg).bg(bg),
-                    ));
-                    spans.push(Span::styled(
-                        value,
-                        Style::default().fg(self.theme.branch_fg).bg(bg),
-                    ));
+                    self.push_header_crumb(&mut spans, "agent: ", value);
                 }
             }
-            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             let has_project_override = self
                 .engine
                 .project_uses_explicit_default_provider(&project.id);
@@ -1988,48 +2359,59 @@ impl App {
             } else {
                 "default provider: "
             };
-            spans.push(Span::styled(
+            self.push_header_crumb(
+                &mut spans,
                 provider_label,
-                Style::default().fg(label_fg).bg(bg),
-            ));
-            spans.push(Span::styled(
                 project.default_provider.as_str().to_string(),
-                Style::default().fg(self.theme.branch_fg).bg(bg),
-            ));
+            );
             // A project override that restates the global default is one fact,
             // so the global crumb only appears when the two providers differ.
             if has_project_override
                 && project.default_provider.as_str()
                     != self.engine.config.default_provider().as_str()
             {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                spans.push(Span::styled(
+                self.push_header_crumb(
+                    &mut spans,
                     "global default: ",
-                    Style::default().fg(label_fg).bg(bg),
-                ));
-                spans.push(Span::styled(
                     self.engine.config.default_provider().as_str().to_string(),
-                    Style::default().fg(self.theme.branch_fg).bg(bg),
-                ));
+                );
             }
             if let Some(session) = self.selected_session()
                 && session.provider != project.default_provider
             {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                spans.push(Span::styled(
+                self.push_header_crumb(
+                    &mut spans,
                     "current provider: ",
-                    Style::default().fg(label_fg).bg(bg),
-                ));
-                spans.push(Span::styled(
                     session.provider.as_str().to_string(),
-                    Style::default().fg(self.theme.branch_fg).bg(bg),
-                ));
+                );
             }
             self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         }
         Paragraph::new(Line::from(spans))
             .style(self.theme.header_style())
             .render(area, frame.buffer_mut());
+    }
+
+    /// One crumb of the header bar: a separator, its label, and its value.
+    fn push_header_crumb(
+        &self,
+        spans: &mut Vec<Span<'static>>,
+        label: &'static str,
+        value: String,
+    ) {
+        let bg = self.theme.header_bg;
+        spans.push(Span::styled(
+            " ╱ ",
+            Style::default().fg(self.theme.header_separator_fg).bg(bg),
+        ));
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(self.theme.header_label_fg).bg(bg),
+        ));
+        spans.push(Span::styled(
+            value,
+            Style::default().fg(self.theme.branch_fg).bg(bg),
+        ));
     }
 
     /// Append a live-state header crumb: the separator, then `label` in the
@@ -2226,10 +2608,7 @@ impl App {
     fn render_agent_row(&self, session: &AgentSession, text_width: u16) -> ListItem<'static> {
         let label = session.display_label();
         let cues = self.agent_row_cues(session);
-        let AgentRowCues {
-            facts, deleting, ..
-        } = cues;
-        let working = facts.working;
+        let AgentRowCues { deleting, .. } = cues;
         let (steady_dot, steady_color) = self.theme.session_dot(session.status);
         let dot = self.agent_row_glyph(cues, steady_dot);
         let (base_color, glyph_color) = self.agent_row_colors(session.status, cues, steady_color);
@@ -2273,17 +2652,7 @@ impl App {
         // pinned to the right edge with the name ellipsized to fit.
         let mut line1_left = vec![Span::styled(format!("{dot} "), glyph_style)];
         line1_left.extend(name_spans);
-        let pr_badge = self.engine.pr_statuses.get(&session.id).map(|pr| {
-            let pr_color = match pr.state {
-                crate::model::PrState::Merged => self.theme.pr_merged_label,
-                crate::model::PrState::Closed => self.theme.pr_closed_label,
-                crate::model::PrState::Open => self.theme.pr_open_label,
-            };
-            Span::styled(
-                format!("{}#{}", self.glyphs().pull_request, pr.number),
-                Style::default().fg(pr_color),
-            )
-        });
+        let pr_badge = self.agent_row_pr_badge(session);
 
         // Line two: project · state word [· branch] [· tabs]. Dim throughout;
         // only the state word carries a color.
@@ -2305,35 +2674,8 @@ impl App {
         // so the tone stays on line two. The standalone terminal row wears the
         // same star at the same indent; owned terminal rows keep their arrow.
         let (marker, name_span) = self.agent_row_owner_spans(session, found, muted);
-        let word = agent_state_word(session.status, facts);
-        // The one working cue: the word pulses between the working token and the
-        // muted tone beside it, and a cycling ellipsis runs after it in a slot
-        // three cells wide, so the tab count behind it never moves as the dots
-        // come and go.
-        let (word_text, word_color) = if working && !deleting && word == AGENT_WORKING_WORD {
-            let elapsed = u128_to_u64_wrapping(self.start_time.elapsed().as_millis());
-            (
-                format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
-                crate::theme::working_word_color(
-                    self.theme.session_working,
-                    muted,
-                    dux_core::working_cue::pulse_step(elapsed),
-                ),
-            )
-        } else {
-            (
-                word.to_string(),
-                self.agent_row_state_color(
-                    word,
-                    if deleting {
-                        RowDeletion::Deleting
-                    } else {
-                        RowDeletion::Settled
-                    },
-                    steady_color,
-                ),
-            )
-        };
+        let (word_text, word_color) =
+            self.agent_row_state_word(session.status, cues, muted, steady_color);
         // Show the branch only when it differs from the displayed name (i.e. a
         // title is set), so it is not repeated as the name on line one, and
         // never at all for an agent that has no branch.
@@ -2401,6 +2743,63 @@ impl App {
         // right up against the next row. Shared with the terminal rows via
         // `framed_row_item` so both lists have the same three-line shape.
         framed_row_item(Line::from(line1), Line::from(line2))
+    }
+
+    /// The pull request badge an agent row pins to its right edge, when the
+    /// agent has a pull request.
+    fn agent_row_pr_badge(&self, session: &AgentSession) -> Option<Span<'static>> {
+        self.engine.pr_statuses.get(&session.id).map(|pr| {
+            let pr_color = match pr.state {
+                crate::model::PrState::Merged => self.theme.pr_merged_label,
+                crate::model::PrState::Closed => self.theme.pr_closed_label,
+                crate::model::PrState::Open => self.theme.pr_open_label,
+            };
+            Span::styled(
+                format!("{}#{}", self.glyphs().pull_request, pr.number),
+                Style::default().fg(pr_color),
+            )
+        })
+    }
+
+    /// An agent row's state word and its color. The one working cue: the word
+    /// pulses between the working token and the muted tone beside it, and a
+    /// cycling ellipsis runs after it in a slot three cells wide, so the tab
+    /// count behind it never moves as the dots come and go.
+    fn agent_row_state_word(
+        &self,
+        status: crate::model::SessionStatus,
+        cues: AgentRowCues,
+        muted: Color,
+        steady_color: Color,
+    ) -> (String, Color) {
+        let AgentRowCues {
+            facts, deleting, ..
+        } = cues;
+        let word = agent_state_word(status, facts);
+        if facts.working && !deleting && word == AGENT_WORKING_WORD {
+            let elapsed = u128_to_u64_wrapping(self.start_time.elapsed().as_millis());
+            (
+                format!("{word}{}", dux_core::working_cue::ellipsis_slot(elapsed)),
+                crate::theme::working_word_color(
+                    self.theme.session_working,
+                    muted,
+                    dux_core::working_cue::pulse_step(elapsed),
+                ),
+            )
+        } else {
+            (
+                word.to_string(),
+                self.agent_row_state_color(
+                    word,
+                    if deleting {
+                        RowDeletion::Deleting
+                    } else {
+                        RowDeletion::Settled
+                    },
+                    steady_color,
+                ),
+            )
+        }
     }
 
     /// Paint the left-pane selection by hand, since the List widget renders with
@@ -3299,45 +3698,7 @@ impl App {
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
-            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
-            let close = self.bindings.label_for(Action::CloseOverlay);
-
-            // Report the offset actually DRAWN, not the raw one held in
-            // `center_mode`. The two differ whenever the content shrank under a
-            // stale offset (a shorter file, a diff refresh): the view clamps to
-            // what exists, and an unclamped number here would overstate where the
-            // reader is until the next key press.
-            let line = if drawn_scroll > 0 {
-                pane_hint_line_after(
-                    &self.theme,
-                    Span::styled(
-                        format!(
-                            "Scrolled back {}.",
-                            count_of(usize::from(drawn_scroll), "line")
-                        ),
-                        Style::default().fg(self.theme.hint_key_fg),
-                    ),
-                    &[
-                        Hint::key(scroll_down, "down"),
-                        Hint::key(scroll_up, "up"),
-                        Hint::key(scroll_line, "one line"),
-                        Hint::key(close, "close diff").pinned(),
-                    ],
-                    hint_area.width,
-                )
-            } else {
-                pane_hint_line(
-                    &self.theme,
-                    &[
-                        Hint::keys([scroll_up, scroll_down], "scroll"),
-                        Hint::key(scroll_line, "one line"),
-                        Hint::key(close, "close diff").pinned(),
-                    ],
-                    hint_area.width,
-                )
-            };
+            let line = self.diff_hint_line(drawn_scroll, hint_area.width);
 
             Paragraph::new(line)
                 .block(
@@ -3346,6 +3707,50 @@ impl App {
                         .border_style(Style::default().fg(self.theme.border_normal)),
                 )
                 .render(hint_area, frame.buffer_mut());
+        }
+    }
+
+    /// The diff pane's hint bar: where the reader is when scrolled back, and the
+    /// keys that scroll and close it.
+    fn diff_hint_line(&self, drawn_scroll: u16, width: u16) -> Line<'static> {
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
+        let close = self.bindings.label_for(Action::CloseOverlay);
+
+        // Report the offset actually DRAWN, not the raw one held in
+        // `center_mode`. The two differ whenever the content shrank under a
+        // stale offset (a shorter file, a diff refresh): the view clamps to
+        // what exists, and an unclamped number here would overstate where the
+        // reader is until the next key press.
+        if drawn_scroll > 0 {
+            pane_hint_line_after(
+                &self.theme,
+                Span::styled(
+                    format!(
+                        "Scrolled back {}.",
+                        count_of(usize::from(drawn_scroll), "line")
+                    ),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ),
+                &[
+                    Hint::key(scroll_down, "down"),
+                    Hint::key(scroll_up, "up"),
+                    Hint::key(scroll_line, "one line"),
+                    Hint::key(close, "close diff").pinned(),
+                ],
+                width,
+            )
+        } else {
+            pane_hint_line(
+                &self.theme,
+                &[
+                    Hint::keys([scroll_up, scroll_down], "scroll"),
+                    Hint::key(scroll_line, "one line"),
+                    Hint::key(close, "close diff").pinned(),
+                ],
+                width,
+            )
         }
     }
 
@@ -3801,14 +4206,6 @@ impl App {
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
     /// single-tab agents look exactly as before.
     fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
-        // Label-cell text per tab, right of the ordinal segment's divider. Every
-        // pill is laid out identically: a one-column activity slot ahead of the
-        // label, mirrored by an equal gutter after it so the text sits centered.
-        // The slot is reserved here as a plain space and written cell-by-cell
-        // later with a style of its own, so the pill's width never depends on
-        // what the tab is doing and the strip cannot reflow or jitter. The active
-        // tab is marked by its highlight alone, so no marker is prefixed here.
-        const GLYPH_SLOT: &str = " ";
         self.agent_tab_regions.clear();
 
         let Some(session) = self.selected_session() else {
@@ -3825,50 +4222,21 @@ impl App {
         }
         let focused_id = self.focused_tab_id(&session_id);
 
-        // Gather owned per-tab data under immutable borrows, then render/mutate.
-        let providers: Vec<String> = tab_ids
-            .iter()
-            .map(|id| self.tab_provider_label(session, id))
-            .collect();
+        let items = self.tab_strip_items(session, &tab_ids);
         // Each pill carries its strip ordinal in its own SEGMENT left of the
         // label (`│ 1 │ codex │`): the visible address for the tab switch
         // keys. See `tab_pill_ordinal_cell` for why every pill is numbered
         // and why ordinals renumber on close.
-        let labels: Vec<String> = tab_labels(
-            &providers
-                .iter()
-                .map(std::string::String::as_str)
-                .collect::<Vec<_>>(),
-        );
-        let seg_ordinal: Vec<String> = (1..=labels.len()).map(tab_pill_ordinal_cell).collect();
-        // Per-tab activity, snapshotted here so the `&mut buf` work below borrows
-        // nothing from the engine. Both predicates are keyed by tab id, so each
-        // pill answers for itself.
-        //
-        // Both carry the same Active guard `any_row_animating` uses to raise the
-        // run loop's poll cadence: an animation nothing is polling fast enough to
-        // drive freezes mid-cycle. `render_agent_row` gates its attention glyph
-        // identically, so the pill and the agent list agree; the line-two state
-        // word is static text and is deliberately not gated.
-        let session_active = matches!(session.status, crate::model::SessionStatus::Active);
-        let attention_on = self.engine.config.ui.attention_indicator && session_active;
-        let glyph_tone = self.theme.session_dot(session.status).1;
-        let items: Vec<TabStripItem> = tab_ids
-            .iter()
-            .zip(labels)
-            .map(|(id, label)| TabStripItem {
-                working: session_active && self.engine.is_agent_streaming(id),
-                needs_attention: attention_on && self.engine.tab_needs_attention(id),
-                id: id.clone(),
-                label,
-                glyph_tone,
-            })
-            .collect();
+        let seg_ordinal: Vec<String> = (1..=items.len()).map(tab_pill_ordinal_cell).collect();
         // Animation phase is read once per frame, before the buffer borrow, so
         // every pill in one frame agrees on the spinner frame and blink phase
         // with each other and with the agent list.
         let spinner_idx = self.spinner_frame_index();
-        let blink_on = self.attention_blink_on();
+        let blink = if self.attention_blink_on() {
+            BlinkPhase::Lit
+        } else {
+            BlinkPhase::Dark
+        };
 
         let [strip_area, term_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -3881,29 +4249,7 @@ impl App {
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
-        let mut seg_content: Vec<String> = items
-            .iter()
-            .map(|item| {
-                let label = &item.label;
-                format!(" {GLYPH_SLOT} {label} {GLYPH_SLOT} ")
-            })
-            .collect();
-        // Per segment: the ordinal cell, +2 for the box's border columns, +1
-        // for the full-height divider between the ordinal and label cells,
-        // +1 for the gap that separates adjacent boxes. Measured in real
-        // display columns (unicode-width via `CellWidth`), not
-        // `chars().count()`: a char-count measure undercounts double-width
-        // CJK/emoji glyphs in custom provider labels, which would overflow
-        // the segment's recorded region.
-        let seg_ord_w: Vec<u16> = seg_ordinal
-            .iter()
-            .map(|t| t.as_str().cell_width())
-            .collect();
-        let mut seg_w: Vec<u16> = seg_content
-            .iter()
-            .zip(&seg_ord_w)
-            .map(|(t, ow)| t.as_str().cell_width() + ow + 4)
-            .collect();
+        let (mut seg_content, seg_ord_w, mut seg_w) = tab_strip_segments(&items, &seg_ordinal);
 
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = items.iter().position(|i| i.id == focused_id).unwrap_or(0);
@@ -3947,12 +4293,7 @@ impl App {
         let buf = frame.buffer_mut();
         // Base fill for the whole 3-row strip band, painted with the app
         // background so leftover buffer cells never bleed between the boxes.
-        let base_style = Style::default().bg(self.theme.app_bg);
-        for y in strip_area.y..strip_area.y + strip_area.height {
-            for x in strip_area.x..strip_area.x + strip_area.width {
-                buf[(x, y)].set_symbol(" ").set_style(base_style);
-            }
-        }
+        fill_blank(buf, strip_area, Style::default().bg(self.theme.app_bg));
 
         // Each tab is a miniature pane: the shared rounded border set with
         // the shared focused/unfocused border and title styles, so the strip
@@ -3996,22 +4337,7 @@ impl App {
             // divider and the trailing inter-box gap.
             let ord_w = seg_ord_w[i];
             let label_w = seg_w[i].saturating_sub(ord_w + 4);
-            let top = format!(
-                "{}{}{}{}{}",
-                corners.top_left,
-                corners.horizontal_top.repeat(usize::from(ord_w)),
-                ratatui::symbols::line::HORIZONTAL_DOWN,
-                corners.horizontal_top.repeat(usize::from(label_w)),
-                corners.top_right
-            );
-            let bottom = format!(
-                "{}{}{}{}{}",
-                corners.bottom_left,
-                corners.horizontal_bottom.repeat(usize::from(ord_w)),
-                ratatui::symbols::line::HORIZONTAL_UP,
-                corners.horizontal_bottom.repeat(usize::from(label_w)),
-                corners.bottom_right
-            );
+            let (top, bottom) = tab_pill_borders(&corners, ord_w, label_w);
             buf.set_string(x, top_y, &top, border_style);
             buf[(x, mid_y)]
                 .set_symbol(corners.vertical_left)
@@ -4029,36 +4355,12 @@ impl App {
             // guard is the truncation path's floor: a focused label squeezed to
             // one column would put this write on the box's right border.
             if label_w >= 2 {
-                let glyph_cell = &mut buf[(x + 2 + ord_w + 1, mid_y)];
-                match tab_activity_glyph(
-                    if items[i].needs_attention {
-                        TabCue::NeedsAttention
-                    } else if items[i].working {
-                        TabCue::Working
-                    } else {
-                        TabCue::Quiet
-                    },
-                    if blink_on {
-                        BlinkPhase::Lit
-                    } else {
-                        BlinkPhase::Dark
-                    },
-                    spinner_idx,
-                ) {
-                    TabActivityGlyph::Blank => {
-                        glyph_cell.set_symbol(" ").set_style(label_style);
-                    }
-                    TabActivityGlyph::Working(frame) => {
-                        glyph_cell
-                            .set_char(frame)
-                            .set_style(Style::default().fg(items[i].glyph_tone));
-                    }
-                    TabActivityGlyph::Attention => {
-                        glyph_cell
-                            .set_symbol(crate::theme::ATTENTION_GLYPH)
-                            .set_style(Style::default().fg(self.theme.session_attention));
-                    }
-                }
+                self.paint_tab_activity(
+                    &mut buf[(x + 2 + ord_w + 1, mid_y)],
+                    &items[i],
+                    (blink, spinner_idx),
+                    label_style,
+                );
             }
             buf[(x + 2 + ord_w + label_w, mid_y)]
                 .set_symbol(corners.vertical_right)
@@ -4074,6 +4376,75 @@ impl App {
         }
 
         term_area
+    }
+
+    /// One pill's worth of state per tab, snapshotted under the engine's
+    /// immutable borrow so the buffer work after it borrows nothing from the
+    /// engine. Both predicates are keyed by tab id, so each pill answers for
+    /// itself.
+    ///
+    /// Both carry the same Active guard `any_row_animating` uses to raise the
+    /// run loop's poll cadence: an animation nothing is polling fast enough to
+    /// drive freezes mid-cycle. `render_agent_row` gates its attention glyph
+    /// identically, so the pill and the agent list agree; the line-two state
+    /// word is static text and is deliberately not gated.
+    fn tab_strip_items(&self, session: &AgentSession, tab_ids: &[String]) -> Vec<TabStripItem> {
+        let providers: Vec<String> = tab_ids
+            .iter()
+            .map(|id| self.tab_provider_label(session, id))
+            .collect();
+        let labels: Vec<String> = tab_labels(
+            &providers
+                .iter()
+                .map(std::string::String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        let session_active = matches!(session.status, crate::model::SessionStatus::Active);
+        let attention_on = self.engine.config.ui.attention_indicator && session_active;
+        let glyph_tone = self.theme.session_dot(session.status).1;
+        tab_ids
+            .iter()
+            .zip(labels)
+            .map(|(id, label)| TabStripItem {
+                working: session_active && self.engine.is_agent_streaming(id),
+                needs_attention: attention_on && self.engine.tab_needs_attention(id),
+                id: id.clone(),
+                label,
+                glyph_tone,
+            })
+            .collect()
+    }
+
+    /// Paint a pill's activity slot: the label cell's second column, right
+    /// after its leading pad. Painted as one cell rather than spliced into the
+    /// label because each glyph carries a tone of its own.
+    fn paint_tab_activity(
+        &self,
+        cell: &mut ratatui::buffer::Cell,
+        item: &TabStripItem,
+        (blink, spinner_idx): (BlinkPhase, usize),
+        label_style: Style,
+    ) {
+        let cue = if item.needs_attention {
+            TabCue::NeedsAttention
+        } else if item.working {
+            TabCue::Working
+        } else {
+            TabCue::Quiet
+        };
+        match tab_activity_glyph(cue, blink, spinner_idx) {
+            TabActivityGlyph::Blank => {
+                cell.set_symbol(" ").set_style(label_style);
+            }
+            TabActivityGlyph::Working(frame) => {
+                cell.set_char(frame)
+                    .set_style(Style::default().fg(item.glyph_tone));
+            }
+            TabActivityGlyph::Attention => {
+                cell.set_symbol(crate::theme::ATTENTION_GLYPH)
+                    .set_style(Style::default().fg(self.theme.session_attention));
+            }
+        }
     }
 
     /// The hint-bar line shown while the focused surface is in scroll mode and
@@ -4265,10 +4636,6 @@ impl App {
         // A comfortable measure for the sentence, capped by the pane. `-2` is
         // the border ring the card is drawn with.
         const PREFERRED_INNER: u16 = 46;
-        // `Active on {device}` is ten characters of chrome plus the two padding
-        // spaces, so a pane with no room for a name falls back to the title that
-        // needs none rather than printing an ellipsis where the device goes.
-        const NAMED_TITLE_CHROME: u16 = 12;
         // One column of padding on each side, the way the web's card pads its
         // body: prose that touches the border ring reads as clipped.
         const SIDE_PADDING: u16 = 1;
@@ -4327,36 +4694,7 @@ impl App {
 
         let inner_w = PREFERRED_INNER.min(area.width.saturating_sub(2)).max(1);
 
-        // The kind sits inside a different sentence in each arm, so each arm
-        // carries its whole prose rather than an opening a shared tail is glued
-        // to: the free card's sentence names what happened to the pty, and the
-        // word `agent` or `terminal` belongs inside that first clause.
-        let (title, prose) = match card {
-            crate::app::pty_ownership::PtyTakeoverCard::Elsewhere { device } => {
-                let title = match device.as_deref() {
-                    Some(device) if inner_w > NAMED_TITLE_CHROME + 3 => format!(
-                        " Active on {} ",
-                        ellipsize_end(device, usize::from(inner_w - NAMED_TITLE_CHROME))
-                    ),
-                    _ => " Active on another device ".to_string(),
-                };
-                (
-                    title,
-                    format!(
-                        "Only one device can type at a time. Take over to drive this \
-                         {target} from here."
-                    ),
-                )
-            }
-            crate::app::pty_ownership::PtyTakeoverCard::Free => (
-                " Running in the background ".to_string(),
-                format!(
-                    "The device driving this {target} disconnected, so we kept the \
-                     {target} running in the background to avoid losing any progress. \
-                     Take over to drive it from here."
-                ),
-            ),
-        };
+        let (title, prose) = takeover_card_wording(card, target, inner_w);
 
         let prose_w = inner_w.saturating_sub(SIDE_PADDING * 2).max(1);
         let prose_lines = wrap_styled_lines(
@@ -5238,59 +5576,27 @@ impl App {
         let row_count = self.changes_row_count(section);
         let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
+        let focus = if is_active_section {
+            FocusState::Focused
+        } else {
+            FocusState::Unfocused
+        };
         let block = self.themed_block_line(
             changed_files_group_title(
                 title_prefix,
                 files,
                 &self.theme,
-                self.theme.title_style(if is_active_section {
-                    FocusState::Focused
-                } else {
-                    FocusState::Unfocused
-                }),
+                self.theme.title_style(focus),
             ),
-            if is_active_section {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            },
+            focus,
         );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
-        let show_search =
-            is_active_section && (self.files_search_active || self.has_files_search());
-        let (search_area, list_inner) = if show_search && inner.height >= 4 {
-            let [sa, la] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(1)])
-                .areas(inner);
-            (Some(sa), la)
-        } else {
-            (None, inner)
-        };
-
-        // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
-        let (list_area, hint_area) =
-            if hint == HintRow::Shown && pane_focused && list_inner.height >= 4 {
-                let [la, ha] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(1), Constraint::Length(2)])
-                    .areas(list_inner);
-                (la, Some(ha))
-            } else {
-                (list_inner, None)
-            };
+        let (search_area, list_area, hint_area) = self.files_list_areas(inner, focus, hint);
 
         if let Some(search_area) = search_area {
-            let query = format!("/ {}", self.files_search.text);
-            Paragraph::new(query)
-                .block(
-                    Block::default()
-                        .borders(Borders::BOTTOM)
-                        .border_style(Style::default().fg(self.theme.border_normal)),
-                )
-                .render(search_area, frame.buffer_mut());
+            self.render_files_search_row(frame, search_area);
         }
 
         let inner_width = usize::from(list_area.width);
@@ -5344,97 +5650,14 @@ impl App {
                     }
                 };
 
-                // The right-aligned figures: a folder's file count, or a
-                // file's line counts, e.g. "+12 -3".
-                let stats = match dux_core::model::folder_count_label(file) {
-                    Some(count) => vec![Span::styled(
-                        count,
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    )],
-                    None => format_line_stats(file, &self.theme),
-                };
-                let stats_width = stats
-                    .iter()
-                    .map(ratatui::prelude::Span::width)
-                    .sum::<usize>();
-
-                // Status prefix takes 3 chars ("M  "), then the row's place in
-                // the tree: two columns per expanded folder above it, and a
-                // folder's open or closed marker (or, inside a folder, two
-                // blank columns so a file lines up with its sibling folders).
-                let indent = "  ".repeat(depth);
-                let marker = if file.is_expandable() {
-                    let glyphs = self.glyphs();
-                    let glyph = if expanded {
-                        glyphs.expanded
-                    } else {
-                        glyphs.collapsed
-                    };
-                    format!("{glyph} ")
-                } else if depth > 0 {
-                    "  ".to_string()
-                } else {
-                    String::new()
-                };
-                let prefix_width = 3 + display_width(&indent) + display_width(&marker);
-                // Leave 1 char gap between path and stats.
-                let path_budget = content_width
-                    .saturating_sub(prefix_width)
-                    .saturating_sub(stats_width)
-                    .saturating_sub(1);
-
-                // Inside a folder the row names only itself: the folder it
-                // hangs from is the row above it.
-                let name = if depth == 0 {
-                    crate::app::changes_tree::folder_label(file)
-                } else {
-                    let label = crate::app::changes_tree::folder_label(file);
-                    let trimmed = label.trim_end_matches('/');
-                    let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
-                    if file.is_folder() {
-                        format!("{leaf}/")
-                    } else {
-                        leaf.to_string()
-                    }
-                };
-                let path = if is_selected {
-                    name
-                } else {
-                    ellipsize_middle(&name, path_budget.max(10))
-                };
-
-                let path_display_width = display_width(&path);
-                let padding = content_width
-                    .saturating_sub(prefix_width)
-                    .saturating_sub(path_display_width)
-                    .saturating_sub(stats_width);
-
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{:>2} ", file.status),
-                        base_style.fg(self.theme.file_status_fg),
-                    ),
-                    Span::styled(format!("{indent}{marker}"), base_style),
-                    Span::styled(path, base_style),
-                    Span::styled(" ".repeat(padding), base_style),
-                ];
-                // For stats spans, keep their green/red fg but apply selection bg when selected.
-                let stats_base = if is_selected {
-                    Style::default()
-                        .bg(self.theme.selection_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                spans.extend(stats.into_iter().map(|s| {
-                    let fg = s.style.fg.unwrap_or(Color::Reset);
-                    Span::styled(s.content, stats_base.fg(fg))
-                }));
-                // The reserved right-margin column is part of the row: painted
-                // in the row's own style so a selection highlight reaches the
-                // pane edge instead of stopping at the stats.
-                spans.push(Span::styled(" ", base_style));
-                ListItem::new(Line::from(spans))
+                self.changes_entry_row(ChangesEntryLook {
+                    file,
+                    depth,
+                    expanded,
+                    selected: is_selected,
+                    base_style,
+                    content_width,
+                })
             })
             .collect::<Vec<_>>();
         // The window already starts where the list would have scrolled to, so
@@ -5458,6 +5681,158 @@ impl App {
         }
 
         list_area
+    }
+
+    /// Where a changes list section draws inside its frame: the `/` search row
+    /// (on the active section while a search is up), the rows, and the hint bar
+    /// (when asked for and the pane is focused), each only when there is room.
+    fn files_list_areas(
+        &self,
+        inner: Rect,
+        focus: FocusState,
+        hint: HintRow,
+    ) -> (Option<Rect>, Rect, Option<Rect>) {
+        let show_search =
+            focus == FocusState::Focused && (self.files_search_active || self.has_files_search());
+        let (search_area, list_inner) = if show_search && inner.height >= 4 {
+            let [sa, la] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .areas(inner);
+            (Some(sa), la)
+        } else {
+            (None, inner)
+        };
+
+        // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
+        let pane_focused = self.focus == FocusPane::Files;
+        let (list_area, hint_area) =
+            if hint == HintRow::Shown && pane_focused && list_inner.height >= 4 {
+                let [la, ha] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(2)])
+                    .areas(list_inner);
+                (la, Some(ha))
+            } else {
+                (list_inner, None)
+            };
+        (search_area, list_area, hint_area)
+    }
+
+    /// The changes list's `/` search row, ruled off from the rows under it.
+    fn render_files_search_row(&self, frame: &mut Frame<'_>, area: Rect) {
+        let query = format!("/ {}", self.files_search.text);
+        Paragraph::new(query)
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.border_normal)),
+            )
+            .render(area, frame.buffer_mut());
+    }
+
+    /// One file or folder row of the changes list: its status, its place in the
+    /// tree, its name fitted to the width, and its figures on the right.
+    fn changes_entry_row(&self, look: ChangesEntryLook<'_>) -> ListItem<'static> {
+        let ChangesEntryLook {
+            file,
+            depth,
+            expanded,
+            selected,
+            base_style,
+            content_width,
+        } = look;
+        // The right-aligned figures: a folder's file count, or a
+        // file's line counts, e.g. "+12 -3".
+        let stats = match dux_core::model::folder_count_label(file) {
+            Some(count) => vec![Span::styled(
+                count,
+                Style::default().fg(self.theme.hint_desc_fg),
+            )],
+            None => format_line_stats(file, &self.theme),
+        };
+        let stats_width = stats
+            .iter()
+            .map(ratatui::prelude::Span::width)
+            .sum::<usize>();
+
+        // Status prefix takes 3 chars ("M  "), then the row's place in
+        // the tree: two columns per expanded folder above it, and a
+        // folder's open or closed marker (or, inside a folder, two
+        // blank columns so a file lines up with its sibling folders).
+        let indent = "  ".repeat(depth);
+        let marker = if file.is_expandable() {
+            let glyphs = self.glyphs();
+            let glyph = if expanded {
+                glyphs.expanded
+            } else {
+                glyphs.collapsed
+            };
+            format!("{glyph} ")
+        } else if depth > 0 {
+            "  ".to_string()
+        } else {
+            String::new()
+        };
+        let prefix_width = 3 + display_width(&indent) + display_width(&marker);
+        // Leave 1 char gap between path and stats.
+        let path_budget = content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(stats_width)
+            .saturating_sub(1);
+
+        // Inside a folder the row names only itself: the folder it
+        // hangs from is the row above it.
+        let name = if depth == 0 {
+            crate::app::changes_tree::folder_label(file)
+        } else {
+            let label = crate::app::changes_tree::folder_label(file);
+            let trimmed = label.trim_end_matches('/');
+            let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+            if file.is_folder() {
+                format!("{leaf}/")
+            } else {
+                leaf.to_string()
+            }
+        };
+        let path = if selected {
+            name
+        } else {
+            ellipsize_middle(&name, path_budget.max(10))
+        };
+
+        let path_display_width = display_width(&path);
+        let padding = content_width
+            .saturating_sub(prefix_width)
+            .saturating_sub(path_display_width)
+            .saturating_sub(stats_width);
+
+        let mut spans = vec![
+            Span::styled(
+                format!("{:>2} ", file.status),
+                base_style.fg(self.theme.file_status_fg),
+            ),
+            Span::styled(format!("{indent}{marker}"), base_style),
+            Span::styled(path, base_style),
+            Span::styled(" ".repeat(padding), base_style),
+        ];
+        // For stats spans, keep their green/red fg but apply selection bg when selected.
+        let stats_base = if selected {
+            Style::default()
+                .bg(self.theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        spans.extend(stats.into_iter().map(|s| {
+            let fg = s.style.fg.unwrap_or(Color::Reset);
+            Span::styled(s.content, stats_base.fg(fg))
+        }));
+        // The reserved right-margin column is part of the row: painted
+        // in the row's own style so a selection highlight reaches the
+        // pane edge instead of stopping at the stats.
+        spans.push(Span::styled(" ", base_style));
+        ListItem::new(Line::from(spans))
     }
 
     /// Render the commit input as its own bordered block.
@@ -5759,8 +6134,6 @@ impl App {
             .fg(self.theme.help_banner_fg)
             .bg(self.theme.help_banner_bg)
             .add_modifier(Modifier::BOLD);
-        let body_style = Style::default().fg(self.theme.help_body_fg);
-
         // Helper: push a full-width banner line.
         let push_banner = |lines: &mut Vec<Line<'static>>, title: &str, width: usize| {
             let padding = width.saturating_sub(display_width(title) + 3);
@@ -5774,6 +6147,28 @@ impl App {
 
         // ── About dux ──────────────────────────────────────────
         push_banner(&mut lines, "About dux", content_width);
+        self.push_help_about(&mut lines);
+
+        // ── Keybindings ─────────────────────────────────────────
+        push_banner(&mut lines, "Keybindings", content_width);
+
+        self.push_help_keybindings(&mut lines);
+
+        // ── Reference ───────────────────────────────────────────
+        push_banner(&mut lines, "Reference", content_width);
+
+        self.push_help_notation_and_modes(&mut lines);
+
+        self.push_help_states(&mut lines);
+
+        self.push_help_github(&mut lines);
+
+        lines
+    }
+
+    /// The help page's About section: what dux is and where its config lives.
+    fn push_help_about(&self, lines: &mut Vec<Line<'static>>) {
+        let body_style = Style::default().fg(self.theme.help_body_fg);
         lines.push(Line::from(Span::styled(
             "dux has two front ends over one workspace: a terminal",
             body_style,
@@ -5820,10 +6215,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
+    }
 
-        // ── Keybindings ─────────────────────────────────────────
-        push_banner(&mut lines, "Keybindings", content_width);
-
+    /// Every help section of the key bindings, one row per binding.
+    fn push_help_keybindings(&self, lines: &mut Vec<Line<'static>>) {
         let help_bindings = self.bindings.help_sections();
         for (i, (section, bindings)) in help_bindings.iter().enumerate() {
             if i > 0 {
@@ -5847,10 +6242,10 @@ impl App {
                 lines.push(Line::from(spans));
             }
         }
+    }
 
-        // ── Reference ───────────────────────────────────────────
-        push_banner(&mut lines, "Reference", content_width);
-
+    /// How keys are written, and the two ways the agent pane routes them.
+    fn push_help_notation_and_modes(&self, lines: &mut Vec<Line<'static>>) {
         // Key notation legend
         lines.push(Line::from(Span::styled(
             "Key notation",
@@ -5901,7 +6296,10 @@ impl App {
                 )));
             }
         }
+    }
 
+    /// The legends for the session and companion terminal state glyphs.
+    fn push_help_states(&self, lines: &mut Vec<Line<'static>>) {
         // Session state legend
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -5967,7 +6365,10 @@ impl App {
                 ),
             ]));
         }
+    }
 
+    /// Where the GitHub integration stands, with its glyph.
+    fn push_help_github(&self, lines: &mut Vec<Line<'static>>) {
         // GitHub integration status.
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -6021,8 +6422,6 @@ impl App {
                 Span::styled(desc, Style::default().fg(self.theme.hint_desc_fg)),
             ]));
         }
-
-        lines
     }
 
     fn render_help(&mut self, frame: &mut Frame<'_>) {
@@ -6250,46 +6649,32 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(4), Constraint::Min(5)])
             .areas(area);
-        let where_at = if prompt.serving {
-            "A listener is up, so the choice applies to it right away."
-        } else {
-            "Nothing is serving, so the choice applies when a listener starts."
-        };
-        let detail_lines = vec![
-            // The mode is one of three constant words, not a name, so it keeps
-            // the plain emphasis rather than the name chip.
-            Line::from(vec![
-                Span::styled(
-                    " Saved mode: ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ),
-                Span::styled(
-                    prompt.current.as_str().to_string(),
-                    Style::default()
-                        .fg(self.theme.text_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![Span::styled(
-                format!(" {where_at}"),
-                Style::default().fg(self.theme.hint_desc_fg),
-            )]),
-        ];
-        let details = Paragraph::new(detail_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.theme.overlay_border))
-                .style(Style::default().bg(self.theme.overlay_bg))
-                .title(" Tailscale address ")
-                .title_style(
-                    Style::default()
-                        .fg(self.theme.title_focused)
-                        .add_modifier(Modifier::BOLD),
-                ),
-        );
+        let details = self.tailscale_mode_details(prompt);
         frame.render_widget(details, details_area);
 
-        let items = prompt
+        let items = self.tailscale_mode_items(prompt);
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg))
+            .title_bottom(bottom_spans);
+        let list = PickerList::new(items, Some(prompt.selected), "No modes to choose from.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
+
+        self.overlay_layout.active = OverlayMouseLayout::SetTailscaleMode {
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
+        };
+    }
+
+    /// One row per Tailscale mode, the saved one marked, each with what it does.
+    fn tailscale_mode_items(
+        &self,
+        prompt: &crate::app::SetTailscaleModePrompt,
+    ) -> Vec<ListItem<'static>> {
+        prompt
             .options
             .iter()
             .map(|option| {
@@ -6325,21 +6710,52 @@ impl App {
                     ),
                 ]))
             })
-            .collect::<Vec<_>>();
-        let list_block = Block::default()
-            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-            .border_style(Style::default().fg(self.theme.overlay_border))
-            .style(Style::default().bg(self.theme.overlay_bg))
-            .title_bottom(bottom_spans);
-        let list = PickerList::new(items, Some(prompt.selected), "No modes to choose from.")
-            .block(list_block)
-            .render(frame, list_area, &self.theme);
+            .collect::<Vec<_>>()
+    }
 
-        self.overlay_layout.active = OverlayMouseLayout::SetTailscaleMode {
-            list: list.list,
-            items: list.items,
-            offset: list.offset,
+    /// The Tailscale mode picker's header box: the saved mode and when a choice
+    /// applies.
+    fn tailscale_mode_details(
+        &self,
+        prompt: &crate::app::SetTailscaleModePrompt,
+    ) -> Paragraph<'static> {
+        let where_at = if prompt.serving {
+            "A listener is up, so the choice applies to it right away."
+        } else {
+            "Nothing is serving, so the choice applies when a listener starts."
         };
+        let detail_lines = vec![
+            // The mode is one of three constant words, not a name, so it keeps
+            // the plain emphasis rather than the name chip.
+            Line::from(vec![
+                Span::styled(
+                    " Saved mode: ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+                Span::styled(
+                    prompt.current.as_str().to_string(),
+                    Style::default()
+                        .fg(self.theme.text_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                format!(" {where_at}"),
+                Style::default().fg(self.theme.hint_desc_fg),
+            )]),
+        ];
+        Paragraph::new(detail_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.theme.overlay_border))
+                .style(Style::default().bg(self.theme.overlay_bg))
+                .title(" Tailscale address ")
+                .title_style(
+                    Style::default()
+                        .fg(self.theme.title_focused)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
     }
 
     fn render_change_theme_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -6439,15 +6855,11 @@ impl App {
         let PromptState::BrowseProjects {
             purpose,
             current_dir,
-            entries,
-            loading,
-            selected,
             filter,
             searching,
             editing_path,
             path_input,
-            tab_completions,
-            tab_index,
+            ..
         } = &self.prompt
         else {
             return;
@@ -6455,6 +6867,101 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         self.clear_overlay_area(frame, area);
+        let Some((items, empty, selected_index)) = self.browse_projects_list_content() else {
+            return;
+        };
+        let picker = PickerList::new(items, Some(selected_index), empty);
+        let has_filter = !filter.is_empty();
+        let show_top_input = *searching || has_filter || *editing_path;
+        let (top_areas, list_render_area) = if show_top_input {
+            let [filter_area, list_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(3)])
+                .areas(area);
+            (Some(filter_area), list_area)
+        } else {
+            (None, area)
+        };
+        if let Some(filter_area) = top_areas {
+            let title = Self::browse_projects_title(*purpose, current_dir);
+            let (prefix, text, cursor) = if *editing_path {
+                ("go: ", path_input.text.as_str(), path_input.cursor)
+            } else {
+                ("/ ", filter.text.as_str(), filter.cursor)
+            };
+            let input_block = self.themed_overlay_block_prose(&title);
+            let input_inner = input_block.inner(filter_area);
+            Paragraph::new(render_single_line_field(
+                prefix,
+                text,
+                cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                FocusState::Focused,
+                input_inner.width,
+            ))
+            .block(input_block)
+            .render(filter_area, frame.buffer_mut());
+            let mode = if *editing_path {
+                BrowseMode::EditingPath
+            } else if *searching {
+                BrowseMode::Searching
+            } else {
+                BrowseMode::Browsing
+            };
+            let bottom_spans =
+                self.browse_projects_field_footer(mode, area.width.saturating_sub(2));
+            let list_block = Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_style(Style::default().fg(self.theme.overlay_border))
+                .style(Style::default().bg(self.theme.overlay_bg))
+                .title_bottom(bottom_spans);
+            let list = picker
+                .block(list_block)
+                .render(frame, list_render_area, &self.theme);
+            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                input: Some(input_inner),
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
+            };
+        } else {
+            let bottom_spans = self.browse_projects_browsing_footer(area.width.saturating_sub(2));
+            let title = Self::browse_projects_title(*purpose, current_dir);
+            let list_block = self
+                .themed_overlay_block_prose(&title)
+                .title_bottom(bottom_spans);
+            let list = picker
+                .block(list_block)
+                .render(frame, list_render_area, &self.theme);
+            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                input: None,
+                list: list.list,
+                items: list.items,
+                offset: list.offset,
+            };
+        }
+    }
+
+    /// What the project browser's list holds: its rows, the sentence it shows
+    /// when there are none, and which row is selected. `None` when the browser
+    /// is not open.
+    fn browse_projects_list_content(
+        &self,
+    ) -> Option<(Vec<ListItem<'static>>, Line<'static>, usize)> {
+        let PromptState::BrowseProjects {
+            entries,
+            loading,
+            selected,
+            filter,
+            editing_path,
+            tab_completions,
+            tab_index,
+            ..
+        } = &self.prompt
+        else {
+            return None;
+        };
         let visible: Vec<_> = if filter.is_empty() {
             entries.iter().collect()
         } else {
@@ -6476,7 +6983,7 @@ impl App {
         // The loading line and every "nothing here" sentence are the list's
         // EMPTY state, not rows: nothing on them can be picked, so nothing
         // highlights them and a click on them selects nothing.
-        let empty: Line<'_> = if *editing_path {
+        let empty: Line<'static> = if *editing_path {
             Line::from("No matching directories.")
         } else if *loading {
             let idx = self.spinner_frame_index();
@@ -6521,99 +7028,39 @@ impl App {
                 .collect::<Vec<_>>()
         };
         let selected_index = if *editing_path { *tab_index } else { *selected };
-        let picker = PickerList::new(items, Some(selected_index), empty);
-        let has_filter = !filter.is_empty();
-        let show_top_input = *searching || has_filter || *editing_path;
-        let (top_areas, list_render_area) = if show_top_input {
-            let [filter_area, list_area] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(3)])
-                .areas(area);
-            (Some(filter_area), list_area)
-        } else {
-            (None, area)
+        Some((items, empty, selected_index))
+    }
+
+    /// The project browser's footer while its search or path field is up.
+    fn browse_projects_field_footer(&self, mode: BrowseMode, width: u16) -> Line<'static> {
+        let footer_keys = BrowseProjectsFooterKeys {
+            close: self.bindings.label_for(Action::CloseOverlay),
+            search: self.bindings.label_for(Action::SearchToggle),
+            open: self.bindings.label_for(Action::OpenEntry),
+            goto: self.bindings.label_for(Action::GoToPath),
+            exit_path: self.bindings.label_for(Action::ExitPathEditorOnProjectAdd),
         };
-        if let Some(filter_area) = top_areas {
-            let title = Self::browse_projects_title(*purpose, current_dir);
-            let (prefix, text, cursor) = if *editing_path {
-                ("go: ", path_input.text.as_str(), path_input.cursor)
-            } else {
-                ("/ ", filter.text.as_str(), filter.cursor)
-            };
-            let input_block = self.themed_overlay_block_prose(&title);
-            let input_inner = input_block.inner(filter_area);
-            Paragraph::new(render_single_line_field(
-                prefix,
-                text,
-                cursor,
-                self.theme.input_cursor_fg,
-                self.theme.input_cursor_bg,
-                FocusState::Focused,
-                input_inner.width,
-            ))
-            .block(input_block)
-            .render(filter_area, frame.buffer_mut());
-            let footer_keys = BrowseProjectsFooterKeys {
-                close: self.bindings.label_for(Action::CloseOverlay),
-                search: self.bindings.label_for(Action::SearchToggle),
-                open: self.bindings.label_for(Action::OpenEntry),
-                goto: self.bindings.label_for(Action::GoToPath),
-                exit_path: self.bindings.label_for(Action::ExitPathEditorOnProjectAdd),
-            };
-            let mode = if *editing_path {
-                BrowseMode::EditingPath
-            } else if *searching {
-                BrowseMode::Searching
-            } else {
-                BrowseMode::Browsing
-            };
-            let bottom_spans =
-                self.browse_projects_input_footer(mode, &footer_keys, area.width.saturating_sub(2));
-            let list_block = Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_style(Style::default().fg(self.theme.overlay_border))
-                .style(Style::default().bg(self.theme.overlay_bg))
-                .title_bottom(bottom_spans);
-            let list = picker
-                .block(list_block)
-                .render(frame, list_render_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
-                input: Some(input_inner),
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-            };
-        } else {
-            let search_key = self.bindings.label_for(Action::SearchToggle);
-            let open_key = self.bindings.label_for(Action::OpenEntry);
-            let add_key = self.bindings.label_for(Action::AddCurrentDir);
-            let goto_key = self.bindings.label_for(Action::GoToPath);
-            let close_key = self.bindings.label_for(Action::CloseOverlay);
-            let bottom_spans = modal_hint_line(
-                &self.theme,
-                &[
-                    Hint::key(search_key, "search"),
-                    Hint::key(open_key, "open"),
-                    Hint::key(add_key, "add current"),
-                    Hint::key(goto_key, "go to"),
-                    Hint::key(close_key, "cancel").pinned(),
-                ],
-                area.width.saturating_sub(2),
-            );
-            let title = Self::browse_projects_title(*purpose, current_dir);
-            let list_block = self
-                .themed_overlay_block_prose(&title)
-                .title_bottom(bottom_spans);
-            let list = picker
-                .block(list_block)
-                .render(frame, list_render_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
-                input: None,
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-            };
-        }
+        self.browse_projects_input_footer(mode, &footer_keys, width)
+    }
+
+    /// The project browser's footer while it is plain browsing, no field up.
+    fn browse_projects_browsing_footer(&self, width: u16) -> Line<'static> {
+        let search_key = self.bindings.label_for(Action::SearchToggle);
+        let open_key = self.bindings.label_for(Action::OpenEntry);
+        let add_key = self.bindings.label_for(Action::AddCurrentDir);
+        let goto_key = self.bindings.label_for(Action::GoToPath);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(search_key, "search"),
+                Hint::key(open_key, "open"),
+                Hint::key(add_key, "add current"),
+                Hint::key(goto_key, "go to"),
+                Hint::key(close_key, "cancel").pinned(),
+            ],
+            width,
+        )
     }
 
     fn browse_projects_title(purpose: BrowsePurpose, current_dir: &Path) -> Prose {
@@ -6870,40 +7317,7 @@ impl App {
             .constraints([Constraint::Length(5), Constraint::Min(6)])
             .areas(area);
 
-        let project_mode = if prompt.inherits_global_default {
-            "inherits global default"
-        } else {
-            "project override"
-        };
-        let detail_lines = vec![
-            labelled_name(
-                " Project: ",
-                &prompt.project_name,
-                Style::default().fg(self.theme.hint_desc_fg),
-                &self.theme,
-            ),
-            Line::from(vec![
-                Span::styled(
-                    " Current provider: ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ),
-                name_chip(prompt.current.as_str(), &self.theme),
-                Span::styled(
-                    format!(" ({project_mode})"),
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ),
-            ]),
-            labelled_name(
-                " Global default: ",
-                prompt.global_default.as_str(),
-                Style::default().fg(self.theme.hint_desc_fg),
-                &self.theme,
-            ),
-            Line::from(vec![Span::styled(
-                " Choose \"inherit global default\" to remove the project-specific override. Existing agents keep their current provider.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )]),
-        ];
+        let detail_lines = self.project_provider_details(prompt);
         Paragraph::new(detail_lines)
             .block(
                 self.themed_overlay_block("Change Project Provider")
@@ -6911,6 +7325,28 @@ impl App {
             )
             .render(details_area, frame.buffer_mut());
 
+        let items = self.project_provider_items(prompt);
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
+        let list = PickerList::new(items, Some(prompt.selected), NO_PROVIDERS)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
+
+        self.overlay_layout.active = OverlayMouseLayout::ChangeProjectDefaultProvider {
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
+        };
+    }
+
+    /// One row per provider choice for a project, the current one marked, each
+    /// with what picking it does.
+    fn project_provider_items(
+        &self,
+        prompt: &crate::app::ChangeProjectDefaultProviderPrompt,
+    ) -> Vec<ListItem<'static>> {
         let provider_col = prompt
             .options
             .iter()
@@ -6921,7 +7357,7 @@ impl App {
             .max()
             .unwrap_or(0)
             .max(8);
-        let items = prompt
+        prompt
             .options
             .iter()
             .map(|option| {
@@ -6963,20 +7399,49 @@ impl App {
                     ),
                 ]))
             })
-            .collect::<Vec<_>>();
-        let list_block = Block::default()
-            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-            .border_style(Style::default().fg(self.theme.overlay_border))
-            .style(Style::default().bg(self.theme.overlay_bg));
-        let list = PickerList::new(items, Some(prompt.selected), NO_PROVIDERS)
-            .block(list_block)
-            .render(frame, list_area, &self.theme);
+            .collect::<Vec<_>>()
+    }
 
-        self.overlay_layout.active = OverlayMouseLayout::ChangeProjectDefaultProvider {
-            list: list.list,
-            items: list.items,
-            offset: list.offset,
+    /// The project provider picker's header lines: the project, its provider and
+    /// where that comes from, and the global default.
+    fn project_provider_details(
+        &self,
+        prompt: &crate::app::ChangeProjectDefaultProviderPrompt,
+    ) -> Vec<Line<'static>> {
+        let project_mode = if prompt.inherits_global_default {
+            "inherits global default"
+        } else {
+            "project override"
         };
+        vec![
+            labelled_name(
+                " Project: ",
+                &prompt.project_name,
+                Style::default().fg(self.theme.hint_desc_fg),
+                &self.theme,
+            ),
+            Line::from(vec![
+                Span::styled(
+                    " Current provider: ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+                name_chip(prompt.current.as_str(), &self.theme),
+                Span::styled(
+                    format!(" ({project_mode})"),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+            ]),
+            labelled_name(
+                " Global default: ",
+                prompt.global_default.as_str(),
+                Style::default().fg(self.theme.hint_desc_fg),
+                &self.theme,
+            ),
+            Line::from(vec![Span::styled(
+                " Choose \"inherit global default\" to remove the project-specific override. Existing agents keep their current provider.",
+                Style::default().fg(self.theme.hint_desc_fg),
+            )]),
+        ]
     }
 
     fn render_pick_editor_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -7155,75 +7620,7 @@ impl App {
                     Style::default().fg(self.theme.hint_dim_desc_fg),
                 ))),
                 ManageWorktreeVisualRow::Entry(index) => {
-                    let entry = &prompt.entries[*index];
-                    let removable = entry.is_removable();
-                    let name_style = if removable {
-                        Style::default().fg(self.theme.text_fg)
-                    } else {
-                        Style::default().fg(self.theme.hint_dim_desc_fg)
-                    };
-                    let branch_label_style = Style::default().fg(if removable {
-                        self.theme.branch_fg
-                    } else {
-                        self.theme.hint_dim_desc_fg
-                    });
-                    let branch_value_style = Style::default().fg(if removable {
-                        self.theme.hint_desc_fg
-                    } else {
-                        self.theme.hint_dim_desc_fg
-                    });
-                    // Dirtiness and the holding agent are the two facts
-                    // the web's list carries too, so the two managers
-                    // show the same thing.
-                    let mut suffix_spans = Vec::new();
-                    if entry.dirty {
-                        suffix_spans.push(Span::styled(
-                            "  uncommitted changes",
-                            Style::default().fg(self.theme.warning_fg),
-                        ));
-                    }
-                    // Held by its agent, and in use by something other than
-                    // that agent, are two facts; a row can carry both.
-                    if entry.being_removed {
-                        suffix_spans.push(Span::styled(
-                            "  being removed",
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ));
-                    } else {
-                        if entry.attached_session_id.is_some() {
-                            suffix_spans.push(Span::styled(
-                                "  held by an agent",
-                                Style::default().fg(self.theme.hint_dim_desc_fg),
-                            ));
-                        }
-                        if let Some(busy) = &entry.busy {
-                            suffix_spans.push(Span::styled(
-                                format!("  in use: {busy}"),
-                                Style::default().fg(self.theme.hint_dim_desc_fg),
-                            ));
-                        }
-                    }
-                    let name = ellipsize_middle(
-                        entry
-                            .path
-                            .file_name()
-                            .map_or_else(
-                                || entry.path.display().to_string(),
-                                |name| name.to_string_lossy().to_string(),
-                            )
-                            .as_str(),
-                        path_col,
-                    );
-                    let mut spans = vec![
-                        Span::styled(
-                            format!("  {}", pad_to_width(&name, path_col)),
-                            name_style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("  branch: ", branch_label_style),
-                        Span::styled(entry.label.as_str(), branch_value_style),
-                    ];
-                    spans.extend(suffix_spans);
-                    ListItem::new(Line::from(spans))
+                    self.manage_worktree_entry_item(&prompt.entries[*index], path_col)
                 }
             })
             .collect::<Vec<_>>();
@@ -7248,6 +7645,83 @@ impl App {
         };
     }
 
+    /// One worktree row of the worktree manager: its folder, its branch, and
+    /// what stands in the way of removing it.
+    fn manage_worktree_entry_item<'a>(
+        &self,
+        entry: &'a dux_core::worktree_manager::ManagedWorktree,
+        path_col: usize,
+    ) -> ListItem<'a> {
+        let removable = entry.is_removable();
+        let name_style = if removable {
+            Style::default().fg(self.theme.text_fg)
+        } else {
+            Style::default().fg(self.theme.hint_dim_desc_fg)
+        };
+        let branch_label_style = Style::default().fg(if removable {
+            self.theme.branch_fg
+        } else {
+            self.theme.hint_dim_desc_fg
+        });
+        let branch_value_style = Style::default().fg(if removable {
+            self.theme.hint_desc_fg
+        } else {
+            self.theme.hint_dim_desc_fg
+        });
+        // Dirtiness and the holding agent are the two facts
+        // the web's list carries too, so the two managers
+        // show the same thing.
+        let mut suffix_spans = Vec::new();
+        if entry.dirty {
+            suffix_spans.push(Span::styled(
+                "  uncommitted changes",
+                Style::default().fg(self.theme.warning_fg),
+            ));
+        }
+        // Held by its agent, and in use by something other than
+        // that agent, are two facts; a row can carry both.
+        if entry.being_removed {
+            suffix_spans.push(Span::styled(
+                "  being removed",
+                Style::default().fg(self.theme.hint_dim_desc_fg),
+            ));
+        } else {
+            if entry.attached_session_id.is_some() {
+                suffix_spans.push(Span::styled(
+                    "  held by an agent",
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                ));
+            }
+            if let Some(busy) = &entry.busy {
+                suffix_spans.push(Span::styled(
+                    format!("  in use: {busy}"),
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                ));
+            }
+        }
+        let name = ellipsize_middle(
+            entry
+                .path
+                .file_name()
+                .map_or_else(
+                    || entry.path.display().to_string(),
+                    |name| name.to_string_lossy().to_string(),
+                )
+                .as_str(),
+            path_col,
+        );
+        let mut spans = vec![
+            Span::styled(
+                format!("  {}", pad_to_width(&name, path_col)),
+                name_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  branch: ", branch_label_style),
+            Span::styled(entry.label.as_str(), branch_value_style),
+        ];
+        spans.extend(suffix_spans);
+        ListItem::new(Line::from(spans))
+    }
+
     fn render_confirm_delete_worktree_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return;
@@ -7258,26 +7732,71 @@ impl App {
         let checkbox_height = if has_checkbox {
             let state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
             let checkbox = Checkbox::with_prose(&checkbox_label, &self.theme)
-                .checked(if prompt.delete_branch {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                })
+                .checked(CheckMark::from(prompt.delete_branch))
                 .state(state);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+            checkbox.height_at(inner_width)
         } else {
             0
         };
 
-        // The copy is the web dialog's, sentence for sentence, and both
-        // sides pin it (see `delete_worktree_title` and the constants
-        // beside it).
+        let body_lines = self.delete_worktree_body(prompt);
+        // The frame keeps a blank row between the checkbox and the buttons, so
+        // the checkbox never sits flush against the destructive button.
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title: "Delete Worktree",
+                body: body_lines,
+                controls_height: checkbox_height,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Cancel),
+                ),
+                act: ConfirmButton::new(
+                    "Delete worktree",
+                    ButtonKind::Danger,
+                    ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Delete),
+                ),
+                reserve_labels: &[],
+            },
+        );
+        let checkbox_area = layout.controls;
+
+        let checkbox_rect = if has_checkbox {
+            let checkbox_state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
+            let (rect, _) = self.render_overlay_prose_checkbox(
+                frame,
+                checkbox_area,
+                &checkbox_label,
+                CheckMark::from(prompt.delete_branch),
+                checkbox_state,
+                None,
+            );
+            Some(OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteWorktreeBranch,
+                rect,
+            })
+        } else {
+            None
+        };
+
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
+            checkbox: checkbox_rect,
+        };
+    }
+
+    /// The worktree removal dialog's prose: what goes, and what happens to its
+    /// branch. The copy is the web dialog's, sentence for sentence, and both sides
+    /// pin it (see `delete_worktree_title` and the constants beside it).
+    fn delete_worktree_body(
+        &self,
+        prompt: &crate::app::ConfirmDeleteWorktreePrompt,
+    ) -> Vec<Line<'static>> {
         let mut body_lines = vec![Line::from("")];
         body_lines.extend(prose_lines(
             &delete_worktree_title_prose(&prompt.label),
@@ -7323,58 +7842,7 @@ impl App {
                 &self.theme,
             )),
         }
-        // The frame keeps a blank row between the checkbox and the buttons, so
-        // the checkbox never sits flush against the destructive button.
-        let layout = self.render_confirm_dialog(
-            frame,
-            &ConfirmDialog {
-                title: "Delete Worktree",
-                body: body_lines,
-                controls_height: checkbox_height,
-                cancel: ConfirmButton::new(
-                    "Cancel",
-                    ButtonKind::Confirm,
-                    ButtonPressedTarget::ConfirmDeleteWorktreeCancel,
-                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Cancel),
-                ),
-                act: ConfirmButton::new(
-                    "Delete worktree",
-                    ButtonKind::Danger,
-                    ButtonPressedTarget::ConfirmDeleteWorktreeConfirm,
-                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Delete),
-                ),
-                reserve_labels: &[],
-            },
-        );
-        let checkbox_area = layout.controls;
-
-        let checkbox_rect = if has_checkbox {
-            let checkbox_state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
-            let (rect, _) = self.render_overlay_prose_checkbox(
-                frame,
-                checkbox_area,
-                &checkbox_label,
-                if prompt.delete_branch {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
-                checkbox_state,
-                None,
-            );
-            Some(OverlayCheckbox {
-                id: OverlayCheckboxId::DeleteWorktreeBranch,
-                rect,
-            })
-        } else {
-            None
-        };
-
-        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteWorktree {
-            cancel_button: layout.cancel,
-            delete_button: layout.act,
-            checkbox: checkbox_rect,
-        };
+        body_lines
     }
 
     fn render_pick_project_worktree_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -7458,55 +7926,7 @@ impl App {
                     )))
                 }
                 ProjectWorktreeVisualRow::Entry(index) => {
-                    let entry = &prompt.entries[*index];
-                    let style = if entry.is_selectable() {
-                        Style::default().fg(self.theme.text_fg)
-                    } else {
-                        Style::default().fg(self.theme.hint_dim_desc_fg)
-                    };
-                    let kind = if entry.is_project_checkout {
-                        "project"
-                    } else if entry.is_external() {
-                        "external"
-                    } else {
-                        "managed"
-                    };
-                    let session_suffix = entry
-                        .existing_session_id
-                        .as_ref()
-                        .map(|id| format!("  agent {id}"))
-                        .unwrap_or_default();
-                    let kind_style = if !entry.is_selectable() {
-                        Style::default().fg(self.theme.hint_dim_desc_fg)
-                    } else if entry.is_managed_by_dux {
-                        Style::default().fg(self.theme.branch_fg)
-                    } else {
-                        Style::default().fg(self.theme.hint_desc_fg)
-                    };
-                    let branch_label_style = Style::default().fg(if entry.is_selectable() {
-                        self.theme.branch_fg
-                    } else {
-                        self.theme.hint_dim_desc_fg
-                    });
-                    let branch_value_style = Style::default().fg(if entry.is_selectable() {
-                        self.theme.hint_desc_fg
-                    } else {
-                        self.theme.hint_dim_desc_fg
-                    });
-                    let name = ellipsize_middle(&entry.display_name(), path_col);
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("  {}", pad_to_width(&name, path_col)),
-                            style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!("  {kind:<8}"), kind_style),
-                        Span::styled("  branch: ", branch_label_style),
-                        Span::styled(entry.branch_name.as_str(), branch_value_style),
-                        Span::styled(
-                            session_suffix,
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ),
-                    ]))
+                    self.project_worktree_entry_item(&prompt.entries[*index], path_col)
                 }
             })
             .collect::<Vec<_>>();
@@ -7531,10 +7951,64 @@ impl App {
         };
     }
 
+    /// One worktree row of the new-agent-from-worktree picker: its folder, what
+    /// kind of worktree it is, its branch, and the agent already on it.
+    fn project_worktree_entry_item<'a>(
+        &self,
+        entry: &'a crate::app::ProjectWorktreeEntry,
+        path_col: usize,
+    ) -> ListItem<'a> {
+        let style = if entry.is_selectable() {
+            Style::default().fg(self.theme.text_fg)
+        } else {
+            Style::default().fg(self.theme.hint_dim_desc_fg)
+        };
+        let kind = if entry.is_project_checkout {
+            "project"
+        } else if entry.is_external() {
+            "external"
+        } else {
+            "managed"
+        };
+        let session_suffix = entry
+            .existing_session_id
+            .as_ref()
+            .map(|id| format!("  agent {id}"))
+            .unwrap_or_default();
+        let kind_style = if !entry.is_selectable() {
+            Style::default().fg(self.theme.hint_dim_desc_fg)
+        } else if entry.is_managed_by_dux {
+            Style::default().fg(self.theme.branch_fg)
+        } else {
+            Style::default().fg(self.theme.hint_desc_fg)
+        };
+        let branch_label_style = Style::default().fg(if entry.is_selectable() {
+            self.theme.branch_fg
+        } else {
+            self.theme.hint_dim_desc_fg
+        });
+        let branch_value_style = Style::default().fg(if entry.is_selectable() {
+            self.theme.hint_desc_fg
+        } else {
+            self.theme.hint_dim_desc_fg
+        });
+        let name = ellipsize_middle(&entry.display_name(), path_col);
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {}", pad_to_width(&name, path_col)),
+                style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {kind:<8}"), kind_style),
+            Span::styled("  branch: ", branch_label_style),
+            Span::styled(entry.branch_name.as_str(), branch_value_style),
+            Span::styled(
+                session_suffix,
+                Style::default().fg(self.theme.hint_dim_desc_fg),
+            ),
+        ]))
+    }
+
     fn render_pick_project_prompt(&mut self, frame: &mut Frame<'_>) {
-        // The path keeps room for its leaf on a narrow screen: the name gives
-        // up width first, then the base, each down to its floor.
-        const PATH_FLOOR: usize = 14;
         let PromptState::PickProject {
             intent,
             entries,
@@ -7602,10 +8076,37 @@ impl App {
             .style(Style::default().bg(self.theme.overlay_bg));
         let list_inner = list_block.inner(list_area);
 
-        // Column plan, sized to the visible rows and the inner width, with a
-        // symmetric one-space margin inside each border. The warning glyph
-        // is a fixed gutter; the path takes the remaining width and shows
-        // its TAIL (leading dirs elided) so the leaf stays readable.
+        let items = self.project_chooser_items(entries, &visible, list_inner.width);
+
+        let empty = if entries.is_empty() {
+            "No projects yet."
+        } else {
+            "No matching projects."
+        };
+        let rendered = PickerList::new(items, Some(list.selected), empty)
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::PickProject {
+            input: filter_input_rect,
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
+        };
+    }
+
+    /// The project chooser's rows for the `visible` entries, laid out in columns
+    /// sized to them and to `width`, with a symmetric one-space margin inside each
+    /// border. The warning glyph is a fixed gutter; the path takes the remaining
+    /// width and shows its TAIL (leading dirs elided) so the leaf stays readable.
+    fn project_chooser_items(
+        &self,
+        entries: &[ProjectChooserEntry],
+        visible: &[usize],
+        width: u16,
+    ) -> Vec<ListItem<'static>> {
+        // The path keeps room for its leaf on a narrow screen: the name gives
+        // up width first, then the base, each down to its floor.
+        const PATH_FLOOR: usize = 14;
         let start_dir = self.engine.config.defaults.start_directory.as_deref();
         let display_path =
             |entry: &ProjectChooserEntry| git::display_path_relative_to(&entry.path, start_dir);
@@ -7641,16 +8142,16 @@ impl App {
             .clamp(8, 20);
         // margin(1) warn(1) sp(1) name sp(2) count sp(2) base sp(2) path margin(1)
         let gutters = 1 + 1 + 1 + 2 + count_col + 2 + 2 + 1;
-        let room = usize::from(list_inner.width).saturating_sub(gutters + PATH_FLOOR);
+        let room = usize::from(width).saturating_sub(gutters + PATH_FLOOR);
         if name_col + base_col > room {
             name_col = room.saturating_sub(base_col).max(8);
         }
         if name_col + base_col > room {
             base_col = room.saturating_sub(name_col).max(8);
         }
-        let path_col = usize::from(list_inner.width).saturating_sub(gutters + name_col + base_col);
+        let path_col = usize::from(width).saturating_sub(gutters + name_col + base_col);
 
-        let items = visible
+        visible
             .iter()
             .filter_map(|i| entries.get(*i))
             .map(|entry| {
@@ -7693,22 +8194,7 @@ impl App {
                     Span::styled(path, Style::default().fg(self.theme.hint_dim_desc_fg)),
                 ]))
             })
-            .collect::<Vec<_>>();
-
-        let empty = if entries.is_empty() {
-            "No projects yet."
-        } else {
-            "No matching projects."
-        };
-        let rendered = PickerList::new(items, Some(list.selected), empty)
-            .block(list_block)
-            .render(frame, list_area, &self.theme);
-        self.overlay_layout.active = OverlayMouseLayout::PickProject {
-            input: filter_input_rect,
-            list: rendered.list,
-            items: rendered.items,
-            offset: rendered.offset,
-        };
+            .collect::<Vec<_>>()
     }
 
     /// `manage-projects`' second step: the project (or orphaned group) named in
@@ -7724,69 +8210,8 @@ impl App {
         let area = centered_rect(72, 70, frame.area());
         self.clear_overlay_area(frame, area);
 
-        let label_style = Style::default().fg(self.theme.hint_desc_fg);
         let text_style = Style::default().fg(self.theme.text_fg);
-        let start_dir = self.engine.config.defaults.start_directory.as_deref();
-        let header: Vec<Line<'static>> = match &prompt.target {
-            ProjectActionsTarget::Project { id } => {
-                match self.engine.projects.iter().find(|p| &p.id == id) {
-                    Some(project) => {
-                        let mut folder = vec![
-                            Span::styled(" Folder: ", label_style),
-                            name_chip(
-                                &git::display_path_relative_to(&project.path, start_dir),
-                                &self.theme,
-                            ),
-                        ];
-                        if project.path_missing {
-                            folder.push(Span::styled(
-                                format!("  {} missing", self.glyphs().warning),
-                                Style::default().fg(self.theme.warning_fg),
-                            ));
-                        }
-                        let mut branches = vec![Span::styled(" Base branch: ", label_style)];
-                        match &project.leading_branch {
-                            Some(base) => branches.push(name_chip(base, &self.theme)),
-                            None => branches.push(Span::styled("no base recorded yet", text_style)),
-                        }
-                        let on = project.current_branch.trim();
-                        let folder_on = if on.is_empty() {
-                            Line::from(vec![
-                                Span::styled(" Folder is on: ", label_style),
-                                Span::styled("an unknown branch", text_style),
-                            ])
-                        } else {
-                            labelled_name(" Folder is on: ", on, label_style, &self.theme)
-                        };
-                        vec![
-                            labelled_name(" Project: ", &project.name, label_style, &self.theme),
-                            Line::from(folder),
-                            Line::from(branches),
-                            folder_on,
-                        ]
-                    }
-                    None => vec![Line::from(Span::styled(
-                        " This project is no longer available.",
-                        Style::default().fg(self.theme.warning_fg),
-                    ))],
-                }
-            }
-            ProjectActionsTarget::Orphaned { project_id, name } => vec![
-                labelled_name(" Orphaned group: ", name, label_style, &self.theme),
-                Line::from(Span::styled(
-                    format!(
-                        " Its project record is gone, and {} still {} to it.",
-                        count_of(self.project_agent_count(project_id), "agent"),
-                        if self.project_agent_count(project_id) == 1 {
-                            "belongs"
-                        } else {
-                            "belong"
-                        }
-                    ),
-                    text_style,
-                )),
-            ],
-        };
+        let header = self.project_actions_header(&prompt.target);
 
         let back = if prompt.return_to.is_some() {
             "back"
@@ -7846,6 +8271,75 @@ impl App {
         };
     }
 
+    /// The project actions screen's header: the project, its folder and branches,
+    /// or what is left of an orphaned group.
+    fn project_actions_header(&self, target: &ProjectActionsTarget) -> Vec<Line<'static>> {
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let start_dir = self.engine.config.defaults.start_directory.as_deref();
+        let header: Vec<Line<'static>> = match target {
+            ProjectActionsTarget::Project { id } => {
+                match self.engine.projects.iter().find(|p| &p.id == id) {
+                    Some(project) => {
+                        let mut folder = vec![
+                            Span::styled(" Folder: ", label_style),
+                            name_chip(
+                                &git::display_path_relative_to(&project.path, start_dir),
+                                &self.theme,
+                            ),
+                        ];
+                        if project.path_missing {
+                            folder.push(Span::styled(
+                                format!("  {} missing", self.glyphs().warning),
+                                Style::default().fg(self.theme.warning_fg),
+                            ));
+                        }
+                        let mut branches = vec![Span::styled(" Base branch: ", label_style)];
+                        match &project.leading_branch {
+                            Some(base) => branches.push(name_chip(base, &self.theme)),
+                            None => branches.push(Span::styled("no base recorded yet", text_style)),
+                        }
+                        let on = project.current_branch.trim();
+                        let folder_on = if on.is_empty() {
+                            Line::from(vec![
+                                Span::styled(" Folder is on: ", label_style),
+                                Span::styled("an unknown branch", text_style),
+                            ])
+                        } else {
+                            labelled_name(" Folder is on: ", on, label_style, &self.theme)
+                        };
+                        vec![
+                            labelled_name(" Project: ", &project.name, label_style, &self.theme),
+                            Line::from(folder),
+                            Line::from(branches),
+                            folder_on,
+                        ]
+                    }
+                    None => vec![Line::from(Span::styled(
+                        " This project is no longer available.",
+                        Style::default().fg(self.theme.warning_fg),
+                    ))],
+                }
+            }
+            ProjectActionsTarget::Orphaned { project_id, name } => vec![
+                labelled_name(" Orphaned group: ", name, label_style, &self.theme),
+                Line::from(Span::styled(
+                    format!(
+                        " Its project record is gone, and {} still {} to it.",
+                        count_of(self.project_agent_count(project_id), "agent"),
+                        if self.project_agent_count(project_id) == 1 {
+                            "belongs"
+                        } else {
+                            "belong"
+                        }
+                    ),
+                    text_style,
+                )),
+            ],
+        };
+        header
+    }
+
     /// The Change base branch picker: the project and its base in a header,
     /// the fetch note (or the search row) beneath, and every branch the folder
     /// can switch to. A branch another worktree holds is dimmed and names its
@@ -7865,62 +8359,13 @@ impl App {
         let details_block = self.themed_overlay_block("Change Base Branch");
         let details_inner = details_block.inner(details_area);
 
-        let label_style = Style::default().fg(self.theme.hint_desc_fg);
         let text_style = Style::default().fg(self.theme.text_fg);
         let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
-        let mut first = vec![Span::styled(" Project: ", label_style)];
-        first.push(name_chip(&prompt.project_name, &self.theme));
-        first.push(Span::styled("  Base: ", label_style));
-        match &prompt.current_base {
-            Some(base) => first.push(name_chip(base, &self.theme)),
-            None => first.push(Span::styled("no base recorded yet", text_style)),
-        }
-        let second = if prompt.list.is_filtering() {
-            render_single_line_field(
-                "/ ",
-                &prompt.list.filter.text,
-                prompt.list.filter.cursor,
-                self.theme.input_cursor_fg,
-                self.theme.input_cursor_bg,
-                FocusState::Focused,
-                details_inner.width,
-            )
-        } else if let Some(note) = &prompt.fetch_note {
-            Line::from(Span::styled(
-                format!(
-                    " Could not fetch origin ({note}); its branches are listed as last fetched."
-                ),
-                Style::default().fg(self.theme.warning_fg),
-            ))
-        } else {
-            Line::from(Span::styled(
-                " Pick the branch new agents start from. The folder switches to it.",
-                label_style,
-            ))
-        };
+        let details = self.change_base_branch_details(&prompt, details_inner.width);
 
-        let searching = prompt.list.searching;
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
-        let back = if prompt.return_to.is_some() {
-            "back"
-        } else {
-            "cancel"
-        };
-        let hints = if searching {
-            vec![confirm, Hint::key(close_key, "clear").pinned()]
-        } else {
-            vec![
-                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
-                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
-                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
-                confirm,
-                Hint::key(close_key, back).pinned(),
-            ]
-        };
-        let hint_line = modal_hint_line(&self.theme, &hints, area.width.saturating_sub(2));
+        let hint_line = self.change_base_branch_hints(&prompt, area.width.saturating_sub(2));
 
-        Paragraph::new(vec![Line::from(first), second])
+        Paragraph::new(details)
             .block(details_block)
             .render(details_area, frame.buffer_mut());
         // A field the user cannot click into is a gap: the search row's rect is
@@ -7961,37 +8406,7 @@ impl App {
                 } else {
                     text_style.add_modifier(Modifier::BOLD)
                 };
-                // The holder's agent and folder are names, so they are chips;
-                // both come from the listing worker, never from a lookup here.
-                let note: Vec<Span<'static>> = match (held, branch.location) {
-                    (Some(holder), _) => match prompt.holders.get(&branch.name) {
-                        Some(BranchHolder {
-                            agent: Some(agent),
-                            path,
-                        }) => vec![
-                            Span::styled("unavailable: checked out by agent ", dim),
-                            name_chip(agent, &self.theme),
-                            Span::styled(" at ", dim),
-                            name_chip(path, &self.theme),
-                        ],
-                        Some(BranchHolder { agent: None, path }) => vec![
-                            Span::styled("unavailable: checked out at ", dim),
-                            name_chip(path, &self.theme),
-                        ],
-                        None => vec![
-                            Span::styled("unavailable: checked out at ", dim),
-                            name_chip(&holder.display().to_string(), &self.theme),
-                        ],
-                    },
-                    (None, dux_core::git::BranchLocation::Remote) => vec![Span::styled(
-                        "on origin only; a local branch is created from it",
-                        dim,
-                    )],
-                    (None, dux_core::git::BranchLocation::Local) if is_base => {
-                        vec![Span::styled("current base", dim)]
-                    }
-                    (None, dux_core::git::BranchLocation::Local) => Vec::new(),
-                };
+                let note = self.branch_choice_note(&prompt, branch);
                 let mut spans = vec![
                     active_provider_marker_span(
                         if is_base {
@@ -8033,6 +8448,119 @@ impl App {
             items: rendered.items,
             offset: rendered.offset,
         };
+    }
+
+    /// The base branch picker's header: the project and its base, then the
+    /// search field, a fetch warning, or what picking does.
+    fn change_base_branch_details(
+        &self,
+        prompt: &crate::app::ChangeBaseBranchPrompt,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let mut first = vec![Span::styled(" Project: ", label_style)];
+        first.push(name_chip(&prompt.project_name, &self.theme));
+        first.push(Span::styled("  Base: ", label_style));
+        match &prompt.current_base {
+            Some(base) => first.push(name_chip(base, &self.theme)),
+            None => first.push(Span::styled("no base recorded yet", text_style)),
+        }
+        let second = if prompt.list.is_filtering() {
+            render_single_line_field(
+                "/ ",
+                &prompt.list.filter.text,
+                prompt.list.filter.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                FocusState::Focused,
+                width,
+            )
+        } else if let Some(note) = &prompt.fetch_note {
+            Line::from(Span::styled(
+                format!(
+                    " Could not fetch origin ({note}); its branches are listed as last fetched."
+                ),
+                Style::default().fg(self.theme.warning_fg),
+            ))
+        } else {
+            Line::from(Span::styled(
+                " Pick the branch new agents start from. The folder switches to it.",
+                label_style,
+            ))
+        };
+        vec![Line::from(first), second]
+    }
+
+    /// What a branch row of the base branch picker says after the name: why it
+    /// cannot be picked, where it lives, or that it is the current base.
+    fn branch_choice_note(
+        &self,
+        prompt: &crate::app::ChangeBaseBranchPrompt,
+        branch: &dux_core::git::BranchChoice,
+    ) -> Vec<Span<'static>> {
+        let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let is_base = prompt.current_base.as_deref() == Some(branch.name.as_str());
+        let held = branch.held_by.as_ref();
+        // The holder's agent and folder are names, so they are chips;
+        // both come from the listing worker, never from a lookup here.
+        match (held, branch.location) {
+            (Some(holder), _) => match prompt.holders.get(&branch.name) {
+                Some(BranchHolder {
+                    agent: Some(agent),
+                    path,
+                }) => vec![
+                    Span::styled("unavailable: checked out by agent ", dim),
+                    name_chip(agent, &self.theme),
+                    Span::styled(" at ", dim),
+                    name_chip(path, &self.theme),
+                ],
+                Some(BranchHolder { agent: None, path }) => vec![
+                    Span::styled("unavailable: checked out at ", dim),
+                    name_chip(path, &self.theme),
+                ],
+                None => vec![
+                    Span::styled("unavailable: checked out at ", dim),
+                    name_chip(&holder.display().to_string(), &self.theme),
+                ],
+            },
+            (None, dux_core::git::BranchLocation::Remote) => vec![Span::styled(
+                "on origin only; a local branch is created from it",
+                dim,
+            )],
+            (None, dux_core::git::BranchLocation::Local) if is_base => {
+                vec![Span::styled("current base", dim)]
+            }
+            (None, dux_core::git::BranchLocation::Local) => Vec::new(),
+        }
+    }
+
+    /// The base branch picker's footer: the search keys while searching, the
+    /// list keys otherwise.
+    fn change_base_branch_hints(
+        &self,
+        prompt: &crate::app::ChangeBaseBranchPrompt,
+        width: u16,
+    ) -> Line<'static> {
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "choose");
+        let back = if prompt.return_to.is_some() {
+            "back"
+        } else {
+            "cancel"
+        };
+        let hints = if prompt.list.searching {
+            vec![confirm, Hint::key(close_key, "clear").pinned()]
+        } else {
+            vec![
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                confirm,
+                Hint::key(close_key, back).pinned(),
+            ]
+        };
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     /// "Change base branch?": the shared prose both surfaces print and a
@@ -8247,21 +8775,11 @@ impl App {
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox_label = "Recover last working config";
         let checkbox_state = CheckboxState::of(*focus, ConfigReloadFailedFocus::Checkbox);
-        let recover_mark = if *recover_old_config {
-            CheckMark::Checked
-        } else {
-            CheckMark::Unchecked
-        };
+        let recover_mark = CheckMark::from(*recover_old_config);
         let checkbox = Checkbox::new(checkbox_label)
             .checked(recover_mark)
             .state(checkbox_state);
-        let checkbox_height = checkbox
-            .layout(
-                inner_width,
-                checkbox.marker_style(Style::default()),
-                checkbox.label_style(Style::default()),
-            )
-            .height;
+        let checkbox_height = checkbox.height_at(inner_width);
 
         let mut body_lines = vec![
             Line::from(""),
@@ -8813,22 +9331,12 @@ impl App {
         let checkbox_label = (!restart_offer.is_empty())
             .then(|| dux_core::working_copy::recreate_restart_checkbox_prose(restart_offer));
         let checkbox_state = CheckboxState::of(*focus, RecreateWorkingCopyFocus::RestartCheckbox);
-        let restart_tabs = if *restart_tabs {
-            CheckMark::Checked
-        } else {
-            CheckMark::Unchecked
-        };
+        let restart_tabs = CheckMark::from(*restart_tabs);
         let checkbox_height = checkbox_label.as_ref().map_or(0, |label| {
             let checkbox = Checkbox::with_prose(label, &self.theme)
                 .checked(restart_tabs)
                 .state(checkbox_state);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+            checkbox.height_at(inner_width)
         });
         let confirm_label = guarded_confirm_label("Recreate", attached);
         let focus = *focus;
@@ -9138,6 +9646,45 @@ impl App {
         else {
             return;
         };
+        let lines = self.discard_file_body(file_path, kind);
+        let deletes_folder = *kind != dux_core::model::ChangedFileKind::File;
+        let (cancel, act) = confirm_focus_buttons(
+            *focus,
+            ButtonPressedTarget::ConfirmDiscardCancel,
+            (
+                if deletes_folder { "Delete" } else { "Discard" },
+                ButtonKind::Danger,
+                ButtonPressedTarget::ConfirmDiscardConfirm,
+            ),
+        );
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title: if deletes_folder {
+                    "Delete Folder"
+                } else {
+                    "Discard Changes"
+                },
+                body: lines,
+                controls_height: 0,
+                cancel,
+                act,
+                reserve_labels: &[],
+            },
+        );
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
+            cancel_button: layout.cancel,
+            discard_button: layout.act,
+        };
+    }
+
+    /// The discard dialog's prose: what goes, what the delete keeps, and the
+    /// warning that it cannot be undone.
+    fn discard_file_body(
+        &self,
+        file_path: &str,
+        kind: &dux_core::model::ChangedFileKind,
+    ) -> Vec<Line<'static>> {
         // A folded folder is deleted whole, so the question names it as the
         // folder it is and says how much goes with it.
         let question = match kind {
@@ -9228,35 +9775,7 @@ impl App {
             warning,
             Style::default().fg(self.theme.warning_fg),
         )));
-        let deletes_folder = *kind != dux_core::model::ChangedFileKind::File;
-        let (cancel, act) = confirm_focus_buttons(
-            *focus,
-            ButtonPressedTarget::ConfirmDiscardCancel,
-            (
-                if deletes_folder { "Delete" } else { "Discard" },
-                ButtonKind::Danger,
-                ButtonPressedTarget::ConfirmDiscardConfirm,
-            ),
-        );
-        let layout = self.render_confirm_dialog(
-            frame,
-            &ConfirmDialog {
-                title: if deletes_folder {
-                    "Delete Folder"
-                } else {
-                    "Discard Changes"
-                },
-                body: lines,
-                controls_height: 0,
-                cancel,
-                act,
-                reserve_labels: &[],
-            },
-        );
-        self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
-            cancel_button: layout.cancel,
-            discard_button: layout.act,
-        };
+        lines
     }
 
     fn render_confirm_initial_commit_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -9390,74 +9909,12 @@ impl App {
         let inner_width = confirm_inner_width(frame.area());
         let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
 
-        // Body: warning text + the "new worktrees branch from …" note,
-        // plus a dim info line on the heuristic path explaining why dux
-        // won't offer to switch branches automatically.
-        // The sentences are dux-core's, the web's word for word; their line
-        // breaks are where this dialog breaks its rows.
-        let known_default = match kind {
-            BranchWarningKind::Known { default_branch } => Some(default_branch.as_str()),
-            BranchWarningKind::Heuristic => None,
-        };
-        let mut body_lines = vec![Line::from("")];
-        body_lines.extend(prose_lines(
-            &dux_core::add_project_prose::branch_warning_prose(current_branch, known_default),
-            " ",
-            Style::default(),
-            &self.theme,
-        ));
-        body_lines.push(Line::from(""));
-        // The sentence follows the box: the core rule names the branch new
-        // worktrees will start from, and only a branch other than the remote's
-        // default is worth a warning.
-        let worktree_line = |checked: dux_core::add_project_plan::DefaultCheckout| {
-            let base = dux_core::add_project_plan::project_base_at_add(
-                Some(current_branch.as_str()),
-                known_default,
-                checked,
-            );
-            let style = if base.is_remote_default() {
-                Style::default()
-            } else {
-                Style::default().fg(self.theme.warning_fg)
-            };
-            prose_lines(
-                &dux_core::add_project_prose::worktree_base_note_prose(base.branch()),
-                " ",
-                style,
-                &self.theme,
-            )
-        };
-        // Measured with the box both ways, so toggling it never resizes the
-        // dialog under the pointer.
-        let worktree_line_height = [
-            dux_core::add_project_plan::DefaultCheckout::CheckOutDefault,
-            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
-        ]
-        .into_iter()
-        .map(|checked| wrapped_rows(&worktree_line(checked), inner_width))
-        .max()
-        .unwrap_or(1);
         let checkout = if *checkout_default {
             dux_core::add_project_plan::DefaultCheckout::CheckOutDefault
         } else {
             dux_core::add_project_plan::DefaultCheckout::StayOnCurrent
         };
-        let worktree_line_extra = worktree_line_height
-            .saturating_sub(wrapped_rows(&worktree_line(checkout), inner_width));
-        body_lines.extend(worktree_line(checkout));
-        for _ in 0..worktree_line_extra {
-            body_lines.push(Line::from(""));
-        }
-        if matches!(kind, BranchWarningKind::Heuristic) {
-            body_lines.push(Line::from(""));
-            body_lines.extend(prose_lines(
-                &dux_core::add_project_prose::heuristic_branch_note_prose(),
-                " ",
-                Style::default().fg(self.theme.hint_desc_fg),
-                &self.theme,
-            ));
-        }
+        let body_lines = self.non_default_branch_body(current_branch, kind, checkout, inner_width);
         // Checkbox height is measured up-front so the outer rect can
         // be sized exactly, mirroring the Delete Agent modal.
         let checkbox_height = if has_checkbox {
@@ -9467,19 +9924,9 @@ impl App {
             let state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let checkbox = Checkbox::with_prose(&label, &self.theme)
-                .checked(if *checkout_default {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                })
+                .checked(CheckMark::from(*checkout_default))
                 .state(state);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+            checkbox.height_at(inner_width)
         } else {
             0
         };
@@ -9527,11 +9974,7 @@ impl App {
                 frame,
                 checkbox_area,
                 &label,
-                if *checkout_default {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
+                CheckMark::from(*checkout_default),
                 checkbox_state,
                 None,
             );
@@ -9548,6 +9991,82 @@ impl App {
             add_button: layout.act,
             checkbox: checkbox_rect,
         };
+    }
+
+    /// The non-default branch dialog's prose: the warning, the note on which
+    /// branch new worktrees start from (padded to the same height whichever
+    /// way the box is ticked), and the heuristic note when dux only guessed.
+    fn non_default_branch_body(
+        &self,
+        current_branch: &str,
+        kind: &BranchWarningKind,
+        checkout: dux_core::add_project_plan::DefaultCheckout,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        // Body: warning text + the "new worktrees branch from …" note,
+        // plus a dim info line on the heuristic path explaining why dux
+        // won't offer to switch branches automatically.
+        // The sentences are dux-core's, the web's word for word; their line
+        // breaks are where this dialog breaks its rows.
+        let known_default = match kind {
+            BranchWarningKind::Known { default_branch } => Some(default_branch.as_str()),
+            BranchWarningKind::Heuristic => None,
+        };
+        let mut body_lines = vec![Line::from("")];
+        body_lines.extend(prose_lines(
+            &dux_core::add_project_prose::branch_warning_prose(current_branch, known_default),
+            " ",
+            Style::default(),
+            &self.theme,
+        ));
+        body_lines.push(Line::from(""));
+        // The sentence follows the box: the core rule names the branch new
+        // worktrees will start from, and only a branch other than the remote's
+        // default is worth a warning.
+        let worktree_line = |checked: dux_core::add_project_plan::DefaultCheckout| {
+            let base = dux_core::add_project_plan::project_base_at_add(
+                Some(current_branch),
+                known_default,
+                checked,
+            );
+            let style = if base.is_remote_default() {
+                Style::default()
+            } else {
+                Style::default().fg(self.theme.warning_fg)
+            };
+            prose_lines(
+                &dux_core::add_project_prose::worktree_base_note_prose(base.branch()),
+                " ",
+                style,
+                &self.theme,
+            )
+        };
+        // Measured with the box both ways, so toggling it never resizes the
+        // dialog under the pointer.
+        let worktree_line_height = [
+            dux_core::add_project_plan::DefaultCheckout::CheckOutDefault,
+            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
+        ]
+        .into_iter()
+        .map(|checked| wrapped_rows(&worktree_line(checked), inner_width))
+        .max()
+        .unwrap_or(1);
+        let worktree_line_extra = worktree_line_height
+            .saturating_sub(wrapped_rows(&worktree_line(checkout), inner_width));
+        body_lines.extend(worktree_line(checkout));
+        for _ in 0..worktree_line_extra {
+            body_lines.push(Line::from(""));
+        }
+        if matches!(kind, BranchWarningKind::Heuristic) {
+            body_lines.push(Line::from(""));
+            body_lines.extend(prose_lines(
+                &dux_core::add_project_prose::heuristic_branch_note_prose(),
+                " ",
+                Style::default().fg(self.theme.hint_desc_fg),
+                &self.theme,
+            ));
+        }
+        body_lines
     }
 
     fn render_confirm_use_existing_branch_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -9611,75 +10130,27 @@ impl App {
 
     fn render_rename_session_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::RenameSession {
-            session_id,
-            input,
             rename_branch,
             focus,
             branch_named,
-            open_pr,
-            pushed,
+            ..
         } = &self.prompt
         else {
             return;
         };
         let checkbox_state = CheckboxState::of(*focus, RenameSessionFocus::RenameBranchCheckbox);
         let checkbox = Checkbox::new("Also rename the git branch")
-            .checked(if *rename_branch {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            })
+            .checked(CheckMark::from(*rename_branch))
             .state(checkbox_state);
         let dialog_width = 62.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
-        // The line under the box says what ticking it does, warns when the
-        // branch has an open pull request or a pushed copy that would stay on
-        // the old name, and, with the box ticked and the name empty, says why
-        // the dialog will not confirm.
-        let note = if *branch_named {
-            let branch = self
-                .engine
-                .sessions
-                .iter()
-                .find(|s| s.id == *session_id)
-                .and_then(|s| s.branch_name())
-                .unwrap_or_default();
-            let (prose, warns) = if *rename_branch && input.text.trim().is_empty() {
-                (Prose::new().text(RENAME_BRANCH_NEEDS_A_NAME), true)
-            } else {
-                (
-                    dux_core::engine::rename_branch_note_prose(
-                        branch,
-                        *open_pr,
-                        if *pushed {
-                            dux_core::engine::BranchPushed::Pushed
-                        } else {
-                            dux_core::engine::BranchPushed::NotPushed
-                        },
-                    ),
-                    open_pr.is_some() || *pushed,
-                )
-            };
-            let style = Style::default().fg(if warns {
-                self.theme.warning_fg
-            } else {
-                self.theme.hint_desc_fg
-            });
-            self.hanging_prose_lines(&prose, style, Checkbox::indent(), inner_width)
-        } else {
-            Vec::new()
-        };
+        let note = self.rename_session_note(inner_width);
         // A standalone agent has no branch, so the checkbox is ABSENT
         // rather than present-and-inert, and the modal shrinks to the
         // one control it really has.
         let checkbox_height = if *branch_named {
             checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+                .height_at(inner_width)
                 .saturating_add(usize_to_u16_wrapping(note.len()))
         } else {
             0
@@ -9716,6 +10187,94 @@ impl App {
         )))
         .render(label_area, frame.buffer_mut());
 
+        let input_inner = self.render_rename_session_field(frame, input_area);
+
+        let checkbox_rect = if *branch_named {
+            let (rect, height) = self.render_overlay_checkbox(
+                frame,
+                checkbox_area,
+                "Also rename the git branch",
+                CheckMark::from(*rename_branch),
+                checkbox_state,
+                None,
+            );
+            let note_area = Rect {
+                y: checkbox_area.y.saturating_add(height),
+                height: checkbox_area.height.saturating_sub(height),
+                ..checkbox_area
+            }
+            .intersection(frame.area());
+            Paragraph::new(note).render(note_area, frame.buffer_mut());
+            Some(rect)
+        } else {
+            None
+        };
+
+        Paragraph::new(self.rename_session_hints(hint_area.width))
+            .render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::RenameSession {
+            input: input_inner,
+            checkbox: checkbox_rect.map(|rect| OverlayCheckbox {
+                id: OverlayCheckboxId::RenameSessionBranch,
+                rect,
+            }),
+        };
+    }
+
+    /// The line under the rename dialog's branch box: what ticking it does, a
+    /// warning when the branch has an open pull request or a pushed copy that
+    /// would stay on the old name, and, with the box ticked and the name empty,
+    /// why the dialog will not confirm. Empty for an agent with no branch.
+    fn rename_session_note(&self, inner_width: u16) -> Vec<Line<'static>> {
+        let PromptState::RenameSession {
+            session_id,
+            input,
+            rename_branch,
+            branch_named: true,
+            open_pr,
+            pushed,
+            ..
+        } = &self.prompt
+        else {
+            return Vec::new();
+        };
+        let branch = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == *session_id)
+            .and_then(|s| s.branch_name())
+            .unwrap_or_default();
+        let (prose, warns) = if *rename_branch && input.text.trim().is_empty() {
+            (Prose::new().text(RENAME_BRANCH_NEEDS_A_NAME), true)
+        } else {
+            (
+                dux_core::engine::rename_branch_note_prose(
+                    branch,
+                    *open_pr,
+                    if *pushed {
+                        dux_core::engine::BranchPushed::Pushed
+                    } else {
+                        dux_core::engine::BranchPushed::NotPushed
+                    },
+                ),
+                open_pr.is_some() || *pushed,
+            )
+        };
+        let style = Style::default().fg(if warns {
+            self.theme.warning_fg
+        } else {
+            self.theme.hint_desc_fg
+        });
+        self.hanging_prose_lines(&prose, style, Checkbox::indent(), inner_width)
+    }
+
+    /// Draw the rename dialog's name field into `area` and return the rect a
+    /// click lands the caret in.
+    fn render_rename_session_field(&self, frame: &mut Frame<'_>, area: Rect) -> Rect {
+        let PromptState::RenameSession { input, focus, .. } = &self.prompt else {
+            return Rect::default();
+        };
         // The field draws its caret only while it HAS focus: with the
         // checkbox focused the field takes no keystrokes, so a caret
         // there would be a lie (and the key handler already drops
@@ -9725,7 +10284,7 @@ impl App {
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(self.theme.overlay_field_border_style(input_focused));
-        let input_inner = input_block.inner(input_area);
+        let input_inner = input_block.inner(area);
         let mut field = render_single_line_field(
             " ",
             &input.text,
@@ -9746,33 +10305,20 @@ impl App {
         }
         Paragraph::new(field)
             .block(input_block)
-            .render(input_area, frame.buffer_mut());
+            .render(area, frame.buffer_mut());
+        input_inner
+    }
 
-        let checkbox_rect = if *branch_named {
-            let (rect, height) = self.render_overlay_checkbox(
-                frame,
-                checkbox_area,
-                "Also rename the git branch",
-                if *rename_branch {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
-                checkbox_state,
-                None,
-            );
-            let note_area = Rect {
-                y: checkbox_area.y.saturating_add(height),
-                height: checkbox_area.height.saturating_sub(height),
-                ..checkbox_area
-            }
-            .intersection(frame.area());
-            Paragraph::new(note).render(note_area, frame.buffer_mut());
-            Some(rect)
-        } else {
-            None
+    /// The rename dialog's footer keys.
+    fn rename_session_hints(&self, width: u16) -> Line<'static> {
+        let PromptState::RenameSession {
+            focus,
+            branch_named,
+            ..
+        } = &self.prompt
+        else {
+            return Line::default();
         };
-
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         // Name only a binding that can move focus out of the name field; omit
@@ -9783,7 +10329,7 @@ impl App {
         } else {
             None
         };
-        let hints = modal_hint_line(
+        modal_hint_line(
             &self.theme,
             &[
                 Hint::key(confirm_key, "confirm"),
@@ -9799,16 +10345,8 @@ impl App {
                 }),
                 Hint::key(close_key, "cancel").pinned(),
             ],
-            hint_area.width,
-        );
-        Paragraph::new(hints).render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::RenameSession {
-            input: input_inner,
-            checkbox: checkbox_rect.map(|rect| OverlayCheckbox {
-                id: OverlayCheckboxId::RenameSessionBranch,
-                rect,
-            }),
-        };
+            width,
+        )
     }
 
     fn render_clone_project_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -9837,20 +10375,9 @@ impl App {
         let dialog_width = 80.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
         let checkbox = Checkbox::new(checkbox_label)
-            .checked(if *randomize_name {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            })
+            .checked(CheckMark::from(*randomize_name))
             .state(checkbox_state);
-        let checkbox_height = checkbox
-            .layout(
-                inner_width,
-                checkbox.marker_style(Style::default()),
-                checkbox.label_style(Style::default()),
-            )
-            .height
-            .saturating_add(1);
+        let checkbox_height = checkbox.height_at(inner_width).saturating_add(1);
         let area = centered_rect_exact(dialog_width, 17 + checkbox_height, frame.area());
         let inner = self
             .open_modal_frame(frame, "Clone a Repository", area)
@@ -9867,80 +10394,41 @@ impl App {
             checkbox_area,
             _,
             hint_area,
-        ] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Length(checkbox_height),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .areas(inner);
+        ] = clone_form_areas(inner, checkbox_height);
 
-        let label_style = Style::default().fg(self.theme.input_label_fg);
-        let mut field_rects = Vec::new();
-        for (label_area, label, field_area, input, field) in [
-            (
-                address_label,
-                " Repository address (anything git clone accepts):",
-                address_area,
-                address,
-                CloneProjectFocus::Address,
-            ),
-            (
-                destination_label,
-                " Clone into:",
-                destination_area,
-                destination,
-                CloneProjectFocus::Destination,
-            ),
-            (
-                name_label,
-                " Name for the first agent (used as branch name):",
-                name_area,
-                agent_name,
-                CloneProjectFocus::AgentName,
-            ),
-        ] {
-            Paragraph::new(Line::from(Span::styled(label, label_style)))
-                .render(label_area, frame.buffer_mut());
-            // The caret only appears while the field has focus: a field that
-            // takes no keystrokes must not look like it does.
-            let focused = FocusState::of(*focus, field);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(self.theme.overlay_field_border_style(focused));
-            let text_rect = block.inner(field_area);
-            field_rects.push(text_rect);
-            Paragraph::new(render_single_line_field(
-                " ",
-                &input.text,
-                input.cursor,
-                self.theme.input_cursor_fg,
-                self.theme.input_cursor_bg,
-                focused,
-                text_rect.width,
-            ))
-            .block(block)
-            .render(field_area, frame.buffer_mut());
-        }
+        let field_rects = self.render_clone_fields(
+            frame,
+            &[
+                (
+                    address_label,
+                    " Repository address (anything git clone accepts):",
+                    address_area,
+                    address,
+                    CloneProjectFocus::Address,
+                ),
+                (
+                    destination_label,
+                    " Clone into:",
+                    destination_area,
+                    destination,
+                    CloneProjectFocus::Destination,
+                ),
+                (
+                    name_label,
+                    " Name for the first agent (used as branch name):",
+                    name_area,
+                    agent_name,
+                    CloneProjectFocus::AgentName,
+                ),
+            ],
+            *focus,
+        );
 
         let (checkbox_rect, _) = self.render_overlay_checkbox(
             frame,
             checkbox_area,
             checkbox_label,
-            if *randomize_name {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            },
+            CheckMark::from(*randomize_name),
             checkbox_state,
             Some(Line::from(Span::styled(
                 format!(
@@ -9951,23 +10439,7 @@ impl App {
             ))),
         );
 
-        let confirm_key = self.bindings.label_for(Action::Confirm);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        // Name only a binding that can still move focus out of a text field.
-        let focus_key = self
-            .bindings
-            .label_for_text_field_dialog(Action::ToggleSelection);
-        let mut hints = vec![
-            Hint::key(confirm_key, "clone"),
-            Hint::maybe_key(focus_key, "focus"),
-        ];
-        // Space is a typed character in every field, so the hint appears only
-        // while the checkbox has focus.
-        if *focus == CloneProjectFocus::RandomizedNameCheckbox {
-            hints.push(Hint::plain("Space toggle"));
-        }
-        hints.push(Hint::key(close_key, "cancel").pinned());
-        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
+        Paragraph::new(self.clone_project_hints(*focus, hint_area.width))
             .render(hint_area, frame.buffer_mut());
         self.overlay_layout.active = OverlayMouseLayout::CloneProject {
             address: Some(field_rects[0]),
@@ -9980,6 +10452,74 @@ impl App {
             review_copy_checkbox: None,
             choose_existing: None,
         };
+    }
+
+    /// A dialog's single-line field in a rounded ring, drawn into `area`, with
+    /// the caret only while it has focus: a field that takes no keystrokes must
+    /// not look like it does. Returns the rect a click lands the caret in.
+    fn render_dialog_field(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        input: &TextInput,
+        focused: FocusState,
+    ) -> Rect {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(self.theme.overlay_field_border_style(focused));
+        let text_rect = block.inner(area);
+        Paragraph::new(render_single_line_field(
+            " ",
+            &input.text,
+            input.cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+            focused,
+            text_rect.width,
+        ))
+        .block(block)
+        .render(area, frame.buffer_mut());
+        text_rect
+    }
+
+    /// Draw a clone form's labelled fields, each a label row over its field,
+    /// and return the rects a click lands each field's caret in.
+    fn render_clone_fields(
+        &self,
+        frame: &mut Frame<'_>,
+        fields: &[(Rect, &str, Rect, &TextInput, CloneProjectFocus)],
+        focus: CloneProjectFocus,
+    ) -> Vec<Rect> {
+        let label_style = Style::default().fg(self.theme.input_label_fg);
+        fields
+            .iter()
+            .map(|&(label_area, label, field_area, input, field)| {
+                Paragraph::new(Line::from(Span::styled(label, label_style)))
+                    .render(label_area, frame.buffer_mut());
+                self.render_dialog_field(frame, field_area, input, FocusState::of(focus, field))
+            })
+            .collect()
+    }
+
+    /// The clone dialog's footer keys; Space is a typed character in every
+    /// field, so its hint appears only while the checkbox has focus.
+    fn clone_project_hints(&self, focus: CloneProjectFocus, width: u16) -> Line<'static> {
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        // Name only a binding that can still move focus out of a text field.
+        let focus_key = self
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection);
+        let mut hints = vec![
+            Hint::key(confirm_key, "clone"),
+            Hint::maybe_key(focus_key, "focus"),
+        ];
+        if focus == CloneProjectFocus::RandomizedNameCheckbox {
+            hints.push(Hint::plain("Space toggle"));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     /// The clone form in pull-request mode: which pull request the user is
@@ -10000,9 +10540,108 @@ impl App {
         };
         let dialog_width = 80.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
-        let text_style = Style::default().fg(self.theme.text_fg);
         let hint_style = Style::default().fg(self.theme.hint_desc_fg);
         let label_style = Style::default().fg(self.theme.input_label_fg);
+        let PrCloneLayout {
+            body,
+            facts_lines,
+            question_lines,
+            has_box,
+            rows,
+        } = self.pr_clone_layout(form, &agent_name.text, inner_width);
+        let review_label = PR_REVIEW_COPY_LABEL;
+        let height = rows.iter().sum::<u16>().saturating_add(2);
+        let area = centered_rect_exact(dialog_width, height, frame.area());
+        let inner = self
+            .open_modal_frame(frame, "New Agent from PR", area)
+            .inner;
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(rows.map(Constraint::Length))
+            .split(inner);
+
+        Paragraph::new(body).render(areas[0], frame.buffer_mut());
+        Paragraph::new(facts_lines).render(areas[2], frame.buffer_mut());
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Clone address: ", label_style),
+            name_chip(&address.text, &self.theme),
+        ]))
+        .render(areas[3], frame.buffer_mut());
+
+        let folder_label = match form.folder {
+            PrFolder::Free => " Clone into:",
+            PrFolder::Checkout { .. } => " Add this folder as a project:",
+        };
+        let field_rects = self.render_clone_fields(
+            frame,
+            &[
+                (
+                    areas[5],
+                    folder_label,
+                    areas[6],
+                    destination,
+                    CloneProjectFocus::Destination,
+                ),
+                (
+                    areas[7],
+                    " Name for the agent (used as branch name):",
+                    areas[8],
+                    agent_name,
+                    CloneProjectFocus::AgentName,
+                ),
+            ],
+            *focus,
+        );
+
+        Paragraph::new(question_lines).render(areas[10], frame.buffer_mut());
+        let review_rect = if has_box {
+            let (rect, _) = self.render_overlay_checkbox(
+                frame,
+                areas[12],
+                review_label,
+                CheckMark::from(form.review_copy_agreed),
+                CheckboxState::of(*focus, CloneProjectFocus::ReviewCopyCheckbox),
+                None,
+            );
+            Some(rect)
+        } else {
+            None
+        };
+
+        let choose_button = form
+            .has_projects
+            .then(|| self.render_choose_existing_button(frame, areas[13], *focus));
+
+        if let Some(status) = self.pr_clone_status(form, hint_style) {
+            Paragraph::new(Line::from(status)).render(areas[14], frame.buffer_mut());
+        }
+
+        Paragraph::new(self.pr_clone_hints(form, *focus, areas[16].width))
+            .render(areas[16], frame.buffer_mut());
+
+        self.overlay_layout.active = OverlayMouseLayout::CloneProject {
+            address: None,
+            destination: field_rects[0],
+            agent_name: field_rects[1],
+            checkbox: None,
+            review_copy_checkbox: review_rect.map(|rect| OverlayCheckbox {
+                id: OverlayCheckboxId::CloneProjectReviewCopy,
+                rect,
+            }),
+            choose_existing: choose_button,
+        };
+    }
+
+    /// What the pull request clone form measures before it draws: its prose
+    /// blocks, whether the review-copy box shows, and every row's height.
+    fn pr_clone_layout(
+        &self,
+        form: &PullRequestClone,
+        name: &str,
+        inner_width: u16,
+    ) -> PrCloneLayout {
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let hint_style = Style::default().fg(self.theme.hint_desc_fg);
 
         let body = self.hanging_prose_lines(&form.body(), text_style, " ", inner_width);
         let facts = Prose::new()
@@ -10016,8 +10655,8 @@ impl App {
 
         // The question for the name now in the field, when there is one: the
         // warning over an unticked box, or the refusal that no name is free.
-        let review_label = "Create a review copy";
-        let (question_lines, has_box) = match form.question_for(&agent_name.text) {
+        let review_label = PR_REVIEW_COPY_LABEL;
+        let (question_lines, has_box) = match form.question_for(name) {
             PrReviewQuestion::Needed(warning) => (
                 self.hanging_prose_lines(
                     &Prose::from_segments(warning),
@@ -10040,20 +10679,13 @@ impl App {
         };
         let review_checkbox_height = if has_box {
             let checkbox = Checkbox::new(review_label);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+            checkbox.height_at(inner_width)
         } else {
             0
         };
         let question_height = u16::try_from(question_lines.len()).unwrap_or(u16::MAX);
         let question_gap = u16::from(question_height > 0);
         let box_gap = u16::from(has_box);
-        let choose_label = "Choose an existing project\u{2026}";
         let choose_height = if form.has_projects {
             1 + BUTTON_HEIGHT
         } else {
@@ -10081,122 +10713,67 @@ impl App {
             1,                      // 15 gap
             1,                      // 16 hints
         ];
-        let height = rows.iter().sum::<u16>().saturating_add(2);
-        let area = centered_rect_exact(dialog_width, height, frame.area());
-        let inner = self
-            .open_modal_frame(frame, "New Agent from PR", area)
-            .inner;
-        let areas = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(rows.map(Constraint::Length))
-            .split(inner);
-
-        Paragraph::new(body).render(areas[0], frame.buffer_mut());
-        Paragraph::new(facts_lines).render(areas[2], frame.buffer_mut());
-        Paragraph::new(Line::from(vec![
-            Span::styled(" Clone address: ", label_style),
-            name_chip(&address.text, &self.theme),
-        ]))
-        .render(areas[3], frame.buffer_mut());
-
-        let folder_label = match form.folder {
-            PrFolder::Free => " Clone into:",
-            PrFolder::Checkout { .. } => " Add this folder as a project:",
-        };
-        let mut field_rects = Vec::new();
-        for (label_area, label, field_area, input, field) in [
-            (
-                areas[5],
-                folder_label,
-                areas[6],
-                destination,
-                CloneProjectFocus::Destination,
-            ),
-            (
-                areas[7],
-                " Name for the agent (used as branch name):",
-                areas[8],
-                agent_name,
-                CloneProjectFocus::AgentName,
-            ),
-        ] {
-            Paragraph::new(Line::from(Span::styled(label, label_style)))
-                .render(label_area, frame.buffer_mut());
-            let focused = FocusState::of(*focus, field);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(self.theme.overlay_field_border_style(focused));
-            let text_rect = block.inner(field_area);
-            field_rects.push(text_rect);
-            Paragraph::new(render_single_line_field(
-                " ",
-                &input.text,
-                input.cursor,
-                self.theme.input_cursor_fg,
-                self.theme.input_cursor_bg,
-                focused,
-                text_rect.width,
-            ))
-            .block(block)
-            .render(field_area, frame.buffer_mut());
+        PrCloneLayout {
+            body,
+            facts_lines,
+            question_lines,
+            has_box,
+            rows,
         }
+    }
 
-        Paragraph::new(question_lines).render(areas[10], frame.buffer_mut());
-        let review_rect = if has_box {
-            let (rect, _) = self.render_overlay_checkbox(
-                frame,
-                areas[12],
-                review_label,
-                if form.review_copy_agreed {
-                    CheckMark::Checked
+    /// The pull request clone form's "Choose an existing project…" button,
+    /// centred under the fields in `area`.
+    fn render_choose_existing_button(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        focus: CloneProjectFocus,
+    ) -> Rect {
+        let choose_label = PR_CHOOSE_EXISTING_LABEL;
+        let width = button_width_for(choose_label).min(area.width);
+        let button = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + 1,
+            width,
+            height: BUTTON_HEIGHT,
+        };
+        Button::new(choose_label)
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::CloneChooseExisting,
+                self.pressed_button,
+                if focus == CloneProjectFocus::ChooseExisting {
+                    ButtonState::Focused
                 } else {
-                    CheckMark::Unchecked
+                    ButtonState::Normal
                 },
-                CheckboxState::of(*focus, CloneProjectFocus::ReviewCopyCheckbox),
-                None,
-            );
-            Some(rect)
-        } else {
-            None
-        };
+            ))
+            .render(frame, button, &self.theme);
+        button
+    }
 
-        let mut choose_button = None;
-        if form.has_projects {
-            let width = button_width_for(choose_label).min(areas[13].width);
-            let button = Rect {
-                x: areas[13].x + areas[13].width.saturating_sub(width) / 2,
-                y: areas[13].y + 1,
-                width,
-                height: BUTTON_HEIGHT,
-            };
-            Button::new(choose_label)
-                .kind(ButtonKind::Confirm)
-                .state(button_state_for(
-                    ButtonPressedTarget::CloneChooseExisting,
-                    self.pressed_button,
-                    if *focus == CloneProjectFocus::ChooseExisting {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    },
-                ))
-                .render(frame, button, &self.theme);
-            choose_button = Some(button);
-        }
-
-        let status = match (&form.error, form.checking) {
+    /// The pull request clone form's status line: its error, or that the
+    /// folder is being checked.
+    fn pr_clone_status(&self, form: &PullRequestClone, hint_style: Style) -> Option<Span<'static>> {
+        match (&form.error, form.checking) {
             (Some(error), _) => Some(Span::styled(
                 format!(" {error}"),
                 Style::default().fg(self.theme.status_error_fg),
             )),
             (None, true) => Some(Span::styled(" Checking the folder\u{2026}", hint_style)),
             (None, false) => None,
-        };
-        if let Some(status) = status {
-            Paragraph::new(Line::from(status)).render(areas[14], frame.buffer_mut());
         }
+    }
 
+    /// The pull request clone form's footer keys, naming what the confirm key
+    /// does with the folder.
+    fn pr_clone_hints(
+        &self,
+        form: &PullRequestClone,
+        focus: CloneProjectFocus,
+        width: u16,
+    ) -> Line<'static> {
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let focus_key = self
@@ -10212,26 +10789,13 @@ impl App {
             ),
             Hint::maybe_key(focus_key, "focus"),
         ];
-        match *focus {
+        match focus {
             CloneProjectFocus::ReviewCopyCheckbox => hints.push(Hint::plain("Space toggle")),
             CloneProjectFocus::ChooseExisting => hints.push(Hint::plain("Space act on focus")),
             _ => {}
         }
         hints.push(Hint::key(close_key, "cancel").pinned());
-        Paragraph::new(modal_hint_line(&self.theme, &hints, areas[16].width))
-            .render(areas[16], frame.buffer_mut());
-
-        self.overlay_layout.active = OverlayMouseLayout::CloneProject {
-            address: None,
-            destination: field_rects[0],
-            agent_name: field_rects[1],
-            checkbox: None,
-            review_copy_checkbox: review_rect.map(|rect| OverlayCheckbox {
-                id: OverlayCheckboxId::CloneProjectReviewCopy,
-                rect,
-            }),
-            choose_existing: choose_button,
-        };
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     fn render_resource_monitor_prompt_overlay(&mut self, frame: &mut Frame<'_>) {
@@ -10354,60 +10918,19 @@ impl App {
             ])
             .areas(inner);
 
-        let labels = match project {
-            Some(project) => vec![
-                labelled_name(
-                    " Project: ",
-                    &project.name,
-                    Style::default().fg(self.theme.input_label_fg),
-                    &self.theme,
-                ),
-                Line::from(Span::styled(
-                    " Paste a GitHub PR URL or enter a PR number:",
-                    Style::default().fg(self.theme.input_label_fg),
-                )),
-            ],
-            None => vec![
-                Line::from(Span::styled(
-                    " Paste a pull request link, or type owner/repo#123:",
-                    Style::default().fg(self.theme.input_label_fg),
-                )),
-                Line::from(Span::styled(
-                    " dux finds the project that repository is open in.",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )),
-            ],
-        };
+        let labels = self.pull_request_input_labels(project.as_ref());
         Paragraph::new(labels).render(label_area, frame.buffer_mut());
 
         // Focus is visible or it is not focus: the border and the caret
         // both follow it, so a field that will not take your keystrokes
         // never draws a caret.
         let field_focused = *focus == PullRequestInputFocus::Input;
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(if field_focused {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            }));
-        let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_field(
-            " ",
-            &input.text,
-            input.cursor,
-            self.theme.input_cursor_fg,
-            self.theme.input_cursor_bg,
-            if field_focused {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            },
-            input_inner.width,
-        ))
-        .block(input_block)
-        .render(input_area, frame.buffer_mut());
+        let input_inner = self.render_dialog_field(
+            frame,
+            input_area,
+            input,
+            FocusState::of(*focus, PullRequestInputFocus::Input),
+        );
 
         // The secondary action, and the misclick-safe blank row above
         // it. Only offered when no project has been chosen: with one
@@ -10463,6 +10986,35 @@ impl App {
             input: input_inner,
             choose_project: choose_button,
         };
+    }
+
+    /// The pull request prompt's lines above its field: the chosen project and
+    /// what to type, or, with no project yet, how dux finds one.
+    fn pull_request_input_labels(&self, project: Option<&Project>) -> Vec<Line<'static>> {
+        match project {
+            Some(project) => vec![
+                labelled_name(
+                    " Project: ",
+                    &project.name,
+                    Style::default().fg(self.theme.input_label_fg),
+                    &self.theme,
+                ),
+                Line::from(Span::styled(
+                    " Paste a GitHub PR URL or enter a PR number:",
+                    Style::default().fg(self.theme.input_label_fg),
+                )),
+            ],
+            None => vec![
+                Line::from(Span::styled(
+                    " Paste a pull request link, or type owner/repo#123:",
+                    Style::default().fg(self.theme.input_label_fg),
+                )),
+                Line::from(Span::styled(
+                    " dux finds the project that repository is open in.",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )),
+            ],
+        }
     }
 
     fn render_attach_pull_request_input_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -10679,35 +11231,15 @@ impl App {
                 Constraint::Length(1),
             ])
             .areas(inner);
-        Paragraph::new(vec![
-            // The global scope's "All projects" is constant words; a project is
-            // a name, so it is the chip.
-            if is_global_env {
-                Line::from(vec![
-                    Span::styled(" Scope: ", Style::default().fg(self.theme.input_label_fg)),
-                    Span::styled(
-                        project_name.clone(),
-                        Style::default().fg(self.theme.input_label_fg),
-                    ),
-                ])
-            } else {
-                labelled_name(
-                    " Project: ",
-                    project_name,
-                    Style::default().fg(self.theme.input_label_fg),
-                    &self.theme,
-                )
-            },
-            Line::from(Span::styled(
-                if is_env {
-                    " Enter one variable per line as KEY=value:"
-                } else {
-                    " Enter a command to run before the provider launches:"
-                },
-                Style::default().fg(self.theme.input_label_fg),
-            )),
-        ])
-        .render(label_area, frame.buffer_mut());
+        let kind = if is_global_env {
+            ConfigureKind::GlobalEnv
+        } else if is_env {
+            ConfigureKind::ProjectEnv
+        } else {
+            ConfigureKind::StartupCommand
+        };
+        Paragraph::new(self.configure_labels(project_name, kind))
+            .render(label_area, frame.buffer_mut());
 
         // Focus routes the next modal action; engagement lets the field consume
         // keys. Focused but unengaged renders a border without a caret.
@@ -10728,6 +11260,35 @@ impl App {
             }),
         );
 
+        let engagement = if engaged {
+            FieldEngagement::Engaged
+        } else {
+            FieldEngagement::Unengaged
+        };
+        self.render_multiline_body(frame, (input_area, text_area), input, engagement);
+
+        let (cancel_button, save_button) =
+            self.render_configure_buttons(frame, buttons_area, focus);
+
+        Paragraph::new(self.configure_hints(engagement, focus, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
+            input: text_area,
+            cancel_button,
+            save_button,
+        };
+    }
+
+    /// A full-text field's body: its visible lines (or its placeholder when
+    /// empty), the one caret while it is engaged, and the scroll marker in the
+    /// field's frame `areas.0` for the text area `areas.1`.
+    fn render_multiline_body(
+        &self,
+        frame: &mut Frame<'_>,
+        (input_area, text_area): (Rect, Rect),
+        input: &TextInput,
+        engagement: FieldEngagement,
+    ) {
         let mut render_input = input.clone();
         render_input
             .set_display_width((text_area.width > 0).then_some(usize::from(text_area.width)));
@@ -10756,7 +11317,7 @@ impl App {
         }
         // Exactly one caret, and only on an ENGAGED field. A caret on a
         // field that will not receive your keys is a lie.
-        if engaged {
+        if engagement == FieldEngagement::Engaged {
             let (cursor_row, cursor_col) = render_input.cursor_display_position();
             let cx = text_area.x + usize_to_u16_wrapping(cursor_col);
             let cy = text_area.y + usize_to_u16_wrapping(cursor_row);
@@ -10777,10 +11338,52 @@ impl App {
             render_input.total_lines(),
             self.theme.hint_desc_fg,
         );
+    }
 
-        // ── Cancel / Save ─────────────────────────────────────────
-        // Cancel discards typing, so the pair sits behind a blank row
-        // and a wide gap (the misclick-safety tenet).
+    /// The configure dialog's two label lines: the scope (a project, as a chip,
+    /// or all of them) and what to type.
+    fn configure_labels(&self, project_name: &str, kind: ConfigureKind) -> Vec<Line<'static>> {
+        let is_env = kind != ConfigureKind::StartupCommand;
+        let is_global_env = kind == ConfigureKind::GlobalEnv;
+        vec![
+            // The global scope's "All projects" is constant words; a project is
+            // a name, so it is the chip.
+            if is_global_env {
+                Line::from(vec![
+                    Span::styled(" Scope: ", Style::default().fg(self.theme.input_label_fg)),
+                    Span::styled(
+                        project_name.to_string(),
+                        Style::default().fg(self.theme.input_label_fg),
+                    ),
+                ])
+            } else {
+                labelled_name(
+                    " Project: ",
+                    project_name,
+                    Style::default().fg(self.theme.input_label_fg),
+                    &self.theme,
+                )
+            },
+            Line::from(Span::styled(
+                if is_env {
+                    " Enter one variable per line as KEY=value:"
+                } else {
+                    " Enter a command to run before the provider launches:"
+                },
+                Style::default().fg(self.theme.input_label_fg),
+            )),
+        ]
+    }
+
+    /// The configure dialog's Cancel and Save buttons, centred in `area`.
+    /// Cancel discards typing, so the pair sits behind a blank row and a wide
+    /// gap (the misclick-safety tenet).
+    fn render_configure_buttons(
+        &self,
+        frame: &mut Frame<'_>,
+        buttons_area: Rect,
+        focus: ConfigureFieldFocus,
+    ) -> (Rect, Rect) {
         let btn_width = 16u16;
         let gap = 6u16;
         let total = btn_width * 2 + gap;
@@ -10821,10 +11424,20 @@ impl App {
                 },
             ))
             .render(frame, save_button, &self.theme);
+        (cancel_button, save_button)
+    }
 
-        // ── Hints. Every key is resolved through the bindings. ────
+    /// The configure dialog's footer keys. Every key is resolved through the
+    /// bindings.
+    fn configure_hints(
+        &self,
+        engagement: FieldEngagement,
+        focus: ConfigureFieldFocus,
+        width: u16,
+    ) -> Line<'static> {
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let hints: Vec<Hint> = if engaged {
+        let field_focused = focus == ConfigureFieldFocus::Input;
+        let hints: Vec<Hint> = if engagement == FieldEngagement::Engaged {
             vec![
                 Hint::key(
                     self.bindings.labels_for(Action::ExitCommitInput),
@@ -10864,13 +11477,7 @@ impl App {
             hints.push(Hint::key(close_key, "cancel").pinned());
             hints
         };
-        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
-            .render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
-            input: text_area,
-            cancel_button,
-            save_button,
-        };
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     fn render_startup_command_logs_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -10880,39 +11487,7 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(92, 82, frame.area());
         self.clear_overlay_area(frame, area);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let bottom_spans = modal_hint_line(
-            &self.theme,
-            &[
-                Hint::keys(self.bindings.labels_list_for(Action::MoveDown), "logs"),
-                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
-                Hint::keys(
-                    [
-                        self.bindings.label_for(Action::ScrollPageUp),
-                        self.bindings.label_for(Action::ScrollPageDown),
-                    ],
-                    "scroll",
-                ),
-                Hint::key(
-                    self.bindings.label_for(Action::OpenStartupCommandLogFile),
-                    "open file",
-                ),
-                Hint::key(
-                    self.bindings.label_for(Action::OpenStartupCommandLogFolder),
-                    "open folder",
-                ),
-                // The focus key, named through the bindings and skipping any
-                // key the filter would type instead. Without it the Close
-                // button is reachable but undiscoverable.
-                Hint::maybe_key(
-                    self.bindings
-                        .label_for_text_field_dialog(Action::ToggleSelection),
-                    "focus",
-                ),
-                Hint::key(close_key, "close").pinned(),
-            ],
-            area.width.saturating_sub(2),
-        );
+        let bottom_spans = self.startup_logs_footer(area.width.saturating_sub(2));
 
         let title = format!("Startup Command Logs - {}", prompt.scope_label);
         let block = self
@@ -10948,102 +11523,11 @@ impl App {
         } else {
             "No matching logs"
         };
-        let items = {
-            visible_indices
-                .iter()
-                .filter_map(|index| prompt.entries.get(*index))
-                .map(|entry| {
-                    let modified = entry.modified_at.map_or_else(
-                        || "unknown time".to_string(),
-                        |ts| ts.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    );
-                    let lines = vec![
-                        Line::from(Span::styled(
-                            entry.display_name.clone(),
-                            Style::default()
-                                .fg(self.theme.help_section_header_fg)
-                                .add_modifier(Modifier::BOLD),
-                        )),
-                        Line::from(Span::styled(
-                            modified,
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        )),
-                    ];
-                    // The click mapping divides a screen row by this
-                    // height to reach an item index; a third line here
-                    // would silently select the wrong run.
-                    debug_assert_eq!(
-                        lines.len(),
-                        usize::from(crate::app::input::STARTUP_LOG_ROW_HEIGHT)
-                    );
-                    ListItem::new(lines)
-                })
-                .collect::<Vec<_>>()
-        };
+        let items = self.startup_log_items(prompt, &visible_indices);
         let selected_visual =
             Self::startup_command_log_selected_visual_index(prompt, &visible_indices);
-        let mut filter_input_rect: Option<Rect> = None;
-        if let Some(filter_area) = filter_area {
-            let filter_block = Block::default()
-                .title(" Filter ")
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                // See `Theme::overlay_field_border_style`: drawing the
-                // unfocused state from `overlay_border` and the focused
-                // one from `border_focused` is the same colour.
-                .border_style(self.theme.overlay_field_border_style(if prompt.searching {
-                    FocusState::Focused
-                } else {
-                    FocusState::Unfocused
-                }))
-                .style(Style::default().bg(self.theme.overlay_bg));
-            let filter_inner = filter_block.inner(filter_area);
-            filter_input_rect = Some(filter_inner);
-            filter_block.render(filter_area, frame.buffer_mut());
-            let text = if prompt.filter.is_empty() && prompt.searching {
-                "type to filter logs"
-            } else {
-                prompt.filter.text.as_str()
-            };
-            if prompt.filter.is_empty() {
-                Paragraph::new(text)
-                    .style(Style::default().fg(self.theme.hint_desc_fg))
-                    .render(filter_inner, frame.buffer_mut());
-            } else {
-                // The one single-line renderer, never a hand-rolled
-                // copy.
-                Paragraph::new(render_single_line_field(
-                    "",
-                    &prompt.filter.text,
-                    prompt.filter.cursor,
-                    self.theme.input_cursor_fg,
-                    self.theme.input_cursor_bg,
-                    if prompt.searching {
-                        FocusState::Focused
-                    } else {
-                        FocusState::Unfocused
-                    },
-                    filter_inner.width,
-                ))
-                .style(Style::default().fg(self.theme.text_fg))
-                .render(filter_inner, frame.buffer_mut());
-            }
-            if prompt.searching {
-                // A caret column is a DISPLAY column. `filter.cursor`
-                // is a byte offset, so using it directly put the caret
-                // past the end of anything non-ASCII.
-                let cursor_x = filter_inner
-                    .x
-                    .saturating_add(single_line_field_caret_column(
-                        &prompt.filter.text,
-                        prompt.filter.cursor,
-                        0,
-                        filter_inner.width,
-                    ))
-                    .min(filter_inner.x + filter_inner.width.saturating_sub(1));
-                frame.set_cursor_position((cursor_x, filter_inner.y));
-            }
-        }
+        let filter_input_rect = filter_area
+            .map(|filter_area| self.render_startup_logs_filter(frame, filter_area, prompt));
         let list_focused = FocusState::of(prompt.focus, StartupCommandLogFocus::List);
         let list_block = Block::default()
             .title(" Runs ")
@@ -11058,6 +11542,190 @@ impl App {
         let list = PickerList::new(items, selected_visual, empty)
             .block(list_block)
             .render(frame, list_area, &self.theme);
+        let body_inner = self.render_startup_log_output(frame, body_area, prompt);
+
+        let close_width = 16;
+        let close_area = Rect {
+            x: button_area.x + button_area.width.saturating_sub(close_width) / 2,
+            y: button_area.y,
+            width: close_width.min(button_area.width),
+            height: 3,
+        };
+        Button::new("Close")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::StartupCommandLogsClose,
+                self.pressed_button,
+                if prompt.focus == StartupCommandLogFocus::Close {
+                    ButtonState::Focused
+                } else {
+                    ButtonState::Normal
+                },
+            ))
+            .render(frame, close_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
+            input: filter_input_rect,
+            list: list.list,
+            body: body_inner,
+            items: list.items,
+            offset: list.offset,
+            close_button: close_area,
+        };
+    }
+
+    /// The startup command log viewer's footer keys.
+    fn startup_logs_footer(&self, width: u16) -> Line<'static> {
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        modal_hint_line(
+            &self.theme,
+            &[
+                Hint::keys(self.bindings.labels_list_for(Action::MoveDown), "logs"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                Hint::keys(
+                    [
+                        self.bindings.label_for(Action::ScrollPageUp),
+                        self.bindings.label_for(Action::ScrollPageDown),
+                    ],
+                    "scroll",
+                ),
+                Hint::key(
+                    self.bindings.label_for(Action::OpenStartupCommandLogFile),
+                    "open file",
+                ),
+                Hint::key(
+                    self.bindings.label_for(Action::OpenStartupCommandLogFolder),
+                    "open folder",
+                ),
+                // The focus key, named through the bindings and skipping any
+                // key the filter would type instead. Without it the Close
+                // button is reachable but undiscoverable.
+                Hint::maybe_key(
+                    self.bindings
+                        .label_for_text_field_dialog(Action::ToggleSelection),
+                    "focus",
+                ),
+                Hint::key(close_key, "close").pinned(),
+            ],
+            width,
+        )
+    }
+
+    /// One two-line row per run the filter keeps: its name and when it ran.
+    fn startup_log_items(
+        &self,
+        prompt: &crate::app::StartupCommandLogPrompt,
+        visible_indices: &[usize],
+    ) -> Vec<ListItem<'static>> {
+        visible_indices
+            .iter()
+            .filter_map(|index| prompt.entries.get(*index))
+            .map(|entry| {
+                let modified = entry.modified_at.map_or_else(
+                    || "unknown time".to_string(),
+                    |ts| ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                );
+                let lines = vec![
+                    Line::from(Span::styled(
+                        entry.display_name.clone(),
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        modified,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                // The click mapping divides a screen row by this
+                // height to reach an item index; a third line here
+                // would silently select the wrong run.
+                debug_assert_eq!(
+                    lines.len(),
+                    usize::from(crate::app::input::STARTUP_LOG_ROW_HEIGHT)
+                );
+                ListItem::new(lines)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// The log viewer's filter field in `filter_area`, with its caret while
+    /// searching. Returns the rect a click lands the caret in.
+    fn render_startup_logs_filter(
+        &self,
+        frame: &mut Frame<'_>,
+        filter_area: Rect,
+        prompt: &crate::app::StartupCommandLogPrompt,
+    ) -> Rect {
+        let filter_block = Block::default()
+            .title(" Filter ")
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            // See `Theme::overlay_field_border_style`: drawing the
+            // unfocused state from `overlay_border` and the focused
+            // one from `border_focused` is the same colour.
+            .border_style(self.theme.overlay_field_border_style(if prompt.searching {
+                FocusState::Focused
+            } else {
+                FocusState::Unfocused
+            }))
+            .style(Style::default().bg(self.theme.overlay_bg));
+        let filter_inner = filter_block.inner(filter_area);
+        filter_block.render(filter_area, frame.buffer_mut());
+        let text = if prompt.filter.is_empty() && prompt.searching {
+            "type to filter logs"
+        } else {
+            prompt.filter.text.as_str()
+        };
+        if prompt.filter.is_empty() {
+            Paragraph::new(text)
+                .style(Style::default().fg(self.theme.hint_desc_fg))
+                .render(filter_inner, frame.buffer_mut());
+        } else {
+            // The one single-line renderer, never a hand-rolled
+            // copy.
+            Paragraph::new(render_single_line_field(
+                "",
+                &prompt.filter.text,
+                prompt.filter.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+                if prompt.searching {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
+                filter_inner.width,
+            ))
+            .style(Style::default().fg(self.theme.text_fg))
+            .render(filter_inner, frame.buffer_mut());
+        }
+        if prompt.searching {
+            // A caret column is a DISPLAY column. `filter.cursor`
+            // is a byte offset, so using it directly put the caret
+            // past the end of anything non-ASCII.
+            let cursor_x = filter_inner
+                .x
+                .saturating_add(single_line_field_caret_column(
+                    &prompt.filter.text,
+                    prompt.filter.cursor,
+                    0,
+                    filter_inner.width,
+                ))
+                .min(filter_inner.x + filter_inner.width.saturating_sub(1));
+            frame.set_cursor_position((cursor_x, filter_inner.y));
+        }
+        filter_inner
+    }
+
+    /// The selected run's output in `body_area`, scrolled to the prompt's
+    /// offset, with the selection painted and the scroll indicator in its
+    /// right border. Returns the output's inner rect.
+    fn render_startup_log_output(
+        &self,
+        frame: &mut Frame<'_>,
+        body_area: Rect,
+        prompt: &crate::app::StartupCommandLogPrompt,
+    ) -> Rect {
         let body_block = Block::default()
             .title(" Output ")
             .borders(Borders::ALL)
@@ -11114,34 +11782,7 @@ impl App {
             content_lines.len(),
             &self.theme,
         );
-
-        let close_width = 16;
-        let close_area = Rect {
-            x: button_area.x + button_area.width.saturating_sub(close_width) / 2,
-            y: button_area.y,
-            width: close_width.min(button_area.width),
-            height: 3,
-        };
-        Button::new("Close")
-            .kind(ButtonKind::Confirm)
-            .state(button_state_for(
-                ButtonPressedTarget::StartupCommandLogsClose,
-                self.pressed_button,
-                if prompt.focus == StartupCommandLogFocus::Close {
-                    ButtonState::Focused
-                } else {
-                    ButtonState::Normal
-                },
-            ))
-            .render(frame, close_area, &self.theme);
-        self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
-            input: filter_input_rect,
-            list: list.list,
-            body: body_inner,
-            items: list.items,
-            offset: list.offset,
-            close_button: close_area,
-        };
+        body_inner
     }
 
     fn render_kill_running_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -11178,29 +11819,7 @@ impl App {
             ])
             .areas(body_area);
 
-        let search_key = self.bindings.label_for(Action::SearchToggle);
-        let toggle_key = self.bindings.label_for(Action::ToggleMarked);
-        let confirm_key = self.bindings.label_for(Action::Confirm);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let next_key = self.bindings.label_for(Action::FocusNext);
-        let prev_key = self.bindings.label_for(Action::FocusPrev);
-        let hint_line = modal_hint_line(
-            &self.theme,
-            &if prompt.list.searching {
-                vec![
-                    Hint::key(confirm_key, "done"),
-                    Hint::key(close_key, "clear").pinned(),
-                ]
-            } else {
-                vec![
-                    Hint::key(toggle_key, "select"),
-                    Hint::key(search_key, "search"),
-                    Hint::keys([next_key, prev_key], "actions"),
-                    Hint::key(confirm_key, "use"),
-                ]
-            },
-            popup.width.saturating_sub(2),
-        );
+        let hint_line = self.kill_running_hints(prompt, popup.width.saturating_sub(2));
 
         let title = if prompt.list.searching {
             "Kill Running (searching)"
@@ -11241,6 +11860,52 @@ impl App {
             (None, list)
         };
 
+        self.render_kill_running_legend(frame, legend_area);
+
+        let button_rects = self.render_kill_running_buttons(frame, buttons_area, prompt);
+        self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+            input,
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
+            cancel_button: button_rects[0],
+            hovered_button: button_rects[1],
+            selected_button: button_rects[2],
+            visible_button: button_rects[3],
+        };
+    }
+
+    /// The kill list's footer keys: the search keys while searching, the list
+    /// keys otherwise.
+    fn kill_running_hints(&self, prompt: &KillRunningPrompt, width: u16) -> Line<'static> {
+        let search_key = self.bindings.label_for(Action::SearchToggle);
+        let toggle_key = self.bindings.label_for(Action::ToggleMarked);
+        let confirm_key = self.bindings.label_for(Action::Confirm);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let next_key = self.bindings.label_for(Action::FocusNext);
+        let prev_key = self.bindings.label_for(Action::FocusPrev);
+        modal_hint_line(
+            &self.theme,
+            &if prompt.list.searching {
+                vec![
+                    Hint::key(confirm_key, "done"),
+                    Hint::key(close_key, "clear").pinned(),
+                ]
+            } else {
+                vec![
+                    Hint::key(toggle_key, "select"),
+                    Hint::key(search_key, "search"),
+                    Hint::keys([next_key, prev_key], "actions"),
+                    Hint::key(confirm_key, "use"),
+                ]
+            },
+            width,
+        )
+    }
+
+    /// The kill list's legend: what AGENT and TERM mean, a fixed line of
+    /// constant words.
+    fn render_kill_running_legend(&self, frame: &mut Frame<'_>, area: Rect) {
         let legend = Line::from(vec![
             Span::raw("  "),
             Span::styled("Legend: ", Style::default().fg(self.theme.hint_desc_fg)),
@@ -11269,8 +11934,19 @@ impl App {
         Paragraph::new(legend)
             // chip-free: a fixed legend of constant words, never a name.
             .wrap(Wrap { trim: false })
-            .render(legend_area, frame.buffer_mut());
+            .render(area, frame.buffer_mut());
+    }
 
+    /// The kill list's four footer buttons, centred in `buttons_area`, each
+    /// disabled when it would act on nothing. These are four distinct actions,
+    /// not picker confirmation controls; three have no keyboard equivalent.
+    /// Returns their rects in footer order.
+    fn render_kill_running_buttons(
+        &self,
+        frame: &mut Frame<'_>,
+        buttons_area: Rect,
+        prompt: &KillRunningPrompt,
+    ) -> [Rect; 4] {
         let buttons = [
             KillRunningFooterAction::Cancel,
             KillRunningFooterAction::Hovered,
@@ -11332,16 +12008,7 @@ impl App {
                 .render(frame, rect, &self.theme);
             cursor_x += button_widths[index] + gap;
         }
-        self.overlay_layout.active = OverlayMouseLayout::KillRunning {
-            input,
-            list: list.list,
-            items: list.items,
-            offset: list.offset,
-            cancel_button: button_rects[0],
-            hovered_button: button_rects[1],
-            selected_button: button_rects[2],
-            visible_button: button_rects[3],
-        };
+        button_rects
     }
 
     fn kill_running_items(
@@ -11361,11 +12028,7 @@ impl App {
             .filter_map(|index| prompt.runtimes.get(*index))
             .map(|runtime| {
                 let checkbox = Checkbox::new("")
-                    .checked(if prompt.selected_ids.contains(&runtime.id) {
-                        CheckMark::Checked
-                    } else {
-                        CheckMark::Unchecked
-                    })
+                    .checked(CheckMark::from(prompt.selected_ids.contains(&runtime.id)))
                     .state(CheckboxState::Normal);
                 let label_padded = fit_to_width(&runtime.label, label_col);
                 let kind_color = match runtime.kind {
@@ -11407,33 +12070,16 @@ impl App {
             return;
         };
         let inner_width = confirm_inner_width(frame.area());
-        // The managed identity, when there is one. A STANDALONE agent
-        // has none, and every "also remove the worktree" affordance
-        // below hangs off this `Some`: there is no removal to offer, so
-        // there is no checkbox to render and none to tick.
-        let managed = match target {
-            crate::app::DeleteAgentTarget::Managed {
-                branch_name,
-                initial_branch,
-                branch_provenance,
-                worktree_shared,
-            } => Some((
-                branch_name.as_str(),
-                initial_branch.as_str(),
-                *branch_provenance,
-                *worktree_shared,
-            )),
-            crate::app::DeleteAgentTarget::Folder { .. } => None,
-        };
         let offers_checkbox = target.offers_worktree_checkbox();
         // The branch box comes and goes with the worktree box, so the measured
         // height has to ask the same question the renderer and the focus ring
         // ask, or the dialog's frame stops matching its contents.
-        let offers_branch_checkbox = target.offers_branch_checkbox(if *delete_worktree {
+        let on_delete = if *delete_worktree {
             dux_core::engine::WorktreeOnDelete::Remove
         } else {
             dux_core::engine::WorktreeOnDelete::Keep
-        });
+        };
+        let offers_branch_checkbox = target.offers_branch_checkbox(on_delete);
         let warned_branches = target.warned_branches();
         let branch_label = delete_agent_branch_checkbox_prose(&warned_branches);
         // ONE measuring pass over every checkbox that will be painted, so a
@@ -11445,20 +12091,8 @@ impl App {
             } else {
                 CheckboxState::Normal
             };
-            let checkbox = checkbox
-                .checked(if checked {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                })
-                .state(state);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
+            let checkbox = checkbox.checked(CheckMark::from(checked)).state(state);
+            checkbox.height_at(inner_width)
         };
         let checkbox_height = if offers_checkbox {
             measure(
@@ -11492,45 +12126,20 @@ impl App {
             Line::from(""),
         ];
         // Folder targets render first because they need `&mut self`; only managed
-        // targets reach this borrowed match.
-        let Some((_branch_name, _initial_branch, branch_provenance, worktree_shared)) = managed
-        else {
+        // targets reach this borrowed match. A STANDALONE agent has no managed
+        // identity, and every "also remove the worktree" affordance hangs off
+        // one: there is no removal to offer, so there is no checkbox to render
+        // and none to tick.
+        if matches!(target, DeleteAgentTarget::Folder { .. }) {
             return;
-        };
-        if worktree_shared {
-            body_lines.push(Line::from(Span::styled(
-                " Worktree is shared with another agent and will be preserved.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )));
-        } else if *delete_worktree {
-            body_lines.push(Line::from(Span::styled(
-                " All uncommitted and unpushed changes in this",
-                Style::default().fg(self.theme.warning_fg),
-            )));
-            body_lines.push(Line::from(Span::styled(
-                " worktree will be permanently lost.",
-                Style::default().fg(self.theme.warning_fg),
-            )));
-            // The branch box below decides the branches, so the only thing left
-            // to say is why these are ones to think twice about. When there is
-            // nothing to say the helper says nothing.
-            if let Some(warning) = delete_agent_branch_warning_prose(
-                branch_provenance,
-                &warned_branches,
-                *unpushed_commits,
-            ) {
-                body_lines.extend(self.indented_prose_lines(
-                    &warning,
-                    Style::default().fg(self.theme.warning_fg),
-                    inner_width,
-                ));
-            }
-        } else {
-            body_lines.push(Line::from(Span::styled(
-                " Worktree and branch will be preserved on disk.",
-                Style::default().fg(self.theme.hint_desc_fg),
-            )));
         }
+        body_lines.extend(self.delete_agent_worktree_note(
+            target,
+            &warned_branches,
+            on_delete,
+            *unpushed_commits,
+            inner_width,
+        ));
         body_lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
         let confirm_label = guarded_confirm_label("Delete", attached);
         let layout = self.render_confirm_dialog(
@@ -11547,50 +12156,14 @@ impl App {
         let [checkbox_area, branch_checkbox_area] =
             stack_rows(layout.controls, [checkbox_height, branch_checkbox_height]);
 
-        let checkbox_rect = if offers_checkbox {
-            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::WorktreeCheckbox);
-            let (rect, _) = self.render_overlay_checkbox(
-                frame,
-                checkbox_area,
-                DELETE_AGENT_WORKTREE_LABEL,
-                if *delete_worktree {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
-                checkbox_state,
-                None,
-            );
-            Some(OverlayCheckbox {
-                id: OverlayCheckboxId::DeleteAgentWorktree,
-                rect,
-            })
-        } else {
-            None
-        };
-        // Published only where it is actually painted, so a click cannot land
-        // on a control the user cannot see.
-        let branch_checkbox_rect = if offers_branch_checkbox {
-            let checkbox_state = CheckboxState::of(*focus, DeleteAgentFocus::BranchCheckbox);
-            let (rect, _) = self.render_overlay_prose_checkbox(
-                frame,
-                branch_checkbox_area,
-                &branch_label,
-                if *delete_branch {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
-                checkbox_state,
-                None,
-            );
-            Some(OverlayCheckbox {
-                id: OverlayCheckboxId::DeleteAgentBranch,
-                rect,
-            })
-        } else {
-            None
-        };
+        let [checkbox_rect, branch_checkbox_rect] = self.render_delete_agent_checkboxes(
+            frame,
+            [
+                offers_checkbox.then_some(checkbox_area),
+                offers_branch_checkbox.then_some(branch_checkbox_area),
+            ],
+            &branch_label,
+        );
 
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
             cancel_button: layout.cancel,
@@ -11600,13 +12173,118 @@ impl App {
         };
     }
 
+    /// What the delete dialog says about the agent's worktree: that it is
+    /// shared and stays, that its unsaved work goes with it (and why its
+    /// branches are worth a second look), or that it stays on disk.
+    fn delete_agent_worktree_note(
+        &self,
+        target: &DeleteAgentTarget,
+        warned_branches: &[&str],
+        on_delete: dux_core::engine::WorktreeOnDelete,
+        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        let DeleteAgentTarget::Managed {
+            branch_provenance,
+            worktree_shared,
+            ..
+        } = target
+        else {
+            return Vec::new();
+        };
+        let (branch_provenance, worktree_shared) = (*branch_provenance, *worktree_shared);
+        let mut body_lines = Vec::new();
+        if worktree_shared {
+            body_lines.push(Line::from(Span::styled(
+                " Worktree is shared with another agent and will be preserved.",
+                Style::default().fg(self.theme.hint_desc_fg),
+            )));
+        } else if on_delete == dux_core::engine::WorktreeOnDelete::Remove {
+            body_lines.push(Line::from(Span::styled(
+                " All uncommitted and unpushed changes in this",
+                Style::default().fg(self.theme.warning_fg),
+            )));
+            body_lines.push(Line::from(Span::styled(
+                " worktree will be permanently lost.",
+                Style::default().fg(self.theme.warning_fg),
+            )));
+            // The branch box below decides the branches, so the only thing left
+            // to say is why these are ones to think twice about. When there is
+            // nothing to say the helper says nothing.
+            if let Some(warning) = delete_agent_branch_warning_prose(
+                branch_provenance,
+                warned_branches,
+                unpushed_commits,
+            ) {
+                body_lines.extend(self.indented_prose_lines(
+                    &warning,
+                    Style::default().fg(self.theme.warning_fg),
+                    inner_width,
+                ));
+            }
+        } else {
+            body_lines.push(Line::from(Span::styled(
+                " Worktree and branch will be preserved on disk.",
+                Style::default().fg(self.theme.hint_desc_fg),
+            )));
+        }
+        body_lines
+    }
+
+    /// The delete dialog's worktree box and branch box, each painted only in
+    /// the area it is offered (`None` when it is not), so a click cannot land
+    /// on a control the user cannot see. Returns what each publishes.
+    fn render_delete_agent_checkboxes(
+        &self,
+        frame: &mut Frame<'_>,
+        [checkbox_area, branch_checkbox_area]: [Option<Rect>; 2],
+        branch_label: &Prose,
+    ) -> [Option<OverlayCheckbox>; 2] {
+        let PromptState::ConfirmDeleteAgent {
+            focus,
+            delete_worktree,
+            delete_branch,
+            ..
+        } = &self.prompt
+        else {
+            return [None, None];
+        };
+        let (focus, delete_worktree, delete_branch) = (*focus, *delete_worktree, *delete_branch);
+        let checkbox = checkbox_area.map(|area| {
+            let (rect, _) = self.render_overlay_checkbox(
+                frame,
+                area,
+                DELETE_AGENT_WORKTREE_LABEL,
+                CheckMark::from(delete_worktree),
+                CheckboxState::of(focus, DeleteAgentFocus::WorktreeCheckbox),
+                None,
+            );
+            OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteAgentWorktree,
+                rect,
+            }
+        });
+        let branch = branch_checkbox_area.map(|area| {
+            let (rect, _) = self.render_overlay_prose_checkbox(
+                frame,
+                area,
+                branch_label,
+                CheckMark::from(delete_branch),
+                CheckboxState::of(focus, DeleteAgentFocus::BranchCheckbox),
+                None,
+            );
+            OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteAgentBranch,
+                rect,
+            }
+        });
+        [checkbox, branch]
+    }
+
     fn render_name_new_agent_prompt(&mut self, frame: &mut Frame<'_>) {
         let PromptState::NameNewAgent {
             request,
             input,
-            randomize_name,
-            copy_changes,
-            review_copy,
             focus,
             ..
         } = &self.prompt
@@ -11614,102 +12292,40 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let randomize_checkbox = Checkbox::new("Use randomized pet name")
-            .checked(if *randomize_name {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            })
-            .state(CheckboxState::of(
-                *focus,
-                NameNewAgentFocus::RandomizedNameCheckbox,
-            ));
         let dialog_width = 60.min(frame.area().width.max(1));
         let inner_width = dialog_width.saturating_sub(2);
-        let randomize_checkbox_height = randomize_checkbox
-            .layout(
-                inner_width,
-                randomize_checkbox.marker_style(Style::default()),
-                randomize_checkbox.label_style(Style::default()),
-            )
-            .height
-            .saturating_add(1);
-        // Only fresh project agents expose the copy checkbox: forks
-        // always copy and the other flows never do.
-        let show_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
-        let copy_checkbox_label = "Copy uncommitted changes from the project checkout";
-        let copy_checkbox_height = if show_copy_checkbox {
-            let copy_checkbox = Checkbox::new(copy_checkbox_label);
-            copy_checkbox
-                .layout(
-                    inner_width,
-                    copy_checkbox.marker_style(Style::default()),
-                    copy_checkbox.label_style(Style::default()),
-                )
-                .height
-                .saturating_add(1)
-        } else {
-            0
-        };
-        // The question a refused pull-request create puts: the warning in
-        // the warning color, wrapped to the dialog, and the box under it.
-        let review_label = "Create a review copy";
-        let review_warning = review_copy.as_ref().map(|question| {
-            self.hanging_prose_lines(
-                &question.warning,
-                Style::default().fg(self.theme.warning_fg),
-                " ",
-                inner_width,
-            )
-        });
-        let review_checkbox_height = if review_warning.is_some() {
-            let checkbox = Checkbox::new(review_label);
-            checkbox
-                .layout(
-                    inner_width,
-                    checkbox.marker_style(Style::default()),
-                    checkbox.label_style(Style::default()),
-                )
-                .height
-        } else {
-            0
-        };
+        let NameNewAgentHeights {
+            randomize_checkbox_height,
+            copy_checkbox_height,
+            review_warning,
+            review_checkbox_height,
+        } = self.name_new_agent_heights(inner_width);
         let review_warning_height = review_warning
             .as_ref()
             .map_or(0, |lines| u16::try_from(lines.len()).unwrap_or(u16::MAX));
         let review_gap = u16::from(review_warning.is_some());
+        let show_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
         let checkbox_spacing = 1;
         let copy_checkbox_spacing = u16::from(show_copy_checkbox);
         let footer_spacing = 1;
-        let context_line = match request {
-            CreateAgentRequest::ExistingManagedWorktree { worktree_path, .. } => Some((
-                " This starts a fresh agent session in ",
-                worktree_path.display().to_string(),
-            )),
-            CreateAgentRequest::ForkExternalWorktree {
-                source_worktree_path,
-                ..
-            } => Some((
-                " External worktree will be copied into a fresh managed dux worktree: ",
-                source_worktree_path.display().to_string(),
-            )),
-            _ => None,
-        };
+        let context_line = name_new_agent_context(request);
         let context_height = u16::from(context_line.is_some());
-        let area = centered_rect_exact(
-            dialog_width,
-            8 + context_height
-                + checkbox_spacing
-                + randomize_checkbox_height
-                + copy_checkbox_spacing
-                + copy_checkbox_height
-                + review_gap
-                + review_warning_height
-                + review_gap
-                + review_checkbox_height
-                + footer_spacing,
-            frame.area(),
-        );
+        let rows = [
+            1,
+            context_height,
+            3,
+            checkbox_spacing,
+            randomize_checkbox_height,
+            copy_checkbox_spacing,
+            copy_checkbox_height,
+            review_gap,
+            review_warning_height,
+            review_gap,
+            review_checkbox_height,
+            footer_spacing,
+        ];
+        // The rows, the frame's two border rows, and two rows for the hints.
+        let area = centered_rect_exact(dialog_width, rows.iter().sum::<u16>() + 4, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Name New Agent");
@@ -11730,79 +12346,128 @@ impl App {
             review_checkbox_area,
             _,
             hint_area,
-        ] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(context_height),
-                Constraint::Length(3),
-                Constraint::Length(checkbox_spacing),
-                Constraint::Length(randomize_checkbox_height),
-                Constraint::Length(copy_checkbox_spacing),
-                Constraint::Length(copy_checkbox_height),
-                Constraint::Length(review_gap),
-                Constraint::Length(review_warning_height),
-                Constraint::Length(review_gap),
-                Constraint::Length(review_checkbox_height),
-                Constraint::Length(footer_spacing),
-                Constraint::Min(1),
-            ])
-            .areas(inner);
+        ] = rows_then_rest(inner, rows);
 
-        let label = if matches!(request, CreateAgentRequest::ExistingManagedWorktree { .. }) {
-            " Enter a display name for the new agent:"
-        } else {
-            " Enter a name for the new agent (used as branch name):"
-        };
-        Paragraph::new(Line::from(Span::styled(
-            label,
-            Style::default().fg(self.theme.input_label_fg),
-        )))
-        .render(label_area, frame.buffer_mut());
-        if let Some((lead, path)) = context_line {
-            // One row: the path gives up its middle so the sentence and the
-            // chip's two pads still fit.
-            let room = usize::from(inner.width)
-                .saturating_sub(display_width(lead))
-                .saturating_sub(3);
-            let hint = Style::default().fg(self.theme.hint_desc_fg);
-            Paragraph::new(Line::from(vec![
-                Span::styled(lead, hint),
-                name_chip(&ellipsize_middle(&path, room), &self.theme),
-                Span::styled(".", hint),
-            ]))
-            .render(context_area, frame.buffer_mut());
-        }
+        self.render_name_new_agent_label(frame, (label_area, context_area), request, context_line);
 
         // Same rule as the rename modal: the caret only appears while
         // the field itself has focus.
-        let input_focused = FocusState::of(*focus, NameNewAgentFocus::Input);
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(self.theme.overlay_field_border_style(input_focused));
-        let input_inner = input_block.inner(input_area);
-        Paragraph::new(render_single_line_field(
-            " ",
-            &input.text,
-            input.cursor,
-            self.theme.input_cursor_fg,
-            self.theme.input_cursor_bg,
-            input_focused,
-            input_inner.width,
-        ))
-        .block(input_block)
-        .render(input_area, frame.buffer_mut());
+        let input_inner = self.render_dialog_field(
+            frame,
+            input_area,
+            input,
+            FocusState::of(*focus, NameNewAgentFocus::Input),
+        );
 
+        let (randomized_name_checkbox_rect, copy_checkbox_rect, review_copy_rect) = self
+            .render_name_new_agent_boxes(
+                frame,
+                [
+                    randomize_checkbox_area,
+                    copy_checkbox_area,
+                    review_warning_area,
+                    review_checkbox_area,
+                ],
+                review_warning,
+            );
+
+        Paragraph::new(self.name_new_agent_hints(*focus, hint_area.width))
+            .render(hint_area, frame.buffer_mut());
+        self.overlay_layout.active = name_new_agent_layout(
+            input_inner,
+            (
+                randomized_name_checkbox_rect,
+                copy_checkbox_rect,
+                review_copy_rect,
+            ),
+        );
+    }
+
+    /// What the name-new-agent dialog measures before it lays out: each box's
+    /// height at `inner_width`, and the review-copy warning when a refused
+    /// pull-request create put the question.
+    fn name_new_agent_heights(&self, inner_width: u16) -> NameNewAgentHeights {
+        let PromptState::NameNewAgent {
+            request,
+            randomize_name,
+            review_copy,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return NameNewAgentHeights::default();
+        };
+        let randomize_checkbox = Checkbox::new("Use randomized pet name")
+            .checked(CheckMark::from(*randomize_name))
+            .state(CheckboxState::of(
+                *focus,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ));
+        let randomize_checkbox_height = randomize_checkbox.height_at(inner_width).saturating_add(1);
+        // Only fresh project agents expose the copy checkbox: forks
+        // always copy and the other flows never do.
+        let show_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
+        let copy_checkbox_height = if show_copy_checkbox {
+            let copy_checkbox = Checkbox::new(NAME_NEW_AGENT_COPY_LABEL);
+            copy_checkbox.height_at(inner_width).saturating_add(1)
+        } else {
+            0
+        };
+        // The question a refused pull-request create puts: the warning in
+        // the warning color, wrapped to the dialog, and the box under it.
+        let review_warning = review_copy.as_ref().map(|question| {
+            self.hanging_prose_lines(
+                &question.warning,
+                Style::default().fg(self.theme.warning_fg),
+                " ",
+                inner_width,
+            )
+        });
+        let review_checkbox_height = if review_warning.is_some() {
+            let checkbox = Checkbox::new(NAME_NEW_AGENT_REVIEW_LABEL);
+            checkbox.height_at(inner_width)
+        } else {
+            0
+        };
+        NameNewAgentHeights {
+            randomize_checkbox_height,
+            copy_checkbox_height,
+            review_warning,
+            review_checkbox_height,
+        }
+    }
+
+    /// The name-new-agent dialog's boxes: the random name box, the copy box
+    /// for a fresh project agent, and the review-copy question with its box.
+    /// Returns the rects each publishes.
+    fn render_name_new_agent_boxes(
+        &self,
+        frame: &mut Frame<'_>,
+        [
+            randomize_checkbox_area,
+            copy_checkbox_area,
+            review_warning_area,
+            review_checkbox_area,
+        ]: [Rect; 4],
+        review_warning: Option<Vec<Line<'static>>>,
+    ) -> (Rect, Option<Rect>, Option<Rect>) {
+        let PromptState::NameNewAgent {
+            request,
+            randomize_name,
+            copy_changes,
+            review_copy,
+            focus,
+            ..
+        } = &self.prompt
+        else {
+            return (Rect::default(), None, None);
+        };
+        let show_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
         let (randomized_name_checkbox_rect, _) = self.render_overlay_checkbox(
             frame,
             randomize_checkbox_area,
             "Use randomized pet name",
-            if *randomize_name {
-                CheckMark::Checked
-            } else {
-                CheckMark::Unchecked
-            },
+            CheckMark::from(*randomize_name),
             CheckboxState::of(*focus, NameNewAgentFocus::RandomizedNameCheckbox),
             Some(Line::from(Span::styled(
                 format!(
@@ -11817,12 +12482,8 @@ impl App {
             let (rect, _) = self.render_overlay_checkbox(
                 frame,
                 copy_checkbox_area,
-                copy_checkbox_label,
-                if *copy_changes {
-                    CheckMark::Checked
-                } else {
-                    CheckMark::Unchecked
-                },
+                NAME_NEW_AGENT_COPY_LABEL,
+                CheckMark::from(*copy_changes),
                 CheckboxState::of(*focus, NameNewAgentFocus::CopyChangesCheckbox),
                 Some(Line::from(Span::styled(
                     format!(
@@ -11843,12 +12504,8 @@ impl App {
                 let (rect, _) = self.render_overlay_checkbox(
                     frame,
                     review_checkbox_area,
-                    review_label,
-                    if question.agreed {
-                        CheckMark::Checked
-                    } else {
-                        CheckMark::Unchecked
-                    },
+                    NAME_NEW_AGENT_REVIEW_LABEL,
+                    CheckMark::from(question.agreed),
                     CheckboxState::of(*focus, NameNewAgentFocus::ReviewCopyCheckbox),
                     None,
                 );
@@ -11856,7 +12513,50 @@ impl App {
             }
             _ => None,
         };
+        (
+            randomized_name_checkbox_rect,
+            copy_checkbox_rect,
+            review_copy_rect,
+        )
+    }
 
+    /// The name-new-agent dialog's label over its field, and the line saying
+    /// what the new agent starts from when it starts from a worktree.
+    fn render_name_new_agent_label(
+        &self,
+        frame: &mut Frame<'_>,
+        (label_area, context_area): (Rect, Rect),
+        request: &CreateAgentRequest,
+        context_line: Option<(&'static str, String)>,
+    ) {
+        let label = if matches!(request, CreateAgentRequest::ExistingManagedWorktree { .. }) {
+            " Enter a display name for the new agent:"
+        } else {
+            " Enter a name for the new agent (used as branch name):"
+        };
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default().fg(self.theme.input_label_fg),
+        )))
+        .render(label_area, frame.buffer_mut());
+        if let Some((lead, path)) = context_line {
+            // One row: the path gives up its middle so the sentence and the
+            // chip's two pads still fit.
+            let room = usize::from(context_area.width)
+                .saturating_sub(display_width(lead))
+                .saturating_sub(3);
+            let hint = Style::default().fg(self.theme.hint_desc_fg);
+            Paragraph::new(Line::from(vec![
+                Span::styled(lead, hint),
+                name_chip(&ellipsize_middle(&path, room), &self.theme),
+                Span::styled(".", hint),
+            ]))
+            .render(context_area, frame.buffer_mut());
+        }
+    }
+
+    /// The name-new-agent dialog's footer keys.
+    fn name_new_agent_hints(&self, focus: NameNewAgentFocus, width: u16) -> Line<'static> {
         let confirm_key = self.bindings.label_for(Action::Confirm);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         // Same rule as the rename modal: the name field owns the
@@ -11872,27 +12572,11 @@ impl App {
         ];
         // Dropped while the name field has focus: Space is a typed
         // character there and toggles nothing.
-        if *focus != NameNewAgentFocus::Input {
+        if focus != NameNewAgentFocus::Input {
             hints.push(Hint::plain("Space toggle"));
         }
         hints.push(Hint::key(close_key, "cancel").pinned());
-        Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
-            .render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
-            input: input_inner,
-            checkbox: Some(OverlayCheckbox {
-                id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
-                rect: randomized_name_checkbox_rect,
-            }),
-            copy_checkbox: copy_checkbox_rect.map(|rect| OverlayCheckbox {
-                id: OverlayCheckboxId::NameNewAgentCopyChanges,
-                rect,
-            }),
-            review_copy_checkbox: review_copy_rect.map(|rect| OverlayCheckbox {
-                id: OverlayCheckboxId::NameNewAgentReviewCopy,
-                rect,
-            }),
-        };
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     fn render_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -12227,6 +12911,11 @@ impl App {
 
         let focus = state.focus;
         let engaged = self.macro_text_engaged();
+        let engagement = if engaged {
+            FieldEngagement::Engaged
+        } else {
+            FieldEngagement::Unengaged
+        };
         let label_style = Style::default().fg(self.theme.input_label_fg);
 
         // ── Name (single line: typing is immediate, no mode) ──────────────
@@ -12275,19 +12964,7 @@ impl App {
                     .unwrap_or_default()
             }),
         );
-        for (index, line_text) in state.text_input.visible_lines().iter().enumerate() {
-            if index >= usize::from(text_inner.height) {
-                break;
-            }
-            let line_area = Rect::new(
-                text_inner.x,
-                text_inner.y + usize_to_u16_wrapping(index),
-                text_inner.width,
-                1,
-            );
-            Paragraph::new(Line::from(Span::raw(format!(" {line_text}"))))
-                .render(line_area, frame.buffer_mut());
-        }
+        render_macro_body_lines(frame, text_inner, &state.text_input);
 
         // The body can hold more than the pane shows, so it carries the shared
         // one-cell marker. Units are the body's own visual rows.
@@ -12301,30 +12978,7 @@ impl App {
             self.theme.hint_desc_fg,
         );
 
-        // Exactly one hardware caret: on the name field while it has focus, or
-        // on the body while the body is ENGAGED. An unengaged body takes no
-        // keystrokes, so showing a caret there would be a lie.
-        if focus == MacroEditFocus::Name {
-            let cursor_col = single_line_field_caret_column(
-                &state.name_input.text,
-                state.name_input.cursor,
-                1,
-                name_inner.width,
-            );
-            let (cx, cy) = (name_inner.x + cursor_col, name_inner.y);
-            if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
-                frame.set_cursor_position((cx, cy));
-            }
-        } else if focus == MacroEditFocus::Text && engaged {
-            let (cursor_row, cursor_col) = state.text_input.cursor_display_position();
-            let (cx, cy) = (
-                text_inner.x + usize_to_u16_wrapping(cursor_col) + 1,
-                text_inner.y + usize_to_u16_wrapping(cursor_row),
-            );
-            if cx < text_inner.x + text_inner.width && cy < text_inner.y + text_inner.height {
-                frame.set_cursor_position((cx, cy));
-            }
-        }
+        Self::place_macro_editor_caret(frame, state, (name_inner, text_inner), engagement);
 
         let surface_options =
             self.render_macro_surface_selector(frame, surface_area, state, label_style);
@@ -12336,14 +12990,7 @@ impl App {
             self.render_macro_editor_buttons(frame, buttons_area, focus);
 
         // ── Hints. Every key is resolved through the bindings. ────────────
-        let hints = self.macro_editor_hints(
-            focus,
-            if engaged {
-                FieldEngagement::Engaged
-            } else {
-                FieldEngagement::Unengaged
-            },
-        );
+        let hints = self.macro_editor_hints(focus, engagement);
         Paragraph::new(modal_hint_line(&self.theme, &hints, hint_area.width))
             .render(hint_area, frame.buffer_mut());
 
@@ -12354,6 +13001,39 @@ impl App {
             cancel_button,
             save_button,
         };
+    }
+
+    /// Place the macro editor's one hardware caret: on the name field while it
+    /// has focus, or on the body while the body is ENGAGED. An unengaged body
+    /// takes no keystrokes, so showing a caret there would be a lie.
+    fn place_macro_editor_caret(
+        frame: &mut Frame<'_>,
+        state: &MacroEditState,
+        (name_inner, text_inner): (Rect, Rect),
+        engagement: FieldEngagement,
+    ) {
+        let focus = state.focus;
+        if focus == MacroEditFocus::Name {
+            let cursor_col = single_line_field_caret_column(
+                &state.name_input.text,
+                state.name_input.cursor,
+                1,
+                name_inner.width,
+            );
+            let (cx, cy) = (name_inner.x + cursor_col, name_inner.y);
+            if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
+                frame.set_cursor_position((cx, cy));
+            }
+        } else if focus == MacroEditFocus::Text && engagement == FieldEngagement::Engaged {
+            let (cursor_row, cursor_col) = state.text_input.cursor_display_position();
+            let (cx, cy) = (
+                text_inner.x + usize_to_u16_wrapping(cursor_col) + 1,
+                text_inner.y + usize_to_u16_wrapping(cursor_row),
+            );
+            if cx < text_inner.x + text_inner.width && cy < text_inner.y + text_inner.height {
+                frame.set_cursor_position((cx, cy));
+            }
+        }
     }
 
     fn render_macro_surface_selector(
@@ -12731,37 +13411,14 @@ impl App {
         viewer.scroll_offset = viewer.scroll_offset.min(max_scroll);
         let query = viewer.search.text.trim().to_lowercase();
 
-        for (row, line) in lines
-            .iter()
-            .skip(usize::from(viewer.scroll_offset))
-            .take(usize::from(term_area.height))
-            .enumerate()
-        {
-            let line_style = if !query.is_empty() && line.to_lowercase().contains(&query) {
-                self.theme.selection_style()
-            } else {
-                Style::default().fg(self.theme.text_fg)
-            };
-            let y = term_area.y + usize_to_u16_wrapping(row);
-            for (col, glyph) in crate::app::input::startup_log_row_glyphs(line) {
-                if col >= term_area.width {
-                    break;
-                }
-                let selected = self.terminal_selection.as_ref().is_some_and(|selection| {
-                    selection.anchor != selection.end
-                        && selection
-                            .contains(viewer.scroll_offset + usize_to_u16_wrapping(row), col)
-                });
-                let style = if selected {
-                    self.theme.selection_style()
-                } else {
-                    line_style
-                };
-                frame
-                    .buffer_mut()
-                    .set_string(term_area.x + col, y, glyph, style);
-            }
-        }
+        paint_startup_log_rows(
+            frame,
+            term_area,
+            (&lines, viewer.scroll_offset),
+            &query,
+            &self.theme,
+            self.terminal_selection.as_ref(),
+        );
 
         // Scroll marker in the modal's right BORDER column, on the content
         // pane's last row. It has to be the border column: the log is painted
@@ -12782,23 +13439,7 @@ impl App {
             self.theme.hint_key_fg,
         );
 
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let search_key = self.bindings.label_for(Action::SearchToggle);
-        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-        let open_file = self.bindings.label_for(Action::OpenStartupCommandLogFile);
-        let open_folder = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
-        let hints = if viewer.searching {
-            vec![Hint::key(close_key, "close search").pinned()]
-        } else {
-            vec![
-                Hint::key(close_key, "close").pinned(),
-                Hint::keys([scroll_up, scroll_down], "scroll"),
-                Hint::key(search_key, "search"),
-                Hint::key(open_file, "open file"),
-                Hint::key(open_folder, "open folder"),
-            ]
-        };
+        let hints = self.startup_log_viewer_hints();
         Paragraph::new(pane_hint_line(&self.theme, &hints, hint_area.width))
             .block(
                 Block::default()
@@ -12814,6 +13455,31 @@ impl App {
         {
             self.render_startup_log_search_bar(frame, inner);
         }
+    }
+
+    /// The fullscreen startup log's footer keys: only the way out of the search
+    /// while searching, the viewer's keys otherwise.
+    fn startup_log_viewer_hints(&self) -> Vec<Hint> {
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        if self
+            .startup_log_viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.searching)
+        {
+            return vec![Hint::key(close_key, "close search").pinned()];
+        }
+        let search_key = self.bindings.label_for(Action::SearchToggle);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let open_file = self.bindings.label_for(Action::OpenStartupCommandLogFile);
+        let open_folder = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
+        vec![
+            Hint::key(close_key, "close").pinned(),
+            Hint::keys([scroll_up, scroll_down], "scroll"),
+            Hint::key(search_key, "search"),
+            Hint::key(open_file, "open file"),
+            Hint::key(open_folder, "open folder"),
+        ]
     }
 
     fn render_startup_log_search_bar(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -12951,15 +13617,40 @@ impl App {
         }
 
         // ── List block (bottom, connected borders) ──
+        let items = self.macro_bar_items(&filtered, list_area.width);
+
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
+        let mut list_state = ListState::default();
+        if !filtered.is_empty() {
+            list_state.select(Some(selected));
+        }
+        StatefulWidget::render(
+            List::new(items)
+                .block(list_block)
+                .highlight_style(self.theme.selection_style()),
+            list_area,
+            frame.buffer_mut(),
+            &mut list_state,
+        );
+    }
+
+    /// The macro bar's rows: each macro's name, padded to the widest, and a
+    /// one-line preview of its text fitted to `width`; one quiet row when
+    /// nothing matches.
+    fn macro_bar_items(&self, filtered: &[(&str, &str)], width: u16) -> Vec<ListItem<'static>> {
         let name_col = filtered
             .iter()
             .map(|&(name, _)| display_width(name))
             .max()
             .unwrap_or(0);
-        let inner_w = usize::from(list_area.width.saturating_sub(3)); // borders + padding
+        let inner_w = usize::from(width.saturating_sub(3)); // borders + padding
         let gap = 2usize;
 
-        let items: Vec<ListItem<'_>> = if filtered.is_empty() {
+        if filtered.is_empty() {
             let msg = "No matching macros.";
             vec![ListItem::new(Span::styled(
                 msg,
@@ -12986,25 +13677,7 @@ impl App {
                     ListItem::new(Line::from(spans))
                 })
                 .collect()
-        };
-
-        let list_block = Block::default()
-            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(self.theme.overlay_border))
-            .style(Style::default().bg(self.theme.overlay_bg));
-        let mut list_state = ListState::default();
-        if !filtered.is_empty() {
-            list_state.select(Some(selected));
         }
-        StatefulWidget::render(
-            List::new(items)
-                .block(list_block)
-                .highlight_style(self.theme.selection_style()),
-            list_area,
-            frame.buffer_mut(),
-            &mut list_state,
-        );
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: FocusState) -> Block<'a> {
@@ -13287,7 +13960,6 @@ impl App {
         // couple of characters. See `resource_monitor_columns` for the
         // rationale (CPU/RSS always survive; PID drops first, then Procs).
         let columns = resource_monitor_columns(inner.width);
-        let name_w = usize::from(columns.name_w);
 
         let mut header_cells = vec![Cell::from("Name").style(header_style)];
         if columns.show_pid {
@@ -13303,81 +13975,18 @@ impl App {
         let visual = build_visual_rows(rows, expanded);
         let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
 
-        let table_rows: Vec<Row<'_>> = visual
+        let table_rows: Vec<Row<'static>> = visual
             .iter()
             .map(|vr| match vr {
-                VisualRow::Parent(idx) => {
-                    let stat = &rows[*idx];
-                    let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
-                    // `~` marks a sample the collector had to re-establish its CPU
-                    // baseline for, so the reading spans only sysinfo's short
-                    // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
-                    // monitor's poll interval: real numbers, noisier because they
-                    // cover less wall-clock time. See `ResourceCollector::sample`.
-                    let cpu_str = if cpu_window == CpuWindow::Short {
-                        format!("~{:.1}%", stat.cpu_percent)
-                    } else {
-                        format!("{:.1}%", stat.cpu_percent)
-                    };
-                    let rss_str = format_bytes(stat.rss_bytes);
-                    let procs_str = stat.process_count.to_string();
-
-                    // Classify by `kind`, never by matching the label string:
-                    // an agent or terminal literally titled "TOTAL" is a
-                    // real, distinct row and must not render as the totals
-                    // row just because its name happens to match.
-                    let is_total = stat.kind == ResourceKind::Total;
-                    let style = if is_total {
-                        Style::default().add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-
-                    let indicator = resource_row_expand_indicator(stat, expanded, self.glyphs());
-                    let label = ellipsize_end(&format!("{indicator}{}", stat.label), name_w);
-
-                    let mut cells = vec![Cell::from(label)];
-                    if columns.show_pid {
-                        cells.push(Cell::from(pid_str));
-                    }
-                    if columns.show_procs {
-                        cells.push(Cell::from(procs_str));
-                    }
-                    cells.push(Cell::from(cpu_str));
-                    cells.push(Cell::from(rss_str));
-                    Row::new(cells).style(style)
-                }
+                VisualRow::Parent(idx) => resource_parent_row(
+                    &rows[*idx],
+                    &columns,
+                    (expanded, cpu_window),
+                    self.glyphs(),
+                ),
                 VisualRow::Child(parent_idx, child_idx) => {
-                    let child = &rows[*parent_idx].children[*child_idx];
-                    let is_last = *child_idx == rows[*parent_idx].children.len().saturating_sub(1);
-                    let connector = if is_last { "└" } else { "├" };
-                    // The root is part of its own breakdown on purpose (that is
-                    // what makes the rows sum to the parent's total), so say so
-                    // instead of letting it read as a phantom duplicate of the
-                    // row above.
-                    let name = if child.is_root {
-                        format!("{} (this process)", child.name)
-                    } else {
-                        child.name.clone()
-                    };
-                    let label = ellipsize_end(&format!("    {connector} {name}"), name_w);
-                    let cpu_str = if cpu_window == CpuWindow::Short {
-                        format!("~{:.1}%", child.cpu_percent)
-                    } else {
-                        format!("{:.1}%", child.cpu_percent)
-                    };
-                    let rss_str = format_bytes(child.rss_bytes);
-
-                    let mut cells = vec![Cell::from(label)];
-                    if columns.show_pid {
-                        cells.push(Cell::from(child.pid.to_string()));
-                    }
-                    if columns.show_procs {
-                        cells.push(Cell::from(""));
-                    }
-                    cells.push(Cell::from(cpu_str));
-                    cells.push(Cell::from(rss_str));
-                    Row::new(cells).style(dim_style)
+                    resource_child_row(&rows[*parent_idx], *child_idx, &columns, cpu_window)
+                        .style(dim_style)
                 }
             })
             .collect();
@@ -18370,6 +18979,10 @@ mod tests {
     /// and the shared title styles on the label. The focused tab is told apart
     /// by that styling alone.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario walked in order on one app, each step asserting on the state the previous step left"
+    )]
     fn tab_strip_renders_rounded_boxes_with_focused_and_unfocused_styles() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;

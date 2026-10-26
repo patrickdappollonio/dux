@@ -20,6 +20,17 @@ pub(crate) enum CheckMark {
     Unchecked,
 }
 
+impl From<bool> for CheckMark {
+    /// Ticked for `true`, the state a box shows for a setting that is on.
+    fn from(checked: bool) -> Self {
+        if checked {
+            Self::Checked
+        } else {
+            Self::Unchecked
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CheckboxState {
     Normal,
@@ -109,6 +120,17 @@ impl<'a> Checkbox<'a> {
     pub(crate) fn state(mut self, state: CheckboxState) -> Self {
         self.state = state;
         self
+    }
+
+    /// How many rows the checkbox takes at `max_width`, laid out in its own
+    /// marker and label styles.
+    pub(crate) fn height_at(&self, max_width: u16) -> u16 {
+        self.layout(
+            max_width,
+            self.marker_style(Style::default()),
+            self.label_style(Style::default()),
+        )
+        .height
     }
 
     pub(crate) fn layout(
