@@ -69,7 +69,7 @@ pub(crate) fn u64_to_f64(n: u64) -> f64 {
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "a float-to-int `as` saturates and maps NaN to 0, which is the intended clamp for a channel"
+    reason = "a float-to-int as-cast saturates and maps NaN to 0, which is the intended clamp for a channel"
 )]
 pub(crate) fn f32_to_u8_saturating(x: f32) -> u8 {
     x as u8

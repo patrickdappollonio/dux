@@ -128,7 +128,7 @@ impl ProviderKind {
     /// A provider of that name; any text is accepted.
     #[expect(
         clippy::should_implement_trait,
-        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+        reason = "an infallible parse with its own fallback, which FromStr (a fallible parse) would not express"
     )]
     pub fn from_str(value: &str) -> Self {
         Self(value.to_string())
@@ -205,7 +205,7 @@ impl SessionStatus {
     /// Parses the stored spelling; anything unrecognized reads as `Detached`.
     #[expect(
         clippy::should_implement_trait,
-        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+        reason = "an infallible parse with its own fallback, which FromStr (a fallible parse) would not express"
     )]
     pub fn from_str(value: &str) -> Self {
         match value {
@@ -281,7 +281,7 @@ impl BranchProvenance {
     /// true provenance is unknowable).
     #[expect(
         clippy::should_implement_trait,
-        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+        reason = "an infallible parse with its own fallback, which FromStr (a fallible parse) would not express"
     )]
     pub fn from_str(value: &str) -> Self {
         match value {
@@ -505,7 +505,7 @@ impl AgentWorkspaceKind {
     /// edited by hand.
     #[expect(
         clippy::should_implement_trait,
-        reason = "an infallible parse with its own fallback, which `FromStr` (a fallible parse) would not express"
+        reason = "an infallible parse with its own fallback, which FromStr (a fallible parse) would not express"
     )]
     pub fn from_str(value: &str) -> Self {
         match value {

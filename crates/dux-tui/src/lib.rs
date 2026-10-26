@@ -132,6 +132,7 @@ pub fn run(
     // Before the lock: `kill -USR1` reaches whoever holds it, and the signal's
     // default action would end this process. Idempotent.
     if let Err(err) = dux_core::reload_signal::install() {
+        // backtick-ok: printed to the terminal dux was started from, never a status.
         line_to_stderr(format_args!(
             "warning: {err}; `kill -USR1` cannot reload this dux, use Reload config in it"
         ));

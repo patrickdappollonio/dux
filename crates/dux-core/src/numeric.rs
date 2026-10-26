@@ -46,7 +46,7 @@ pub(crate) fn usize_to_f64(n: usize) -> f64 {
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "a float-to-int `as` saturates and maps NaN to 0, which is the intended clamp"
+    reason = "a float-to-int as-cast saturates and maps NaN to 0, which is the intended clamp"
 )]
 pub(crate) fn f64_to_u32_saturating(x: f64) -> u32 {
     x as u32
@@ -70,7 +70,7 @@ pub(crate) fn u64_to_f32(n: u64) -> f32 {
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    reason = "mirrors the terminal engine's own `as i32` line arithmetic, wrap included"
+    reason = "mirrors the terminal engine's own as-cast to i32 in its line arithmetic, wrap included"
 )]
 pub(crate) fn grid_i32(n: usize) -> i32 {
     n as i32

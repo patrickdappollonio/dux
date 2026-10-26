@@ -7028,7 +7028,7 @@ pub fn docker_style_name() -> String {
 /// make the name draw as something it does not say ([`crate::bidi`]).
 #[expect(
     clippy::case_sensitive_file_extension_comparisons,
-    reason = "git refuses a ref component ending in exactly `.lock`, a case-sensitive rule"
+    reason = "git refuses a ref component ending in exactly .lock, a case-sensitive rule"
 )]
 pub fn is_valid_agent_name(name: &str) -> bool {
     // The branch form's own refusals, on top of the ref name rules below.
