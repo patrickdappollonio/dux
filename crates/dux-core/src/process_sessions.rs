@@ -195,6 +195,10 @@ pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
 
 /// [`end_exactly`] with the process table handed in, as
 /// [`read_process_table_strict`] reads it.
+///
+/// # Errors
+///
+/// Fails when `read_table` fails.
 pub fn end_exactly_with(
     rows: &[ProcRow],
     grace: Duration,
@@ -717,6 +721,10 @@ pub fn read_process_table() -> Vec<ProcRow> {
 
 /// [`read_process_table`] that fails when the table cannot be read, rather than
 /// answering no processes; a process vanishing mid-read is not a failure.
+///
+/// # Errors
+///
+/// Fails when the process table cannot be listed or a process's entry cannot be read or understood.
 pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
     crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
     #[cfg(target_os = "linux")]
@@ -776,6 +784,10 @@ pub struct Occupant {
 
 /// Every inspectable process of the current user in `table` (this one excluded)
 /// working in or under one of `folders`. Blocking.
+///
+/// # Errors
+///
+/// Fails when a process's owner or working directory cannot be read.
 pub fn occupants_of(
     table: &[ProcRow],
     folders: &[std::path::PathBuf],
@@ -1046,6 +1058,11 @@ impl SpawnGate {
     /// The ticket for a spawn in `folder`, or the refusal when a removal of it
     /// (or of a folder containing it) is under way. Keep the ticket until the
     /// new session is registered.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the refusal when a removal of `folder`, or of a folder containing it, is under
+    /// way.
     pub fn enter(
         &self,
         folder: &std::path::Path,

@@ -155,6 +155,10 @@ impl PtySizeOwners {
     /// nothing. The epoch lets a client that already applied a higher-stamped
     /// `pty.owner` keep the newer verdict, since the handshake and the
     /// broadcasts ride different connections with no ordering between them.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
         let owners = self.owners.lock().unwrap();
         let record = owners.map.get(pty_id);
@@ -191,6 +195,10 @@ impl PtySizeOwners {
     ///
     /// `device` is the claiming connection's captured `User-Agent`, recorded on
     /// a claim and ignored on every other outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn claim_for_resize(
         &self,
         pty_id: &str,
@@ -277,6 +285,10 @@ impl PtySizeOwners {
     /// a resize: those go through [`Self::write_if_owner`], [`Self::may_write`]
     /// and [`Self::claim_for_resize`], which decide and act under one lock, and a
     /// check here followed by an action leaves a TOCTOU window open.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
             .lock()
@@ -306,6 +318,10 @@ impl PtySizeOwners {
     /// the one frame that transfers ownership is a resize flagged as a take-over
     /// (see [`Self::claim_for_resize`]). `device` is the writing connection's
     /// captured `User-Agent`, recorded only on the claim.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn may_write(
         &self,
         pty_id: &str,
@@ -361,6 +377,10 @@ impl PtySizeOwners {
     /// poisons ownership for all of them. That is what closes the window a
     /// separate check leaves open, in which a take-over lands between the verdict
     /// and the write and one keystroke reaches a pty the writer no longer owns.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn write_if_owner(&self, pty_id: &str, conn_id: u64, write: impl FnOnce()) -> bool {
         let owners = self.owners.lock().unwrap();
         let allowed = owners
@@ -382,6 +402,10 @@ impl PtySizeOwners {
     /// learn the driving device has gone, so without it the take-over card is a
     /// permanent lie. The release takes an epoch because a client discards a
     /// `pty.owner` that is not newer than what it has applied.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
         let mut owners = self.owners.lock().unwrap();
         if owners
@@ -405,6 +429,10 @@ impl PtySizeOwners {
     /// them at one moment. One critical section rather than a loop of
     /// [`Self::release`] calls keeps the epochs consecutive and stops a browser
     /// claiming one mid-sweep only to have that claim released underneath it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release_all(&self, conn_id: u64) -> Vec<(String, u64)> {
         let mut owners = self.owners.lock().unwrap();
         let held: Vec<String> = owners
@@ -438,6 +466,10 @@ impl PtySizeOwners {
     /// for tens of milliseconds, so holding this lock behind it would stall every
     /// keystroke gate. [`Self::superseding_grid`] closes the window that leaves,
     /// which is why `rows` and `cols` are recorded here.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn accept_grid_apply(&self, pty_id: &str, seq: u64, rows: u16, cols: u16) -> bool {
         let mut owners = self.owners.lock().unwrap();
         let landed = owners.applied.entry(pty_id.to_string()).or_default();
@@ -497,6 +529,10 @@ impl PtySizeOwners {
     /// ([`Self::applied_grid_seq`]): the two differ while a stamped resize is
     /// still queued, and seeding a handshake's drop filter from this one drops
     /// the not-yet-published broadcast forever.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
@@ -514,6 +550,10 @@ impl PtySizeOwners {
     /// lower bound for the grid that handshake carries. The stamped seq is not:
     /// a resize that has not reached the child yet would make the client drop
     /// the very broadcast announcing its apply, permanently.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn applied_grid_seq(&self, pty_id: &str) -> u64 {
         self.owners
             .lock()
@@ -526,6 +566,10 @@ impl PtySizeOwners {
     /// The owner-map mutation counter, read by the engine actor's spine check as
     /// its cheap "ownership might have changed" gate. See
     /// [`OwnersState::generation`] for why this is not `epoch`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn ownership_generation(&self) -> u64 {
         self.owners.lock().unwrap().generation
     }
@@ -533,6 +577,10 @@ impl PtySizeOwners {
     /// A point-in-time copy of the owner map (pty id -> owning connection id),
     /// so the overlay stamps a consistent set of owners onto one spine build.
     /// Cloned because the lock must not be held across the spine projection.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn input_owners_snapshot(&self) -> std::collections::HashMap<String, u64> {
         self.owners
             .lock()

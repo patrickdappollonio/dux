@@ -219,6 +219,10 @@ impl PullRequestCloneFacts {
 
 /// Look the pull request up through `gh_program` and pair it with the offer.
 /// The error is the lookup's own sentence, unchanged. Blocking: it runs `gh`.
+///
+/// # Errors
+///
+/// Fails with the lookup's own sentence when `gh` cannot be run or cannot find the pull request.
 pub fn look_up_clone_offer(
     gh_program: &std::ffi::OsStr,
     offer: PullRequestCloneOffer,
@@ -338,6 +342,11 @@ fn ambiguous_scheme_separator(scheme: &str) -> String {
 }
 
 /// Parse typed text into the repository and/or pull request it names.
+///
+/// # Errors
+///
+/// Fails with the sentence to show when `raw` is empty or names no repository or pull request dux
+/// can read.
 pub fn parse_typed_reference(raw: &str) -> Result<TypedReference, String> {
     let input = raw.trim();
     if input.is_empty() {

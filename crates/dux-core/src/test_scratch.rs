@@ -26,11 +26,19 @@ pub struct ScratchDir(Option<tempfile::TempDir>);
 
 impl ScratchDir {
     /// A fresh directory in the system temp directory.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the directory cannot be created.
     pub fn new() -> Self {
         Self::from(tempfile::tempdir().expect("create a test scratch directory"))
     }
 
     /// The directory's path.
+    ///
+    /// # Panics
+    ///
+    /// Never: a live scratch directory always holds its directory.
     pub fn path(&self) -> &Path {
         self.0
             .as_ref()

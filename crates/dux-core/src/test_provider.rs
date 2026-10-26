@@ -170,6 +170,10 @@ pub fn harmless_config() -> Config {
 
 /// Asserts a fixture's config can launch nothing but a stand-in: not for any
 /// stock provider, not for its default provider, and not for a terminal.
+///
+/// # Panics
+///
+/// Panics when the config could launch anything but a stand-in.
 pub fn assert_fixture_config_is_harmless(config: &Config) {
     let mut providers: Vec<crate::model::ProviderKind> = default_provider_commands()
         .iter()

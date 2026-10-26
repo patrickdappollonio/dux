@@ -1230,6 +1230,11 @@ impl crate::engine::Engine {
 
     /// [`Self::apply_wire_operation`] for a change nobody asked to follow: the
     /// record still holds what it changes, and its statuses are left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::apply_wire_operation`] does: the command is refused, in the way of a
+    /// running operation, or fails to apply.
     pub fn apply_wire_recorded(
         &mut self,
         command: crate::wire::WireCommand,

@@ -124,6 +124,11 @@ pub fn undetected_warning(
 /// "serve loopback only" and warns. A CLI that is not there maps to
 /// `CommandMissing`, any other launch failure, a timeout or a non-zero exit to
 /// `CommandFailed`, and unparseable output to `NoAddress`.
+///
+/// # Errors
+///
+/// Fails with the reason no address is available: the CLI is missing, fails or times out, or prints
+/// no address.
 pub fn detect_ip() -> Result<IpAddr, TailscaleUnavailable> {
     first_cli_answer(CLI_CANDIDATES, |program| {
         detect_ip_with(program, DETECT_TIMEOUT)
@@ -599,6 +604,10 @@ pub struct TailscaleIdentity {
 /// Ask the `tailscale` CLI for this machine's name and the serve routes that
 /// end at `dux_port`. Bounded exactly like [`detect_ip`]; see
 /// [`detect_identity_with`].
+///
+/// # Errors
+///
+/// Fails as [`detect_ip`] does.
 pub fn detect_identity(dux_port: u16) -> Result<TailscaleIdentity, TailscaleUnavailable> {
     let look = detect_identity_checked(CLI_CANDIDATES, DETECT_TIMEOUT, dux_port, &local_evidence);
     if let Ok(identity) = &look {

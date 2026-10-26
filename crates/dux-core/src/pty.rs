@@ -1157,6 +1157,10 @@ impl ReaderLoopState {
 
 impl PtyClient {
     /// Spawn a CLI command in a new PTY with the given size.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::spawn_with_env`] does.
     #[allow(dead_code)]
     pub fn spawn(
         command: &str,
@@ -1174,6 +1178,10 @@ impl PtyClient {
     /// use. Companion terminals want it off and go through
     /// [`PtyClient::spawn_with_env_opts`]. No terminal-identity mutation is applied
     /// (the caller env is the only override).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the pseudo-terminal cannot be opened or the command cannot be spawned in it.
     pub fn spawn_with_env(
         command: &str,
         args: &[String],
@@ -1508,6 +1516,10 @@ impl PtyClient {
     /// snapshot: the child process will echo or react to this input, and
     /// pre-marking dirty avoids a one-frame delay waiting for the reader
     /// thread to process the echo.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write to the PTY fails.
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
         // Hand the bytes to the dedicated writer thread and return immediately.
         // The write itself may block on a child that has stopped reading its
@@ -1537,6 +1549,10 @@ impl PtyClient {
     }
 
     /// Get an owned snapshot of the currently visible terminal viewport.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
@@ -1565,6 +1581,10 @@ impl PtyClient {
     /// from now on. Dropping the guard immediately removes this subscriber from
     /// the fan-out list; the receiver will observe disconnection on the next
     /// `recv` or `try_recv` call after the guard is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the subscribers lock is poisoned by an earlier panic while it was held.
     pub fn subscribe(&self) -> (PtyViewerGuard, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
@@ -1619,6 +1639,11 @@ impl PtyClient {
     ///
     /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
     /// connection's lifetime; dropping it removes the subscriber immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal or subscribers lock is poisoned by an earlier panic while it was
+    /// held.
     pub fn subscribe_with_repaint(
         &self,
     ) -> (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
@@ -1641,6 +1666,10 @@ impl PtyClient {
     /// `target.links` (the TUI passes `config.capabilities.hyperlinks`): when
     /// `false` no cell carries a `link` and the interning work is skipped
     /// entirely, so a config that disables hyperlinks pays nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     pub fn snapshot_into(&self, target: &mut TerminalSnapshot, links: Hyperlinks) -> bool {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
@@ -1651,6 +1680,10 @@ impl PtyClient {
     }
 
     /// How many lines the view is scrolled back from the bottom.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the terminal lock is poisoned by an earlier panic while it was held.
     pub fn scrollback_offset(&self) -> usize {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.scrollback_offset()
@@ -1720,6 +1753,10 @@ impl PtyClient {
     /// holding the lock stretches it to tens of milliseconds. Taking the lock
     /// first closes it. `TIOCSWINSZ` does not block, so nothing long-running runs
     /// under the lock here.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the PTY cannot be resized.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         // A resize can move the scrollback offset (growing the viewport pulls
         // history into the grid and resets the display offset to 0). That is

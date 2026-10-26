@@ -125,6 +125,10 @@ pub struct CorpusCase {
 
 /// Every case of the start corpus, read from its fixture (see the comment
 /// at its head for the format and for each outcome changed on purpose).
+///
+/// # Panics
+///
+/// Panics on a fixture line that does not parse, or names an unknown outcome.
 pub fn start_corpus() -> Vec<CorpusCase> {
     const TEXT: &str = include_str!("../tests/fixtures/start_corpus.txt");
     let starts = |outcome: &str| match outcome.split('(').next() {

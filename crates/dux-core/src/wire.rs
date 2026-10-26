@@ -1980,6 +1980,11 @@ fn validate_settings_patch(
 
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the command is refused, in the way of a running operation, would end somebody
+    /// else's terminal, or fails to apply.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
         // Stamp the synchronous command-result status with the current command
         // origin. Deferred busies and finals capture `current_origin` at their
@@ -2733,6 +2738,10 @@ impl Engine {
     /// Lazy rather than eager, matching the sibling preferences: the serve has
     /// already acted by the time the file lands, and the saved value only decides
     /// what the NEXT run does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `mode` is not `auto`, `yes` or `no`.
     pub fn set_tailscale_mode(
         &mut self,
         mode: &str,

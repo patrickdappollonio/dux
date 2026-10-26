@@ -108,6 +108,10 @@ pub(crate) fn manageable_worktrees(entries: Vec<ProjectWorktreeEntry>) -> Vec<Ma
 /// git lock) degrades to "clean" rather than failing the whole listing: the
 /// manager is still useful without the warning, and every confirmation says the
 /// removal is forced anyway.
+///
+/// # Errors
+///
+/// Fails with git's reason when the project's worktrees cannot be listed.
 pub fn list_manageable_worktrees(
     project: &Project,
     paths: &DuxPaths,
@@ -151,6 +155,10 @@ pub(crate) fn in_use_by(
 /// dux still runs there, from [`crate::engine::Engine::busy_folders`]) and each
 /// folder an agent is being created in, so a row the manager would refuse to
 /// remove is never offered as removable.
+///
+/// # Errors
+///
+/// Fails with git's reason when the project's worktrees cannot be listed.
 pub fn list_manageable_worktrees_with_busy(
     project: &Project,
     paths: &DuxPaths,
@@ -283,6 +291,10 @@ pub enum RemovalOutcome {
 /// Classify and remove in one hop: the entry point both surfaces call.
 ///
 /// Shells to git, so run it off the UI thread and off the async reactor.
+///
+/// # Errors
+///
+/// Fails with the reason when the worktrees cannot be listed or the removal fails.
 pub fn remove_managed_worktree(
     project: &Project,
     paths: &DuxPaths,
@@ -367,6 +379,11 @@ impl AdmittedRemoval {
 
     /// Wait (bounded) for the operations still running in the worktree, then
     /// classify and remove it. Shells to git and blocks: worker threads only.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason when operations in the worktree do not finish in time, its processes
+    /// cannot be ended, or the removal fails.
     pub fn run(self) -> Result<RemovalOutcome, String> {
         let Self {
             ops,

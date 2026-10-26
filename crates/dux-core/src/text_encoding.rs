@@ -360,6 +360,10 @@ impl std::error::Error for Unmappable {}
 /// a browser would. The `replacement` encoding is refused: it decodes every
 /// file to a single replacement character and was made to neutralise content,
 /// not to edit it.
+///
+/// # Errors
+///
+/// Fails when `label` is no WHATWG label, or names the `replacement` encoding.
 pub fn encoding_for_label(label: &str) -> anyhow::Result<&'static Encoding> {
     match Encoding::for_label(label.trim().as_bytes()) {
         Some(encoding) if encoding != encoding_rs::REPLACEMENT => Ok(encoding),
@@ -405,6 +409,10 @@ fn bom_bytes(encoding: &'static Encoding) -> &'static [u8] {
 /// encoding the text back gives exactly the file's bytes. Where it does not
 /// (see [`Unwritable`]), the text still opens, but `unwritable` says why it
 /// must not be saved in this encoding.
+///
+/// # Errors
+///
+/// Fails with a [`DecodeRefused`] when the bytes are not valid in `requested`.
 pub fn decode(
     bytes: &[u8],
     requested: Option<&'static Encoding>,
@@ -526,6 +534,11 @@ fn decode_reporting(bytes: &[u8], encoding: &'static Encoding) -> Result<String,
 /// UTF-16 is encoded by hand: `encoding_rs`'s encoder writes UTF-8 for it, the
 /// way a browser submits a form, which is right for the web and wrong for a
 /// file. Line endings are whatever the text holds; nothing is normalised.
+///
+/// # Errors
+///
+/// Fails when the text holds a byte-order mark of its own, a character `encoding` has no bytes for
+/// (an [`Unmappable`]), or the encoding cannot be written.
 pub fn encode(
     text: &str,
     encoding: &'static Encoding,

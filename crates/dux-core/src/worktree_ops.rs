@@ -542,6 +542,10 @@ impl WorktreeOps {
 
     /// Register an operation on `path` for as long as the returned guard lives.
     /// Refused once a removal of the path has been announced.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the refusal once a removal or a destructive operation covers the path.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn hold(
         &self,
@@ -704,6 +708,11 @@ impl WorktreeOps {
     /// between the occupancy check and the operation. Refused, with the
     /// reason, when a removal already covers it or an operation is already
     /// running inside it. Dropping the lease lets the folder go.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason when a removal already covers the path or an operation is running
+    /// inside it.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive(
         &self,
@@ -715,6 +724,11 @@ impl WorktreeOps {
     /// [`Self::claim_for_destructive_within`], saying what the operation is
     /// ("an editor delete or move", "a changes-pane delete"), so anything it
     /// refuses meanwhile names it truthfully.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason when a removal still covers the path or an operation is still running
+    /// inside it after `wait`.
     #[must_use = "a refused hold or claim must be answered, never dropped"]
     pub fn claim_for_destructive_as(
         &self,

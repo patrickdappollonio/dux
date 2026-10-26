@@ -44,6 +44,10 @@ impl std::fmt::Debug for NewToken {
 }
 
 /// Mint a token from the operating system's random generator.
+///
+/// # Errors
+///
+/// Fails when the system's random generator cannot be read.
 pub fn new_token() -> Result<NewToken> {
     let mut raw = [0u8; TOKEN_BYTES];
     getrandom::fill(&mut raw)
@@ -134,6 +138,10 @@ pub struct WebSessionStore {
 
 impl WebSessionStore {
     /// Open the database at `path`, creating the table when it is missing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database cannot be opened, configured or migrated.
     pub fn open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -146,6 +154,10 @@ impl WebSessionStore {
     }
 
     /// An in-memory store, for tests.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the table cannot be created.
     pub fn in_memory() -> Result<Self> {
         let store = Self {
             conn: Connection::open_in_memory()?,
@@ -175,6 +187,10 @@ impl WebSessionStore {
     }
 
     /// Every stored session.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
     pub fn load(&self) -> Result<Vec<StoredSession>> {
         let mut statement = self
             .conn
@@ -206,6 +222,10 @@ impl WebSessionStore {
     }
 
     /// Insert a session, or move an existing one's last use and generation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn upsert(&self, session: &StoredSession) -> Result<()> {
         self.conn.execute(
             "insert into web_sessions (digest, generation, last_seen_ms, kind)
@@ -225,6 +245,10 @@ impl WebSessionStore {
 
     /// Move the last use of every listed session that still exists, in one
     /// transaction. A session deleted meanwhile is not brought back.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction fails; nothing moves then.
     pub fn touch(&mut self, sessions: &[(TokenDigest, i64)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -240,6 +264,10 @@ impl WebSessionStore {
     }
 
     /// Delete one session.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn delete(&self, digest: &TokenDigest) -> Result<()> {
         self.conn.execute(
             "delete from web_sessions where digest = ?1",
@@ -249,6 +277,10 @@ impl WebSessionStore {
     }
 
     /// Delete every session not issued under `generation`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn delete_other_generations(&self, generation: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "delete from web_sessions where generation <> ?1",
@@ -258,6 +290,10 @@ impl WebSessionStore {
 
     /// Delete every browser session last used before `browser_cutoff_ms` and
     /// every command-line one last used before `cli_cutoff_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
     pub fn delete_idle_since(&self, browser_cutoff_ms: i64, cli_cutoff_ms: i64) -> Result<usize> {
         Ok(self.conn.execute(
             "delete from web_sessions

@@ -54,6 +54,11 @@ pub(crate) fn occupied_folder_refusal(folder: &Path, then: &str) -> crate::statu
 /// Refuses rather than overwrites when something already occupies the path.
 /// dux is putting a directory back, and a directory that is already there is
 /// somebody's, whether a working copy that reappeared or an unrelated folder.
+///
+/// # Errors
+///
+/// Fails when something already occupies the path, or a git step to check the branch out again
+/// fails.
 pub fn recreate_working_copy(
     repo_path: &Path,
     worktree_path: &Path,

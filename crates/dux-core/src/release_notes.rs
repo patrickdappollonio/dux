@@ -557,6 +557,11 @@ fn is_loopback_base(base: &str) -> bool {
 ///
 /// A tag with no published release is a definitive
 /// [`FetchError::NoSuchRelease`], not a transient failure.
+///
+/// # Errors
+///
+/// Fails with [`FetchError::NoSuchRelease`] when the tag has no published release, or another
+/// [`FetchError`] when the request or its answer fails.
 pub fn fetch_release_by_tag(api_base: &str, tag: &str) -> Result<ReleaseNotes, FetchError> {
     if !is_path_safe_tag(tag) {
         // Definitive: such a string cannot name a dux release, and re-asking is
@@ -579,6 +584,10 @@ pub fn fetch_release_by_tag(api_base: &str, tag: &str) -> Result<ReleaseNotes, F
 ///
 /// Unauthenticated: GitHub serves this endpoint with no token at a 60
 /// requests/hour per-IP limit, which is why [`load_or_fetch_tag`] caches.
+///
+/// # Errors
+///
+/// Fails with a [`FetchError`] when the request or its answer fails.
 pub fn fetch_latest(api_base: &str) -> Result<ReleaseNotes, FetchError> {
     let url = latest_release_endpoint(api_base);
     fetch_release(api_base, &url, None)
@@ -719,6 +728,10 @@ pub fn cached_notes(path: &Path, version: &str, ttl: Duration, now: DateTime<Utc
 }
 
 /// Writes `notes` to the cache, stamped `now`, replacing any previous entry.
+///
+/// # Errors
+///
+/// Fails when the notes cannot be encoded, or the cache's folder or file cannot be written.
 pub fn write_cache(path: &Path, notes: &ReleaseNotes, now: DateTime<Utc>) -> Result<()> {
     let file = CacheFile {
         fetched_at: now,
@@ -742,6 +755,11 @@ pub fn write_cache(path: &Path, notes: &ReleaseNotes, now: DateTime<Utc>) -> Res
 /// A definitive [`FetchError::NoSuchRelease`] is returned as-is and does NOT fall
 /// back to a stale entry: there is no release, so there is nothing to be stale
 /// about.
+///
+/// # Errors
+///
+/// Fails as [`fetch_release_by_tag`] does when there is no fresh cache entry and no stale one to
+/// fall back to; a missing release never falls back.
 pub fn load_or_fetch_tag(
     api_base: &str,
     cache: &Path,
@@ -783,6 +801,10 @@ pub fn load_or_fetch_tag(
 ///   published release. This can only be reached by an explicit user action (a dev
 ///   build never auto-shows the what's-new screen), and it is deliberately
 ///   uncached: there is no stable key to file it under.
+///
+/// # Errors
+///
+/// Fails as [`load_release_notes_from`] does.
 pub fn load_release_notes(root: &Path, running_version: &str) -> Result<ReleaseNotes, FetchError> {
     load_release_notes_from(crate::urls::GITHUB_API_BASE, root, running_version)
 }
@@ -797,6 +819,11 @@ pub fn load_release_notes(root: &Path, running_version: &str) -> Result<ReleaseN
 /// thing; `load_release_notes` is the convenience wrapper that does.
 ///
 /// BLOCKING: worker only.
+///
+/// # Errors
+///
+/// Fails as [`load_or_fetch_tag`] does for a release build and [`fetch_latest`] for a development
+/// build.
 pub fn load_release_notes_from(
     api_base: &str,
     root: &Path,

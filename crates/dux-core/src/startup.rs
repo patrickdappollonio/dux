@@ -210,6 +210,10 @@ pub fn read_log(path: &Path) -> Result<String> {
 /// The one place the scope is matched. Callers ask here rather than re-deriving
 /// "agent means this directory, project means every session directory under it",
 /// so the two spellings cannot drift apart.
+///
+/// # Errors
+///
+/// Fails when a log directory exists but cannot be read.
 pub fn list_logs_for_scope(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,
@@ -228,6 +232,10 @@ pub fn list_logs_for_scope(
 /// Both halves are file I/O, so they belong on the same off-thread hop: a
 /// caller that listed here and then read the newest on the UI thread would put
 /// exactly the read this exists to avoid back on the UI thread.
+///
+/// # Errors
+///
+/// Fails when a log directory or the newest log cannot be read.
 pub fn load_logs_for_scope(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,

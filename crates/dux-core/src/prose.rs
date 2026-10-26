@@ -171,6 +171,10 @@ impl Prose {
     /// The shape the cross-language fixture records: a string for constant
     /// words, `{ "name", "quoted" }` for a name, the same shape the browser's
     /// `Prose` type has.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the segments are strings and plain structs, which always serialize.
     pub fn to_json(&self) -> Value {
         serde_json::to_value(&self.segments).expect("prose segments always serialize")
     }
