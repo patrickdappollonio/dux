@@ -978,8 +978,8 @@ pub(crate) fn identity_news(
     next: &TailscaleIdentity,
     password: Password,
 ) -> Vec<(dux_core::statusline::StatusTone, String)> {
-    let password_set = password == Password::Set;
     use dux_core::statusline::StatusTone;
+    let password_set = password == Password::Set;
     let mut news = Vec::new();
     // A Funnel that forwards to dux's port is the Funnel state's news (see
     // `funnel_state_news`), said once there; this only speaks for a Funnel elsewhere,
@@ -1167,11 +1167,11 @@ pub(crate) fn funnel_state_news(
     because: Because,
     password: Password,
 ) -> Option<(dux_core::statusline::StatusTone, String)> {
-    let password_set = password == Password::Set;
     use crate::exposure::FunnelState::{
         Checking, CliNotFound, Funnel, FunnelSaved, Open, Unchecked, Unconfirmed,
     };
     use dux_core::statusline::StatusTone;
+    let password_set = password == Password::Set;
     if before == after {
         return None;
     }

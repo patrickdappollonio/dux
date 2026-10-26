@@ -1304,14 +1304,14 @@ impl TailscaleLoop {
         self.first_look_landed = true;
         let previous = self.hold_identity(Some(identity.clone()));
         self.settle_funnel_state(
-            crate::serve_legs::funnel_state_after_look(&identity),
+            crate::serve_legs::funnel_state_after_look(identity),
             crate::serve_legs::Because::Look,
             console,
             status,
         );
         for (tone, message) in identity_news(
             previous.as_ref(),
-            &identity,
+            identity,
             crate::serve_legs::Password::now(&self.password_set),
         ) {
             say(tone, &message, console, status);
