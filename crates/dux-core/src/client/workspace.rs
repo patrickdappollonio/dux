@@ -817,7 +817,10 @@ fn report(record: &OperationRecord) -> Result<String, CliError> {
     }
     lines.extend(record.parts.iter().map(wait::part_line));
     lines.extend(record.created.iter().cloned());
-    Ok(lines.into_iter().map(|line| format!("{line}\n")).collect())
+    Ok(lines
+        .iter()
+        .flat_map(|line| [line.as_str(), "\n"])
+        .collect())
 }
 
 /// `dux projects add <path>`.

@@ -69,7 +69,7 @@ pub fn render(listing: &Listing, shape: Shape) -> String {
         Shape::Ids => listing
             .rows
             .iter()
-            .map(|row| format!("{}\n", row.id))
+            .flat_map(|row| [row.id.as_str(), "\n"])
             .collect(),
         Shape::Json => {
             let array: Vec<&serde_json::Value> = listing.rows.iter().map(|row| &row.json).collect();

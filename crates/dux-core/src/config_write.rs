@@ -6196,7 +6196,7 @@ pub fn read_token(current: Option<&str>) -> String {
         None => Sha256::new().chain_update(b"missing\0"),
     }
     .finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::text::hex_lower(&digest)
 }
 
 #[cfg(test)]

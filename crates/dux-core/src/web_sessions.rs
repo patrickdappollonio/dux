@@ -86,7 +86,7 @@ pub fn credential_generation(password_hash: &str) -> String {
         return String::new();
     }
     let digest = Sha256::digest(password_hash.as_bytes());
-    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+    crate::text::hex_lower(&digest[..16])
 }
 
 /// Who holds a session, which decides the idle setting it obeys:

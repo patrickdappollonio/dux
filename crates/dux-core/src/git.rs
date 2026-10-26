@@ -6989,7 +6989,7 @@ pub(crate) fn agent_folder_name(name: &str) -> String {
     }
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(name.as_bytes());
-    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let hash = crate::text::hex_lower(&digest[..8]);
     let budget = AGENT_FOLDER_MAX_UNITS - hash.len() - 1;
     let mut used = 0;
     let kept: String = flat

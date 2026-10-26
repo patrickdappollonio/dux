@@ -1037,11 +1037,7 @@ pub fn global_env_version(env: &BTreeMap<String, String>) -> String {
 fn content_version(value: &impl Serialize) -> String {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(value).unwrap_or_default();
-    Sha256::digest(&bytes)
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::text::hex_lower(&Sha256::digest(&bytes)[..8])
 }
 
 /// A whole-set save refused because the set changed after the client read it.

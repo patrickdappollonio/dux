@@ -288,10 +288,7 @@ impl Blocker {
             self.target,
         ]);
         let digest = Sha256::digest(identity.to_string().as_bytes());
-        digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        crate::text::hex_lower(&digest[..8])
     }
 
     /// One blocker in words: who, from where, doing what, to which tab or

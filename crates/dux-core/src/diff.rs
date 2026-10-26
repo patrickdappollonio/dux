@@ -900,14 +900,21 @@ mod tests {
         assert_eq!(c.modified, "");
     }
 
-    /// A path absent both at HEAD and on disk is a stale/typo path: it errors
-    /// rather than returning a confusing all-blank diff.
+    /// The lines `line` makes for `0..count`, each ended by a line break.
+    fn numbered_lines(count: usize, line: impl Fn(usize) -> String) -> String {
+        (0..count).fold(String::new(), |mut out, i| {
+            out.push_str(&line(i));
+            out.push('\n');
+            out
+        })
+    }
+
     /// Commit a file whose diff is far longer than the head cap, so the
     /// fallback has something real to cut.
     fn commit_and_rewrite_long_file(repo: &Path, rel: &str, lines: usize) {
-        let original: String = (0..lines).map(|i| format!("old line {i}\n")).collect();
+        let original: String = numbered_lines(lines, |i| format!("old line {i}"));
         commit_file(repo, rel, &original);
-        let rewritten: String = (0..lines).map(|i| format!("new line {i}\n")).collect();
+        let rewritten: String = numbered_lines(lines, |i| format!("new line {i}"));
         std::fs::write(repo.join(rel), rewritten).expect("rewrite");
     }
 
@@ -1104,7 +1111,7 @@ mod tests {
     #[test]
     fn a_readers_diff_context_setting_does_not_move_the_counts() {
         let repo = init_repo();
-        let base: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let base: String = numbered_lines(60, |i| format!("line {i}"));
         commit_file(repo.path(), "ctx.txt", &base);
         let changed = base.replace("line 30\n", "CHANGED\n");
         std::fs::write(repo.path().join("ctx.txt"), changed).expect("overwrite");
@@ -1138,9 +1145,9 @@ mod tests {
         // Ten lines of a quarter megabyte each: far under the line cap, far
         // over the byte cap.
         let long = "x".repeat(256 * 1024);
-        let base: String = (0..10).map(|i| format!("{long}{i}\n")).collect();
+        let base: String = numbered_lines(10, |i| format!("{long}{i}"));
         commit_file(repo.path(), "min.js", &base);
-        let changed: String = (0..10).map(|i| format!("{long}z{i}\n")).collect();
+        let changed: String = numbered_lines(10, |i| format!("{long}z{i}"));
         std::fs::write(repo.path().join("min.js"), changed).expect("overwrite");
 
         let head = diff_head_via_git(repo.path(), "min.js").expect("head");
@@ -1205,6 +1212,8 @@ mod tests {
         );
     }
 
+    /// A path absent both at HEAD and on disk is a stale/typo path: it errors
+    /// rather than returning a confusing all-blank diff.
     #[test]
     fn absent_on_both_sides_errors() {
         let repo = init_repo();
