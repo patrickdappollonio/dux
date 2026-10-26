@@ -430,7 +430,7 @@ mod tests {
             ),
         ];
         assert_eq!(removable_worktree_indices(&entries), vec![1]);
-        let rows = manage_worktree_visual_rows(&entries, false, None);
+        let rows = manage_worktree_visual_rows(&entries, Listing::Loaded, None);
         assert!(
             rows.iter()
                 .any(|r| matches!(r, ManageWorktreeVisualRow::Entry(0))),

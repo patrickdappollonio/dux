@@ -1416,15 +1416,6 @@ enum Truncation {
     Whole,
 }
 
-/// Whether an agent's working copy is on disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkingCopy {
-    /// Its directory is gone.
-    Missing,
-    /// It is there.
-    Present,
-}
-
 /// How many branches a delete warning about unpushed commits covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchSpread {
@@ -1477,15 +1468,6 @@ enum HintRow {
     Shown,
     /// It does not.
     Hidden,
-}
-
-/// Whether a multiline field is engaged for typing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldEngagement {
-    /// Every key goes to the text.
-    Engaged,
-    /// The modal owns the keys.
-    Unengaged,
 }
 
 /// Whether a picker list is filtering by a typed search.
@@ -7041,8 +7023,15 @@ impl App {
             )
             .render(details_area, frame.buffer_mut());
 
-        let rows =
-            manage_worktree_visual_rows(&prompt.entries, prompt.loading, prompt.error.as_deref());
+        let rows = manage_worktree_visual_rows(
+            &prompt.entries,
+            if prompt.loading {
+                Listing::Loading
+            } else {
+                Listing::Loaded
+            },
+            prompt.error.as_deref(),
+        );
         let path_col = prompt
             .entries
             .iter()
@@ -7348,8 +7337,15 @@ impl App {
             )
             .render(details_area, frame.buffer_mut());
 
-        let rows =
-            project_worktree_visual_rows(&prompt.entries, prompt.loading, prompt.error.as_deref());
+        let rows = project_worktree_visual_rows(
+            &prompt.entries,
+            if prompt.loading {
+                Listing::Loading
+            } else {
+                Listing::Loaded
+            },
+            prompt.error.as_deref(),
+        );
         let path_col = prompt
             .entries
             .iter()

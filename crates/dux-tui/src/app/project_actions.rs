@@ -980,14 +980,14 @@ mod tests {
         }
     }
 
-    fn picker(app: &App, loading: bool, branches: Vec<BranchChoice>) -> PromptState {
+    fn picker(app: &App, listing: Listing, branches: Vec<BranchChoice>) -> PromptState {
         let project = &app.engine.projects[0];
         PromptState::ChangeBaseBranch(Box::new(ChangeBaseBranchPrompt {
             holders: std::collections::HashMap::new(),
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             current_base: Some("develop".to_string()),
-            loading,
+            loading: listing == Listing::Loading,
             branches,
             fetch_note: None,
             error: None,
@@ -1010,7 +1010,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = picker(
             &app,
-            false,
+            Listing::Loaded,
             vec![branch("develop"), branch("main"), branch("release")],
         );
         type_search(&mut app, "rel");
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn a_listing_that_lands_mid_search_selects_among_the_visible_rows() {
         let mut app = test_app(default_bindings());
-        app.prompt = picker(&app, true, Vec::new());
+        app.prompt = picker(&app, Listing::Loading, Vec::new());
         type_search(&mut app, "e");
         press(&mut app, KeyCode::Enter);
         let project_id = app.engine.projects[0].id.clone();
@@ -1130,7 +1130,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         let mut held = branch("agent-one");
         held.held_by = Some(PathBuf::from("/srv/wt/agent-one"));
-        app.prompt = picker(&app, false, vec![branch("develop"), held]);
+        app.prompt = picker(&app, Listing::Loaded, vec![branch("develop"), held]);
         if let PromptState::ChangeBaseBranch(prompt) = &mut app.prompt {
             prompt.holders.insert(
                 "agent-one".to_string(),

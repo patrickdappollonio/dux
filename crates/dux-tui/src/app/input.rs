@@ -1153,7 +1153,11 @@ impl App {
     }
 
     fn focus_next_pane(&mut self) {
-        let has_staged = !self.engine.staged_files.is_empty();
+        let has_staged = if self.engine.staged_files.is_empty() {
+            StagedFiles::Absent
+        } else {
+            StagedFiles::Present
+        };
         if self.focus == FocusPane::Left
             && self.left_section == LeftSection::Projects
             && self.has_terminal_items()
@@ -1188,7 +1192,11 @@ impl App {
     }
 
     fn focus_previous_pane(&mut self) {
-        let has_staged = !self.engine.staged_files.is_empty();
+        let has_staged = if self.engine.staged_files.is_empty() {
+            StagedFiles::Absent
+        } else {
+            StagedFiles::Present
+        };
         if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
             self.left_section = LeftSection::Projects;
         } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Projects {
@@ -6293,7 +6301,11 @@ impl App {
         // movement key. `owns_keys` and not `is_text_field`: an unengaged body
         // takes no keystrokes, so the movement keys keep working while focus is
         // parked on it.
-        let owned_by_field = focus.owns_keys(self.macro_text_engaged()) && text_field_owns_key(key);
+        let owned_by_field = focus.owns_keys(if self.macro_text_engaged() {
+            FieldEngagement::Engaged
+        } else {
+            FieldEngagement::Unengaged
+        }) && text_field_owns_key(key);
         let action = if owned_by_field {
             None
         } else {
@@ -8307,7 +8319,11 @@ impl App {
             PromptState::ManageWorktrees(prompt) => {
                 let rows = manage_worktree_visual_rows(
                     &prompt.entries,
-                    prompt.loading,
+                    if prompt.loading {
+                        Listing::Loading
+                    } else {
+                        Listing::Loaded
+                    },
                     prompt.error.as_deref(),
                 );
                 rows.get(visual_index).and_then(|row| match row {
@@ -8337,7 +8353,11 @@ impl App {
             PromptState::PickProjectWorktree(prompt) => {
                 let rows = project_worktree_visual_rows(
                     &prompt.entries,
-                    prompt.loading,
+                    if prompt.loading {
+                        Listing::Loading
+                    } else {
+                        Listing::Loaded
+                    },
                     prompt.error.as_deref(),
                 );
                 rows.get(visual_index).and_then(|row| match row {
@@ -25589,7 +25609,8 @@ cyan = "#00ffff"
             busy: None,
         };
         let entries = vec![entry("free", None), entry("held", Some("session-1"))];
-        let rows = crate::app::manage_worktree_visual_rows(&entries, false, None);
+        let rows =
+            crate::app::manage_worktree_visual_rows(&entries, crate::app::Listing::Loaded, None);
         let held_row = rows
             .iter()
             .position(|r| matches!(r, crate::app::ManageWorktreeVisualRow::Entry(1)))

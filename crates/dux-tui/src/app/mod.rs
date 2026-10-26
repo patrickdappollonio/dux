@@ -266,6 +266,41 @@ struct PruneViewContext {
     tab_providers: HashMap<String, String>,
 }
 
+/// Whether an agent's working copy is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkingCopy {
+    /// Its directory is gone.
+    Missing,
+    /// It is there.
+    Present,
+}
+
+/// Whether a multiline field is engaged for typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldEngagement {
+    /// Every key goes to the text.
+    Engaged,
+    /// The modal owns the keys.
+    Unengaged,
+}
+
+/// Whether the changes pane lists any staged files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StagedFiles {
+    /// It does, so the staged list and the commit box are reachable.
+    Present,
+    /// It does not.
+    Absent,
+}
+
+/// Whether a worker-fed list has its answer yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Listing {
+    /// The worker has not answered.
+    Loading,
+    /// It has.
+    Loaded,
+}
 /// What the status line showed when the command palette last opened.
 #[derive(Default)]
 pub(crate) enum PaletteOpenedOver {
@@ -1370,9 +1405,9 @@ pub(crate) enum RightSection {
 impl RightSection {
     /// Returns the next section, or `None` to exit the pane.
     /// Order: Unstaged → Staged → `CommitInput`.
-    pub(crate) fn next(self, has_staged: bool) -> Option<Self> {
+    pub(crate) fn next(self, staged: StagedFiles) -> Option<Self> {
         match self {
-            Self::Unstaged if has_staged => Some(Self::Staged),
+            Self::Unstaged if (staged == StagedFiles::Present) => Some(Self::Staged),
             Self::Unstaged => None,
             Self::Staged => Some(Self::CommitInput),
             Self::CommitInput => None,
@@ -1393,8 +1428,8 @@ impl RightSection {
         Self::Unstaged
     }
 
-    pub(crate) fn last(has_staged: bool) -> Self {
-        if has_staged {
+    pub(crate) fn last(staged: StagedFiles) -> Self {
+        if staged == StagedFiles::Present {
             Self::CommitInput
         } else {
             Self::Unstaged
@@ -1744,7 +1779,7 @@ pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
     pr: Option<(&crate::model::PrInfo, bool)>,
-    directory_missing: bool,
+    working_copy: WorkingCopy,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session.display_label();
     // Mirror the header's "current provider" note: when the agent runs a provider
@@ -1791,7 +1826,7 @@ pub(crate) fn agent_info_lines(
                 format!("Worktree:     {}", managed.worktree_path),
                 AgentInfoTone::Neutral,
             ));
-            if directory_missing {
+            if working_copy == WorkingCopy::Missing {
                 lines.push((
                     dux_core::working_copy::MISSING_WORKING_COPY_INFO_LINE.to_string(),
                     AgentInfoTone::Warning,
@@ -1810,7 +1845,7 @@ pub(crate) fn agent_info_lines(
                 ),
                 AgentInfoTone::Neutral,
             ));
-            if directory_missing {
+            if working_copy == WorkingCopy::Missing {
                 lines.push((
                     dux_core::working_copy::MISSING_FOLDER_INFO_LINE.to_string(),
                     AgentInfoTone::Warning,
@@ -3291,10 +3326,10 @@ pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>)
 
 pub(crate) fn project_worktree_visual_rows(
     entries: &[ProjectWorktreeEntry],
-    loading: bool,
+    listing: Listing,
     error: Option<&str>,
 ) -> Vec<ProjectWorktreeVisualRow> {
-    if loading {
+    if listing == Listing::Loading {
         return vec![ProjectWorktreeVisualRow::Empty(
             "Loading project worktrees...".to_string(),
         )];
@@ -3355,10 +3390,10 @@ pub(crate) fn project_worktree_visual_rows(
 /// they are not selectable, so the cursor cannot land on one.
 pub(crate) fn manage_worktree_visual_rows(
     entries: &[dux_core::worktree_manager::ManagedWorktree],
-    loading: bool,
+    listing: Listing,
     error: Option<&str>,
 ) -> Vec<ManageWorktreeVisualRow> {
-    if loading {
+    if listing == Listing::Loading {
         return vec![ManageWorktreeVisualRow::Empty(
             "Listing the worktrees dux manages...".to_string(),
         )];
@@ -3505,10 +3540,10 @@ impl MacroEditFocus {
     /// owns nothing, so the movement keys keep working while focus is parked on
     /// it. That distinction is what [`MacroEditFocus::is_text_field`] cannot
     /// make on its own.
-    pub(crate) fn owns_keys(self, body_engaged: bool) -> bool {
+    pub(crate) fn owns_keys(self, body: FieldEngagement) -> bool {
         match self {
             MacroEditFocus::Name => true,
-            MacroEditFocus::Text => body_engaged,
+            MacroEditFocus::Text => body == FieldEngagement::Engaged,
             MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => false,
         }
     }
@@ -7301,8 +7336,13 @@ impl App {
                 .pr_statuses
                 .get(&session.id)
                 .map(|pr| (pr, self.engine.pr_overrides.contains_key(&session.id)));
-            let directory_missing = self.engine.folder_repo_status(&session.id)
-                == dux_core::git::FolderRepoStatus::Missing;
+            let directory_missing = if self.engine.folder_repo_status(&session.id)
+                == dux_core::git::FolderRepoStatus::Missing
+            {
+                WorkingCopy::Missing
+            } else {
+                WorkingCopy::Present
+            };
             let lines = agent_info_lines(&session, project_default, pr, directory_missing);
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
@@ -8609,7 +8649,7 @@ mod tests {
     #[test]
     fn agent_info_lines_for_a_standalone_agent_name_the_folder_and_no_branches() {
         let s = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         let text = lines
             .iter()
             .map(|(l, _)| l.as_str())
@@ -8643,7 +8683,7 @@ mod tests {
     #[test]
     fn agent_info_lines_flag_a_directory_that_is_gone() {
         let managed = test_session("s1", "p1", 0);
-        let lines = agent_info_lines(&managed, None, None, true);
+        let lines = agent_info_lines(&managed, None, None, WorkingCopy::Missing);
         let flagged = lines
             .iter()
             .find(|(_, tone)| *tone == AgentInfoTone::Warning)
@@ -8655,7 +8695,7 @@ mod tests {
         assert!(flagged.0.contains("Recreate it"), "{}", flagged.0);
 
         assert!(
-            !agent_info_lines(&managed, None, None, false)
+            !agent_info_lines(&managed, None, None, WorkingCopy::Present)
                 .iter()
                 .any(|(text, _)| text == dux_core::working_copy::MISSING_WORKING_COPY_INFO_LINE),
             "and nothing is flagged while the copy is there"
@@ -8664,7 +8704,7 @@ mod tests {
         // dux never puts a standalone agent's folder back, so its line names a
         // different remedy.
         let standalone = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&standalone, None, None, true);
+        let lines = agent_info_lines(&standalone, None, None, WorkingCopy::Missing);
         assert!(
             lines
                 .iter()
@@ -8690,7 +8730,7 @@ mod tests {
             .expect("managed test session")
             .source_branch = "main".into();
 
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -8721,7 +8761,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = "main".into();
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
         // passes while reporting nothing at all.
@@ -8753,7 +8793,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = String::new();
-        let lines = agent_info_lines(&s, None, None, false);
+        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(
             !lines
                 .iter()
@@ -8775,11 +8815,11 @@ mod tests {
         };
 
         // No PR known: no line at all.
-        let none = agent_info_lines(&s, None, None, false);
+        let none = agent_info_lines(&s, None, None, WorkingCopy::Present);
         assert!(!none.iter().any(|(l, _)| l.starts_with("Pull request:")));
 
         // Autodetected PR: number, lowercase state, title, no pin marker.
-        let auto = agent_info_lines(&s, None, Some((&pr, false)), false);
+        let auto = agent_info_lines(&s, None, Some((&pr, false)), WorkingCopy::Present);
         let line = auto
             .iter()
             .find(|(l, _)| l.starts_with("Pull request:"))
@@ -8794,7 +8834,7 @@ mod tests {
 
         // Pinned PR: the same line carries the manual marker. This line is the
         // ONLY TUI cue that a pin exists, so the marker is load-bearing.
-        let pinned = agent_info_lines(&s, None, Some((&pr, true)), false);
+        let pinned = agent_info_lines(&s, None, Some((&pr, true)), WorkingCopy::Present);
         let line = pinned
             .iter()
             .find(|(l, _)| l.starts_with("Pull request:"))
@@ -8806,7 +8846,12 @@ mod tests {
     fn agent_info_provider_line_notes_a_divergent_project_default() {
         let s = test_session("s1", "p1", 0); // provider "codex"
         // Matching default: plain provider line, no annotation.
-        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")), None, false);
+        let same = agent_info_lines(
+            &s,
+            Some(ProviderKind::from_str("codex")),
+            None,
+            WorkingCopy::Present,
+        );
         let provider_same = same
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -8814,7 +8859,12 @@ mod tests {
         assert!(!provider_same.0.contains("project default"));
 
         // Divergent default: the line spells out the project default too.
-        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")), None, false);
+        let diff = agent_info_lines(
+            &s,
+            Some(ProviderKind::from_str("claude")),
+            None,
+            WorkingCopy::Present,
+        );
         let provider_diff = diff
             .iter()
             .find(|(l, _)| l.starts_with("Provider:"))
@@ -10092,7 +10142,7 @@ leading_branch = "main"
             },
         ];
 
-        let rows = project_worktree_visual_rows(&entries, false, None);
+        let rows = project_worktree_visual_rows(&entries, Listing::Loaded, None);
 
         assert!(matches!(
             rows.first(),
