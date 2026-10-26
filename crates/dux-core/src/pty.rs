@@ -36,24 +36,43 @@ use crate::scroll_margins::{ScrollRegion, ScrollRegionTracker};
 /// 1:1 to `ratatui::Color`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CellColor {
+    /// The terminal's default color.
     Reset,
+    /// ANSI black (color 0).
     Black,
+    /// ANSI red (color 1).
     Red,
+    /// ANSI green (color 2).
     Green,
+    /// ANSI yellow (color 3).
     Yellow,
+    /// ANSI blue (color 4).
     Blue,
+    /// ANSI magenta (color 5).
     Magenta,
+    /// ANSI cyan (color 6).
     Cyan,
+    /// ANSI white (color 7), which renders as a light gray.
     Gray,
+    /// ANSI bright black (color 8), which renders as a dark gray.
     DarkGray,
+    /// ANSI bright red (color 9).
     LightRed,
+    /// ANSI bright green (color 10).
     LightGreen,
+    /// ANSI bright yellow (color 11).
     LightYellow,
+    /// ANSI bright blue (color 12).
     LightBlue,
+    /// ANSI bright magenta (color 13).
     LightMagenta,
+    /// ANSI bright cyan (color 14).
     LightCyan,
+    /// ANSI bright white (color 15).
     White,
+    /// A 24-bit color, as red, green and blue.
     Rgb(u8, u8, u8),
+    /// A color from the 256-color palette, by index.
     Indexed(u8),
 }
 
@@ -108,11 +127,17 @@ pub(crate) enum BellPolicy {
 pub struct CellModifier(u8);
 
 impl CellModifier {
+    /// Bold or increased intensity.
     pub const BOLD: Self = Self(1);
+    /// Faint or decreased intensity.
     pub const DIM: Self = Self(1 << 1);
+    /// Italic.
     pub const ITALIC: Self = Self(1 << 2);
+    /// Underlined.
     pub const UNDERLINED: Self = Self(1 << 3);
+    /// Reverse video: foreground and background swapped.
     pub const REVERSED: Self = Self(1 << 4);
+    /// Struck through.
     pub const CROSSED_OUT: Self = Self(1 << 5);
 
     /// Whether every attribute in `other` is set here.
@@ -134,19 +159,29 @@ impl std::ops::BitOr for CellModifier {
     }
 }
 
+/// Where the terminal's cursor sits in a snapshot, in cells from the top-left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapshotCursor {
+    /// The cursor's row, from 0.
     pub row: u16,
+    /// The cursor's column, from 0.
     pub col: u16,
 }
 
+/// One visible cell of a terminal snapshot, with its text and style.
 #[derive(Clone, Debug)]
 pub struct SnapshotCell {
+    /// The cell's row, from 0.
     pub row: u16,
+    /// The cell's column, from 0.
     pub col: u16,
+    /// The text the cell shows.
     pub symbol: CompactString,
+    /// The foreground color.
     pub fg: CellColor,
+    /// The background color.
     pub bg: CellColor,
+    /// The text attributes.
     pub modifier: CellModifier,
     /// Index into [`TerminalSnapshot::links`] when this cell is part of an OSC 8
     /// hyperlink, else `None`. The TUI wraps the cell symbol in an OSC 8 open/close
@@ -154,13 +189,21 @@ pub struct SnapshotCell {
     pub link: Option<u16>,
 }
 
+/// What a terminal shows at one moment: its size, its scrollback position, its cursor and its
+/// cells.
 #[derive(Clone, Debug)]
 pub struct TerminalSnapshot {
+    /// The visible height, in rows.
     pub rows: u16,
+    /// The visible width, in columns.
     pub cols: u16,
+    /// How many lines the view is scrolled back from the bottom.
     pub scrollback_offset: usize,
+    /// How many lines of scrollback there are in all.
     pub scrollback_total: usize,
+    /// The cursor, when it is visible.
     pub cursor: Option<SnapshotCursor>,
+    /// The visible cells, wide-character spacers left out.
     pub cells: Vec<SnapshotCell>,
     /// Interned OSC 8 hyperlink URIs referenced by `cells[..].link`. A per-snapshot
     /// table so a link spanning many cells stores its URI once.
@@ -957,7 +1000,9 @@ const PASSTHROUGH_SEQ_MAX: usize = 8 * 1024;
 /// mirrors [`crate::attention::AttentionEvent::Progress`].
 #[derive(Debug, Clone, Copy)]
 pub struct ProgressReport {
+    /// Whether the agent reported it is working.
     pub working: bool,
+    /// When the report arrived.
     pub at: Instant,
 }
 
@@ -1605,6 +1650,7 @@ impl PtyClient {
         true
     }
 
+    /// How many lines the view is scrolled back from the bottom.
     pub fn scrollback_offset(&self) -> usize {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.scrollback_offset()
