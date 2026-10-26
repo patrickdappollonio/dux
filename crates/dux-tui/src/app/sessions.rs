@@ -5932,7 +5932,7 @@ mod tests {
 
         // Confirming dispatches a background worker; the commit + registration
         // complete asynchronously. Drain until the project appears (bounded).
-        app.resolve_confirm_create_initial_commit(true);
+        app.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm);
         assert!(matches!(app.prompt, PromptState::None));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.engine.projects.is_empty() && std::time::Instant::now() < deadline {
@@ -5985,7 +5985,7 @@ mod tests {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
         app.add_project(path.clone(), "Fresh".to_string())
             .expect("add_project");
-        app.resolve_confirm_create_initial_commit(true);
+        app.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm);
         // The gate is keyed by the repository's real path, which macOS reaches
         // through a symlink.
         let gate = dux_core::engine::InFlightKey::InitialCommit(
@@ -6048,7 +6048,7 @@ mod tests {
         app.add_project(path.clone(), "Fresh".to_string())
             .expect("add_project");
 
-        app.resolve_confirm_create_initial_commit(false);
+        app.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
 
         assert!(
             !dux_core::git::repo_has_commits(Path::new(&path)),
@@ -6626,7 +6626,7 @@ mod tests {
         app.confirm_recreate_selected_working_copy()
             .expect("dispatch");
 
-        app.resolve_confirm_recreate_working_copy(false);
+        app.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel);
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -8244,7 +8244,7 @@ mod tests {
         app.delete_selected_project()
             .expect("open the confirmation");
         // The engine's guard answers the confirmed delete.
-        app.resolve_confirm_delete_project(true);
+        app.resolve_confirm_delete_project(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine.sessions.iter().all(|s| s.id != "s1"),
@@ -8292,7 +8292,7 @@ mod tests {
         app.delete_selected_project()
             .expect("open the confirmation");
         // The engine's guard answers the confirmed delete.
-        app.resolve_confirm_delete_project(true);
+        app.resolve_confirm_delete_project(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine.sessions.iter().any(|s| s.id == "s1"),
@@ -9244,7 +9244,7 @@ mod tests {
         mark_active(&mut app, "s1");
         app.confirm_detach_selected_session().expect("dispatch");
 
-        app.resolve_confirm_detach_agent(false);
+        app.resolve_confirm_detach_agent(ConfirmAnswer::Cancel);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
         assert!(app.engine.pending_detachments.is_empty());
@@ -9264,7 +9264,7 @@ mod tests {
         assert_eq!(provider_label, "Claude");
         assert!(*last_running, "it is the agent's only running tab");
         assert_eq!(*focus, ConfirmFocus::Cancel, "Cancel is the safe default");
-        app.resolve_confirm_stop_tab(false);
+        app.resolve_confirm_stop_tab(ConfirmAnswer::Cancel);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
 
@@ -9272,7 +9272,7 @@ mod tests {
         // naming who, with focus back on Cancel, and the tab keeps running.
         crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
         app.stop_focused_tab_prompt();
-        app.resolve_confirm_stop_tab(true);
+        app.resolve_confirm_stop_tab(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmStopTab {
                 attached, focus, ..
@@ -9286,7 +9286,7 @@ mod tests {
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
 
         // Confirming again stops it over them.
-        app.resolve_confirm_stop_tab(true);
+        app.resolve_confirm_stop_tab(ConfirmAnswer::Confirm);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.engine.providers.is_empty(), "the tab's process ended");
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
@@ -9434,7 +9434,7 @@ mod tests {
         // Refused, saying which operation, while another surface holds it.
         hold_agent_elsewhere(&mut app, "s1");
         app.confirm_detach_selected_session().expect("dispatch");
-        app.resolve_confirm_detach_agent(true);
+        app.resolve_confirm_detach_agent(ConfirmAnswer::Confirm);
         assert!(
             app.status.text().contains("op-held"),
             "{}",
@@ -9447,7 +9447,7 @@ mod tests {
         // who, with focus back on Cancel, and nothing is stopped.
         crate::app::test_support::watch_from_a_browser(&app, "s1-slot", "s1");
         app.confirm_detach_selected_session().expect("dispatch");
-        app.resolve_confirm_detach_agent(true);
+        app.resolve_confirm_detach_agent(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmDetachAgent {
                 attached, focus, ..
@@ -9461,7 +9461,7 @@ mod tests {
         assert!(!app.engine.providers.is_empty(), "nothing was stopped");
 
         // Confirming again goes ahead over them.
-        app.resolve_confirm_detach_agent(true);
+        app.resolve_confirm_detach_agent(ConfirmAnswer::Confirm);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.engine.providers.is_empty(),
@@ -9674,7 +9674,7 @@ mod tests {
         // The project leaves behind the open dialog (the browser removed it).
         app.engine.projects.clear();
 
-        app.resolve_confirm_delete_project(true);
+        app.resolve_confirm_delete_project(ConfirmAnswer::Confirm);
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.engine.sessions.len(), 1, "nothing is cascaded");
@@ -9813,7 +9813,7 @@ mod tests {
         }
 
         add_second_agent(&mut app);
-        app.resolve_confirm_delete_project(true);
+        app.resolve_confirm_delete_project(ConfirmAnswer::Confirm);
 
         assert_eq!(app.engine.projects.len(), 1, "the project is kept");
         assert_eq!(app.engine.sessions.len(), 2, "no agent is deleted");
@@ -9832,7 +9832,7 @@ mod tests {
         assert!(rendered_text(&mut app).contains("its 2 agents,"));
 
         // Asked again with the true count on screen, the answer stands.
-        app.resolve_confirm_delete_project(true);
+        app.resolve_confirm_delete_project(ConfirmAnswer::Confirm);
         assert!(app.engine.projects.is_empty(), "the second answer deletes");
     }
 
@@ -9854,7 +9854,7 @@ mod tests {
         let mut extra = app.engine.sessions[0].clone();
         extra.id = "orphan-two".into();
         app.engine.sessions.push(extra);
-        app.resolve_confirm_remove_project(true);
+        app.resolve_confirm_remove_project(ConfirmAnswer::Confirm);
 
         assert_eq!(app.engine.sessions.len(), 2, "no record is cleared");
         assert!(matches!(
@@ -10046,7 +10046,7 @@ mod tests {
         }
         assert_eq!(app.engine.sessions.len(), 1, "nothing is removed yet");
 
-        app.resolve_confirm_remove_project(true);
+        app.resolve_confirm_remove_project(ConfirmAnswer::Confirm);
 
         assert!(app.engine.sessions.is_empty(), "the orphan record is gone");
         assert!(worktree.is_dir(), "its worktree stays on disk");
@@ -11510,7 +11510,7 @@ mod tests {
         let mut app = three_running_agents_cursor_on_the_middle("project-1");
 
         app.confirm_detach_selected_session().expect("dispatch");
-        app.resolve_confirm_detach_agent(true);
+        app.resolve_confirm_detach_agent(ConfirmAnswer::Confirm);
 
         assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
         assert_resting_on_the_tips_screen(&mut app);
@@ -11541,7 +11541,7 @@ mod tests {
 
         app.stop_focused_tab_prompt();
         assert!(matches!(app.prompt, PromptState::ConfirmStopTab { .. }));
-        app.resolve_confirm_stop_tab(true);
+        app.resolve_confirm_stop_tab(ConfirmAnswer::Confirm);
 
         assert_eq!(app.engine.sessions[1].status, SessionStatus::Detached);
         assert_resting_on_the_tips_screen(&mut app);

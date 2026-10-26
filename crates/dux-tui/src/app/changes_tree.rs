@@ -1551,11 +1551,11 @@ mod tests {
         assert!(screen.contains("13 files"), "{screen}");
 
         // Cancel keeps everything.
-        app.resolve_confirm_discard_file(false);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Cancel);
         assert!(worktree.join("node_modules/top.js").exists());
 
         app.confirm_discard_selected_file().unwrap();
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         assert_eq!(app.status.tone(), StatusTone::Busy);
         settle(&mut app, idle);
         assert_eq!(app.status.tone(), StatusTone::Info);
@@ -1888,7 +1888,7 @@ mod tests {
         app.confirm_discard_selected_file().unwrap();
         std::fs::write(worktree.join("node_modules/late.js"), "late\n").unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);
@@ -1908,7 +1908,7 @@ mod tests {
         app.confirm_discard_selected_file().unwrap();
         std::fs::remove_file(worktree.join("node_modules/top.js")).unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Info, "{}", app.status.text());
@@ -1932,7 +1932,7 @@ mod tests {
         std::fs::create_dir_all(worktree.join("notes.md")).unwrap();
         std::fs::write(worktree.join("notes.md/a.txt"), "a\n").unwrap();
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         // The discard runs on a worker; its final replaces the busy.
         let deadline = Instant::now() + Duration::from_secs(10);
         while app.status.tone() == StatusTone::Busy {
@@ -1958,7 +1958,7 @@ mod tests {
         app.confirm_discard_selected_file().unwrap();
         run_git(&worktree.join("node_modules"), &["init", "-q"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);
@@ -1987,7 +1987,7 @@ mod tests {
             .expect("the repository row");
 
         app.confirm_discard_selected_file().unwrap();
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert!(!clone.exists());
@@ -2006,7 +2006,7 @@ mod tests {
         run_git(&worktree, &["add", "--", "node_modules"]);
         run_git(&worktree, &["commit", "-q", "-m", "vendor"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         settle(&mut app, idle);
 
         assert_eq!(app.status.tone(), StatusTone::Error);

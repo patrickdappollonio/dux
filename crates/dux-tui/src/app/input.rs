@@ -4774,7 +4774,7 @@ impl App {
         }
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         if matches!(action, Some(Action::CloseOverlay)) {
-            return Some(self.resolve_config_reload_failed(false));
+            return Some(self.resolve_config_reload_failed(ConfirmAnswer::Cancel));
         }
         let PromptState::ConfigReloadFailed {
             recover_old_config,
@@ -4797,10 +4797,10 @@ impl App {
             match *focus {
                 ConfigReloadFailedFocus::Checkbox => *recover_old_config = !*recover_old_config,
                 ConfigReloadFailedFocus::Close => {
-                    return Some(self.resolve_config_reload_failed(false));
+                    return Some(self.resolve_config_reload_failed(ConfirmAnswer::Cancel));
                 }
                 ConfigReloadFailedFocus::Apply => {
-                    return Some(self.resolve_config_reload_failed(true));
+                    return Some(self.resolve_config_reload_failed(ConfirmAnswer::Confirm));
                 }
             }
         }
@@ -4884,7 +4884,7 @@ impl App {
         let PromptState::ConfirmKillRunning(prompt) = &mut self.prompt else {
             return None;
         };
-        let confirm = prompt.focus.is_confirm();
+        let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => {
@@ -4896,7 +4896,7 @@ impl App {
             }
             ModalKeyStep::MoveFocus(_) => prompt.focus = prompt.focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_kill_running(confirm));
+                return Some(self.resolve_confirm_kill_running(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4941,10 +4941,10 @@ impl App {
                 }
                 DeleteAgentFocus::BranchCheckbox => *delete_branch = !*delete_branch,
                 DeleteAgentFocus::Cancel => {
-                    return Some(self.resolve_confirm_delete_agent(false));
+                    return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel));
                 }
                 DeleteAgentFocus::Delete => {
-                    return Some(self.resolve_confirm_delete_agent(true));
+                    return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Confirm));
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -4956,13 +4956,13 @@ impl App {
         let PromptState::ConfirmDeleteTerminal { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_delete_terminal(confirm));
+                return Some(self.resolve_confirm_delete_terminal(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4973,13 +4973,13 @@ impl App {
         let PromptState::ConfirmCloseTab { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_close_tab(confirm));
+                return Some(self.resolve_confirm_close_tab(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -4990,13 +4990,13 @@ impl App {
         let PromptState::ConfirmStopTab { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_stop_tab(confirm));
+                return Some(self.resolve_confirm_stop_tab(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5007,13 +5007,13 @@ impl App {
         let PromptState::ConfirmDetachAgent { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_detach_agent(confirm));
+                return Some(self.resolve_confirm_detach_agent(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5045,10 +5045,12 @@ impl App {
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match *focus {
                 RecreateWorkingCopyFocus::RestartCheckbox => *restart_tabs = !*restart_tabs,
                 RecreateWorkingCopyFocus::Cancel => {
-                    return Some(self.resolve_confirm_recreate_working_copy(false));
+                    return Some(self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel));
                 }
                 RecreateWorkingCopyFocus::Recreate => {
-                    return Some(self.resolve_confirm_recreate_working_copy(true));
+                    return Some(
+                        self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm),
+                    );
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -5060,16 +5062,16 @@ impl App {
         let PromptState::ConfirmCheckoutDefaultBranch { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             // Escape is a cancel, and a cancel says so.
             ModalKeyStep::Close => {
-                return Some(self.resolve_confirm_checkout_default_branch(false));
+                return Some(self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel));
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_checkout_default_branch(confirm));
+                return Some(self.resolve_confirm_checkout_default_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5080,14 +5082,16 @@ impl App {
         let PromptState::ConfirmDeleteProject { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             // Escape is a cancel, and a cancel says so.
-            ModalKeyStep::Close => return Some(self.resolve_confirm_delete_project(false)),
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_delete_project(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_delete_project(confirm));
+                return Some(self.resolve_confirm_delete_project(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5098,14 +5102,16 @@ impl App {
         let PromptState::ConfirmRemoveProject { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             // Escape is a cancel, and a cancel says so.
-            ModalKeyStep::Close => return Some(self.resolve_confirm_remove_project(false)),
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_remove_project(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_remove_project(confirm));
+                return Some(self.resolve_confirm_remove_project(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5116,13 +5122,13 @@ impl App {
         let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_quit(confirm));
+                return Some(self.resolve_confirm_quit(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5133,13 +5139,13 @@ impl App {
         let PromptState::ConfirmDiscardFile { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_discard_file(confirm));
+                return Some(self.resolve_confirm_discard_file(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5150,15 +5156,15 @@ impl App {
         let PromptState::ConfirmCreateInitialCommit { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => {
-                self.resolve_confirm_create_initial_commit(false);
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                self.resolve_confirm_create_initial_commit(confirm);
+                self.resolve_confirm_create_initial_commit(answer);
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5169,15 +5175,15 @@ impl App {
         let PromptState::ConfirmInitRepo { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => {
-                self.resolve_confirm_init_repo(false);
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
             }
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                self.resolve_confirm_init_repo(confirm);
+                self.resolve_confirm_init_repo(answer);
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5227,13 +5233,13 @@ impl App {
         let PromptState::ConfirmUseExistingBranch { focus, .. } = &mut self.prompt else {
             return None;
         };
-        let confirm = focus.is_confirm();
+        let answer = focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
             ModalKeyStep::Close => self.prompt = PromptState::None,
             ModalKeyStep::MoveFocus(_) => *focus = focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_use_existing_branch(confirm));
+                return Some(self.resolve_confirm_use_existing_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }
@@ -5263,10 +5269,10 @@ impl App {
                     prompt.delete_branch = !prompt.delete_branch;
                 }
                 DeleteWorktreeFocus::Cancel => {
-                    return Some(self.resolve_confirm_delete_worktree(false));
+                    return Some(self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel));
                 }
                 DeleteWorktreeFocus::Delete => {
-                    return Some(self.resolve_confirm_delete_worktree(true));
+                    return Some(self.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm));
                 }
             },
             ModalKeyStep::FallThroughToField => {}
@@ -6542,7 +6548,7 @@ impl App {
         let is_space = key.code == KeyCode::Char(' ');
         let activate = matches!(action, Some(Action::Confirm)) || is_space;
 
-        let confirm = {
+        let answer = {
             let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
                 return Ok(false);
             };
@@ -6561,14 +6567,14 @@ impl App {
             if !activate {
                 return Ok(false);
             }
-            pending.focus.is_confirm()
+            pending.focus.answer()
         };
 
-        self.resolve_confirm_delete_macro(confirm);
+        self.resolve_confirm_delete_macro(answer);
         Ok(false)
     }
 
-    pub(super) fn resolve_confirm_delete_macro(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_macro(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
             return false;
         };
@@ -6576,7 +6582,7 @@ impl App {
             return false;
         };
 
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
 
@@ -8327,7 +8333,7 @@ impl App {
         }
     }
 
-    pub(super) fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_agent(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, delete_worktree, branch_answer) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
@@ -8343,7 +8349,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if confirm {
+        if answer == ConfirmAnswer::Confirm {
             // Dispatches git work to a worker when needed, so the UI stays
             // responsive. Errors arrive asynchronously via
             // `WorkerEvent::WorktreeRemoveCompleted`.
@@ -8357,13 +8363,13 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_delete_terminal(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_terminal(&mut self, answer: ConfirmAnswer) -> bool {
         let terminal_id = match &self.prompt {
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => terminal_id.clone(),
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if confirm
+        if (answer == ConfirmAnswer::Confirm)
             && let Some(refused) =
                 self.guarded_by(&asked, |app| app.do_delete_terminal(&terminal_id))
         {
@@ -8376,13 +8382,13 @@ impl App {
     /// asks every live tab to shut down and the row goes Detached at once; the
     /// spinner raised here is retired by the reaper's own outcome, once the last
     /// child is actually gone or the grace has run out.
-    pub(super) fn resolve_confirm_detach_agent(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_detach_agent(&mut self, answer: ConfirmAnswer) -> bool {
         let session_id = match &self.prompt {
             PromptState::ConfirmDetachAgent { session_id, .. } => session_id.clone(),
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let Err(in_the_way) = self
@@ -8436,7 +8442,7 @@ impl App {
     /// A ticked restart stops tabs, so it reserves them through the attachment
     /// guard like any stop, and reopens naming whoever is attached rather than
     /// stopping a tab somebody else is using.
-    pub(super) fn resolve_confirm_recreate_working_copy(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_recreate_working_copy(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, restart_tabs) = match &self.prompt {
             PromptState::ConfirmRecreateWorkingCopy {
                 session_id,
@@ -8450,7 +8456,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         let reservation = if restart_tabs {
@@ -8494,7 +8500,10 @@ impl App {
     /// removed while the dialog was up); cancelling runs nothing and says so,
     /// because a silent close is indistinguishable from a checkout that quietly
     /// did nothing.
-    pub(super) fn resolve_confirm_checkout_default_branch(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_checkout_default_branch(
+        &mut self,
+        answer: ConfirmAnswer,
+    ) -> bool {
         let (project_id, project_name, return_to) = match &self.prompt {
             PromptState::ConfirmCheckoutDefaultBranch {
                 project_id,
@@ -8513,7 +8522,7 @@ impl App {
             .iter()
             .find(|p| p.id == project_id)
             .cloned();
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             match &project {
                 Some(project) => {
                     self.set_info(dux_core::engine::checkout_default_branch_cancelled_message(
@@ -8545,7 +8554,7 @@ impl App {
     /// while the dialog was up, which is said out loud); cancelling deletes
     /// nothing and says so, because a silent close is indistinguishable from a
     /// delete that quietly did nothing.
-    pub(crate) fn resolve_confirm_delete_project(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_delete_project(&mut self, answer: ConfirmAnswer) -> bool {
         let (project_id, project_name, painted, return_to) = match &self.prompt {
             PromptState::ConfirmDeleteProject {
                 project_id,
@@ -8561,7 +8570,7 @@ impl App {
             ),
             _ => return false,
         };
-        if confirm
+        if (answer == ConfirmAnswer::Confirm)
             && self.ask_again_if_project_grew(
                 &project_id,
                 &project_name,
@@ -8572,7 +8581,7 @@ impl App {
             return false;
         }
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(dux_core::project_prose::delete_project_cancelled_message(
                 &project_name,
                 self.project_agent_count(&project_id),
@@ -8631,7 +8640,7 @@ impl App {
     /// target: a real project must still exist and still hold no agents, and
     /// an orphaned group must still have agents to clear. Cancelling removes
     /// nothing and says so.
-    pub(crate) fn resolve_confirm_remove_project(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_remove_project(&mut self, answer: ConfirmAnswer) -> bool {
         let (project_id, project_name, orphaned, painted, return_to) = match &self.prompt {
             PromptState::ConfirmRemoveProject {
                 project_id,
@@ -8651,7 +8660,7 @@ impl App {
         };
         // A real project's removal needs no re-ask: `run_remove_project` refuses
         // one that has gained any agent at all.
-        if confirm
+        if (answer == ConfirmAnswer::Confirm)
             && orphaned
             && self.ask_again_if_project_grew(
                 &project_id,
@@ -8663,7 +8672,7 @@ impl App {
             return false;
         }
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(dux_core::project_prose::remove_project_cancelled_message(
                 &project_name,
             ));
@@ -8701,7 +8710,7 @@ impl App {
 
     /// Stop the tab the dialog named through the engine command the browser and
     /// the command line send, so its guards and its sentence are theirs.
-    pub(super) fn resolve_confirm_stop_tab(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_stop_tab(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmStopTab {
                 session_id, tab_id, ..
@@ -8709,7 +8718,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         match self.guarded_by(&asked, |app| {
@@ -8731,7 +8740,7 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_close_tab(&mut self, answer: ConfirmAnswer) -> bool {
         let (session_id, tab_id) = match &self.prompt {
             PromptState::ConfirmCloseTab {
                 session_id, tab_id, ..
@@ -8739,7 +8748,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let Err(in_the_way) = self.engine.check_admission(
@@ -8824,12 +8833,12 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_kill_running(&mut self, answer: ConfirmAnswer) -> bool {
         let confirm_prompt = match &self.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
             _ => return false,
         };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.prompt = PromptState::KillRunning(confirm_prompt.previous);
             self.set_info(
                 "Kill cancelled. Your running agents and companion terminals are unchanged.",
@@ -8870,28 +8879,28 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_quit(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::ConfirmQuit { attached, .. } = &self.prompt else {
-            return confirm;
+            return answer == ConfirmAnswer::Confirm;
         };
         let attached = attached.clone();
-        if confirm {
+        if answer == ConfirmAnswer::Confirm {
             // Once reserved, nobody can attach to anything here until dux has gone.
             if let Err(now) = self.engine.reserve_quit(&attached) {
                 self.prompt.name_attached(now.blockers);
                 self.forget_buttons_until_redrawn();
                 self.set_warning(
                     "Another device connected while this was open. Check who is connected now, \
-                     then confirm again to quit.",
+                     then (answer == ConfirmAnswer::Confirm) again to quit.",
                 );
                 return false;
             }
         }
         self.prompt = PromptState::None;
-        confirm
+        answer == ConfirmAnswer::Confirm
     }
 
-    pub(crate) fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_discard_file(&mut self, answer: ConfirmAnswer) -> bool {
         let (file_path, kind) = match &self.prompt {
             PromptState::ConfirmDiscardFile {
                 file_path, kind, ..
@@ -8901,7 +8910,7 @@ impl App {
         self.prompt = PromptState::None;
         // A folder is deleted whole on a worker, which re-checks live status
         // before it removes anything (see `changes_tree`).
-        if confirm && kind != dux_core::model::ChangedFileKind::File {
+        if (answer == ConfirmAnswer::Confirm) && kind != dux_core::model::ChangedFileKind::File {
             let folder = ChangedFile {
                 status: "?".to_string(),
                 path: file_path,
@@ -8918,12 +8927,14 @@ impl App {
         // Discard is the most destructive of the changes actions, so the
         // folder-driven gate applies here too: it refuses in a folder with no
         // repository rather than handing git a directory it cannot answer for.
-        if confirm && let Some(worktree) = self.changes_worktree_for_selection() {
+        if (answer == ConfirmAnswer::Confirm)
+            && let Some(worktree) = self.changes_worktree_for_selection()
+        {
             // Classified against LIVE git status on the discard's worker, right
             // before it acts, so the delete-vs-restore decision and the
             // destructive action agree with the worktree as it is THEN (not as
             // it was when the prompt opened): a file that was untracked at
-            // prompt-open but became tracked before confirm is restored, never
+            // prompt-open but became tracked before (answer == ConfirmAnswer::Confirm) is restored, never
             // deleted. A refusal there (now staged, nothing left to discard)
             // is the discard's final. The prompt was a file's, and a file is
             // what the discard may touch: a folder that has since taken the
@@ -8945,7 +8956,7 @@ impl App {
     /// no commits. On confirm: dispatch the commit to a background worker (which
     /// registers the project on completion). On cancel: leave the repo and
     /// workspace untouched. Always returns `false` (never quits).
-    pub(crate) fn resolve_confirm_create_initial_commit(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_create_initial_commit(&mut self, answer: ConfirmAnswer) -> bool {
         let (path, name) = match &self.prompt {
             PromptState::ConfirmCreateInitialCommit { path, name, .. } => {
                 (path.clone(), name.clone())
@@ -8953,9 +8964,9 @@ impl App {
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.set_info(
-                "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and confirm) to create the initial commit.",
+                "Add cancelled. A project needs at least one commit, so run \"git commit\" (or re-add and (answer == ConfirmAnswer::Confirm)) to create the initial commit.",
             );
             return false;
         }
@@ -8971,7 +8982,7 @@ impl App {
     /// commit to a background worker (which registers the project on
     /// completion). On cancel: leave the folder untouched and restore the
     /// project browser. Always returns `false` (never quits).
-    pub(crate) fn resolve_confirm_init_repo(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_init_repo(&mut self, answer: ConfirmAnswer) -> bool {
         let (path, name, return_prompt) =
             match std::mem::replace(&mut self.prompt, PromptState::None) {
                 PromptState::ConfirmInitRepo {
@@ -8985,7 +8996,7 @@ impl App {
                     return false;
                 }
             };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             // Restore the browser exactly as the user left it (location,
             // typed path), the AddProjectFailed pattern; never rebuild it at
             // the start directory.
@@ -9051,7 +9062,7 @@ impl App {
         false
     }
 
-    pub(super) fn resolve_confirm_use_existing_branch(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_use_existing_branch(&mut self, answer: ConfirmAnswer) -> bool {
         let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
         let PromptState::ConfirmUseExistingBranch {
             mut request,
@@ -9061,7 +9072,7 @@ impl App {
         else {
             return false;
         };
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             return false;
         }
         if let CreateAgentRequest::NewProject {
@@ -10162,71 +10173,87 @@ impl App {
                 }
                 false
             }
-            ButtonPressedTarget::ConfirmKillCancel => self.resolve_confirm_kill_running(false),
-            ButtonPressedTarget::ConfirmKillConfirm => self.resolve_confirm_kill_running(true),
-            ButtonPressedTarget::ConfirmDeleteCancel => self.resolve_confirm_delete_agent(false),
-            ButtonPressedTarget::ConfirmDeleteConfirm => self.resolve_confirm_delete_agent(true),
+            ButtonPressedTarget::ConfirmKillCancel => {
+                self.resolve_confirm_kill_running(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmKillConfirm => {
+                self.resolve_confirm_kill_running(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmDeleteCancel => {
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmDeleteConfirm => {
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmDeleteWorktreeCancel => {
-                self.resolve_confirm_delete_worktree(false)
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteWorktreeConfirm => {
-                self.resolve_confirm_delete_worktree(true)
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteTerminalCancel => {
-                self.resolve_confirm_delete_terminal(false)
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteTerminalConfirm => {
-                self.resolve_confirm_delete_terminal(true)
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
-            ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
-            ButtonPressedTarget::ConfirmStopTabCancel => self.resolve_confirm_stop_tab(false),
-            ButtonPressedTarget::ConfirmStopTabConfirm => self.resolve_confirm_stop_tab(true),
+            ButtonPressedTarget::ConfirmCloseTabCancel => {
+                self.resolve_confirm_close_tab(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmCloseTabConfirm => {
+                self.resolve_confirm_close_tab(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmStopTabCancel => {
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmStopTabConfirm => {
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmDetachAgentCancel => {
-                self.resolve_confirm_detach_agent(false)
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDetachAgentConfirm => {
-                self.resolve_confirm_detach_agent(true)
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmRecreateWorkingCopyCancel => {
-                self.resolve_confirm_recreate_working_copy(false)
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmRecreateWorkingCopyConfirm => {
-                self.resolve_confirm_recreate_working_copy(true)
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmChangeBaseBranchCancel => {
-                self.resolve_confirm_change_base_branch(false)
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmChangeBaseBranchConfirm => {
-                self.resolve_confirm_change_base_branch(true)
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ProjectInfoClose => {
                 self.close_project_info();
                 false
             }
             ButtonPressedTarget::ConfirmCheckoutDefaultBranchCancel => {
-                self.resolve_confirm_checkout_default_branch(false)
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmCheckoutDefaultBranchConfirm => {
-                self.resolve_confirm_checkout_default_branch(true)
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteProjectCancel => {
-                self.resolve_confirm_delete_project(false)
+                self.resolve_confirm_delete_project(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteProjectConfirm => {
-                self.resolve_confirm_delete_project(true)
+                self.resolve_confirm_delete_project(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmRemoveProjectCancel => {
-                self.resolve_confirm_remove_project(false)
+                self.resolve_confirm_remove_project(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmRemoveProjectConfirm => {
-                self.resolve_confirm_remove_project(true)
+                self.resolve_confirm_remove_project(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteMacroCancel => {
-                self.resolve_confirm_delete_macro(false)
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmDeleteMacroConfirm => {
-                self.resolve_confirm_delete_macro(true)
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Confirm)
             }
             // Focus follows the click first, so the button that renders as armed
             // is the one that acts.
@@ -10252,18 +10279,30 @@ impl App {
                 }
                 false
             }
-            ButtonPressedTarget::ConfirmQuitCancel => self.resolve_confirm_quit(false),
-            ButtonPressedTarget::ConfirmQuitConfirm => self.resolve_confirm_quit(true),
-            ButtonPressedTarget::ConfirmDiscardCancel => self.resolve_confirm_discard_file(false),
-            ButtonPressedTarget::ConfirmDiscardConfirm => self.resolve_confirm_discard_file(true),
+            ButtonPressedTarget::ConfirmQuitCancel => {
+                self.resolve_confirm_quit(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmQuitConfirm => {
+                self.resolve_confirm_quit(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmDiscardCancel => {
+                self.resolve_confirm_discard_file(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmDiscardConfirm => {
+                self.resolve_confirm_discard_file(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmCreateInitialCommitCancel => {
-                self.resolve_confirm_create_initial_commit(false)
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmCreateInitialCommitConfirm => {
-                self.resolve_confirm_create_initial_commit(true)
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmInitRepoCancel => self.resolve_confirm_init_repo(false),
-            ButtonPressedTarget::ConfirmInitRepoConfirm => self.resolve_confirm_init_repo(true),
+            ButtonPressedTarget::ConfirmInitRepoCancel => {
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmInitRepoConfirm => {
+                self.resolve_confirm_init_repo(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
                 self.prompt = PromptState::None;
                 false
@@ -10275,15 +10314,17 @@ impl App {
                 self.resolve_confirm_non_default_branch()
             }
             ButtonPressedTarget::ConfirmUseExistingBranchCancel => {
-                self.resolve_confirm_use_existing_branch(false)
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Cancel)
             }
             ButtonPressedTarget::ConfirmUseExistingBranchUse => {
-                self.resolve_confirm_use_existing_branch(true)
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfigReloadFailedClose => {
-                self.resolve_config_reload_failed(false)
+                self.resolve_config_reload_failed(ConfirmAnswer::Cancel)
             }
-            ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
+            ButtonPressedTarget::ConfigReloadFailedApply => {
+                self.resolve_config_reload_failed(ConfirmAnswer::Confirm)
+            }
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
             ButtonPressedTarget::AgentInfoClose => {
                 self.prompt = PromptState::None;
@@ -10315,7 +10356,7 @@ impl App {
         }
     }
 
-    pub(super) fn resolve_config_reload_failed(&mut self, apply: bool) -> bool {
+    pub(super) fn resolve_config_reload_failed(&mut self, answer: ConfirmAnswer) -> bool {
         let recover = matches!(
             &self.prompt,
             PromptState::ConfigReloadFailed {
@@ -10323,12 +10364,12 @@ impl App {
                 ..
             }
         );
-        if apply && !recover {
+        if (answer == ConfirmAnswer::Confirm) && !recover {
             self.set_info("Check \"Recover last working config\" before restoring config.toml.");
             return false;
         }
         self.prompt = PromptState::None;
-        if apply && recover {
+        if (answer == ConfirmAnswer::Confirm) && recover {
             // RecoverConfig now writes synchronously and returns a FINAL status
             // (restored / failed); surface that and do NOT set a trailing Busy,
             // which would never clear (the recovery already completed).
@@ -12325,7 +12366,6 @@ mod tests {
     use super::{
         LinkPressDecision, TerminalPressAction, decide_terminal_press, link_release_opens,
     };
-    use crate::app::ConfirmFocus;
     use crate::app::ResizeDragState;
     use crate::app::SelectionOrigin;
     use crate::app::input::{
@@ -12333,6 +12373,7 @@ mod tests {
         configure_project_text_input, cursor_from_single_line_position, snapshot_cell_columns,
         startup_command_log_visual_lines,
     };
+    use crate::app::{ConfirmAnswer, ConfirmFocus};
 
     /// The commit success message advertises the push key only where pushing can
     /// succeed. A standalone agent has no branch, so the key it used to name
@@ -13931,7 +13972,7 @@ not_a_real_action = ["x"]
             scroll: 0,
         };
 
-        app.resolve_config_reload_failed(true);
+        app.resolve_config_reload_failed(ConfirmAnswer::Confirm);
         // RecoverConfig is synchronous: it writes through the engine while
         // holding the quiesce barrier and returns the FINAL status directly.
         // There is no trailing Busy (which would never clear) and nothing to drain.
@@ -13983,7 +14024,7 @@ not_a_real_action = ["x"]
             focus: ConfigReloadFailedFocus::Apply,
             scroll: 0,
         };
-        app.resolve_config_reload_failed(true);
+        app.resolve_config_reload_failed(ConfirmAnswer::Confirm);
         let recovered: Config =
             toml::from_str(&std::fs::read_to_string(&app.engine.paths.config_path).expect("read"))
                 .expect("parse");
@@ -16182,7 +16223,7 @@ not_a_real_action = ["x"]
             focus: ConfirmFocus::Cancel,
         });
 
-        app.resolve_confirm_kill_running(false);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Cancel);
 
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
@@ -16259,7 +16300,7 @@ not_a_real_action = ["x"]
 
         app.open_confirm_kill_running_action(KillRunningAction::Visible)
             .unwrap();
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine
@@ -16796,7 +16837,7 @@ not_a_real_action = ["x"]
         let session_id = app.engine.sessions[0].id.clone();
         crate::app::test_support::watch_from_a_browser(&app, "term-1", &session_id);
         open(&mut app);
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmKillRunning(confirm) => {
                 assert_eq!(confirm.attached.len(), 1);
@@ -16809,7 +16850,7 @@ not_a_real_action = ["x"]
         assert!(!app.engine.companion_terminals.is_empty());
 
         // Confirming again kills them over the browser.
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert!(app.engine.providers.is_empty());
         assert!(app.engine.companion_terminals.is_empty());
@@ -16840,7 +16881,7 @@ not_a_real_action = ["x"]
             focus: ConfirmFocus::Confirm,
         });
 
-        app.resolve_confirm_kill_running(true);
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already gone"));
@@ -25047,7 +25088,7 @@ cyan = "#00ffff"
 
         // Cancel restores the browser EXACTLY as the user left it: same
         // location, typed path intact (never rebuilt at the start directory).
-        app.resolve_confirm_init_repo(false);
+        app.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
         match &app.prompt {
             PromptState::BrowseProjects {
                 editing_path,
@@ -25072,7 +25113,7 @@ cyan = "#00ffff"
             focus: ConfirmFocus::Confirm,
             return_prompt: Box::new(PromptState::None),
         };
-        app.resolve_confirm_init_repo(true);
+        app.resolve_confirm_init_repo(ConfirmAnswer::Confirm);
         assert!(
             !app.engine
                 .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(canonical)),
@@ -25770,7 +25811,10 @@ cyan = "#00ffff"
         if let PromptState::ConfirmQuit { focus, .. } = &mut app.prompt {
             *focus = ConfirmFocus::Confirm;
         }
-        assert!(!app.resolve_confirm_quit(true), "asked again");
+        assert!(
+            !app.resolve_confirm_quit(ConfirmAnswer::Confirm),
+            "asked again"
+        );
         match &app.prompt {
             PromptState::ConfirmQuit {
                 attached, focus, ..
@@ -25780,7 +25824,10 @@ cyan = "#00ffff"
             }
             _ => panic!("the quit confirmation stays open"),
         }
-        assert!(app.resolve_confirm_quit(true), "nobody new since");
+        assert!(
+            app.resolve_confirm_quit(ConfirmAnswer::Confirm),
+            "nobody new since"
+        );
     }
 
     #[test]
@@ -28432,7 +28479,7 @@ cyan = "#00ffff"
         git(&["add", "ghost.txt"]);
         git(&["commit", "-m", "track ghost"]);
 
-        app.resolve_confirm_discard_file(true);
+        app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
         drain_until(&mut app, |app| {
             app.status.tone() != crate::statusline::StatusTone::Busy
         });
@@ -34513,7 +34560,7 @@ cyan = "#00ffff"
         // who, with focus back on Cancel, and the terminal keeps running.
         let session_id = app.engine.sessions[0].id.clone();
         crate::app::test_support::watch_from_a_browser(&app, &terminal_id, &session_id);
-        app.resolve_confirm_delete_terminal(true);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm);
         match &app.prompt {
             PromptState::ConfirmDeleteTerminal {
                 attached, focus, ..
@@ -34526,7 +34573,7 @@ cyan = "#00ffff"
         assert_eq!(app.engine.companion_terminals.len(), 1);
 
         // Confirming again closes it over them.
-        app.resolve_confirm_delete_terminal(true);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Confirm);
 
         assert!(
             app.engine.companion_terminals.is_empty(),
@@ -34552,7 +34599,7 @@ cyan = "#00ffff"
             focus: ConfirmFocus::Cancel,
         };
 
-        app.resolve_confirm_delete_terminal(false);
+        app.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel);
 
         assert_eq!(
             app.engine.companion_terminals.len(),

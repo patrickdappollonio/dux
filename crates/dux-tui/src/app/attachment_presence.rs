@@ -304,7 +304,7 @@ mod tests {
         let first = crate::app::test_support::watch_from_a_browser(&app, &slot_tab, &session_id);
         app.confirm_delete_selected_session()
             .expect("open the delete dialog");
-        app.resolve_confirm_delete_agent(true);
+        app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
         assert_eq!(app.prompt.attached().len(), 1);
         if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
             *focus = DeleteAgentFocus::Delete;
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(restart_offer, &vec!["codex".to_string()]);
         assert!(*restart_tabs, "ticked by default");
 
-        app.resolve_confirm_recreate_working_copy(true);
+        app.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm);
         let PromptState::ConfirmRecreateWorkingCopy {
             attached, focus, ..
         } = &app.prompt
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(*focus, RecreateWorkingCopyFocus::Cancel);
         assert!(!app.engine.is_in_flight(&recreating), "nothing checked out");
 
-        app.resolve_confirm_recreate_working_copy(true);
+        app.resolve_confirm_recreate_working_copy(ConfirmAnswer::Confirm);
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.engine.is_in_flight(&recreating),

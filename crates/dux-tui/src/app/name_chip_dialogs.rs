@@ -457,7 +457,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     app.confirm_delete_selected_session()
         .expect("open the delete dialog");
 
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
 
     let PromptState::ConfirmDeleteAgent { focus, .. } = &app.prompt else {
         panic!("the delete dialog stays open, got {:?}", app.prompt);
@@ -503,7 +503,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
         *focus = DeleteAgentFocus::Delete;
     }
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
     let PromptState::ConfirmDeleteAgent {
         focus, attached, ..
     } = &app.prompt
@@ -514,7 +514,7 @@ fn a_refused_agent_delete_names_who_is_attached_and_offers_to_delete_anyway() {
     assert_eq!(*focus, DeleteAgentFocus::Cancel);
     assert!(app.engine.sessions.iter().any(|s| s.id == agent));
 
-    app.resolve_confirm_delete_agent(true);
+    app.resolve_confirm_delete_agent(ConfirmAnswer::Confirm);
 
     assert!(matches!(app.prompt, PromptState::None));
     assert!(

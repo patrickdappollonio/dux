@@ -3512,6 +3512,24 @@ impl ConfirmFocus {
     pub(crate) fn is_confirm(self) -> bool {
         matches!(self, Self::Confirm)
     }
+
+    /// The answer activating the focused button gives.
+    pub(crate) fn answer(self) -> ConfirmAnswer {
+        match self {
+            Self::Cancel => ConfirmAnswer::Cancel,
+            Self::Confirm => ConfirmAnswer::Confirm,
+        }
+    }
+}
+
+/// How the user answered a confirmation: with its committing button, or by
+/// cancelling it (its Cancel button, Escape, or a click outside).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmAnswer {
+    /// The committing button (Delete, Quit, Discard, Apply, …).
+    Confirm,
+    /// Anything that abandons the confirmation.
+    Cancel,
 }
 
 #[derive(Clone, Debug)]

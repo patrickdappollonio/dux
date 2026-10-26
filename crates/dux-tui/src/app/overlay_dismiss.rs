@@ -264,7 +264,7 @@ impl App {
             PromptState::ChangeBaseBranch(_) => self.dismiss_change_base_branch(),
             // Steps back to the picker, the kill-running idiom.
             PromptState::ConfirmChangeBaseBranch(_) => {
-                self.resolve_confirm_change_base_branch(false);
+                self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel);
             }
 
             // Closing the log viewer must also drop the drag-selection state,
@@ -292,24 +292,24 @@ impl App {
             // Same resolve path as its Close button (see `handle_prompt_key`,
             // which now also routes Esc here).
             PromptState::ConfigReloadFailed { .. } => {
-                self.resolve_config_reload_failed(false);
+                self.resolve_config_reload_failed(ConfirmAnswer::Cancel);
             }
 
             // Restores the KillRunning list this confirm was raised from, so
             // cancelling the nested confirm steps back rather than closing the
             // whole stack.
             PromptState::ConfirmKillRunning(_) => {
-                self.resolve_confirm_kill_running(false);
+                self.resolve_confirm_kill_running(ConfirmAnswer::Cancel);
             }
 
             // Restores its `return_prompt` (the browser, as the user left it).
             PromptState::ConfirmInitRepo { .. } => {
-                self.resolve_confirm_init_repo(false);
+                self.resolve_confirm_init_repo(ConfirmAnswer::Cancel);
             }
 
             // Drops the pending add and explains why (its helper's message).
             PromptState::ConfirmCreateInitialCommit { .. } => {
-                self.resolve_confirm_create_initial_commit(false);
+                self.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
             }
 
             // Confirmations: route through the resolve helpers so the
@@ -317,45 +317,45 @@ impl App {
             // the app exit", and cancelling never exits, which the caller's
             // `false` return preserves.
             PromptState::ConfirmDeleteAgent { .. } => {
-                self.resolve_confirm_delete_agent(false);
+                self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel);
             }
             // Steps back to the manager's list rather than closing the stack,
             // the kill-running idiom.
             PromptState::ConfirmDeleteWorktree(_) => {
-                self.resolve_confirm_delete_worktree(false);
+                self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDeleteTerminal { .. } => {
-                self.resolve_confirm_delete_terminal(false);
+                self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmCloseTab { .. } => {
-                self.resolve_confirm_close_tab(false);
+                self.resolve_confirm_close_tab(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmStopTab { .. } => {
-                self.resolve_confirm_stop_tab(false);
+                self.resolve_confirm_stop_tab(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmRecreateWorkingCopy { .. } => {
-                self.resolve_confirm_recreate_working_copy(false);
+                self.resolve_confirm_recreate_working_copy(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmCheckoutDefaultBranch { .. } => {
-                self.resolve_confirm_checkout_default_branch(false);
+                self.resolve_confirm_checkout_default_branch(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDeleteProject { .. } => {
-                self.resolve_confirm_delete_project(false);
+                self.resolve_confirm_delete_project(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmRemoveProject { .. } => {
-                self.resolve_confirm_remove_project(false);
+                self.resolve_confirm_remove_project(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDetachAgent { .. } => {
-                self.resolve_confirm_detach_agent(false);
+                self.resolve_confirm_detach_agent(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDiscardFile { .. } => {
-                self.resolve_confirm_discard_file(false);
+                self.resolve_confirm_discard_file(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmQuit { .. } => {
-                self.resolve_confirm_quit(false);
+                self.resolve_confirm_quit(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmUseExistingBranch { .. } => {
-                self.resolve_confirm_use_existing_branch(false);
+                self.resolve_confirm_use_existing_branch(ConfirmAnswer::Cancel);
             }
 
             // The nested macro delete-confirm: clears the confirm and leaves
@@ -364,7 +364,7 @@ impl App {
                 pending_delete: Some(_),
                 ..
             } => {
-                self.resolve_confirm_delete_macro(false);
+                self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel);
             }
 
             // The macro LIST closes the overlay, exactly as its close binding

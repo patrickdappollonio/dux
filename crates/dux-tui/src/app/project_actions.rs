@@ -822,12 +822,12 @@ impl App {
     /// change to the engine (which takes the folder's lock, switches it in a
     /// worker and saves the base); cancelling steps back to the picker and
     /// says nothing moved.
-    pub(crate) fn resolve_confirm_change_base_branch(&mut self, confirm: bool) -> bool {
+    pub(crate) fn resolve_confirm_change_base_branch(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::ConfirmChangeBaseBranch(prompt) = &self.prompt else {
             return false;
         };
         let prompt = (**prompt).clone();
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             let name = prompt.previous.project_name.clone();
             let Some(project) = self
                 .engine
@@ -873,13 +873,15 @@ impl App {
         let PromptState::ConfirmChangeBaseBranch(prompt) = &mut self.prompt else {
             return None;
         };
-        let confirm = prompt.focus.is_confirm();
+        let answer = prompt.focus.answer();
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
         match modal_key_step(action, key, false) {
-            ModalKeyStep::Close => return Some(self.resolve_confirm_change_base_branch(false)),
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_change_base_branch(ConfirmAnswer::Cancel));
+            }
             ModalKeyStep::MoveFocus(_) => prompt.focus = prompt.focus.toggled(),
             ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => {
-                return Some(self.resolve_confirm_change_base_branch(confirm));
+                return Some(self.resolve_confirm_change_base_branch(answer));
             }
             ModalKeyStep::FallThroughToField => {}
         }

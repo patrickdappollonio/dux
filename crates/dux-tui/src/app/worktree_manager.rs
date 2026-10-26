@@ -112,12 +112,12 @@ impl App {
     /// Confirming deliberately does not put the manager back: relisting opens a
     /// second keyed Busy, and on a single most-recent-wins status line the
     /// listing's chatter buries the removal's own final report.
-    pub(super) fn resolve_confirm_delete_worktree(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_worktree(&mut self, answer: ConfirmAnswer) -> bool {
         let PromptState::ConfirmDeleteWorktree(prompt) = &self.prompt else {
             return false;
         };
         let prompt = prompt.clone();
-        if !confirm {
+        if answer == ConfirmAnswer::Cancel {
             self.prompt = PromptState::ManageWorktrees(prompt.previous);
             self.set_info("Removal cancelled. The worktree and its branch are unchanged.");
             return false;
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn removing_a_worktree_with_the_checkbox_on_takes_the_branch_too() {
         let (mut app, repo, worktree) = app_with_a_real_worktree(true);
-        app.resolve_confirm_delete_worktree(true);
+        app.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm);
         let message = wait_for_status(&mut app, "Removed the worktree");
         assert!(!worktree.exists(), "the worktree directory must be gone");
         assert!(!branch_exists(&repo, "free"), "the branch must be gone");
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn removing_a_worktree_with_the_checkbox_off_keeps_the_branch() {
         let (mut app, repo, worktree) = app_with_a_real_worktree(false);
-        app.resolve_confirm_delete_worktree(true);
+        app.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm);
         let message = wait_for_status(&mut app, "Removed the worktree");
         assert!(!worktree.exists(), "the worktree directory must be gone");
         assert!(branch_exists(&repo, "free"), "the branch must survive");
