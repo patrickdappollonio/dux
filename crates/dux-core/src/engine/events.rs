@@ -461,7 +461,7 @@ pub enum EventReaction {
 /// messages.
 #[derive(Clone, Debug)]
 pub struct DetachedSession {
-    pub id: String,
+    pub(crate) id: String,
     pub label: String,
 }
 
@@ -675,7 +675,7 @@ pub struct BranchDeleteInputs {
     pub branch_name: String,
     /// The branch the agent was born on, empty when it was never recorded.
     pub initial_branch: String,
-    pub branch_provenance: crate::model::BranchProvenance,
+    pub(crate) branch_provenance: crate::model::BranchProvenance,
 }
 
 impl BranchDeleteInputs {
@@ -1701,7 +1701,7 @@ impl Engine {
         LaunchedProviderInsert::Kept
     }
 
-    pub fn process_agent_launch_ready(
+    pub(crate) fn process_agent_launch_ready(
         &mut self,
         data: AgentLaunchReadyData,
     ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {

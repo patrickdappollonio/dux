@@ -293,7 +293,7 @@ pub struct ResourceTarget {
     /// The spine id: a tab id for [`ResourceKind::Agent`], a terminal id for
     /// [`ResourceKind::Terminal`].
     pub id: String,
-    pub kind: ResourceKind,
+    pub(crate) kind: ResourceKind,
     /// Human-readable description, for display only. Never parse it.
     pub label: String,
     /// Root of the process tree to aggregate.
@@ -351,11 +351,11 @@ pub struct BrowserEntry {
 /// nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequestPin {
-    pub host: String,
-    pub owner_repo: String,
-    pub number: u64,
-    pub title: String,
-    pub state: String,
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) state: String,
     /// The pull request's own branch, which is checked out elsewhere; named in
     /// the sentence that says where a push from the copy goes.
     pub(crate) busy_branch: String,
@@ -473,8 +473,8 @@ pub struct AgentLaunchFailedData {
 /// code.
 #[derive(Clone, Debug)]
 pub struct AgentAtWorktree {
-    pub name: String,
-    pub worktree_path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) worktree_path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -932,7 +932,7 @@ pub enum PullOutcome {
 }
 
 impl PullOutcome {
-    pub fn current_branch(&self) -> Option<&String> {
+    pub(crate) fn current_branch(&self) -> Option<&String> {
         match self {
             PullOutcome::Pulled { current_branch } | PullOutcome::NoOrigin { current_branch } => {
                 current_branch.as_ref()
@@ -954,9 +954,9 @@ pub enum PullTarget {
 /// Snapshot of session data shared with the branch-sync background worker.
 #[derive(Clone, Debug)]
 pub struct BranchSyncEntry {
-    pub session_id: String,
-    pub worktree_path: String,
-    pub branch_name: String,
+    pub(crate) session_id: String,
+    pub(crate) worktree_path: String,
+    pub(crate) branch_name: String,
 }
 
 /// The identity of a manually attached ("pinned") pull request, carried on a
@@ -967,9 +967,9 @@ pub struct BranchSyncEntry {
 /// for a pinned session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedPr {
-    pub host: String,
-    pub owner_repo: String,
-    pub number: u64,
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
 }
 
 /// One agent's pull-request answer, with the branch generation it was asked
@@ -978,17 +978,17 @@ pub struct PinnedPr {
 /// against the new one, while one that lands after an explicit rename stands.
 #[derive(Clone, Debug)]
 pub struct PrStatusResult {
-    pub session_id: String,
+    pub(crate) session_id: String,
     pub(crate) branch_generation: u64,
-    pub pr: Option<crate::model::PrInfo>,
+    pub(crate) pr: Option<crate::model::PrInfo>,
 }
 
 /// Snapshot of session data shared with the PR-sync background worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
-    pub session_id: String,
-    pub branch_name: String,
-    pub worktree_path: String,
+    pub(crate) session_id: String,
+    pub(crate) branch_name: String,
+    pub(crate) worktree_path: String,
     /// If we already know a PR for this session, the worker can use `gh pr view`
     /// (works even after branch deletion) and skip a merged PR entirely. A CLOSED
     /// one is still refreshed, because it can be reopened.

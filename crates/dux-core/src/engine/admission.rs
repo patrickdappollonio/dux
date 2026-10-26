@@ -41,8 +41,8 @@ use crate::wire::WireCommand;
 
 /// What a change wants admitted, and what it holds once admitted.
 pub struct Admission {
-    pub wants: Vec<Hold>,
-    pub takes: Vec<Hold>,
+    pub(crate) wants: Vec<Hold>,
+    pub(crate) takes: Vec<Hold>,
 }
 
 impl Engine {

@@ -215,8 +215,8 @@ pub enum PrunedPtyKind {
 /// reaped. `None` for terminals and for keep-worktree deletes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeferredWorktreeRemoval {
-    pub session_id: String,
-    pub project_path: String,
+    pub(crate) session_id: String,
+    pub(crate) project_path: String,
     /// The managed working copy to remove, captured whole at delete time: the
     /// worktree path, the current branch, the branch the agent was born on
     /// (deleted too when it differs, or a drifted agent leaves its birth branch
@@ -254,7 +254,7 @@ pub struct DeferredWorktreeRemoval {
 /// UI thread, bounded by `grace` plus [`crate::process_sessions::KILL_SETTLE`].
 #[derive(Clone)]
 pub struct RemovalProcesses {
-    pub sessions: Vec<crate::process_sessions::ProcessSession>,
+    pub(crate) sessions: Vec<crate::process_sessions::ProcessSession>,
     /// The members found BEFORE anything was asked to exit, filled in by the
     /// thread that then sends the polite signals. A member that called
     /// `setsid` is tied to the agent only by its parent, and that link is cut
@@ -317,7 +317,7 @@ const SHUTDOWN_RECORD_WAIT: Duration = Duration::from_secs(3);
 /// the question is asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminatingOwner {
-    pub session_id: String,
+    pub(crate) session_id: String,
     /// The provider an agent tab was running; `None` for a companion terminal.
     pub provider: Option<crate::model::ProviderKind>,
 }
@@ -358,7 +358,7 @@ impl PtyGone {
 pub struct PtyGoneNotice(PtyGone);
 
 impl PtyGoneNotice {
-    pub fn signal(&self) -> PtyGone {
+    pub(crate) fn signal(&self) -> PtyGone {
         self.0.clone()
     }
 }
@@ -375,12 +375,12 @@ impl Drop for PtyGoneNotice {
 /// once it exits or its deadline passes. This is the non-blocking, per-PTY
 /// counterpart to `shutdown_ptys`'s whole-app blocking wait.
 pub struct TerminatingPty {
-    pub client: PtyClient,
-    pub deadline: Instant,
-    pub kind: PrunedPtyKind,
+    pub(crate) client: PtyClient,
+    pub(crate) deadline: Instant,
+    pub(crate) kind: PrunedPtyKind,
     /// Tab id (agent) or terminal id (companion terminal).
     pub id: String,
-    pub label: String,
+    pub(crate) label: String,
     /// The agent this PTY belonged to, captured when it started terminating.
     /// `None` for a project or standalone terminal.
     pub owner: Option<TerminatingOwner>,
@@ -658,7 +658,7 @@ pub struct TabExit {
 /// and dispatches `removal` exactly once, when `pending_ids` empties.
 pub struct GroupWorktreeRemoval {
     pub(crate) pending_ids: std::collections::HashSet<String>,
-    pub removal: DeferredWorktreeRemoval,
+    pub(crate) removal: DeferredWorktreeRemoval,
 }
 
 /// What a working-copy recreate does with the agent's tabs once the
@@ -697,7 +697,7 @@ pub(crate) enum RestartsStop {
 /// delete: [`Engine::reap_terminating_ptys`] drops each tab id as it reaps and
 /// emits the keyed final only once the set empties.
 pub struct PendingDetach {
-    pub session_id: String,
+    pub(crate) session_id: String,
     /// The agent's display label, captured at request time so the outcome names
     /// the agent even if the row has since been renamed or removed.
     pub label: String,
@@ -731,7 +731,7 @@ pub struct PendingDetach {
 /// starts the tabs and resolves the recreate's own op once the set is empty, so
 /// the one spinner the user saw spans the checkout and the restart.
 pub struct PendingTabRestart {
-    pub session_id: String,
+    pub(crate) session_id: String,
     /// The recreate's op, still unresolved: its final names the branch outcome
     /// and every tab this restarted.
     pub op: crate::engine::HandlerStatusOp<crate::engine::RecreateOutcome>,
@@ -958,7 +958,7 @@ pub struct ShutdownReport {
     pub(crate) agents_exited: usize,
     /// Terminals that exited within the grace period (the rest were `SIGKILLed`).
     pub(crate) terminals_exited: usize,
-    pub elapsed: std::time::Duration,
+    pub(crate) elapsed: std::time::Duration,
     /// True when at least one child had to be force-killed (SIGKILL) because it
     /// had not exited by the time the grace window was up. Equivalently,
     /// `agents_exited < agents_total || terminals_exited < terminals_total`. With

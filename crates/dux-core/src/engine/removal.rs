@@ -52,8 +52,8 @@ pub struct StartupRerunClaim {
 
 /// What a project deletion reports when its last worktree removal lands.
 pub struct ProjectDeletionOutcome {
-    pub project_name: String,
-    pub agents: usize,
+    pub(crate) project_name: String,
+    pub(crate) agents: usize,
     /// Each worktree that could not be removed, and why.
     pub failures: Vec<(String, String)>,
     /// What could not be saved, and why, when something could not: the

@@ -160,7 +160,7 @@ impl Final {
 /// the worker channel without closures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFinal {
-    pub key: String,
+    pub(crate) key: String,
     pub outcome: Final,
     /// Delivery audience captured at dispatch time, while
     /// `Engine::current_origin` is still set, and copied onto the emitted
@@ -433,7 +433,7 @@ pub struct StatusOp<T, E> {
 }
 
 impl<T, E> StatusOp<T, E> {
-    pub fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 

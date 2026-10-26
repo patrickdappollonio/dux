@@ -1045,7 +1045,7 @@ pub struct RecreateOutcome {
 /// to be restarted once the checkout lands, which tabs those were when it
 /// asked.
 pub struct PendingRecreate {
-    pub op: HandlerStatusOp<RecreateOutcome>,
+    pub(crate) op: HandlerStatusOp<RecreateOutcome>,
     /// The tabs to restart, captured with the request: exactly the set the
     /// attachment guard reserved, so a tab that comes up during the checkout,
     /// which nothing reserved and somebody may have attached to since, is
