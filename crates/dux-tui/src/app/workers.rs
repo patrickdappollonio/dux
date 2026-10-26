@@ -1733,6 +1733,11 @@ impl App {
             matches!(&outcome.view, AgentLaunchReadyView::ResumeFallback { .. })
                 && self.tui_fallback_tabs.remove(&outcome.tab_id);
         let started_here = armed || created_here || fell_back_from_here;
+        let view = if outcome.wants_fullscreen {
+            LaunchView::Fullscreen
+        } else {
+            LaunchView::Minimized
+        };
         if started_here
             && self
                 .engine
@@ -1787,7 +1792,7 @@ impl App {
                 // (Center focused, typeable); only a fullscreen-seeking launch
                 // lands fullscreen. A create is never fullscreen-seeking, but
                 // the shared landing helper keeps the rule in one place.
-                self.land_completed_launch(outcome.wants_fullscreen);
+                self.land_completed_launch(view);
                 // The create success / startup-error keyed final is resolved
                 // ENGINE-SIDE and arrives as a sibling `Status` in the same
                 // `Multi`; this arm keeps only the non-status view work.
@@ -1815,11 +1820,8 @@ impl App {
                     self.show_agent_surface();
                     // Land minimized unless the launch sought
                     // fullscreen (see CreateCommitted above).
-                    self.land_completed_launch(outcome.wants_fullscreen);
-                    self.launch_completion_message(
-                        status_message.to_string(),
-                        outcome.wants_fullscreen,
-                    )
+                    self.land_completed_launch(view);
+                    self.launch_completion_message(status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };
@@ -1861,11 +1863,8 @@ impl App {
                     // when the landing actually happened: a fallback for an
                     // unselected agent moves no focus, so promising a typeable
                     // pane there would be a lie.
-                    self.land_completed_launch(outcome.wants_fullscreen);
-                    self.launch_completion_message(
-                        status_message.to_string(),
-                        outcome.wants_fullscreen,
-                    )
+                    self.land_completed_launch(view);
+                    self.launch_completion_message(status_message.to_string(), view)
                 } else {
                     status_message.to_string()
                 };

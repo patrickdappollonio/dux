@@ -1666,7 +1666,7 @@ impl App {
         &mut self,
         _session_id: &str,
         tab_id: &str,
-        seek_fullscreen: bool,
+        view: LaunchView,
     ) -> Result<()> {
         // Resolution, per-provider resume decision, message wording and the
         // request build are the single-source `Engine::dormant_tab_launch_request`
@@ -1674,7 +1674,7 @@ impl App {
         // tab or gone session) is a silent no-op.
         let pty_size = self.pty_size_for_launch();
         if let Some(mut request) = self.engine.dormant_tab_launch_request(tab_id, pty_size) {
-            request.wants_fullscreen = self.launch_seeks_fullscreen(seek_fullscreen);
+            request.wants_fullscreen = self.launch_seeks_fullscreen(view);
             self.dispatch_agent_launch(request);
         }
         Ok(())
@@ -1684,8 +1684,9 @@ impl App {
     /// completion. `seek_fullscreen` is the caller's explicit intent; on top of
     /// that, a launch started while the fullscreen relaunch screen is up keeps
     /// the user fullscreen rather than dropping them to the 3-pane layout.
-    pub(crate) fn launch_seeks_fullscreen(&self, seek_fullscreen: bool) -> bool {
-        seek_fullscreen || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+    pub(crate) fn launch_seeks_fullscreen(&self, view: LaunchView) -> bool {
+        (view == LaunchView::Fullscreen)
+            || !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
     }
 
     /// Close-tab entry point. Every tab opens the confirmation dialog, the tab in
@@ -1857,8 +1858,8 @@ impl App {
     /// `wants_fullscreen` bit was stamped at dispatch; every other launch lands
     /// focused but minimized so the center pane is immediately typeable. Callers
     /// run `show_agent_surface` first.
-    pub(crate) fn land_completed_launch(&mut self, wants_fullscreen: bool) {
-        if wants_fullscreen {
+    pub(crate) fn land_completed_launch(&mut self, view: LaunchView) {
+        if view == LaunchView::Fullscreen {
             self.input_target = InputTarget::Agent;
             self.fullscreen_overlay = FullscreenOverlay::Agent;
         } else {
@@ -1874,10 +1875,10 @@ impl App {
     pub(crate) fn launch_completion_message(
         &self,
         engine_message: String,
-        wants_fullscreen: bool,
+        view: LaunchView,
     ) -> String {
         let key = self.bindings.label_for(Action::ToggleFullscreen);
-        if wants_fullscreen {
+        if view == LaunchView::Fullscreen {
             format!("{engine_message} The pane is fullscreen; press {key} to minimize.")
         } else {
             format!(
@@ -4060,19 +4061,23 @@ impl App {
         logger::info(&format!(
             "restarting agent {session_id} with fresh session (no resume args)"
         ));
-        self.dispatch_reconnect_plan(&session_id, true, false)
+        self.dispatch_reconnect_plan(
+            &session_id,
+            dux_core::engine::ReconnectMode::Force,
+            LaunchView::Minimized,
+        )
     }
 
     /// `seek_fullscreen` marks a fullscreen-seeking relaunch: only the fullscreen
     /// toggle passes `true`, and every other caller lands the completed launch
     /// focused but minimized. See `launch_seeks_fullscreen`.
-    pub(crate) fn reconnect_selected_session(&mut self, seek_fullscreen: bool) -> Result<()> {
+    pub(crate) fn reconnect_selected_session(&mut self, view: LaunchView) -> Result<()> {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
         };
         logger::info(&format!("reconnecting session {session_id}"));
-        self.dispatch_reconnect_plan(&session_id, false, seek_fullscreen)
+        self.dispatch_reconnect_plan(&session_id, dux_core::engine::ReconnectMode::Normal, view)
     }
 
     /// Shared TUI reconnect dispatch: build the single-source
@@ -4084,13 +4089,13 @@ impl App {
     fn dispatch_reconnect_plan(
         &mut self,
         session_id: &str,
-        force: bool,
-        seek_fullscreen: bool,
+        mode: dux_core::engine::ReconnectMode,
+        view: LaunchView,
     ) -> Result<()> {
         // A start ends any other agent in the same folder, a forced one this
         // agent's own run too: all of it is reserved before anything is torn down.
         let mut scope = self.engine.launch_conflict_scope(session_id);
-        if force {
+        if mode == dux_core::engine::ReconnectMode::Force {
             scope.extend(self.engine.agent_scope(session_id));
         }
         let _reservation = if scope.is_empty() {
@@ -4105,15 +4110,7 @@ impl App {
             }
         };
         let pty_size = self.pty_size_for_launch();
-        match self.engine.reconnect_plan(
-            session_id,
-            if force {
-                dux_core::engine::ReconnectMode::Force
-            } else {
-                dux_core::engine::ReconnectMode::Normal
-            },
-            pty_size,
-        )? {
+        match self.engine.reconnect_plan(session_id, mode, pty_size)? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
                 self.set_info(message);
             }
@@ -4125,7 +4122,7 @@ impl App {
                 busy_message,
                 ..
             } => {
-                request.wants_fullscreen = self.launch_seeks_fullscreen(seek_fullscreen);
+                request.wants_fullscreen = self.launch_seeks_fullscreen(view);
                 if self.dispatch_agent_launch(*request) {
                     // Route the busy through a keyed reconnect op so its final
                     // (resolved in the shared launch-ready/failed view handlers)
@@ -9091,8 +9088,12 @@ mod tests {
             cmd.args = Vec::new();
         }
 
-        app.dispatch_reconnect_plan("s1", false, false)
-            .expect("reconnect");
+        app.dispatch_reconnect_plan(
+            "s1",
+            dux_core::engine::ReconnectMode::Normal,
+            LaunchView::Minimized,
+        )
+        .expect("reconnect");
 
         assert!(
             app.tui_launched_ptys.contains("t2"),
@@ -9134,7 +9135,7 @@ mod tests {
             ),
             "the activate branch reads this, and it must say the promoted tab is the slot"
         );
-        app.launch_focused_extra_tab("s1", "t2", false)
+        app.launch_focused_extra_tab("s1", "t2", LaunchView::Minimized)
             .expect("no-op");
         assert!(
             app.tui_launched_ptys.is_empty(),

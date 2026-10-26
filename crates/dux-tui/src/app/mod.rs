@@ -1380,6 +1380,24 @@ impl RightSection {
     }
 }
 
+/// How a launched agent's pane should land once its child is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchView {
+    /// Fullscreen, with keys going to the agent.
+    Fullscreen,
+    /// The windowed (minimized) typeable pane.
+    Minimized,
+}
+
+/// What activating an agent does when the tab it lands on is not running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OnDormant {
+    /// Start the tab.
+    Launch,
+    /// Leave it stopped and only leave interactive mode.
+    Leave,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FullscreenOverlay {
     None,
@@ -5925,7 +5943,7 @@ impl App {
             }
             "detach-agent" => self.confirm_detach_selected_session(),
             "recreate-working-copy" => self.confirm_recreate_selected_working_copy(),
-            "reconnect-agent" => self.reconnect_selected_session(false),
+            "reconnect-agent" => self.reconnect_selected_session(LaunchView::Minimized),
             "force-reconnect-agent" => self.force_reconnect_agent(),
             "refresh-changes" => self.refresh_changed_files_now(),
             "move-agent-up" => {
@@ -5965,7 +5983,7 @@ impl App {
                 self.move_selected_terminal(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "show-agent" => self.activate_center_agent(true, false),
+            "show-agent" => self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized),
             "show-terminal" => self.show_or_open_first_terminal(),
             "new-terminal-for-agent" => self.new_companion_terminal(),
             "new-terminal-for-project" => {

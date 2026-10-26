@@ -1341,11 +1341,11 @@ impl App {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
-                Action::FocusAgent => self.activate_selected_left_item(true)?,
+                Action::FocusAgent => self.activate_selected_left_item(OnDormant::Launch)?,
                 // From the sidebar, the fullscreen toggle reopens fullscreen
                 // for a live agent and never launches a dormant one;
                 // `InteractAgent` stays the explicit jump-to-fullscreen.
-                Action::ToggleFullscreen => self.activate_selected_left_item(false)?,
+                Action::ToggleFullscreen => self.activate_selected_left_item(OnDormant::Leave)?,
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -1436,7 +1436,7 @@ impl App {
                 // Preserve the activated agent across the exit so the restored full
                 // list keeps it selected (Enter on the Inactive toggle has no agent).
                 let keep = self.selected_session().map(|s| s.id.clone());
-                self.activate_selected_left_item(true)?;
+                self.activate_selected_left_item(OnDormant::Launch)?;
                 self.close_agent_filter();
                 if let Some(id) = keep {
                     self.reselect_left_session(&id);
@@ -1536,14 +1536,14 @@ impl App {
                 self.forward_typing_key_to_center(&key);
             }
         } else {
-            self.activate_center_agent(true, false)?;
+            self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
         }
         Ok(())
     }
 
     fn toggle_center_fullscreen(&mut self) -> Result<()> {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            self.activate_center_agent(true, true)?;
+            self.activate_center_agent(OnDormant::Launch, LaunchView::Fullscreen)?;
         } else {
             self.close_top_overlay();
         }
@@ -1600,7 +1600,9 @@ impl App {
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
                 self.open_current_pr_in_browser();
             }
-            Action::ReconnectAgent => self.activate_center_agent(true, false)?,
+            Action::ReconnectAgent => {
+                self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?
+            }
             _ => {}
         }
         Ok(())
@@ -10395,7 +10397,7 @@ impl App {
     /// focuses the windowed typeable center pane, while the fullscreen toggle
     /// reopens fullscreen. `InteractAgent` keeps its own jump-straight-to-
     /// fullscreen path in `handle_left_key`.
-    fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
+    fn activate_selected_left_item(&mut self, on_dormant: OnDormant) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
@@ -10405,7 +10407,7 @@ impl App {
                     .selected_session()
                     .is_some_and(|s| self.engine.providers.contains_key(s.slot_tab_id()))
                 {
-                    if allow_launch {
+                    if on_dormant == OnDormant::Launch {
                         // Enter (and the sidebar double-click) lands on the
                         // windowed typeable pane: snap to the live edge and
                         // leave fullscreen and the raw-input target off, so
@@ -10419,11 +10421,11 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
                     }
                 } else if self.selected_session().is_some() {
-                    if allow_launch {
+                    if on_dormant == OnDormant::Launch {
                         // Enter from the sidebar focuses the minimized
                         // typeable center, so its dormant-agent
                         // launch is minimized-seeking.
-                        self.reconnect_selected_session(false)?;
+                        self.reconnect_selected_session(LaunchView::Minimized)?;
                     } else {
                         self.exit_interactive_without_launch();
                     }
@@ -10437,7 +10439,7 @@ impl App {
     }
 
     fn activate_selected_left_item_from_mouse(&mut self) {
-        if let Err(err) = self.activate_selected_left_item(true) {
+        if let Err(err) = self.activate_selected_left_item(OnDormant::Launch) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
@@ -10452,8 +10454,8 @@ impl App {
     /// fullscreen toggle and the double-click maximize gesture pass `true`.
     pub(crate) fn activate_center_agent(
         &mut self,
-        allow_launch: bool,
-        seek_fullscreen: bool,
+        on_dormant: OnDormant,
+        view: LaunchView,
     ) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
@@ -10486,13 +10488,13 @@ impl App {
             // `tab_resume_decision` inside the launch: this tab may resume
             // its provider's prior conversation if it is the sole
             // live/launching tab of that provider, not "never resume".
-            if allow_launch {
-                self.launch_focused_extra_tab(&session_id, &tab_id, seek_fullscreen)?;
+            if on_dormant == OnDormant::Launch {
+                self.launch_focused_extra_tab(&session_id, &tab_id, view)?;
             } else {
                 self.exit_interactive_without_launch();
             }
-        } else if allow_launch {
-            self.reconnect_selected_session(seek_fullscreen)?;
+        } else if on_dormant == OnDormant::Launch {
+            self.reconnect_selected_session(view)?;
         } else {
             self.exit_interactive_without_launch();
         }
@@ -10528,7 +10530,7 @@ impl App {
         }
         // Double-click is the maximize gesture, so a dormant tab launched by
         // it is fullscreen-seeking.
-        if let Err(err) = self.activate_center_agent(true, true) {
+        if let Err(err) = self.activate_center_agent(OnDormant::Launch, LaunchView::Fullscreen) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
@@ -11843,7 +11845,8 @@ impl App {
             return;
         };
         let tab_id = self.focused_tab_id(&session_id);
-        if let Err(err) = self.launch_focused_extra_tab(&session_id, &tab_id, false) {
+        if let Err(err) = self.launch_focused_extra_tab(&session_id, &tab_id, LaunchView::Minimized)
+        {
             self.set_error(format!("{err:#}"));
         }
     }
