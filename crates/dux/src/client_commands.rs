@@ -11,19 +11,19 @@ use dux_core::config::DuxPaths;
 use crate::commands::{
     AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
     ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSub,
-    TabsSub, TerminalsSub, WorktreesSub,
+    ServerSub, TabsSub, TerminalsSub, WorktreesSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
 /// default are consulted.
-pub struct Selection {
+pub(crate) struct Selection {
     pub remote: Option<String>,
     pub local: bool,
 }
 
 impl Selection {
     /// What `--local` said, for the client.
-    fn local_flag(&self) -> connect::LocalFlag {
+    pub(crate) fn local_flag(&self) -> connect::LocalFlag {
         if self.local {
             connect::LocalFlag::Given
         } else {
@@ -37,7 +37,7 @@ impl Selection {
 
     /// The remote this selection names, reading the saved default only when
     /// nothing else names one.
-    pub fn remote_name(&self, paths: &DuxPaths) -> Result<Option<String>, CliError> {
+    pub(crate) fn remote_name(&self, paths: &DuxPaths) -> Result<Option<String>, CliError> {
         let variable = Self::variable();
         if self.local || self.remote.is_some() || variable.as_deref().is_some_and(|v| !v.is_empty())
         {
@@ -54,7 +54,7 @@ impl Selection {
     /// [`Self::remote_name`] for the `dux config` command `args`. A reset never reads
     /// remotes.toml, so a broken one cannot stop the reset that removes it; any other
     /// command that cannot read it says so, with the ways on.
-    pub fn config_remote_name(
+    pub(crate) fn config_remote_name(
         &self,
         paths: &DuxPaths,
         args: &[String],
@@ -92,12 +92,12 @@ impl Selection {
 }
 
 /// Print a command's result, or its error, and end the process with its code.
-pub fn finish(result: Result<String, CliError>) -> ! {
+pub(crate) fn finish(result: Result<String, CliError>) -> ! {
     finish_with_code(result.map(|text| (text, 0)))
 }
 
 /// [`finish`] for a result that carries its own exit code.
-pub fn finish_with_code(result: Result<(String, i32), CliError>) -> ! {
+pub(crate) fn finish_with_code(result: Result<(String, i32), CliError>) -> ! {
     match result {
         Ok((text, code)) => {
             print!("{text}");
@@ -128,13 +128,13 @@ fn shape(list: &ListFlags) -> Shape {
     Shape::of(format, ids_only)
 }
 
-fn line(text: String) -> String {
+fn line(text: &str) -> String {
     format!("{text}\n")
 }
 
 /// `dux operations show`: the record on stdout, and the exit code its state
 /// calls for (0 succeeded, 1 failed or partly done, 6 still running).
-pub fn operations(
+pub(crate) fn operations(
     command: OperationsSub,
     selection: &Selection,
 ) -> Result<(String, i32), CliError> {
@@ -144,12 +144,12 @@ pub fn operations(
         OperationsSub::Show { id } => {
             let record = client.operation(&id)?;
             let code = wait::exit_of(&record).map_or(0, Exit::code);
-            Ok((line(wait::describe(&record)), code))
+            Ok((line(&wait::describe(&record)), code))
         }
     }
 }
 
-pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliError> {
     let paths = discover()?;
     let root = &paths.root;
     match command {
@@ -167,7 +167,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 saved.add(&name, &url, plain_http)?;
                 Ok(saved.get(&name)?.url.clone())
             })?;
-            Ok(line(format!(
+            Ok(line(&format!(
                 "Saved remote {name} ({url}). Use it with --remote {name}, or make it the default \
                  with \"dux remote default {name}\"."
             )))
@@ -194,7 +194,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                      it goes unused for [server.auth] cli_token_idle_days."
                 ));
             }
-            Ok(line(text))
+            Ok(line(&text))
         }
         RemoteSub::Default { name, unset: _ } => {
             let before = Remotes::update(root, |saved| {
@@ -202,7 +202,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 saved.set_default(name.as_deref())?;
                 Ok(before)
             })?;
-            Ok(line(match (name, before) {
+            Ok(line(&match (name, before) {
                 (Some(name), _) => format!(
                     "{name} is now the default remote: commands talk to it unless --local, \
                      --remote or DUX_REMOTE says otherwise."
@@ -230,7 +230,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                     }
                     Ok(())
                 })?;
-                return Ok(line(format!(
+                return Ok(line(&format!(
                     "{name} has no password, so there is nothing to sign in to: commands reach it \
                      as they are."
                 )));
@@ -255,14 +255,14 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 &signed_in.token,
                 instance.as_deref(),
             )?;
-            Ok(line(format!("Signed in to {name}.")))
+            Ok(line(&format!("Signed in to {name}.")))
         }
         RemoteSub::Logout { name } => {
             let saved = Remotes::load(root)?;
             let name = named_or_selected(name, selection, &saved, "logout")?;
             let remote = saved.get(&name)?.clone();
             let Some(token) = remote.token.clone() else {
-                return Ok(line(format!(
+                return Ok(line(&format!(
                     "Not signed in to {name}, so there was nothing to end."
                 )));
             };
@@ -276,7 +276,7 @@ pub fn remote(command: RemoteSub, selection: &Selection) -> Result<String, CliEr
                 Ok(())
             })?;
             match told {
-                Ok(()) => Ok(line(format!("Signed out of {name}."))),
+                Ok(()) => Ok(line(&format!("Signed out of {name}."))),
                 Err(error) => Err(CliError::new(
                     error.exit,
                     format!(
@@ -338,13 +338,22 @@ fn read_with<T>(
     }
 }
 
+/// Whether standard input is free to carry the answer to a confirmation.
+#[derive(Clone, Copy)]
+enum Stdin {
+    /// Nothing else reads standard input.
+    Free,
+    /// Standard input carries a value, so it cannot also carry the answer.
+    CarriesValue,
+}
+
 /// Run a change through the selected running dux, or on config.toml when this machine runs
-/// none. `stdin_taken` says standard input carries a value, so it cannot also carry the answer.
+/// none. `stdin` says whether standard input is free to carry the answer.
 fn change_with(
     selection: &Selection,
     flags: &ChangeFlags,
     question: &str,
-    stdin_taken: bool,
+    stdin: Stdin,
     change: impl FnOnce(Writer<'_>) -> Result<String, CliError>,
 ) -> Result<String, CliError> {
     let paths = discover()?;
@@ -352,12 +361,12 @@ fn change_with(
         ask(
             question,
             &paths.config_path.display().to_string(),
-            flags.yes,
-            stdin_taken,
+            flags.consent(),
+            stdin,
         )?;
         return change(Writer::File(&paths));
     };
-    ask(question, client.target(), flags.yes, stdin_taken)?;
+    ask(question, client.target(), flags.consent(), stdin)?;
     let wait = if flags.no_wait {
         None
     } else {
@@ -381,15 +390,16 @@ fn client_if_running(
 }
 
 /// Confirm a change on the terminal, or take `--yes` for it.
-fn ask(question: &str, target: &str, yes: bool, stdin_taken: bool) -> Result<(), CliError> {
+fn ask(
+    question: &str,
+    target: &str,
+    consent: output::Consent,
+    stdin: Stdin,
+) -> Result<(), CliError> {
     use std::io::IsTerminal;
-    let consent = if yes {
-        output::Consent::Given
-    } else {
-        output::Consent::Ask
-    };
-    let terminal =
-        !stdin_taken && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let terminal = matches!(stdin, Stdin::Free)
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
     if !terminal {
         return output::confirm(question, target, consent, None);
     }
@@ -398,7 +408,7 @@ fn ask(question: &str, target: &str, yes: bool, stdin_taken: bool) -> Result<(),
     output::confirm(question, target, consent, Some((&mut input, &mut prompt)))
 }
 
-pub fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         MacrosSub::Ls(list) => read_with(selection, |source| {
             resources::macros_ls(source, shape(&list))
@@ -415,20 +425,20 @@ pub fn macros(command: MacrosSub, selection: &Selection) -> Result<String, CliEr
             selection,
             &change,
             &resources::set_macro_question(&name),
-            false,
+            Stdin::Free,
             |writer| resources::set_macro(writer, &name, text, &surface),
         ),
         MacrosSub::Rm { name, change } => change_with(
             selection,
             &change,
             &resources::remove_macro_question(&name),
-            false,
+            Stdin::Free,
             |writer| resources::remove_macro(writer, &name),
         ),
     }
 }
 
-pub fn providers(command: NamedReadSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn providers(command: NamedReadSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         NamedReadSub::Ls(list) => read_with(selection, |source| {
             resources::providers_ls(source, shape(&list))
@@ -439,19 +449,19 @@ pub fn providers(command: NamedReadSub, selection: &Selection) -> Result<String,
     }
 }
 
-pub fn keys(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn keys(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
     let ListOnlySub::Ls(list) = command;
     read_with(selection, |source| resources::keys_ls(source, shape(&list)))
 }
 
-pub fn themes(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn themes(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
     let ListOnlySub::Ls(list) = command;
     read_with(selection, |source| {
         resources::themes_ls(source, shape(&list))
     })
 }
 
-pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         EnvSub::Ls { show, list } => read_with(selection, |source| {
             let values = if show {
@@ -473,7 +483,11 @@ pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
                 selection,
                 &change,
                 &resources::set_env_question(&name),
-                stdin,
+                if stdin {
+                    Stdin::CarriesValue
+                } else {
+                    Stdin::Free
+                },
                 |writer| {
                     let value = dux_tui::read_env_value(stdin, &name)
                         .map_err(|error| CliError::new(Exit::Failed, format!("{error:#}")))?;
@@ -485,7 +499,7 @@ pub fn env(command: EnvSub, selection: &Selection) -> Result<String, CliError> {
             selection,
             &change,
             &resources::remove_env_question(&name),
-            false,
+            Stdin::Free,
             |writer| resources::remove_env(writer, &name),
         ),
     }
@@ -529,7 +543,12 @@ fn change_on_dux(
     if let Some(notice) = &planned.notice {
         eprintln!("{notice}");
     }
-    ask(&planned.question, client.target(), flags.yes, false)?;
+    ask(
+        &planned.question,
+        client.target(),
+        flags.consent(),
+        Stdin::Free,
+    )?;
     let wait = if flags.no_wait {
         None
     } else {
@@ -553,7 +572,7 @@ fn guarded_on_dux(
     change_on_dux(selection, &flags.change, |client, _| plan(client, force))
 }
 
-pub fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         ProjectsSub::Ls(list) => read_on_dux(selection, |client| {
             workspace::projects_ls(client, shape(&list))
@@ -594,7 +613,7 @@ pub fn projects(command: ProjectsSub, selection: &Selection) -> Result<String, C
     }
 }
 
-pub fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn agents(command: AgentsSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         AgentsSub::Ls {
             project,
@@ -732,7 +751,7 @@ fn tabs(command: TabsSub, selection: &Selection) -> Result<String, CliError> {
     }
 }
 
-pub fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String, CliError> {
     match command {
         TerminalsSub::Ls(list) => read_on_dux(selection, |client| {
             workspace::terminals_ls(client, shape(&list))
@@ -760,10 +779,7 @@ pub fn terminals(command: TerminalsSub, selection: &Selection) -> Result<String,
 // ---------------------------------------------------------------------------
 
 /// `dux server connections ls`.
-pub fn server_connections(
-    command: ConnectionsSub,
-    selection: &Selection,
-) -> Result<String, CliError> {
+fn server_connections(command: ConnectionsSub, selection: &Selection) -> Result<String, CliError> {
     let ConnectionsSub::Ls(list) = command;
     let paths = discover()?;
     let client = connect::connect(&selection.target(&paths)?, &paths.lock_path)?;
@@ -772,7 +788,31 @@ pub fn server_connections(
 
 /// `dux server logs`: the last lines of the server log and, with `follow`, every line after.
 /// With no dux running on this machine, its log file is read as it stands.
-pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<String, CliError> {
+/// `dux server logs` and `dux server connections`.
+pub(crate) fn server(command: ServerSub, selection: &Selection) -> Result<String, CliError> {
+    match command {
+        ServerSub::Logs { follow, lines } => {
+            let read = if follow {
+                LogRead::Follow
+            } else {
+                LogRead::Tail
+            };
+            server_logs(read, lines, selection)
+        }
+        ServerSub::Connections { command } => server_connections(command, selection),
+    }
+}
+
+/// How `dux server logs` reads the log.
+#[derive(Clone, Copy)]
+enum LogRead {
+    /// Print the last lines and stop.
+    Tail,
+    /// Print the last lines, then every line after, until interrupted.
+    Follow,
+}
+
+fn server_logs(read: LogRead, lines: usize, selection: &Selection) -> Result<String, CliError> {
     use std::io::Write;
     use std::ops::ControlFlow;
     let paths = discover()?;
@@ -789,7 +829,7 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
     // remote's file is not here, so its sentence is shown.
     let this_machine = matches!(target, Target::Local).then_some(&paths);
     match client_if_running(&target, &paths)? {
-        Some(client) if follow => {
+        Some(client) if matches!(read, LogRead::Follow) => {
             server_inspect::follow_or_file(&client, this_machine, lines, &mut print)?;
         }
         Some(client) => print_tail(
@@ -804,7 +844,7 @@ pub fn server_logs(follow: bool, lines: usize, selection: &Selection) -> Result<
                     path.display()
                 );
             }
-            if follow {
+            if matches!(read, LogRead::Follow) {
                 server_inspect::file_follow(&path, lines, &mut print)?;
             } else {
                 print_tail(server_inspect::file_tail(&path, lines)?, &mut print);

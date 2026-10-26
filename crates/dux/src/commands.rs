@@ -3,6 +3,7 @@
 //! starts; `main` only dispatches on the result.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use dux_core::client::connect::LocalFlag;
 
 const SERVER_ABOUT: &str = "\
 Run the dux web UI over the headless engine. The web UI has one optional
@@ -45,7 +46,7 @@ codes:
     about = "Terminal and web UI for AI worktree sessions, and a command line for their state. Run with no command to launch the terminal UI.",
     after_help = ROOT_AFTER_HELP
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// Talk to this saved remote instead of the local dux.
     #[arg(long, global = true, value_name = "NAME")]
     pub remote: Option<String>,
@@ -59,7 +60,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum Command {
+pub(crate) enum Command {
     /// Serve the web UI over the headless engine, or inspect a running server.
     Server(ServerCmd),
     /// Manage the configuration file on this machine.
@@ -93,7 +94,7 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 #[command(before_help = SERVER_ABOUT)]
-pub struct ServerCmd {
+pub(crate) struct ServerCmd {
     /// Bind this exact address, overriding [server] host and port. An IP:port
     /// socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
     #[arg(long, value_name = "ADDR:PORT")]
@@ -113,7 +114,7 @@ pub struct ServerCmd {
 }
 
 impl ServerCmd {
-    pub fn into_overrides(self) -> dux_core::config::ServerCliOverrides {
+    pub(crate) fn into_overrides(self) -> dux_core::config::ServerCliOverrides {
         dux_core::config::ServerCliOverrides {
             bind: self.bind,
             port: self.port,
@@ -124,7 +125,7 @@ impl ServerCmd {
 
 /// The listener flags only make sense when starting a server, so they are
 /// refused beside `logs` and `connections`. The global flags are not.
-pub fn listener_flags_with_subcommand(server: &ServerCmd) -> Result<(), String> {
+pub(crate) fn listener_flags_with_subcommand(server: &ServerCmd) -> Result<(), String> {
     let set = server.bind.is_some() || server.port.is_some() || server.no_tailscale;
     if set && server.command.is_some() {
         return Err(
@@ -137,8 +138,11 @@ pub fn listener_flags_with_subcommand(server: &ServerCmd) -> Result<(), String> 
 
 /// Starting a server is always on this machine, so naming a target is a
 /// mistake.
-pub fn check_server_start_target(remote: Option<&str>, local: bool) -> Result<(), String> {
-    if remote.is_some() || local {
+pub(crate) fn check_server_start_target(
+    remote: Option<&str>,
+    local: LocalFlag,
+) -> Result<(), String> {
+    if remote.is_some() || local == LocalFlag::Given {
         return Err("dux server starts a server on this machine; --remote and --local apply to its logs and connections subcommands".to_string());
     }
     Ok(())
@@ -146,8 +150,11 @@ pub fn check_server_start_target(remote: Option<&str>, local: bool) -> Result<()
 
 /// Starting dux with no command starts the terminal UI on this machine, so
 /// naming a target is a mistake.
-pub fn check_terminal_ui_start_target(remote: Option<&str>, local: bool) -> Result<(), String> {
-    if remote.is_some() || local {
+pub(crate) fn check_terminal_ui_start_target(
+    remote: Option<&str>,
+    local: LocalFlag,
+) -> Result<(), String> {
+    if remote.is_some() || local == LocalFlag::Given {
         return Err("dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux".to_string());
     }
     Ok(())
@@ -156,7 +163,7 @@ pub fn check_terminal_ui_start_target(remote: Option<&str>, local: bool) -> Resu
 /// What `dux [--remote x | --local] config <args>` carries: the global flags
 /// that came before the word, and everything after it, byte for byte.
 #[derive(Debug)]
-pub struct ConfigInvocation {
+pub(crate) struct ConfigInvocation {
     pub remote: Option<String>,
     pub local: bool,
     pub args: Vec<String>,
@@ -164,7 +171,7 @@ pub struct ConfigInvocation {
 
 /// Splits off a command line whose command is `config`, after the global flags alone, so clap
 /// never sees its words. Any other shape, or one naming both global flags, is left to clap.
-pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
+pub(crate) fn split_config(args: &[String]) -> Option<ConfigInvocation> {
     let mut remote = None;
     let mut local = false;
     let mut i = 0;
@@ -195,8 +202,8 @@ pub fn split_config(args: &[String]) -> Option<ConfigInvocation> {
 
 /// `dux config` edits this machine's file, so a remote selected by `--remote`, `DUX_REMOTE` or
 /// the saved default is refused unless `--local` is given.
-pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), String> {
-    if remote.is_some() && !local {
+pub(crate) fn check_config_target(remote: Option<&str>, local: LocalFlag) -> Result<(), String> {
+    if remote.is_some() && local == LocalFlag::Absent {
         return Err(
             "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE"
                 .to_string(),
@@ -206,7 +213,7 @@ pub fn check_config_target(remote: Option<&str>, local: bool) -> Result<(), Stri
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ServerSub {
+pub(crate) enum ServerSub {
     /// Show the server's log: the last lines of server.log, read from the
     /// file when dux is not running.
     Logs {
@@ -225,7 +232,7 @@ pub enum ServerSub {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ConnectionsSub {
+pub(crate) enum ConnectionsSub {
     /// List the connections.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -234,7 +241,7 @@ pub enum ConnectionsSub {
 /// `dux config` hands its arguments, untouched, to the config code, which
 /// owns every message and exit code of that command.
 #[derive(Args, Debug)]
-pub struct ConfigCmd {
+pub(crate) struct ConfigCmd {
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -248,13 +255,13 @@ pub struct ConfigCmd {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum Format {
+pub(crate) enum Format {
     Table,
     Json,
 }
 
 #[derive(Args, Debug)]
-pub struct ListFlags {
+pub(crate) struct ListFlags {
     /// Output format.
     #[arg(long, value_enum, default_value = "table")]
     pub format: Format,
@@ -265,7 +272,7 @@ pub struct ListFlags {
 
 /// What every change takes: whether to confirm, and how long to wait.
 #[derive(Args, Debug)]
-pub struct ChangeFlags {
+pub(crate) struct ChangeFlags {
     /// Do not ask for confirmation (required without a terminal).
     #[arg(long)]
     pub yes: bool,
@@ -277,9 +284,20 @@ pub struct ChangeFlags {
     pub wait_timeout: Option<u64>,
 }
 
+impl ChangeFlags {
+    /// Whether `--yes` already gave the confirmation.
+    pub(crate) fn consent(&self) -> dux_core::client::output::Consent {
+        if self.yes {
+            dux_core::client::output::Consent::Given
+        } else {
+            dux_core::client::output::Consent::Ask
+        }
+    }
+}
+
 /// A change that can cut off whoever is attached to what it touches.
 #[derive(Args, Debug)]
-pub struct GuardedChangeFlags {
+pub(crate) struct GuardedChangeFlags {
     #[command(flatten)]
     pub change: ChangeFlags,
     /// Go ahead even though someone is attached.
@@ -297,7 +315,7 @@ pub struct GuardedChangeFlags {
         .required(true)
         .multiple(true)
 ))]
-pub struct AddAgentArgs {
+pub(crate) struct AddAgentArgs {
     /// The project to create the agent in, on a new branch unless
     /// --from-pr or --from-worktree says otherwise.
     #[arg(long, value_name = "PROJECT", conflicts_with_all = ["fork", "standalone"])]
@@ -357,7 +375,7 @@ pub struct AddAgentArgs {
 /// `dux terminals add`: an agent's or a project's, or a standalone one when
 /// neither is named.
 #[derive(Args, Debug)]
-pub struct AddTerminalArgs {
+pub(crate) struct AddTerminalArgs {
     /// Open it in this agent's worktree.
     #[arg(long, value_name = "AGENT", conflicts_with = "project")]
     pub agent: Option<String>,
@@ -373,13 +391,13 @@ pub struct AddTerminalArgs {
 // ---------------------------------------------------------------------------
 
 #[derive(Args, Debug)]
-pub struct ProjectsCmd {
+pub(crate) struct ProjectsCmd {
     #[command(subcommand)]
     pub command: ProjectsSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ProjectsSub {
+pub(crate) enum ProjectsSub {
     /// List projects.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -419,7 +437,7 @@ pub enum ProjectsSub {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum WorktreesSub {
+pub(crate) enum WorktreesSub {
     /// List a project's worktrees.
     #[command(visible_alias = "list")]
     Ls {
@@ -430,13 +448,13 @@ pub enum WorktreesSub {
 }
 
 #[derive(Args, Debug)]
-pub struct AgentsCmd {
+pub(crate) struct AgentsCmd {
     #[command(subcommand)]
     pub command: AgentsSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum AgentsSub {
+pub(crate) enum AgentsSub {
     /// List agents.
     #[command(visible_alias = "list")]
     Ls {
@@ -491,7 +509,7 @@ pub enum AgentsSub {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum TabsSub {
+pub(crate) enum TabsSub {
     /// List an agent's tabs.
     #[command(visible_alias = "list")]
     Ls {
@@ -533,13 +551,13 @@ pub enum TabsSub {
 }
 
 #[derive(Args, Debug)]
-pub struct TerminalsCmd {
+pub(crate) struct TerminalsCmd {
     #[command(subcommand)]
     pub command: TerminalsSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum TerminalsSub {
+pub(crate) enum TerminalsSub {
     /// List terminals.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -555,13 +573,13 @@ pub enum TerminalsSub {
 }
 
 #[derive(Args, Debug)]
-pub struct NamedReadCmd {
+pub(crate) struct NamedReadCmd {
     #[command(subcommand)]
     pub command: NamedReadSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum NamedReadSub {
+pub(crate) enum NamedReadSub {
     /// List them.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -570,13 +588,13 @@ pub enum NamedReadSub {
 }
 
 #[derive(Args, Debug)]
-pub struct MacrosCmd {
+pub(crate) struct MacrosCmd {
     #[command(subcommand)]
     pub command: MacrosSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum MacrosSub {
+pub(crate) enum MacrosSub {
     /// List the macros.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
@@ -603,26 +621,26 @@ pub enum MacrosSub {
 }
 
 #[derive(Args, Debug)]
-pub struct ListOnlyCmd {
+pub(crate) struct ListOnlyCmd {
     #[command(subcommand)]
     pub command: ListOnlySub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ListOnlySub {
+pub(crate) enum ListOnlySub {
     /// List them.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
 }
 
 #[derive(Args, Debug)]
-pub struct EnvCmd {
+pub(crate) struct EnvCmd {
     #[command(subcommand)]
     pub command: EnvSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum EnvSub {
+pub(crate) enum EnvSub {
     /// List the variables.
     #[command(visible_alias = "list")]
     Ls {
@@ -651,13 +669,13 @@ pub enum EnvSub {
 }
 
 #[derive(Args, Debug)]
-pub struct RemoteCmd {
+pub(crate) struct RemoteCmd {
     #[command(subcommand)]
     pub command: RemoteSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum RemoteSub {
+pub(crate) enum RemoteSub {
     /// Save a remote under a name.
     Add {
         name: String,
@@ -694,13 +712,13 @@ pub enum RemoteSub {
 }
 
 #[derive(Args, Debug)]
-pub struct OperationsCmd {
+pub(crate) struct OperationsCmd {
     #[command(subcommand)]
     pub command: OperationsSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum OperationsSub {
+pub(crate) enum OperationsSub {
     /// Show where a change stands.
     Show { id: String },
 }
@@ -892,12 +910,12 @@ mod tests {
     fn a_selected_remote_refuses_config_unless_local() {
         let msg = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE";
         assert_eq!(
-            check_config_target(Some("box"), false),
+            check_config_target(Some("box"), LocalFlag::Absent),
             Err(msg.to_string())
         );
-        assert_eq!(check_config_target(None, false), Ok(()));
-        assert_eq!(check_config_target(None, true), Ok(()));
-        assert_eq!(check_config_target(Some("box"), true), Ok(()));
+        assert_eq!(check_config_target(None, LocalFlag::Absent), Ok(()));
+        assert_eq!(check_config_target(None, LocalFlag::Given), Ok(()));
+        assert_eq!(check_config_target(Some("box"), LocalFlag::Given), Ok(()));
     }
 
     #[test]
@@ -1045,25 +1063,31 @@ mod tests {
     fn a_server_start_refuses_a_selected_target() {
         let msg = "dux server starts a server on this machine; --remote and --local apply to its logs and connections subcommands";
         assert_eq!(
-            check_server_start_target(Some("x"), false),
+            check_server_start_target(Some("x"), LocalFlag::Absent),
             Err(msg.to_string())
         );
-        assert_eq!(check_server_start_target(None, true), Err(msg.to_string()));
-        assert_eq!(check_server_start_target(None, false), Ok(()));
+        assert_eq!(
+            check_server_start_target(None, LocalFlag::Given),
+            Err(msg.to_string())
+        );
+        assert_eq!(check_server_start_target(None, LocalFlag::Absent), Ok(()));
     }
 
     #[test]
     fn starting_the_terminal_ui_refuses_a_selected_target() {
         let msg = "dux with no command starts the terminal UI on this machine and takes no target; --remote and --local apply to the commands that talk to a dux";
         assert_eq!(
-            check_terminal_ui_start_target(Some("box"), false),
+            check_terminal_ui_start_target(Some("box"), LocalFlag::Absent),
             Err(msg.to_string())
         );
         assert_eq!(
-            check_terminal_ui_start_target(None, true),
+            check_terminal_ui_start_target(None, LocalFlag::Given),
             Err(msg.to_string())
         );
-        assert_eq!(check_terminal_ui_start_target(None, false), Ok(()));
+        assert_eq!(
+            check_terminal_ui_start_target(None, LocalFlag::Absent),
+            Ok(())
+        );
     }
 
     #[test]

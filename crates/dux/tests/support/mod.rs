@@ -14,24 +14,24 @@ use std::time::{Duration, Instant};
 use dux_core::config::{DuxPaths, PlanAddr, ServerPlan, TailscaleMode};
 use dux_core::lockfile::LockFileContents;
 
-pub struct Run {
+pub(crate) struct Run {
     out: Output,
 }
 
 impl Run {
-    pub fn code(&self) -> i32 {
+    pub(crate) fn code(&self) -> i32 {
         self.out.status.code().expect("exited normally")
     }
-    pub fn stdout(&self) -> String {
+    pub(crate) fn stdout(&self) -> String {
         String::from_utf8_lossy(&self.out.stdout).into_owned()
     }
-    pub fn stderr(&self) -> String {
+    pub(crate) fn stderr(&self) -> String {
         String::from_utf8_lossy(&self.out.stderr).into_owned()
     }
 }
 
 /// Run the built dux on the config folder `home`, feeding it `input`.
-pub fn dux(home: &Path, args: &[&str], input: &str) -> Run {
+pub(crate) fn dux(home: &Path, args: &[&str], input: &str) -> Run {
     use std::io::Write;
     let mut child = Command::new(env!("CARGO_BIN_EXE_dux"))
         .args(args)
@@ -54,7 +54,7 @@ pub fn dux(home: &Path, args: &[&str], input: &str) -> Run {
 }
 
 /// An empty, owner-only config folder named for `name`.
-pub fn home(prefix: &str, name: &str) -> PathBuf {
+pub(crate) fn home(prefix: &str, name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("dux-{prefix}-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -68,7 +68,7 @@ pub fn home(prefix: &str, name: &str) -> PathBuf {
 
 /// Serve dux on `root` in this process, on a loopback port, and wait until
 /// its control socket answers. Returns the port.
-pub fn serve(root: &Path) -> u16 {
+pub(crate) fn serve(root: &Path) -> u16 {
     let paths = DuxPaths {
         root: root.to_path_buf(),
         config_path: root.join("config.toml"),

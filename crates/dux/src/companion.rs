@@ -24,12 +24,12 @@ use dux_web::background::BackgroundServer;
 /// Holds the background web server, or the control socket's own core, when
 /// either is running.
 #[derive(Default)]
-pub struct WebCompanion {
+pub(crate) struct WebCompanion {
     server: Option<BackgroundServer>,
 }
 
 impl WebCompanion {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
