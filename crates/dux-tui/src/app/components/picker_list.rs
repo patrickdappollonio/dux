@@ -192,9 +192,9 @@ mod tests {
             .block(Block::default().borders(Borders::ALL));
         let (buf, layout) = draw(list, &theme);
         assert_eq!(layout.items, 30);
-        let lit = highlighted(&buf, &theme);
-        assert_eq!(lit.len(), 1, "one highlighted row");
-        let y = lit[0];
+        let highlighted_rows = highlighted(&buf, &theme);
+        assert_eq!(highlighted_rows.len(), 1, "one highlighted row");
+        let y = highlighted_rows[0];
         let text: String = (1..8).map(|x| buf[(x, y)].symbol().to_string()).collect();
         assert_eq!(text, "row 20 ");
         assert_eq!(layout.item_at(1, 3, y), Some(20), "a click there is row 20");

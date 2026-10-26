@@ -3020,7 +3020,7 @@ impl App {
                     self.glyphs(),
                     TerminalRowContent {
                         facts: dux_core::row_state::TerminalRowFacts { working, typing },
-                        spinner: spinner,
+                        spinner,
                         display_title: row.display_title.as_deref(),
                         owner_name: &row.owner_name,
                         owner: if row.standalone {
@@ -6132,7 +6132,13 @@ impl App {
         let items = {
             let name_col = commands
                 .iter()
-                .map(|binding| display_width(binding.palette_name.unwrap()))
+                .map(|binding| {
+                    display_width(
+                        binding
+                            .palette_name
+                            .expect("the palette lists only bindings that carry a palette name"),
+                    )
+                })
                 .max()
                 .unwrap_or(0);
             let inner_width = usize::from(popup.width) - 3;
@@ -6140,7 +6146,9 @@ impl App {
             commands
                 .iter()
                 .map(|binding| {
-                    let name = binding.palette_name.unwrap();
+                    let name = binding
+                        .palette_name
+                        .expect("the palette lists only bindings that carry a palette name");
                     let name_padded = pad_to_width(name, name_col);
                     let mut spans = vec![Span::styled(
                         name_padded,
@@ -12863,7 +12871,7 @@ impl App {
     }
 
     fn render_macro_bar(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let (query, selected, cursor, cursor_fg, cursor_bg) = {
+        let (query, selected, cursor, cursor_text, cursor_fill) = {
             let Some(bar) = &self.macro_bar else {
                 return;
             };
@@ -12927,8 +12935,8 @@ impl App {
             "",
             &query,
             cursor,
-            cursor_fg,
-            cursor_bg,
+            cursor_text,
+            cursor_fill,
             FocusState::Focused,
             input_inner.width,
         ))
@@ -14062,8 +14070,8 @@ fn render_single_line_field(
     prefix: &str,
     text: &str,
     cursor: usize,
-    cursor_fg: Color,
-    cursor_bg: Color,
+    cursor_text: Color,
+    cursor_fill: Color,
     focused: FocusState,
     width: u16,
 ) -> Line<'static> {
@@ -14072,8 +14080,8 @@ fn render_single_line_field(
         prefix,
         &text[skip..],
         cursor.saturating_sub(skip),
-        cursor_fg,
-        cursor_bg,
+        cursor_text,
+        cursor_fill,
         focused,
     )
 }
@@ -14101,8 +14109,8 @@ fn render_single_line_cursor_input(
     prefix: &str,
     text: &str,
     cursor: usize,
-    cursor_fg: Color,
-    cursor_bg: Color,
+    cursor_text: Color,
+    cursor_fill: Color,
     focused: FocusState,
 ) -> Line<'static> {
     if focused == FocusState::Unfocused {
@@ -14120,14 +14128,14 @@ fn render_single_line_cursor_input(
             Span::raw(before.to_string()),
             Span::styled(
                 cursor_glyph.to_string(),
-                Style::default().fg(cursor_fg).bg(cursor_bg),
+                Style::default().fg(cursor_text).bg(cursor_fill),
             ),
             Span::raw(rest.to_string()),
         ])
     } else {
         Line::from(vec![
             Span::raw(format!("{prefix}{text}")),
-            Span::styled(" ", Style::default().fg(cursor_fg).bg(cursor_bg)),
+            Span::styled(" ", Style::default().fg(cursor_text).bg(cursor_fill)),
         ])
     }
 }
@@ -18110,7 +18118,9 @@ mod tests {
             .pty_activity
             .insert("tab-2".to_string(), Instant::now());
         app.engine.needs_attention.insert(TabId::new("tab-2"));
-        app.start_time = Instant::now() - Duration::from_millis(800);
+        app.start_time = Instant::now()
+            .checked_sub(Duration::from_millis(800))
+            .expect("the monotonic clock reads past the offset a test steps back");
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -18988,7 +18998,9 @@ mod tests {
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
         app.engine.sessions[0].status = crate::model::SessionStatus::Active;
         seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
-        app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
+        app.start_time = Instant::now()
+            .checked_sub(Duration::from_millis(elapsed_ms))
+            .expect("the monotonic clock reads past the offset a test steps back");
         (app, session_id, slot_tab)
     }
 
@@ -19048,10 +19060,11 @@ mod tests {
                 app.engine.pty_activity.insert(slot, Instant::now());
                 // Land mid-cell so the sample cannot sit on a boundary.
                 app.start_time = Instant::now()
-                    - Duration::from_millis(
+                    .checked_sub(Duration::from_millis(
                         step * dux_core::working_cue::ELLIPSIS_STEP_MS
                             + dux_core::working_cue::ELLIPSIS_STEP_MS / 2,
-                    );
+                    ))
+                    .expect("the monotonic clock reads past the offset a test steps back");
                 agent_row_text(&app, width)
                     .lines()
                     .nth(1)
@@ -19144,7 +19157,9 @@ mod tests {
         app.engine
             .pty_activity
             .insert(session.id.clone(), Instant::now());
-        app.start_time = Instant::now() - Duration::from_millis(1500);
+        app.start_time = Instant::now()
+            .checked_sub(Duration::from_millis(1500))
+            .expect("the monotonic clock reads past the offset a test steps back");
 
         let item = app.render_agent_row(&session, 60);
         let mut terminal = Terminal::new(TestBackend::new(60, 3)).expect("terminal");
@@ -19199,7 +19214,9 @@ mod tests {
             .expect("a frame period in milliseconds fits in a u64");
         let index_at = |elapsed_ms: u64| {
             let mut app = test_app(default_bindings());
-            app.start_time = Instant::now() - Duration::from_millis(elapsed_ms);
+            app.start_time = Instant::now()
+                .checked_sub(Duration::from_millis(elapsed_ms))
+                .expect("the monotonic clock reads past the offset a test steps back");
             app.spinner_frame_index()
         };
         assert_eq!(index_at(0), 0);
@@ -19350,7 +19367,9 @@ mod tests {
             );
         }
         app.set_focused_tab(&session_id, "tab-98");
-        app.start_time = Instant::now() - Duration::from_millis(800);
+        app.start_time = Instant::now()
+            .checked_sub(Duration::from_millis(800))
+            .expect("the monotonic clock reads past the offset a test steps back");
         for i in 0..99 {
             app.engine
                 .pty_activity
@@ -19504,7 +19523,9 @@ mod tests {
             .needs_attention
             .insert(TabId::new(slot_tab.clone()));
         // Deep in the blink's HOLD phase, where a live dot would certainly show.
-        app.start_time = Instant::now() - Duration::from_millis(1500);
+        app.start_time = Instant::now()
+            .checked_sub(Duration::from_millis(1500))
+            .expect("the monotonic clock reads past the offset a test steps back");
         assert!(app.attention_blink_on(), "test setup: the blink is visible");
 
         let cells = tab_strip_label_row(&mut app, 80);
@@ -19624,7 +19645,9 @@ mod tests {
                 );
             }
             app.set_focused_tab(&session_id, "tab-5");
-            app.start_time = Instant::now() - Duration::from_millis(800);
+            app.start_time = Instant::now()
+                .checked_sub(Duration::from_millis(800))
+                .expect("the monotonic clock reads past the offset a test steps back");
             if working {
                 for i in 0..6 {
                     app.engine
@@ -21551,8 +21574,14 @@ mod tests {
         let height_at = |elapsed: Duration| {
             let mut app = test_app(default_bindings());
             app.status.set_clear_after(Duration::from_secs(10));
-            app.status
-                .set(Instant::now() - elapsed, None, StatusTone::Info, text);
+            app.status.set(
+                Instant::now()
+                    .checked_sub(elapsed)
+                    .expect("the monotonic clock reads past the offset a test steps back"),
+                None,
+                StatusTone::Info,
+                text,
+            );
             app.dim_overlay_area(full).height
         };
         assert_eq!(
@@ -22098,10 +22127,11 @@ mod tests {
         app.engine.pty_activity.insert(slot, Instant::now());
         // Mid-way through the fourth dot step, so the slot reads "...".
         app.start_time = Instant::now()
-            - Duration::from_millis(
+            .checked_sub(Duration::from_millis(
                 3 * dux_core::working_cue::ELLIPSIS_STEP_MS
                     + dux_core::working_cue::ELLIPSIS_STEP_MS / 2,
-            );
+            ))
+            .expect("the monotonic clock reads past the offset a test steps back");
         assert_eq!(
             sidebar_line_two_at_120(&mut app),
             format!("{} Working... · 1 …", crate::theme::Glyphs::PLAIN.project)

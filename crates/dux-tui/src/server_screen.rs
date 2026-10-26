@@ -943,8 +943,7 @@ fn action_for_key(key: KeyEvent) -> Option<ExitKind> {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(ExitKind::QuitProcess)
         }
-        KeyCode::Char('q' | 'Q') => Some(ExitKind::ReturnToTui),
-        KeyCode::Esc => Some(ExitKind::ReturnToTui),
+        KeyCode::Char('q' | 'Q') | KeyCode::Esc => Some(ExitKind::ReturnToTui),
         _ => None,
     }
 }
@@ -1881,7 +1880,7 @@ mod tests {
     /// against the old per-frame approach (copy the whole buffer, wrap every
     /// line). Run with `--ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "a benchmark that prints timings; run it with --ignored --nocapture"]
     fn bench_log_frame() {
         let theme = Theme::default_dark();
         let frames = 50;

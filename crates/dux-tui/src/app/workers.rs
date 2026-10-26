@@ -660,12 +660,12 @@ impl App {
             return;
         }
         match reaction {
-            EventReaction::Nothing => {}
+            EventReaction::Nothing
             // The terminal UI reads `Engine::gh_status` live every time it gates
             // a pull-request command, so the flip is already visible here and
             // the accompanying keyed status carries the explanation. The arm
             // exists so a surface that DOES need to react cannot forget to.
-            EventReaction::GhAvailabilityChanged { .. } => {}
+            | EventReaction::GhAvailabilityChanged { .. } => {}
             EventReaction::Status(StatusUpdate {
                 tone,
                 message,
@@ -1873,11 +1873,6 @@ impl App {
         // runtime map (incl. pty_activity/pty_input) for the detached agent's
         // tabs, so no follow-up clear is needed here.
         match outcome.view {
-            AgentLaunchReadyView::CreatePersistFailed { .. } => {
-                // The create op's keyed error final is resolved ENGINE-SIDE and
-                // arrives alongside this View as a sibling `Status` in the same
-                // `Multi`, so there is no status to set here.
-            }
             AgentLaunchReadyView::CreateCommitted { .. } if !started_here => {
                 self.rebuild_left_items();
             }
@@ -1987,7 +1982,11 @@ impl App {
                 // Same re-partition as Reconnect: the resumed agent is Active now.
                 self.rebuild_left_items();
             }
-            AgentLaunchReadyView::StartupAutoReopen => {}
+            // The create op's keyed error final is resolved ENGINE-SIDE and
+            // arrives alongside this View as a sibling `Status` in the same
+            // `Multi`, so there is no status to set here.
+            AgentLaunchReadyView::CreatePersistFailed { .. }
+            | AgentLaunchReadyView::StartupAutoReopen => {}
         }
     }
 
@@ -2020,11 +2019,6 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create { .. } => {
-                // The create op's keyed error final is resolved ENGINE-SIDE and
-                // arrives as a sibling `Status` in the same `Multi`, so this arm
-                // has no status to set.
-            }
             AgentLaunchFailedOutcome::Reconnect {
                 session_id,
                 agent_label,
@@ -2054,9 +2048,6 @@ impl App {
                     },
                 );
             }
-            AgentLaunchFailedOutcome::ResumeFallback => {
-                // Engine logged + marked Detached; nothing for the view.
-            }
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 agent_label,
                 message,
@@ -2078,10 +2069,16 @@ impl App {
                     "Tab launch failed for \"{agent_label}\": {message}"
                 ));
             }
-            AgentLaunchFailedOutcome::Silent => {
-                // Ghost-tab launch failure: the row was already closed by the
-                // user, so there is nothing to warn about.
-            }
+            // The create op's keyed error final is resolved ENGINE-SIDE and
+            // arrives as a sibling `Status` in the same `Multi`, so a failed
+            // create has no status to set here.
+            AgentLaunchFailedOutcome::Create { .. }
+            // The engine logged it and marked the agent Detached; nothing for the
+            // view.
+            | AgentLaunchFailedOutcome::ResumeFallback
+            // Ghost-tab launch failure: the row was already closed by the user,
+            // so there is nothing to warn about.
+            | AgentLaunchFailedOutcome::Silent => {}
         }
     }
 

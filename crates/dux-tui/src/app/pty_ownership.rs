@@ -134,11 +134,11 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
         AgentLaunchKind::Create { .. }
         | AgentLaunchKind::Reconnect { .. }
         | AgentLaunchKind::ForceReconnect { .. }
-        | AgentLaunchKind::Tab { .. } => true,
+        | AgentLaunchKind::Tab { .. }
         // The tail of a launch somebody did ask for: the provider refused to
         // resume, so dux relaunches it fresh. dux-core dispatches this one
         // directly, so it never reaches this surface's dispatch.
-        AgentLaunchKind::ResumeFallback { .. } => true,
+        | AgentLaunchKind::ResumeFallback { .. } => true,
     }
 }
 

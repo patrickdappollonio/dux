@@ -103,10 +103,9 @@ pub(crate) fn run_get(
     // `[keys]` is the terminal UI's alone.
     let users = match (refuses(Surface::TerminalUi), refuses(Surface::DuxServer)) {
         _ if key.path.first().map(String::as_str) == Some("keys") => "the terminal UI",
-        (false, false) => "dux",
+        (false, false) | (true, true) => "dux",
         (true, false) => "dux server",
         (false, true) => "the terminal UI",
-        (true, true) => "dux",
     };
     let corrected = !report.corrections.is_empty();
     // A table prints a name that breaks its map's rule as a marker naming

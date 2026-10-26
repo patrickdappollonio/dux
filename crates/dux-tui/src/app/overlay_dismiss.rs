@@ -113,12 +113,11 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ChangeTheme(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::ConfigReloadFailed { .. }
-        | PromptState::Command { .. } => Cancel,
-
+        | PromptState::Command { .. }
         // Confirmations. Dismissal IS cancel here, and every one of these
         // already defaults its focus to Cancel, so an outside click resolves
         // them the same way the safe default button does.
-        PromptState::ConfirmDeleteAgent { .. }
+        | PromptState::ConfirmDeleteAgent { .. }
         | PromptState::ConfirmDeleteTerminal { .. }
         | PromptState::ConfirmCloseTab { .. }
         | PromptState::ConfirmStopTab { .. }
@@ -137,8 +136,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfirmUseExistingBranch { .. }
         // The worktree-removal confirm cancels back to the manager it was
         // raised from, exactly as its Esc arm does.
-        | PromptState::ConfirmDeleteWorktree(_) => Cancel,
-
+        | PromptState::ConfirmDeleteWorktree(_)
         // `EditMacros` is three modals in one variant, so it answers three
         // ways. Its nested delete-confirm is a confirmation like any other and
         // dismisses. Its LIST is a Picker over saved rows, holding no unsaved
@@ -146,7 +144,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         // other picker above; the blink justification ("unsaved free text, or a
         // multi-step selection") is true of the EDITOR and not of the list. The
         // editor itself, below, is the half that really does hold unsaved text.
-        PromptState::EditMacros {
+        | PromptState::EditMacros {
             pending_delete: Some(_),
             ..
         }
@@ -239,8 +237,6 @@ impl App {
         self.clear_prompt_hint();
 
         match &self.prompt {
-            PromptState::None => return false,
-
             // Plain closes: these match their Esc arms exactly.
             PromptState::AgentInfo(_)
             | PromptState::ResourceMonitor { .. }
@@ -252,7 +248,15 @@ impl App {
             | PromptState::ChangeDefaultProvider(_)
             | PromptState::SetTailscaleMode(_)
             | PromptState::Command { .. }
-            | PromptState::ConfirmNonDefaultBranch { .. } => {
+            | PromptState::ConfirmNonDefaultBranch { .. }
+            // The macro LIST closes the overlay, exactly as its close binding
+            // does. Nothing is saved and nothing is lost: the rows on screen
+            // are the ones already in config.
+            | PromptState::EditMacros {
+                editing: None,
+                pending_delete: None,
+                ..
+            } => {
                 self.prompt = PromptState::None;
             }
 
@@ -370,25 +374,16 @@ impl App {
                 self.resolve_confirm_delete_macro(ConfirmAnswer::Cancel);
             }
 
-            // The macro LIST closes the overlay, exactly as its close binding
-            // does. Nothing is saved and nothing is lost: the rows on screen
-            // are the ones already in config.
-            PromptState::EditMacros {
-                editing: None,
-                pending_delete: None,
-                ..
-            } => {
-                self.prompt = PromptState::None;
-            }
-
             // Not dismissible by an outside click (see `outside_click_policy`);
             // reached only if a caller ignores the policy, so it is a no-op
             // rather than a surprise close. The macro editor cannot join the
             // "matches its Esc arm" contract above: its Esc is state-dependent
             // (in the engaged body it leaves edit mode, in the editor it cancels
             // back to the list), so there is no single statement to mirror. A
-            // stray click gets the blink instead.
-            PromptState::EditMacros { .. }
+            // stray click gets the blink instead. With nothing open there is
+            // nothing to close either.
+            PromptState::None
+            | PromptState::EditMacros { .. }
             | PromptState::BrowseProjects { .. }
             | PromptState::ConfigureStartupCommand { .. }
             | PromptState::ConfigureProjectEnv { .. }

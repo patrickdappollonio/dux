@@ -139,6 +139,10 @@ pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[];
 /// without checking that all three answers really are the same.
 pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
     use ModalFamily::{Confirm, Form, Picker, Report};
+    #[expect(
+        clippy::match_same_arms,
+        reason = "one arm per reason a modal gets its answer; arms whose answers agree stay apart so each keeps its own justification"
+    )]
     let spec = match prompt {
         PromptState::None => return None,
 

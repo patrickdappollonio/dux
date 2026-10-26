@@ -525,8 +525,12 @@ fn diff_node(
             };
             found.push((dotted, line));
         }
-        Policy::Recurse => match (default, current) {
-            (serde_json::Value::Object(default_map), serde_json::Value::Object(current_map)) => {
+        Policy::Recurse => {
+            if let (
+                serde_json::Value::Object(default_map),
+                serde_json::Value::Object(current_map),
+            ) = (default, current)
+            {
                 let style = missing_style_for(path);
                 let names: BTreeSet<&String> =
                     default_map.keys().chain(current_map.keys()).collect();
@@ -544,11 +548,10 @@ fn diff_node(
                     }
                     path.pop();
                 }
-            }
-            // Every other shape, arrays included, is one value. `terminal.args`
-            // and `server.allowed_hosts` are settings in their own right, not
-            // parents of a `terminal.args.0`.
-            _ => {
+            } else {
+                // Every other shape, arrays included, is one value. `terminal.args`
+                // and `server.allowed_hosts` are settings in their own right, not
+                // parents of a `terminal.args.0`.
                 let dotted = dux_core::config::shown_path(raw, path);
                 let line = format!(
                     "{dotted}: {} -> {}",
@@ -557,7 +560,7 @@ fn diff_node(
                 );
                 found.push((dotted, line));
             }
-        },
+        }
     }
 }
 
@@ -1566,6 +1569,8 @@ mod tests {
         fs::create_dir_all(&worktree).expect("worktree");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&worktree);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -1652,6 +1657,8 @@ mod tests {
         fs::write(project_repo.join("keep.txt"), "mine\n").expect("seed");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&project_repo);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -1732,6 +1739,8 @@ mod tests {
                 worktree.display()
             ))
             .current_dir(&repo);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -1796,6 +1805,8 @@ mod tests {
         fs::create_dir_all(&worktree).expect("worktree");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&worktree);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -1877,7 +1888,8 @@ mod tests {
         fs::create_dir_all(&folder).expect("folder");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&folder);
-        // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -3633,6 +3645,8 @@ mod tests {
         fs::create_dir_all(&home).expect("home");
         let mut command = std::process::Command::new("sleep");
         command.arg("60").current_dir(&elsewhere);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;
@@ -3698,6 +3712,8 @@ mod tests {
                 repo.display()
             ))
             .current_dir(&worktree);
+        // SAFETY: the hook runs in the forked child before exec and calls only
+        // `setsid`, which is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
                 rustix::process::setsid().map_err(std::io::Error::from)?;

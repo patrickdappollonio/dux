@@ -109,7 +109,7 @@ fn render_change_line<'a>(
         ),
         ChangeTag::Equal => (" ", Color::Reset, None, new_highlighter),
     };
-    let content = expand_tabs(change.value().trim_end_matches('\n'), context.tab_width);
+    let line_text = expand_tabs(change.value().trim_end_matches('\n'), context.tab_width);
     let mut spans = Vec::new();
     if context.show_line_numbers {
         spans.push(Span::styled(
@@ -125,15 +125,15 @@ fn render_change_line<'a>(
     // `None` means "render this line plainly", which a skipped highlight and a
     // highlighter that could not parse the line reach by different routes and
     // want the same answer to.
-    let highlighted = if context.highlight {
+    let highlighted_spans = if context.highlight {
         highlighter
-            .highlight_line(&content, &context.cache.syntax_set)
+            .highlight_line(&line_text, &context.cache.syntax_set)
             .ok()
     } else {
         None
     };
 
-    match highlighted {
+    match highlighted_spans {
         Some(ranges) if tag == ChangeTag::Equal => {
             spans.push(Span::styled(prefix, Style::default().fg(base_fg)));
             spans.extend(
@@ -153,7 +153,7 @@ fn render_change_line<'a>(
             }));
         }
         None => spans.push(Span::styled(
-            format!("{prefix}{content}"),
+            format!("{prefix}{line_text}"),
             Style::default()
                 .fg(base_fg)
                 .bg(background.unwrap_or(Color::Reset)),
@@ -195,10 +195,11 @@ pub(crate) struct DiffAnswer {
 /// everything it renders with and the run loop keeps drawing while it works.
 pub(crate) fn spawn_diff_job(
     key: DiffRequestKey,
-    theme: AppTheme,
+    theme: &AppTheme,
     cache: std::sync::Arc<SyntaxCache>,
     tx: std::sync::mpsc::Sender<DiffAnswer>,
 ) {
+    let theme = *theme;
     std::thread::spawn(move || {
         let result = diff_file(
             Path::new(&key.worktree_path),
@@ -279,7 +280,7 @@ fn count_lines(bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         return 0;
     }
-    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let newlines = memchr::memchr_iter(b'\n', bytes).count();
     if bytes.last() == Some(&b'\n') {
         newlines
     } else {
@@ -1696,7 +1697,7 @@ mod tests {
 
         spawn_diff_job(
             key.clone(),
-            AppTheme::default_dark(),
+            &AppTheme::default_dark(),
             std::sync::Arc::new(SyntaxCache::new()),
             tx,
         );

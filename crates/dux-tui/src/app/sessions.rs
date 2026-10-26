@@ -1039,7 +1039,7 @@ impl App {
                     .map(str::to_string)
             }),
         };
-        let randomize_name = initial_name.is_none()
+        let wants_random_name = initial_name.is_none()
             && self
                 .engine
                 .config
@@ -1049,7 +1049,7 @@ impl App {
         let mut randomized_name = None;
         if let Some(name) = initial_name {
             input.set_text(name);
-        } else if randomize_name {
+        } else if wants_random_name {
             let name = crate::git::docker_style_name();
             input.set_text(name.clone());
             randomized_name = Some(name);
@@ -1060,7 +1060,7 @@ impl App {
         self.prompt = PromptState::NameNewAgent {
             request,
             input,
-            randomize_name,
+            randomize_name: wants_random_name,
             randomized_name,
             copy_changes: self
                 .engine
@@ -1131,13 +1131,13 @@ impl App {
             return;
         }
         let start_folder = dux_core::project_browser::resolve_start_dir(&self.engine.config);
-        let randomize_name = self
+        let wants_random_name = self
             .engine
             .config
             .defaults
             .enable_randomized_pet_name_by_default;
         let mut randomized_name = None;
-        if randomize_name {
+        if wants_random_name {
             let name = crate::git::docker_style_name();
             agent_name.set_text(name.clone());
             randomized_name = Some(name);
@@ -1148,7 +1148,7 @@ impl App {
             destination_edited: false,
             start_folder,
             agent_name,
-            randomize_name,
+            randomize_name: wants_random_name,
             randomized_name,
             focus: CloneProjectFocus::Address,
             pull_request: None,
@@ -2441,6 +2441,10 @@ impl App {
     /// delete's removal (if any) has reported. A failure the status line
     /// reports as an error comes back as `Err` with that sentence.
     #[cfg(test)]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a test helper: a delete that never finishes must fail the test, not read as the delete's own error"
+    )]
     pub(crate) fn do_delete_session(
         &mut self,
         session_id: &str,
@@ -4255,7 +4259,7 @@ impl App {
             seq: self.diff_request_seq,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::diff::spawn_diff_job(key.clone(), self.theme, Arc::clone(&self.syntax_cache), tx);
+        crate::diff::spawn_diff_job(key.clone(), &self.theme, Arc::clone(&self.syntax_cache), tx);
         self.pending_diff = Some(PendingDiff {
             key,
             rx,
@@ -6939,7 +6943,8 @@ mod tests {
             .expect("pending read")
             .announce_at
             .expect("a selection read owes a late spinner")
-            - crate::app::SLOW_CHANGED_FILES_READ;
+            .checked_sub(crate::app::SLOW_CHANGED_FILES_READ)
+            .expect("the monotonic clock reads past the offset a test steps back");
 
         app.announce_slow_changed_files_read(started + Duration::from_millis(100));
         assert!(
@@ -9094,11 +9099,15 @@ mod tests {
         // term-b activity is the most recent (smallest elapsed), term-a the oldest.
         app.engine.pty_activity.insert(
             "term-a".to_string(),
-            std::time::Instant::now() - std::time::Duration::from_secs(30),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(30))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.engine.pty_activity.insert(
             "term-c".to_string(),
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(15))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.engine
             .pty_activity
@@ -9632,6 +9641,10 @@ mod tests {
     /// Run a project palette command with no agent selected: the project list
     /// opens, and the highlighted project (the only one, in these journeys) is
     /// picked the way a person picks it.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a test helper: the wrong prompt must fail the test, not read as the command's own error"
+    )]
     fn run_via_project_list(app: &mut App, command: &str) -> Result<()> {
         app.execute_command(command)?;
         assert!(

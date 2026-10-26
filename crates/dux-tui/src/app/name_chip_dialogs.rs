@@ -1440,16 +1440,11 @@ fn unreasoned_ratatui_wraps(source: &str) -> Vec<usize> {
         for (i, c) in code.iter().enumerate().skip(p) {
             match c {
                 '(' | '[' | '{' => depth += 1,
-                ')' | ']' => depth -= 1,
-                '}' if depth <= 0 => {
+                '}' | ';' if depth <= 0 => {
                     end = i;
                     break;
                 }
-                '}' => depth -= 1,
-                ';' if depth <= 0 => {
-                    end = i;
-                    break;
-                }
+                ')' | ']' | '}' => depth -= 1,
                 _ => {}
             }
         }

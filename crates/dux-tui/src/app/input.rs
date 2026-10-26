@@ -598,7 +598,6 @@ struct LocalScroll {
 
 fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
     match action {
-        RawSeqAction::Forward(_) => true,
         RawSeqAction::Intercept(
             Action::OpenMacroBar
             | Action::ToggleFullscreen
@@ -606,8 +605,9 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
             | Action::FocusAgent,
             _,
             _,
-        ) => false,
-        RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _) => false,
+        )
+        | RawSeqAction::Intercept(Action::ScrollPageUp | Action::ScrollPageDown, _, _)
+        | RawSeqAction::Mouse(..) => false,
         RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
             !(*scroll == RawScroll::WhenScrolledBack
                 && local.has_scrollback
@@ -616,8 +616,7 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
         RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, _) => {
             !(*scroll == RawScroll::WhenScrolledBack && local.has_scrollback)
         }
-        RawSeqAction::Intercept(..) => true,
-        RawSeqAction::Mouse(..) => false,
+        RawSeqAction::Forward(_) | RawSeqAction::Intercept(..) => true,
     }
 }
 
@@ -1964,8 +1963,6 @@ impl App {
         let mut refresh_path_completions = false;
         let mut select_startup_log: Option<usize> = None;
         match &mut self.prompt {
-            PromptState::None => {}
-
             // Type-immediately: the palette query.
             PromptState::Command { input, selected } => {
                 input.insert_str(text);
@@ -2067,12 +2064,13 @@ impl App {
                     state.name_input.insert_str(text);
                 }
             }
-            // The macro list, and the nested delete-confirm, own no text.
-            PromptState::EditMacros { .. } => {}
-
             // Report, confirm, and picker modals hold no text field; the
             // paste is dropped, as their key handlers drop plain characters.
-            PromptState::AgentInfo(_)
+            // The macro list and the nested delete-confirm own no text either,
+            // and with nothing open there is nothing to paste into.
+            PromptState::None
+            | PromptState::EditMacros { .. }
+            | PromptState::AgentInfo(_)
             | PromptState::AddProjectFailed { .. }
             | PromptState::FirstLoad(_)
             | PromptState::DebugInput { .. }
@@ -7025,7 +7023,6 @@ impl App {
 
     fn prompt_mouse_target(&self, column: u16, row: u16) -> Option<PromptMouseTarget> {
         match self.overlay_layout.active {
-            OverlayMouseLayout::None | OverlayMouseLayout::Help => None,
             OverlayMouseLayout::Command {
                 input,
                 list,
@@ -7119,7 +7116,9 @@ impl App {
                 column,
                 row,
             ),
-            OverlayMouseLayout::ResourceMonitor { .. } => None,
+            OverlayMouseLayout::None
+            | OverlayMouseLayout::Help
+            | OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::StartupCommandLogs {
                 input,
                 list,
@@ -7873,7 +7872,10 @@ impl App {
         } = &self.prompt
         {
             if let Some(binding) = self.palette_command_at(&input.text, *selected) {
-                binding.palette_name.unwrap().to_string()
+                binding
+                    .palette_name
+                    .expect("the palette lists only bindings that carry a palette name")
+                    .to_string()
             } else {
                 input.text.trim().to_string()
             }
@@ -8146,7 +8148,9 @@ impl App {
                 if direction == FocusStep::Forward {
                     KillRunningFocus::Footer(enabled[0])
                 } else {
-                    KillRunningFocus::Footer(*enabled.last().unwrap())
+                    KillRunningFocus::Footer(
+                        *enabled.last().expect("an empty footer returned above"),
+                    )
                 }
             }
             Some(current) => {
@@ -8154,7 +8158,9 @@ impl App {
                     return if direction == FocusStep::Forward {
                         KillRunningFocus::Footer(enabled[0])
                     } else {
-                        KillRunningFocus::Footer(*enabled.last().unwrap())
+                        KillRunningFocus::Footer(
+                            *enabled.last().expect("an empty footer returned above"),
+                        )
                     };
                 };
                 if direction == FocusStep::Forward {
@@ -10560,7 +10566,8 @@ impl App {
             ButtonPressedTarget::ConfirmInitRepoConfirm => {
                 self.resolve_confirm_init_repo(ConfirmAnswer::Confirm)
             }
-            ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
+            ButtonPressedTarget::ConfirmNonDefaultBranchCancel
+            | ButtonPressedTarget::AgentInfoClose => {
                 self.prompt = PromptState::None;
                 false
             }
@@ -10583,10 +10590,6 @@ impl App {
                 self.resolve_config_reload_failed(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
-            ButtonPressedTarget::AgentInfoClose => {
-                self.prompt = PromptState::None;
-                false
-            }
             // The clicked button takes focus first, so a click and the focused
             // confirm key are the same act reaching the same place.
             ButtonPressedTarget::StartupCommandLogsClose => {
@@ -11834,8 +11837,8 @@ impl App {
     /// rect and not about whether a drop there would mean anything.
     fn row_drag_target_row(&self, list: RowDragList, mouse: MouseEvent) -> Option<usize> {
         match (list, self.mouse_target(mouse.column, mouse.row)) {
-            (RowDragList::Agents, Some(MouseTarget::LeftRow(index))) => Some(index),
-            (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
+            (RowDragList::Agents, Some(MouseTarget::LeftRow(index)))
+            | (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
             _ => None,
         }
     }
@@ -23234,8 +23237,11 @@ not_a_real_action = ["x"]
         app.active_terminal_id = None;
         // Backdate the regain so the (default 3 s) grace has fully elapsed.
         app.terminal_focus.on_focus_lost();
-        app.terminal_focus
-            .on_focus_gained(std::time::Instant::now() - std::time::Duration::from_secs(4));
+        app.terminal_focus.on_focus_gained(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(4))
+                .expect("the monotonic clock reads past the offset a test steps back"),
+        );
 
         app.note_focused_agent_viewed();
 
@@ -26986,7 +26992,7 @@ cyan = "#00ffff"
             match app.engine.worker_rx.recv_timeout(remaining) {
                 Ok(WorkerEvent::AgentLaunchFailed(data)) => return data.request,
                 Ok(WorkerEvent::AgentLaunchReady(data)) => return data.request,
-                Ok(_) => continue,
+                Ok(_) => {}
                 Err(err) => panic!("no dispatched launch event arrived: {err}"),
             }
         }
@@ -28392,7 +28398,7 @@ cyan = "#00ffff"
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
 
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28410,7 +28416,7 @@ cyan = "#00ffff"
             .foreground_cmd = Some("zsh".to_string());
         app.engine
             .companion_terminals
-            .get_mut(&session_tid)
+            .get_mut(&companion_tid)
             .unwrap()
             .foreground_cmd = Some("ash".to_string());
 
@@ -28429,7 +28435,7 @@ cyan = "#00ffff"
                 .map(|(id, _)| id.as_str())
                 .collect();
             assert!(
-                ids.contains(&standalone_tid.as_str()) && ids.contains(&session_tid.as_str()),
+                ids.contains(&standalone_tid.as_str()) && ids.contains(&companion_tid.as_str()),
                 "both terminals must be listed under sort mode {mode}; got {ids:?}"
             );
         }
@@ -28441,7 +28447,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str(), standalone_tid.as_str()],
+            vec![companion_tid.as_str(), standalone_tid.as_str()],
         );
         // Name ascending puts "ash" before "zsh"; descending flips it, which is
         // only meaningful because the standalone row takes part in the compare.
@@ -28451,7 +28457,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![standalone_tid.as_str(), session_tid.as_str()],
+            vec![standalone_tid.as_str(), companion_tid.as_str()],
         );
     }
 
@@ -28474,7 +28480,7 @@ cyan = "#00ffff"
         let session_id = app.engine.sessions[0].id.clone();
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28496,7 +28502,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str()],
+            vec![companion_tid.as_str()],
         );
         assert_eq!(
             app.selected_terminal_index, 0,
@@ -28538,7 +28544,7 @@ cyan = "#00ffff"
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
         let session_id = app.engine.sessions[0].id.clone();
-        let (session_tid, _) = app
+        let (companion_tid, _) = app
             .engine
             .create_companion_terminal(&session_id, 24, 80)
             .expect("session terminal");
@@ -28629,7 +28635,7 @@ cyan = "#00ffff"
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            vec![session_tid.as_str(), standalone_tid.as_str()],
+            vec![companion_tid.as_str(), standalone_tid.as_str()],
             "the full list is back",
         );
         assert_eq!(
@@ -30662,7 +30668,7 @@ cyan = "#00ffff"
                     };
                 }
                 Ok(other) => app.engine.worker_tx.send(other).unwrap(),
-                Err(_) => panic!("the clone never answered"),
+                Err(err) => panic!("the clone never answered: {err}"),
             }
         };
         app.engine.worker_tx.send(succeeded).unwrap();
@@ -32118,7 +32124,9 @@ cyan = "#00ffff"
             .mark_session_status(&session_id, SessionStatus::Active);
         app.engine.resume_fallback_candidates.insert(
             TabId::new(slot_tab.clone()),
-            std::time::Instant::now() - std::time::Duration::from_millis(20),
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(20))
+                .expect("the monotonic clock reads past the offset a test steps back"),
         );
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;

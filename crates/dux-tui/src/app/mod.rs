@@ -1490,9 +1490,8 @@ impl RightSection {
     pub(crate) fn next(self, staged: StagedFiles) -> Option<Self> {
         match self {
             Self::Unstaged if (staged == StagedFiles::Present) => Some(Self::Staged),
-            Self::Unstaged => None,
+            Self::Unstaged | Self::CommitInput => None,
             Self::Staged => Some(Self::CommitInput),
-            Self::CommitInput => None,
         }
     }
 
@@ -1795,9 +1794,8 @@ pub(crate) use dux_core::agent_tabs::branch_drifted;
 /// get swallowed.
 pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
     match elapsed_ms % 2000 {
-        200..=399 => false, // blink 1: hide
-        600..=799 => false, // blink 2: hide
-        _ => true,          // leading show, the gap between blinks, and the hold
+        200..=399 | 600..=799 => false, // blinks 1 and 2: hide
+        _ => true,                      // leading show, the gap between blinks, and the hold
     }
 }
 
@@ -4826,7 +4824,7 @@ impl App {
             interactive_patterns,
             signals,
             status,
-            theme,
+            &theme,
             &SessionRestore::Restore,
         ))
     }
@@ -4845,7 +4843,7 @@ impl App {
         interactive_patterns: InteractiveBytePatterns,
         signals: SignalHandles,
         status: KeyedStatusController,
-        theme: Theme,
+        theme: &Theme,
         restore: &SessionRestore,
     ) -> App {
         let pr_banner_at_bottom = dux_core::config_effective::effective_pr_banner_position(
@@ -4927,7 +4925,7 @@ impl App {
             last_diff_height: 0,
             last_diff_visual_lines: 0,
             diff_rows: None,
-            theme,
+            theme: *theme,
             tick_count: 0,
             start_time: Instant::now(),
             refusal_blink: None,
@@ -5082,7 +5080,7 @@ impl App {
             interactive_patterns,
             signals,
             status,
-            theme,
+            &theme,
             &SessionRestore::Skip,
         ))
     }
@@ -11054,6 +11052,9 @@ leading_branch = "main"
         let after_resume = Arc::new(AtomicBool::new(false));
         let resume_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&after_resume))
             .expect("re-register SIGURG after a flip");
+        // SAFETY: SIGURG is ignored by default, and the only handler installed for
+        // it is signal-hook's, which sets an atomic flag; raising it on this
+        // thread runs nothing else.
         unsafe { libc::raise(libc::SIGURG) };
         assert!(
             after_resume.load(Ordering::SeqCst),
@@ -11070,11 +11071,16 @@ leading_branch = "main"
         let pre_reset_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&pre_reset))
             .expect("register SIGURG before reset");
         signal_hook::low_level::unregister(pre_reset_id);
+        // SAFETY: restoring SIGURG's default disposition (ignore) installs no
+        // handler, so nothing runs in signal context.
         unsafe { libc::signal(libc::SIGURG, libc::SIG_DFL) };
 
         let dormant = Arc::new(AtomicBool::new(false));
         let dormant_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&dormant))
             .expect("re-register SIGURG after a SIG_DFL reset");
+        // SAFETY: SIGURG is ignored by default, and the only handler installed for
+        // it is signal-hook's, which sets an atomic flag; raising it on this
+        // thread runs nothing else.
         unsafe { libc::raise(libc::SIGURG) };
         assert!(
             !dormant.load(Ordering::SeqCst),

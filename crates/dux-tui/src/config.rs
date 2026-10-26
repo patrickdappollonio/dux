@@ -1914,10 +1914,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     out.push('\n');
                 }
                 match value_fn(config) {
-                    FieldValue::Str(s) => {
-                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
-                    }
-                    FieldValue::OptStr(Some(s)) => {
+                    FieldValue::Str(s) | FieldValue::OptStr(Some(s)) => {
                         let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
                     }
                     FieldValue::OptStr(None) => {

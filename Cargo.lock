@@ -1203,6 +1203,7 @@ dependencies = [
  "home",
  "indexmap 2.14.0",
  "libc",
+ "memchr",
  "notify",
  "opaline",
  "ratatui",

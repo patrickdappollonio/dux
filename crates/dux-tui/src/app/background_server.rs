@@ -790,8 +790,9 @@ impl App {
         outcome: dux_core::config::TailscaleModeOutcome,
     ) {
         self.note_reload_tailscale_change_done(mode, outcome);
-        match self.pending_tailscale_mode_op.take() {
-            Some(op) => self.apply_reaction(op.resolve(&outcome).into_reaction()),
+        if let Some(op) = self.pending_tailscale_mode_op.take() {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+        } else {
             // No op waiting: the serve answered a request this surface no longer
             // remembers (a stop and start across it, say). Say it anyway rather
             // than swallowing a listener change nobody asked about, and say it on
@@ -799,20 +800,18 @@ impl App {
             // fact about the process rather than an answer owed to this screen,
             // and a browser reaching dux over the tailnet is as affected as the
             // terminal in front of it.
-            None => {
-                let report = outcome.report(mode);
-                let tone = if report.warning {
-                    dux_core::statusline::StatusTone::Warning
-                } else {
-                    dux_core::statusline::StatusTone::Info
-                };
-                self.engine
-                    .post_status(dux_core::engine::StatusUpdate::keyed(
-                        dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
-                        tone,
-                        report.message,
-                    ));
-            }
+            let report = outcome.report(mode);
+            let tone = if report.warning {
+                dux_core::statusline::StatusTone::Warning
+            } else {
+                dux_core::statusline::StatusTone::Info
+            };
+            self.engine
+                .post_status(dux_core::engine::StatusUpdate::keyed(
+                    dux_core::tailscale::MODE_CHANGE_STATUS_KEY,
+                    tone,
+                    report.message,
+                ));
         }
     }
 
