@@ -24,9 +24,9 @@ pub(crate) mod removal;
 mod rename;
 mod resume_fallback;
 mod spawn_worker;
-#[cfg(any(test, feature = "test-support"))]
 pub use clone::CloneAskedBy;
 pub use reload_origin::ReloadSlot;
+#[cfg(any(test, feature = "test-support"))]
 pub use spawn_worker::fail_next_worker_spawn;
 pub mod status_op;
 
