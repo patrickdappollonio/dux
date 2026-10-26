@@ -1475,6 +1475,17 @@ mod tests {
         dir
     }
 
+    /// Make the local branch `name` in the working copy `dir`.
+    fn make_branch(dir: &Path, name: &str) {
+        let made = crate::git::test_support::git_command()
+            .arg("-C")
+            .arg(dir)
+            .args(["branch", name])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+    }
+
     #[test]
     fn a_folder_is_judged_by_what_it_holds_against_the_repository_asked_for() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1567,13 +1578,7 @@ mod tests {
             ("typed", "fix-docs-review")
         );
         assert_eq!(ask("my-own-name"), Some(ReviewCopyOutlook::NotNeeded));
-        let made = crate::git::test_support::git_command()
-            .arg("-C")
-            .arg(&ours)
-            .args(["branch", "fix-docs-review"])
-            .output()
-            .unwrap();
-        assert!(made.status.success());
+        make_branch(&ours, "fix-docs-review");
         assert_eq!(ask("fix-docs-review"), Some(ReviewCopyOutlook::NotNeeded));
 
         let refused = inspect(&ours, &[project.as_str()])

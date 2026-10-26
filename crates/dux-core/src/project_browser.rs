@@ -774,6 +774,16 @@ mod tests {
         }
     }
 
+    /// A worktree as git lists it: at `path`, with `head` out on `branch`.
+    fn listed_worktree(path: &Path, head: &str, branch: &str) -> git::GitWorktree {
+        git::GitWorktree {
+            path: path.to_path_buf(),
+            head: Some(head.to_string()),
+            branch_name: Some(branch.to_string()),
+            detached: false,
+        }
+    }
+
     #[test]
     fn classify_project_worktrees_marks_managed_external_and_existing_agent() {
         let root =
@@ -834,30 +844,10 @@ mod tests {
             }),
         }];
         let worktrees = vec![
-            git::GitWorktree {
-                path: repo.clone(),
-                head: Some("0000000".to_string()),
-                branch_name: Some("main".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: managed.clone(),
-                head: Some("1111111".to_string()),
-                branch_name: Some("managed-orphan".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: external.clone(),
-                head: Some("2222222".to_string()),
-                branch_name: Some("feature".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: existing.clone(),
-                head: Some("3333333".to_string()),
-                branch_name: Some("existing".to_string()),
-                detached: false,
-            },
+            listed_worktree(&repo, "0000000", "main"),
+            listed_worktree(&managed, "1111111", "managed-orphan"),
+            listed_worktree(&external, "2222222", "feature"),
+            listed_worktree(&existing, "3333333", "existing"),
         ];
 
         let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);

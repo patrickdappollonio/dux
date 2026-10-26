@@ -2192,137 +2192,134 @@ impl CreatePlanContext<'_> {
         ask_id: Option<&str>,
         agents: &[crate::worker::AgentAtWorktree],
     ) -> Option<ManagedCreatePlan> {
-        Some({
-            let repo_path = PathBuf::from(&project.path);
-            // A typed name is the agent's durable title; falling back to the PR
-            // head branch means no user-authored name, so leave title empty.
-            // (Named `agent_title` to avoid shadowing the PR `title` above.)
-            let mut agent_title = custom_name.clone();
-            let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.to_string());
-            // From here on a failure names the agent that was being made.
-            self.attempted_name = Some(resolved_name.clone());
-            let fetch = PrFetch {
-                repo_path: &repo_path,
-                owner_repo,
-                number,
-            };
-            let LocalBranchJudgement {
-                head_commit,
-                validated_tip,
-                containment,
-            } = self.judge_local_branch(fetch, &resolved_name, agents)?;
-            let busy = self.check_busy_pr_branch(
-                project,
-                &repo_path,
+        let repo_path = PathBuf::from(&project.path);
+        // A typed name is the agent's durable title; falling back to the PR
+        // head branch means no user-authored name, so leave title empty.
+        // (Named `agent_title` to avoid shadowing the PR `title` above.)
+        let mut agent_title = custom_name.clone();
+        let mut resolved_name = custom_name.unwrap_or_else(|| head_branch.to_string());
+        // From here on a failure names the agent that was being made.
+        self.attempted_name = Some(resolved_name.clone());
+        let fetch = PrFetch {
+            repo_path: &repo_path,
+            owner_repo,
+            number,
+        };
+        let LocalBranchJudgement {
+            head_commit,
+            validated_tip,
+            containment,
+        } = self.judge_local_branch(fetch, &resolved_name, agents)?;
+        let busy = self.check_busy_pr_branch(
+            project,
+            &repo_path,
+            &resolved_name,
+            head_branch,
+            number,
+            agents,
+            head_commit.as_deref(),
+            &containment,
+            review_copy,
+            ask_id,
+        );
+        let (fresh_copy, fast_forward) = match busy {
+            BusyBranchCheck::Refused => return None,
+            BusyBranchCheck::Free => (None, None),
+            BusyBranchCheck::FastForward { old_tip, commit } => (None, Some((old_tip, commit))),
+            BusyBranchCheck::FreshCopy(copy) => {
+                // The copy is named after the branch it actually got, so
+                // the sidebar does not show two rows with the busy name.
+                resolved_name.clone_from(&copy.new_branch);
+                self.attempted_name = Some(resolved_name.clone());
+                agent_title = Some(copy.new_branch.clone());
+                (Some(copy), None)
+            }
+        };
+        // Two separate questions. `attach_existing` decides how the worktree
+        // is made: only a LOCAL branch that contains the pull request's head
+        // commit is checked out as it is. Anything else, a remote-tracking
+        // copy included, is fetched from the pull request's own head ref,
+        // because a fork's pull request often shares its branch name with
+        // an unrelated upstream branch.
+        //
+        // `local_branch_existed` decides whose branch it is: only a local
+        // branch that was there first is the user's, and the ref on origin
+        // is never touched either way. A fresh copy's name was chosen
+        // because no branch has it, so the copy always takes the fetch path
+        // and its branch is always dux's.
+        if self.refuse_occupied_folder(&project.name, &resolved_name) {
+            return None;
+        }
+        let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
+        let attach = if fresh_copy.is_none()
+            && (branch == BranchAttach::AttachExisting || local_branch_existed)
+        {
+            BranchAttach::AttachExisting
+        } else {
+            BranchAttach::CreateNew
+        };
+        if !self.announce_or_fetch_pr_branch(fetch, &project.name, &resolved_name, attach) {
+            return None;
+        }
+        // Whether the fetch minted `refs/heads/<name>` or the worktree
+        // add DWIMed it out of `origin/<name>`, dux made the local branch
+        // and it is dux's to clean up. Only a local branch that was
+        // already there is the user's and stays.
+        let branch_provenance = if local_branch_existed {
+            BranchProvenance::AttachedExisting
+        } else {
+            BranchProvenance::CreatedByDux
+        };
+        let (branch_name, worktree_path) =
+            self.create_pr_worktree(fetch, &project.name, &resolved_name, branch_provenance)?;
+        // A branch the user had is used only as it was judged, and only
+        // from inside the worktree that now holds it: git lets no other
+        // worktree check it out meanwhile, so what is read here is what the
+        // agent gets. A branch to move forward is moved here too, with its
+        // files, for the same reason.
+        let moved_forward = if attach == BranchAttach::AttachExisting && fresh_copy.is_none() {
+            self.reuse_branch_or_undo(
+                fetch,
+                &worktree_path,
                 &resolved_name,
-                head_branch,
-                number,
-                agents,
                 head_commit.as_deref(),
-                &containment,
-                review_copy,
-                ask_id,
-            );
-            let (fresh_copy, fast_forward) = match busy {
-                BusyBranchCheck::Refused => return None,
-                BusyBranchCheck::Free => (None, None),
-                BusyBranchCheck::FastForward { old_tip, commit } => (None, Some((old_tip, commit))),
-                BusyBranchCheck::FreshCopy(copy) => {
-                    // The copy is named after the branch it actually got, so
-                    // the sidebar does not show two rows with the busy name.
-                    resolved_name.clone_from(&copy.new_branch);
-                    self.attempted_name = Some(resolved_name.clone());
-                    agent_title = Some(copy.new_branch.clone());
-                    (Some(copy), None)
-                }
-            };
-            // Two separate questions. `attach_existing` decides how the worktree
-            // is made: only a LOCAL branch that contains the pull request's head
-            // commit is checked out as it is. Anything else, a remote-tracking
-            // copy included, is fetched from the pull request's own head ref,
-            // because a fork's pull request often shares its branch name with
-            // an unrelated upstream branch.
-            //
-            // `local_branch_existed` decides whose branch it is: only a local
-            // branch that was there first is the user's, and the ref on origin
-            // is never touched either way. A fresh copy's name was chosen
-            // because no branch has it, so the copy always takes the fetch path
-            // and its branch is always dux's.
-            if self.refuse_occupied_folder(&project.name, &resolved_name) {
-                return None;
-            }
-            let local_branch_existed = git::local_branch_exists(&repo_path, &resolved_name);
-            let attach = if fresh_copy.is_none()
-                && (branch == BranchAttach::AttachExisting || local_branch_existed)
-            {
-                BranchAttach::AttachExisting
-            } else {
-                BranchAttach::CreateNew
-            };
-            if !self.announce_or_fetch_pr_branch(fetch, &project.name, &resolved_name, attach) {
-                return None;
-            }
-            // Whether the fetch minted `refs/heads/<name>` or the worktree
-            // add DWIMed it out of `origin/<name>`, dux made the local branch
-            // and it is dux's to clean up. Only a local branch that was
-            // already there is the user's and stays.
-            let branch_provenance = if local_branch_existed {
-                BranchProvenance::AttachedExisting
-            } else {
-                BranchProvenance::CreatedByDux
-            };
-            let (branch_name, worktree_path) =
-                self.create_pr_worktree(fetch, &project.name, &resolved_name, branch_provenance)?;
-            // A branch the user had is used only as it was judged, and only
-            // from inside the worktree that now holds it: git lets no other
-            // worktree check it out meanwhile, so what is read here is what the
-            // agent gets. A branch to move forward is moved here too, with its
-            // files, for the same reason.
-            let moved_forward = if attach == BranchAttach::AttachExisting && fresh_copy.is_none() {
-                self.reuse_branch_or_undo(
-                    fetch,
-                    &worktree_path,
-                    &resolved_name,
-                    head_commit.as_deref(),
-                    validated_tip.as_deref(),
-                    fast_forward.as_ref(),
-                )
-                .ok()?
-            } else {
-                None
-            };
-            let (status_lead, pull_request_pin) =
-                fresh_copy.as_ref().map_or((None, None), |copy| {
-                    let pin = review_copy_pin(copy, host, owner_repo, number, title, state);
-                    (
-                        self.announce_fresh_copy(&repo_path, copy),
-                        Some(Box::new(pin)),
-                    )
-                });
-            logger::info(&format!(
-                "created PR worktree from {owner_repo} #{number} ({state}) {}",
-                gh::pull_request_url(host, owner_repo, number)
-            ));
-            ManagedCreatePlan {
-                project: project.clone(),
-                provider: project.default_provider.clone(),
-                source_branch: project.current_branch.clone(),
-                status_message: pull_request_created_status(project, &branch_name, number, title),
-                // Quiet on the web: the new row carries the pull-request chip
-                // and its pane launches and streams. A fresh copy's note makes
-                // it loud when the job folds the notes in.
-                status_quiet: ROW_AND_PANE_CREATE_QUIET,
-                branch_name,
-                worktree_path,
-                owns_worktree: true,
-                title: agent_title,
-                launch_with_resume: false,
-                pending_copy: None,
-                status_lead,
-                pull_request_pin,
-                branch_provenance,
-                moved_forward,
-            }
+                validated_tip.as_deref(),
+                fast_forward.as_ref(),
+            )
+            .ok()?
+        } else {
+            None
+        };
+        let (status_lead, pull_request_pin) = fresh_copy.as_ref().map_or((None, None), |copy| {
+            let pin = review_copy_pin(copy, host, owner_repo, number, title, state);
+            (
+                self.announce_fresh_copy(&repo_path, copy),
+                Some(Box::new(pin)),
+            )
+        });
+        logger::info(&format!(
+            "created PR worktree from {owner_repo} #{number} ({state}) {}",
+            gh::pull_request_url(host, owner_repo, number)
+        ));
+        Some(ManagedCreatePlan {
+            project: project.clone(),
+            provider: project.default_provider.clone(),
+            source_branch: project.current_branch.clone(),
+            status_message: pull_request_created_status(project, &branch_name, number, title),
+            // Quiet on the web: the new row carries the pull-request chip
+            // and its pane launches and streams. A fresh copy's note makes
+            // it loud when the job folds the notes in.
+            status_quiet: ROW_AND_PANE_CREATE_QUIET,
+            branch_name,
+            worktree_path,
+            owns_worktree: true,
+            title: agent_title,
+            launch_with_resume: false,
+            pending_copy: None,
+            status_lead,
+            pull_request_pin,
+            branch_provenance,
+            moved_forward,
         })
     }
 
@@ -4736,10 +4733,8 @@ mod tests {
         ];
         for (repo, warned, warning) in cases {
             let worktrees_before = worktree_paths(repo);
-            let mut asking = pull_request_request(repo, None);
-            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut asking {
-                *review_copy = crate::worker::ReviewCopyConsent::Withheld;
-            }
+            let asking =
+                pull_request_request_with_consent(repo, crate::worker::ReviewCopyConsent::Withheld);
             let refused = drive_create_job_run(repo, asking);
             assert_eq!(
                 refused.failure.as_deref(),
@@ -4763,10 +4758,10 @@ mod tests {
             assert!(!crate::git::local_branch_exists(repo, "pr-head-review"));
 
             // A request that agrees with a flag is told the flag, not the box.
-            let mut by_flag = pull_request_request(repo, None);
-            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut by_flag {
-                *review_copy = crate::worker::ReviewCopyConsent::WithheldByFlag;
-            }
+            let by_flag = pull_request_request_with_consent(
+                repo,
+                crate::worker::ReviewCopyConsent::WithheldByFlag,
+            );
             let flagged = drive_create_job_run(repo, by_flag);
             assert_eq!(
                 flagged.failure.as_deref(),
@@ -4779,21 +4774,21 @@ mod tests {
             );
 
             // Agreeing to a different copy than the one warned about asks again.
-            let mut other = pull_request_request(repo, None);
-            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut other {
-                *review_copy = crate::worker::ReviewCopyConsent::Warned(
+            let other = pull_request_request_with_consent(
+                repo,
+                crate::worker::ReviewCopyConsent::Warned(
                     "unknown:#42:pr-head-review:x".to_string(),
-                );
-            }
+                ),
+            );
             let again = drive_create_job_run(repo, other);
             assert!(again.session.is_none());
             assert!(again.failure_ask.is_some(), "{:?}", again.failure);
 
             // Agreeing to this one makes it.
-            let mut agreed = pull_request_request(repo, None);
-            if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut agreed {
-                *review_copy = crate::worker::ReviewCopyConsent::Warned(warned.clone());
-            }
+            let agreed = pull_request_request_with_consent(
+                repo,
+                crate::worker::ReviewCopyConsent::Warned(warned.clone()),
+            );
             let made = drive_create_job_run(repo, agreed);
             assert_eq!(
                 made.session.expect("a session").branch_name().unwrap(),
@@ -4878,6 +4873,19 @@ mod tests {
         git_in(origin.path(), &["checkout", "--detach"]);
         git_in(origin.path(), &["branch", "-D", "--", "pr-head"]);
         (origin, repo)
+    }
+
+    /// [`pull_request_request`] with no name typed, answering the review copy
+    /// question with `consent`.
+    fn pull_request_request_with_consent(
+        repo: &Path,
+        consent: crate::worker::ReviewCopyConsent,
+    ) -> CreateAgentRequest {
+        let mut request = pull_request_request(repo, None);
+        if let CreateAgentRequest::PullRequest { review_copy, .. } = &mut request {
+            *review_copy = consent;
+        }
+        request
     }
 
     fn pull_request_request(repo: &Path, custom_name: Option<&str>) -> CreateAgentRequest {
@@ -5024,6 +5032,42 @@ mod tests {
             .collect()
     }
 
+    /// [`pull_request_request`] with no name typed, from a project whose agents
+    /// are `agents`, each by its name and worktree.
+    fn pull_request_request_among(repo: &Path, agents: &[(&str, &Path)]) -> CreateAgentRequest {
+        let mut request = pull_request_request(repo, None);
+        if let CreateAgentRequest::PullRequest { agents: known, .. } = &mut request {
+            known.extend(
+                agents
+                    .iter()
+                    .map(|(name, worktree)| crate::worker::AgentAtWorktree {
+                        name: (*name).to_string(),
+                        worktree_path: worktree.to_path_buf(),
+                    }),
+            );
+        }
+        request
+    }
+
+    /// A complete fresh copy's create `message` says where the pushes go and
+    /// claims nothing it cannot know.
+    fn assert_a_fresh_copy_says_where_pushes_go(message: &str) {
+        assert!(
+            message.ends_with(
+                ". The agent is on its own branch \"pr-head-review\", so pushes from it go there, not to the pull request."
+            ),
+            "the note says where the pushes go: {message}"
+        );
+        assert!(
+            !message.contains("It is linked"),
+            "the worker cannot know the link will hold, so it never claims it: {message}"
+        );
+        assert!(
+            !message.contains("This copy is missing"),
+            "nothing is missing, so no count is claimed: {message}"
+        );
+    }
+
     #[test]
     fn a_pull_request_branch_checked_out_in_another_worktree_gets_a_fresh_copy() {
         let (origin, repo) = pr_repo_with_fake_origin();
@@ -5033,13 +5077,7 @@ mod tests {
         // An agent that already has the pull request's code is pointed to, and
         // nothing is created.
         let worktrees_before = worktree_paths(repo.path());
-        let mut held_by_agent = pull_request_request(repo.path(), None);
-        if let CreateAgentRequest::PullRequest { agents, .. } = &mut held_by_agent {
-            agents.push(crate::worker::AgentAtWorktree {
-                name: "reviewer".to_string(),
-                worktree_path: holder.clone(),
-            });
-        }
+        let held_by_agent = pull_request_request_among(repo.path(), &[("reviewer", &holder)]);
         let refused = drive_create_job_run(repo.path(), held_by_agent);
         let folder = crate::home_path::shorten_home(&holder);
         assert_eq!(
@@ -5096,21 +5134,8 @@ mod tests {
             "the busy branch did not move"
         );
         let message = run.status_message.expect("a create message");
-        assert!(
-            message.ends_with(
-                ". The agent is on its own branch \"pr-head-review\", so pushes from it go there, not to the pull request."
-            ),
-            "the note says where the pushes go: {message}"
-        );
         let _ = folder;
-        assert!(
-            !message.contains("It is linked"),
-            "the worker cannot know the link will hold, so it never claims it: {message}"
-        );
-        assert!(
-            !message.contains("This copy is missing"),
-            "nothing is missing, so no count is claimed: {message}"
-        );
+        assert_a_fresh_copy_says_where_pushes_go(&message);
         assert_eq!(
             run.status_quiet,
             crate::statusline::QuietSurfaces::LOUD,
@@ -5128,13 +5153,7 @@ mod tests {
                 &git_stdout(repo.path(), &["rev-parse", "main"]),
             ],
         );
-        let mut diverged_agent = pull_request_request(repo.path(), None);
-        if let CreateAgentRequest::PullRequest { agents, .. } = &mut diverged_agent {
-            agents.push(crate::worker::AgentAtWorktree {
-                name: "reviewer".to_string(),
-                worktree_path: holder.clone(),
-            });
-        }
+        let diverged_agent = pull_request_request_among(repo.path(), &[("reviewer", &holder)]);
         let run = drive_create_job_run(repo.path(), diverged_agent);
         assert_eq!(
             run.session.expect("a session").branch_name().unwrap(),
@@ -5143,17 +5162,8 @@ mod tests {
 
         // An earlier copy is an agent that already has the code, whichever
         // branch name it sits on: it is pointed to instead of a third copy.
-        let mut with_earlier_copy = pull_request_request(repo.path(), None);
-        if let CreateAgentRequest::PullRequest { agents, .. } = &mut with_earlier_copy {
-            agents.push(crate::worker::AgentAtWorktree {
-                name: "reviewer".to_string(),
-                worktree_path: holder.clone(),
-            });
-            agents.push(crate::worker::AgentAtWorktree {
-                name: "first-copy".to_string(),
-                worktree_path: copy.to_path_buf(),
-            });
-        }
+        let with_earlier_copy =
+            pull_request_request_among(repo.path(), &[("reviewer", &holder), ("first-copy", copy)]);
         let refused = drive_create_job_run(repo.path(), with_earlier_copy);
         let copy_folder = crate::home_path::shorten_home(copy);
         assert_eq!(

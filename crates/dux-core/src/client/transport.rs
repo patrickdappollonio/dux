@@ -841,7 +841,7 @@ impl Transport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::test_server::{FakeDux, Reply, private_dir};
+    use crate::client::test_server::{FakeDux, Reply, Seen, private_dir};
 
     #[test]
     fn a_request_reaches_the_socket_with_its_body_and_token() {
@@ -868,12 +868,11 @@ mod tests {
         assert_eq!(seen[0].header("user-agent"), Some("dux CLI"));
     }
 
-    #[test]
-    fn a_reply_is_read_whole_and_only_within_the_client_limits() {
-        let dir = private_dir();
-        let socket = dir.path().join("dux.sock");
-        let _fake = FakeDux::unix(&socket, |seen| {
-            match seen.path.as_str() {
+    /// The replies [`a_reply_is_read_whole_and_only_within_the_client_limits`]
+    /// reads, by path: framings to read whole, and ones past the client's
+    /// limits.
+    fn reply_at_the_limits(seen: &Seen) -> Reply {
+        match seen.path.as_str() {
             "/chunked" => Reply::Raw(
                 "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n7;x=1\r\n, world\r\n0\r\n\r\n"
                     .to_string(),
@@ -909,7 +908,13 @@ mod tests {
             ),
             _ => Reply::Raw("HTTP/1.1 404 Not Found\r\n\r\nunknown session".to_string()),
         }
-        });
+    }
+
+    #[test]
+    fn a_reply_is_read_whole_and_only_within_the_client_limits() {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, reply_at_the_limits);
         let transport = UnixTransport::new(&socket);
         let chunked = transport.send(&Request::get("/chunked")).unwrap();
         assert_eq!(

@@ -3854,6 +3854,39 @@ mod tests {
         })
     }
 
+    /// What the pull request lookup finds for the agent on `feat/x` whose
+    /// worktree is `worktree`, knowing `known`, when the branch's ref answers
+    /// `ref_value` and the search by head name answers `nodes`, for a branch dux
+    /// minted at `minted`.
+    fn deleted_branch_lookup(
+        worktree: &str,
+        known: Option<StoredPr>,
+        ref_value: &serde_json::Value,
+        nodes: &[serde_json::Value],
+        minted: Option<&str>,
+    ) -> Option<(u64, PrState)> {
+        let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
+        p.worktree_path = worktree.to_string();
+        p.branch_minted_at = minted.map(|t| t.parse().unwrap());
+        let ps = vec![p];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let data = serde_json::json!({
+            "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
+        });
+        let (results, _) = parse_chunk_response(
+            &ps,
+            &chunk,
+            &pos_repo,
+            Some(&data),
+            &head_commit_in_local_history,
+        );
+        results[0]
+            .1
+            .as_ref()
+            .map(|pr| (pr.number, pr.state.clone()))
+    }
+
     /// A merge that deletes the head branch leaves the ref lookup with nothing
     /// to answer, so a pull request dux never saw while the branch existed is
     /// found by its head name instead. Branch names get reused, so a match is
@@ -3864,33 +3897,9 @@ mod tests {
     fn a_pull_request_whose_branch_was_deleted_is_found_by_head_name_only_when_it_is_ours() {
         let (dir, tip, stray) = repo_with_feature_branch();
         let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup_with = |known: Option<StoredPr>,
-                           ref_value: serde_json::Value,
-                           nodes: Vec<serde_json::Value>,
-                           minted: Option<&str>|
-         -> Option<(u64, PrState)> {
-            let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
-            p.worktree_path = worktree.clone();
-            p.branch_minted_at = minted.map(|t| t.parse().unwrap());
-            let ps = vec![p];
-            let chunk = [0usize];
-            let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-            let data = serde_json::json!({
-                "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
-            });
-            let (results, _) = parse_chunk_response(
-                &ps,
-                &chunk,
-                &pos_repo,
-                Some(&data),
-                &head_commit_in_local_history,
-            );
-            results[0]
-                .1
-                .as_ref()
-                .map(|pr| (pr.number, pr.state.clone()))
+        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
         };
-        let lookup = |ref_value, nodes, minted| lookup_with(None, ref_value, nodes, minted);
         let ours = Some("octocat/Hello-World");
         let null = serde_json::Value::Null;
 
@@ -3973,6 +3982,20 @@ mod tests {
             newest.0, 72,
             "the most recently created pull request that passes wins"
         );
+    }
+
+    /// A pull request found by head name for a branch dux minted must have been
+    /// opened after the branch was born, and while the branch exists the ref
+    /// lookup is the answer.
+    #[test]
+    fn a_deleted_branchs_pull_request_is_dated_against_the_branch_and_the_ref_still_wins() {
+        let (dir, tip, _) = repo_with_feature_branch();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
+        };
+        let ours = Some("octocat/Hello-World");
+        let null = serde_json::Value::Null;
 
         assert_eq!(
             lookup(
@@ -4002,6 +4025,17 @@ mod tests {
             None,
             "while the branch exists the ref lookup is the answer"
         );
+    }
+
+    #[test]
+    fn a_known_merged_pull_request_gives_way_only_to_a_newer_one_that_is_ours() {
+        let (dir, tip, stray) = repo_with_feature_branch();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let lookup_with = |known, ref_value, nodes: Vec<serde_json::Value>, minted| {
+            deleted_branch_lookup(&worktree, known, &ref_value, &nodes, minted)
+        };
+        let ours = Some("octocat/Hello-World");
+        let null = serde_json::Value::Null;
 
         // A merged pull request dux already knows does not hide a follow-up on
         // the same branch that was merged and deleted between two checks: a

@@ -245,6 +245,13 @@ mod tests {
     }
 
     fn vectors() -> Vec<Vector> {
+        let mut all = vectors_that_stop_short();
+        all.extend(vectors_that_are_ready());
+        all
+    }
+
+    /// The rows whose folder cannot be added as it is.
+    fn vectors_that_stop_short() -> Vec<Vector> {
         vec![
             Vector {
                 name: "inside a work tree is blocked (root named)",
@@ -308,6 +315,12 @@ mod tests {
                     can_checkout_default: false,
                 },
             },
+        ]
+    }
+
+    /// The rows whose folder is ready to add, each with its branch warning.
+    fn vectors_that_are_ready() -> Vec<Vector> {
+        vec![
             Vector {
                 name: "on a non-default branch with a known default: checkout offered",
                 inspection: AddProjectInspection {

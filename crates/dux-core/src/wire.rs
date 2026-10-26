@@ -10634,11 +10634,6 @@ mod tests {
 
     #[test]
     fn apply_wire_init_repo_clears_the_gate_and_resolves_the_op() {
-        // (folder name, shape, remote reachable, project's current branch and
-        // leading branch when it is added, the warning when one is raised,
-        // else the end of the refusal)
-        type Outcome<'a> = Result<(&'a str, &'a str, Option<String>), &'a str>;
-
         // Catches a stranded busy toast plus a permanently locked path.
         // Asserts only outcome-independent invariants (the commit outcome
         // depends on whether this machine has an ambient git identity).
@@ -10674,19 +10669,77 @@ mod tests {
             "the in-flight gate must be cleared after the worker completes"
         );
 
-        // A clone of a local repository with a commit adds the project on the
-        // remote's default branch and starts the named agent there, with one
-        // final, the create's, and nothing left open.
         let tmp = tempfile::tempdir().unwrap();
         let remote = crate::git::test_support::bare_remote_with_commit(tmp.path());
-        let dest = std::fs::canonicalize(tmp.path()).unwrap().join("cloned");
+        check_a_clone_adds_its_project_and_agent(&mut engine, tmp.path(), &remote);
+        check_a_blank_agent_name_is_a_random_one(&mut engine, tmp.path(), &remote);
+        let tools = tempfile::tempdir().unwrap();
+        let (pr_remote, pr_commit) = remote_with_pull_request(tools.path());
+        check_a_pull_request_clone_runs_on_its_commit(
+            &mut engine,
+            tmp.path(),
+            tools.path(),
+            &pr_remote,
+            &pr_commit,
+        );
+
+        // A folder that already holds a checkout, on a branch of its own,
+        // becomes the project with no download: the project leads with the
+        // remote's default branch, found in the folder, else asked of the
+        // remote, and the agent runs on the pull request's commit while the
+        // folder keeps its branch and its files. When neither can say, the
+        // folder's branch leads and a warning says it was a guess.
+        let gh_dir = tools.path().join("add-gh");
+        std::fs::create_dir(&gh_dir).unwrap();
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &gh_dir,
+            &gh_prints(&pull_request_json("pr-branch")),
+        );
+        let nowhere = tools.path().join("nowhere.git");
+        let fixture = AddFixture {
+            root: std::fs::canonicalize(tmp.path()).unwrap(),
+            gh,
+            pr_remote,
+            pr_commit,
+            nowhere,
+        };
+        for case in [
+            ("added-with-head", "", true, "main"),
+            ("added-asking-the-remote", "no-head", true, "main"),
+            ("added-guessing", "no-head", false, "feature"),
+        ] {
+            check_an_added_checkout(&fixture, case);
+        }
+
+        check_the_branch_an_added_checkout_leads_with(&fixture);
+
+        check_a_stuck_agent_after_a_clone(&mut engine, tmp.path(), &remote);
+    }
+
+    /// What the pull request adds in [`apply_wire_init_repo_clears_the_gate_and_resolves_the_op`]
+    /// share: the folder the checkouts are made in, the stand-in `gh`, the
+    /// remote with the pull request and its commit, and a remote that is not
+    /// there.
+    struct AddFixture {
+        root: PathBuf,
+        gh: PathBuf,
+        pr_remote: PathBuf,
+        pr_commit: String,
+        nowhere: PathBuf,
+    }
+
+    /// A clone of the local repository `remote` into `tmp` with a commit adds
+    /// the project on the remote's default branch and starts the named agent
+    /// there, with one final, the create's, and nothing left open.
+    fn check_a_clone_adds_its_project_and_agent(engine: &mut Engine, tmp: &Path, remote: &Path) {
+        let dest = std::fs::canonicalize(tmp).unwrap().join("cloned");
         let busy = engine
-            .apply_wire(clone_command(&remote, &dest, "first-agent"))
+            .apply_wire(clone_command(remote, &dest, "first-agent"))
             .expect("dispatch the clone")
             .status
             .expect("a keyed busy");
         assert_eq!(busy.tone, "busy");
-        let chain = drive_clone_chain(&mut engine);
+        let chain = drive_clone_chain(engine);
         let project = engine
             .projects
             .iter()
@@ -10713,10 +10766,12 @@ mod tests {
             engine.mark_in_flight(InFlightKey::Clone(dest)),
             "the clone's gate must be cleared"
         );
+    }
 
-        // A blank agent name is a random one, as in the New agent dialog,
-        // whether or not a random name was asked for.
-        let blank = std::fs::canonicalize(tmp.path()).unwrap().join("blank");
+    /// A blank agent name is a random one, as in the New agent dialog,
+    /// whether or not a random name was asked for.
+    fn check_a_blank_agent_name_is_a_random_one(engine: &mut Engine, tmp: &Path, remote: &Path) {
+        let blank = std::fs::canonicalize(tmp).unwrap().join("blank");
         engine
             .apply_wire(WireCommand::CloneProject {
                 url: remote.to_string_lossy().into_owned(),
@@ -10728,7 +10783,7 @@ mod tests {
                 review_copy: crate::clone_project::UpfrontReviewCopy::default(),
             })
             .expect("a blank name is not refused");
-        drive_clone_chain(&mut engine);
+        drive_clone_chain(engine);
         let project = engine
             .projects
             .iter()
@@ -10742,24 +10797,30 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(crate::git::is_valid_agent_name(names[0]), "{names:?}");
+    }
 
-        // A clone for a pull request ends in an agent on the pull request's own
-        // commit, not on the remote's branch of the same name, and the project
-        // still leads with the remote's default branch.
-        let tools = tempfile::tempdir().unwrap();
-        let (pr_remote, pr_commit) = remote_with_pull_request(tools.path());
+    /// A clone for a pull request ends in an agent on the pull request's own
+    /// commit, not on the remote's branch of the same name, and the project
+    /// still leads with the remote's default branch.
+    fn check_a_pull_request_clone_runs_on_its_commit(
+        engine: &mut Engine,
+        tmp: &Path,
+        tools: &Path,
+        pr_remote: &Path,
+        pr_commit: &str,
+    ) {
         let gh = crate::gh::probe_test_support::stand_in_gh(
-            tools.path(),
+            tools,
             &gh_prints(&pull_request_json("feature")),
         );
-        serve_pull_requests(&mut engine, &gh, &pr_remote);
-        let pr_dest = std::fs::canonicalize(tmp.path()).unwrap().join("pr-dest");
+        serve_pull_requests(engine, &gh, pr_remote);
+        let pr_dest = std::fs::canonicalize(tmp).unwrap().join("pr-dest");
         let busy = engine
             .apply_wire(pull_request_clone_command("acme/widget", &pr_dest, None))
             .expect("dispatch the pull request clone")
             .status
             .expect("a keyed busy");
-        let chain = drive_clone_chain(&mut engine);
+        let chain = drive_clone_chain(engine);
         let project = engine
             .projects
             .iter()
@@ -10784,149 +10845,147 @@ mod tests {
         assert_eq!(chain.clear_keys, vec![busy.key.unwrap()]);
         assert!(engine.clones.pending.is_empty());
         assert!(engine.pending_create_ops.is_empty());
+    }
 
-        // A folder that already holds a checkout, on a branch of its own,
-        // becomes the project with no download: the project leads with the
-        // remote's default branch, found in the folder, else asked of the
-        // remote, and the agent runs on the pull request's commit while the
-        // folder keeps its branch and its files. When neither can say, the
-        // folder's branch leads and a warning says it was a guess.
-        let gh_dir = tools.path().join("add-gh");
-        std::fs::create_dir(&gh_dir).unwrap();
-        let gh = crate::gh::probe_test_support::stand_in_gh(
-            &gh_dir,
-            &gh_prints(&pull_request_json("pr-branch")),
-        );
-        let nowhere = tools.path().join("nowhere.git");
-        for (name, shape, reaches_remote, leads_with) in [
-            ("added-with-head", "", true, "main"),
-            ("added-asking-the-remote", "no-head", true, "main"),
-            ("added-guessing", "no-head", false, "feature"),
-        ] {
-            let (mut engine, _engine_dir) = test_engine();
-            let folder = checkout_of_widget(
-                &std::fs::canonicalize(tmp.path()).unwrap(),
-                name,
-                &pr_remote,
-                shape,
-            );
-            serve_pull_requests(
-                &mut engine,
-                &gh,
-                if reaches_remote { &pr_remote } else { &nowhere },
-            );
-            let busy = engine
-                .apply_wire(pull_request_add_command("acme/widget", &folder, None))
-                .unwrap_or_else(|refused| panic!("{name}: {refused}"))
-                .status
-                .expect("a keyed busy");
-            assert_eq!(
-                busy.message,
-                format!(
-                    "Adding {} as a project for pull request #7...",
-                    folder.display()
-                ),
-                "{name}"
-            );
-            let chain = drive_clone_chain(&mut engine);
-            let project = engine
-                .projects
-                .iter()
-                .find(|p| Path::new(&p.path) == folder)
-                .unwrap_or_else(|| panic!("{name}: the folder is not a project"))
-                .clone();
-            assert_eq!(project.current_branch, "feature", "{name}");
-            assert_eq!(
-                project.leading_branch.as_deref(),
-                Some(leads_with),
-                "{name}"
-            );
-            let said: Vec<&str> = chain.statuses.iter().map(|s| s.message.as_str()).collect();
-            assert!(
-                said.iter().all(|message| !message.starts_with("Cloned")),
-                "{name}: an add said it cloned: {said:?}"
-            );
-            let guessed: Vec<_> = chain
-                .statuses
-                .iter()
-                .filter(|s| s.tone == "warning")
-                .collect();
-            let agents: Vec<_> = engine
-                .sessions
-                .iter()
-                .filter(|s| s.project_id() == Some(project.id.as_str()))
-                .collect();
+    /// One case of adding a checkout for the pull request: its folder name,
+    /// its shape, whether the remote answers, and the branch the project
+    /// must then lead with.
+    fn check_an_added_checkout(fixture: &AddFixture, case: (&str, &str, bool, &str)) {
+        let (name, shape, reaches_remote, leads_with) = case;
+        let (mut engine, _engine_dir) = test_engine();
+        let folder = checkout_of_widget(&fixture.root, name, &fixture.pr_remote, shape);
+        serve_pull_requests(
+            &mut engine,
+            &fixture.gh,
             if reaches_remote {
-                assert!(guessed.is_empty(), "{name}: {guessed:?}");
-                assert_eq!(agents.len(), 1, "{name}");
-                assert_eq!(agents[0].branch_name(), Some("pr-branch"), "{name}");
-                let head = crate::git::test_support::git_command()
-                    .arg("-C")
-                    .arg(agents[0].directory())
-                    .args(["rev-parse", "HEAD"])
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    String::from_utf8_lossy(&head.stdout).trim(),
-                    pr_commit,
-                    "{name}"
-                );
-                assert_eq!(chain.clear_keys, vec![busy.key.clone().unwrap()], "{name}");
+                &fixture.pr_remote
             } else {
-                assert_eq!(guessed.len(), 1, "{name}: {guessed:?}");
-                assert_eq!(
-                    guessed[0].message,
-                    "dux could not learn the default branch of github.com/acme/widget from \
-                     its remote, so project \"added-guessing\" leads with \"feature\", the \
-                     branch the folder has checked out."
-                );
-                // The remote that could not answer cannot serve the pull
-                // request either: the project stays and says what was done.
-                assert!(agents.is_empty(), "{name}");
-                let ended = self::finals(&chain);
-                let missing = ended.iter().find(|s| s.tone == "error").expect(name);
-                assert!(
-                    missing.message.starts_with(&format!(
-                        "Added {} as project \"added-guessing\", but didn't create agent \
-                         \"pr-branch\":",
-                        folder.display()
-                    )),
-                    "{name}: {}",
-                    missing.message
-                );
-            }
-            let branch = crate::git::test_support::git_command()
+                &fixture.nowhere
+            },
+        );
+        let busy = engine
+            .apply_wire(pull_request_add_command("acme/widget", &folder, None))
+            .unwrap_or_else(|refused| panic!("{name}: {refused}"))
+            .status
+            .expect("a keyed busy");
+        assert_eq!(
+            busy.message,
+            format!(
+                "Adding {} as a project for pull request #7...",
+                folder.display()
+            ),
+            "{name}"
+        );
+        let chain = drive_clone_chain(&mut engine);
+        let project = engine
+            .projects
+            .iter()
+            .find(|p| Path::new(&p.path) == folder)
+            .unwrap_or_else(|| panic!("{name}: the folder is not a project"))
+            .clone();
+        assert_eq!(project.current_branch, "feature", "{name}");
+        assert_eq!(
+            project.leading_branch.as_deref(),
+            Some(leads_with),
+            "{name}"
+        );
+        let said: Vec<&str> = chain.statuses.iter().map(|s| s.message.as_str()).collect();
+        assert!(
+            said.iter().all(|message| !message.starts_with("Cloned")),
+            "{name}: an add said it cloned: {said:?}"
+        );
+        let guessed: Vec<_> = chain
+            .statuses
+            .iter()
+            .filter(|s| s.tone == "warning")
+            .collect();
+        let agents: Vec<_> = engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .collect();
+        if reaches_remote {
+            assert!(guessed.is_empty(), "{name}: {guessed:?}");
+            assert_eq!(agents.len(), 1, "{name}");
+            assert_eq!(agents[0].branch_name(), Some("pr-branch"), "{name}");
+            let head = crate::git::test_support::git_command()
                 .arg("-C")
-                .arg(&folder)
-                .args(["symbolic-ref", "--short", "HEAD"])
+                .arg(agents[0].directory())
+                .args(["rev-parse", "HEAD"])
                 .output()
                 .unwrap();
             assert_eq!(
-                String::from_utf8_lossy(&branch.stdout).trim(),
-                "feature",
-                "{name}: the folder's branch moved"
-            );
-            assert_eq!(
-                std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
-                "mine",
+                String::from_utf8_lossy(&head.stdout).trim(),
+                fixture.pr_commit,
                 "{name}"
             );
-            assert!(engine.clones.pending.is_empty(), "{name}");
+            assert_eq!(chain.clear_keys, vec![busy.key.clone().unwrap()], "{name}");
+        } else {
+            assert_eq!(guessed.len(), 1, "{name}: {guessed:?}");
+            assert_eq!(
+                guessed[0].message,
+                "dux could not learn the default branch of github.com/acme/widget from \
+                 its remote, so project \"added-guessing\" leads with \"feature\", the \
+                 branch the folder has checked out."
+            );
+            // The remote that could not answer cannot serve the pull
+            // request either: the project stays and says what was done.
+            assert!(agents.is_empty(), "{name}");
+            let ended = self::finals(&chain);
+            let missing = ended.iter().find(|s| s.tone == "error").expect(name);
             assert!(
-                !engine.is_in_flight(&InFlightKey::CloneRepository(
-                    "github.com/acme/widget".to_string()
+                missing.message.starts_with(&format!(
+                    "Added {} as project \"added-guessing\", but didn't create agent \
+                     \"pr-branch\":",
+                    folder.display()
                 )),
-                "{name}: the repository stayed held"
+                "{name}: {}",
+                missing.message
             );
         }
+        assert_the_added_folder_is_kept(&engine, &folder, name);
+    }
 
-        // The project must lead with a branch the folder really has: the
-        // remote's default only when it exists there, else the branch checked
-        // out, else `main` when that exists, else nothing is added. A folder
-        // with no commits has no branch to lead with at all.
-        let widget = "github.com/acme/widget";
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let cases: Vec<(&str, &str, bool, Outcome<'_>)> = vec![
+    /// The checkout `folder` an add for case `name` made a project of keeps its
+    /// branch and its files, and nothing about the add is left held in
+    /// `engine`.
+    fn assert_the_added_folder_is_kept(engine: &Engine, folder: &Path, name: &str) {
+        let branch = crate::git::test_support::git_command()
+            .arg("-C")
+            .arg(folder)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&branch.stdout).trim(),
+            "feature",
+            "{name}: the folder's branch moved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+            "mine",
+            "{name}"
+        );
+        assert!(engine.clones.pending.is_empty(), "{name}");
+        assert!(
+            !engine.is_in_flight(&InFlightKey::CloneRepository(
+                "github.com/acme/widget".to_string()
+            )),
+            "{name}: the repository stayed held"
+        );
+    }
+
+    /// What an add of a checkout must lead with: (folder name, shape, remote
+    /// reachable, project's current branch and leading branch when it is added,
+    /// the warning when one is raised, else the end of the refusal).
+    type AddedLeading = Result<(&'static str, &'static str, Option<String>), &'static str>;
+
+    /// The cases [`check_the_branch_an_added_checkout_leads_with`] adds, for the
+    /// repository `widget`.
+    fn added_checkout_leading_branches(
+        widget: &str,
+    ) -> Vec<(&'static str, &'static str, bool, AddedLeading)> {
+        vec![
             (
                 "added-single-branch",
                 "single-branch",
@@ -10976,14 +11035,27 @@ mod tests {
                      first commit in it, then use New agent from PR again. Nothing was added.",
                 ),
             ),
-        ];
+        ]
+    }
+
+    /// The project must lead with a branch the folder really has: the
+    /// remote's default only when it exists there, else the branch checked
+    /// out, else `main` when that exists, else nothing is added. A folder
+    /// with no commits has no branch to lead with at all.
+    fn check_the_branch_an_added_checkout_leads_with(fixture: &AddFixture) {
+        let widget = "github.com/acme/widget";
+        let cases = added_checkout_leading_branches(widget);
         for (name, shape, reaches_remote, outcome) in cases {
             let (mut engine, _engine_dir) = test_engine();
-            let folder = checkout_of_widget(&root, name, &pr_remote, shape);
+            let folder = checkout_of_widget(&fixture.root, name, &fixture.pr_remote, shape);
             serve_pull_requests(
                 &mut engine,
-                &gh,
-                if reaches_remote { &pr_remote } else { &nowhere },
+                &fixture.gh,
+                if reaches_remote {
+                    &fixture.pr_remote
+                } else {
+                    &fixture.nowhere
+                },
             );
             engine
                 .apply_wire(pull_request_add_command("acme/widget", &folder, None))
@@ -11032,10 +11104,12 @@ mod tests {
                 "{name}"
             );
         }
+    }
 
-        // An agent that cannot start after the clone and the add: the one
-        // final says the clone is on disk, the project was added, and why the
-        // agent is missing.
+    /// An agent that cannot start after the clone and the add: the one
+    /// final says the clone is on disk, the project was added, and why the
+    /// agent is missing.
+    fn check_a_stuck_agent_after_a_clone(engine: &mut Engine, tmp: &Path, remote: &Path) {
         let provider = engine.config.default_provider();
         engine
             .config
@@ -11044,11 +11118,11 @@ mod tests {
             .get_mut(provider.as_str())
             .expect("the default provider is configured")
             .command = "no-such-provider".to_string();
-        let broken = std::fs::canonicalize(tmp.path()).unwrap().join("broken");
+        let broken = std::fs::canonicalize(tmp).unwrap().join("broken");
         engine
-            .apply_wire(clone_command(&remote, &broken, "stuck-agent"))
+            .apply_wire(clone_command(remote, &broken, "stuck-agent"))
             .expect("dispatch the clone");
-        let chain = drive_clone_chain(&mut engine);
+        let chain = drive_clone_chain(engine);
         let ended = self::finals(&chain);
         assert_eq!(ended.len(), 1, "{ended:?}");
         assert_eq!(ended[0].tone, "error", "{}", ended[0].message);
@@ -11429,7 +11503,40 @@ mod tests {
     fn each_clone_check_refuses_with_its_own_sentence_before_git_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let remote = crate::git::test_support::bare_remote_with_commit(&root);
+        let fixture = refusal_fixture(&root);
+        for case in plain_clone_refusals(&fixture)
+            .into_iter()
+            .chain(pull_request_clone_refusals(&fixture))
+            .chain(pull_request_add_refusals(&fixture))
+            .chain(unagreed_review_copy_refusals(&fixture))
+        {
+            check_a_refused_clone(&fixture, case);
+        }
+        check_a_second_pull_request_clone_is_refused(&fixture);
+        check_a_pull_request_clone_needs_github(&fixture);
+    }
+
+    /// The folders, remote and stand-in `gh` the clone refusals are judged
+    /// against: a project that is already a checkout of acme/matched, and a
+    /// `gh` that finds a pull request in every repository but acme/gone, whose
+    /// pull request names a branch no agent can be called in acme/odd.
+    struct RefusalFixture {
+        root: PathBuf,
+        remote: PathBuf,
+        url: String,
+        dest: PathBuf,
+        full: PathBuf,
+        linked: PathBuf,
+        project: PathBuf,
+        spelled: PathBuf,
+        checkout: PathBuf,
+        gh: PathBuf,
+        pr_dest: PathBuf,
+    }
+
+    /// The [`RefusalFixture`] made in `root`.
+    fn refusal_fixture(root: &Path) -> RefusalFixture {
+        let remote = crate::git::test_support::bare_remote_with_commit(root);
         let dest = root.join("dest");
         let full = root.join("full");
         std::fs::create_dir(&full).unwrap();
@@ -11441,20 +11548,8 @@ mod tests {
         let spelled = root.join("spelled");
         std::fs::create_dir(&spelled).unwrap();
         std::fs::write(spelled.join("README"), "x").unwrap();
-        std::os::unix::fs::symlink(&root, root.join("alias")).unwrap();
-        let request = |url: &str, path: &Path, name: Option<&str>| WireCommand::CloneProject {
-            url: url.to_string(),
-            path: path.to_string_lossy().into_owned(),
-            agent_name: name.map(str::to_string),
-            random_name: false,
-            pull_request: None,
-            add_existing: false,
-            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
-        };
+        std::os::unix::fs::symlink(root, root.join("alias")).unwrap();
         let url = remote.to_string_lossy().into_owned();
-        // A project that is already a checkout of acme/matched, and a `gh`
-        // that finds a pull request in every repository but acme/gone, whose
-        // pull request names a branch no agent can be called in acme/odd.
         let checkout = root.join("checkout");
         std::fs::create_dir(&checkout).unwrap();
         for args in [
@@ -11475,7 +11570,7 @@ mod tests {
             assert!(out.status.success(), "git {args:?}: {out:?}");
         }
         let gh = crate::gh::probe_test_support::stand_in_gh(
-            &root,
+            root,
             &format!(
                 "case \"$*\" in\n  \"repo view\"*) {} ;;\n  \
                  *acme/gone*) echo 'no pull requests found' >&2; exit 1 ;;\n  \
@@ -11486,73 +11581,124 @@ mod tests {
             ),
         );
         let pr_dest = root.join("pr-dest");
-        // (what, request, destination it must leave without a clone, words the
-        // refusal carries)
-        let cases: Vec<(&str, WireCommand, &Path, &[&str])> = vec![
+        RefusalFixture {
+            root: root.to_path_buf(),
+            remote,
+            url,
+            dest,
+            full,
+            linked,
+            project,
+            spelled,
+            checkout,
+            gh,
+            pr_dest,
+        }
+    }
+
+    /// A plain clone of `url` into `path` for the agent `name`.
+    fn clone_request(url: &str, path: &Path, name: Option<&str>) -> WireCommand {
+        WireCommand::CloneProject {
+            url: url.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            agent_name: name.map(str::to_string),
+            random_name: false,
+            pull_request: None,
+            add_existing: false,
+            review_copy: crate::clone_project::UpfrontReviewCopy::default(),
+        }
+    }
+
+    /// The plain clones refused before git runs: (what, request, destination it
+    /// must leave without a clone, words the refusal carries).
+    fn plain_clone_refusals(
+        fixture: &RefusalFixture,
+    ) -> Vec<(&'static str, WireCommand, &Path, &'static [&'static str])> {
+        let RefusalFixture {
+            root,
+            url,
+            dest,
+            full,
+            linked,
+            project,
+            spelled,
+            ..
+        } = fixture;
+        vec![
             (
                 "an empty address",
-                request("  ", &dest, Some("a")),
-                &dest,
+                clone_request("  ", dest, Some("a")),
+                dest,
                 &["address"],
             ),
             (
                 "an agent name git will not take",
-                request(&url, &dest, Some("not a name")),
-                &dest,
+                clone_request(url, dest, Some("not a name")),
+                dest,
                 &["Invalid agent name", "not a name"],
             ),
             (
                 "a name only git's branch form refuses",
-                request(&url, &dest, Some("HEAD")),
-                &dest,
+                clone_request(url, dest, Some("HEAD")),
+                dest,
                 &["Invalid agent name", "HEAD"],
             ),
             (
                 "a relative destination",
-                request(&url, Path::new("relative/dest"), Some("a")),
-                &dest,
+                clone_request(url, Path::new("relative/dest"), Some("a")),
+                dest,
                 &["isn't an absolute path"],
             ),
             (
                 "a destination whose parent is missing",
-                request(&url, &root.join("missing/dest"), Some("a")),
-                &dest,
+                clone_request(url, &root.join("missing/dest"), Some("a")),
+                dest,
                 &["doesn't exist"],
             ),
             (
                 "a destination that is not an empty folder",
-                request(&url, &full, Some("a")),
-                &full,
+                clone_request(url, full, Some("a")),
+                full,
                 &["isn't an empty folder", "interrupted"],
             ),
             (
                 "a destination that is a symbolic link",
-                request(&url, &linked, Some("a")),
-                &linked,
+                clone_request(url, linked, Some("a")),
+                linked,
                 &["symbolic link"],
             ),
             (
                 "a destination that is already a project",
-                request(&url, &project, Some("a")),
-                &project,
+                clone_request(url, project, Some("a")),
+                project,
                 &["already a project"],
             ),
             (
                 "a destination that is a project saved under another spelling",
-                request(&url, &spelled, Some("a")),
-                &spelled,
+                clone_request(url, spelled, Some("a")),
+                spelled,
                 &["already a project"],
             ),
+        ]
+    }
+
+    /// The pull request clones refused before git runs, as
+    /// [`plain_clone_refusals`] lists them.
+    fn pull_request_clone_refusals(
+        fixture: &RefusalFixture,
+    ) -> Vec<(&'static str, WireCommand, &Path, &'static [&'static str])> {
+        let pr_dest = &fixture.pr_dest;
+        vec![
             (
                 "a pull request gh cannot find",
-                pull_request_clone_command("acme/gone", &pr_dest, None),
-                &pr_dest,
+                pull_request_clone_command("acme/gone", pr_dest, None),
+                pr_dest,
                 &["no pull requests found", "Nothing was cloned"],
             ),
             (
                 "a head branch that is no agent name, with no name typed",
-                pull_request_clone_command("acme/odd", &pr_dest, None),
-                &pr_dest,
+                pull_request_clone_command("acme/odd", pr_dest, None),
+                pr_dest,
                 &[
                     "not a name",
                     "not a usable agent name",
@@ -11561,8 +11707,8 @@ mod tests {
             ),
             (
                 "a project that became a checkout of the repository",
-                pull_request_clone_command("acme/matched", &pr_dest, None),
-                &pr_dest,
+                pull_request_clone_command("acme/matched", pr_dest, None),
+                pr_dest,
                 &[
                     "p3-name",
                     "is already a checkout of",
@@ -11570,6 +11716,18 @@ mod tests {
                     "did not clone it again",
                 ],
             ),
+        ]
+    }
+
+    /// The adds of a checkout for a pull request refused before git runs, as
+    /// [`plain_clone_refusals`] lists them.
+    fn pull_request_add_refusals(
+        fixture: &RefusalFixture,
+    ) -> Vec<(&'static str, WireCommand, &Path, &'static [&'static str])> {
+        let RefusalFixture {
+            url, dest, full, ..
+        } = fixture;
+        vec![
             (
                 "an add with no pull request",
                 WireCommand::CloneProject {
@@ -11581,19 +11739,19 @@ mod tests {
                     add_existing: true,
                     review_copy: crate::clone_project::UpfrontReviewCopy::default(),
                 },
-                &dest,
+                dest,
                 &["add_existing needs a pull request."],
             ),
             (
                 "an add of a pull request gh cannot find",
-                pull_request_add_command("acme/gone", &full, None),
-                &full,
+                pull_request_add_command("acme/gone", full, None),
+                full,
                 &["no pull requests found", "Nothing was added"],
             ),
             (
                 "an add of a project that became a checkout of the repository",
-                pull_request_add_command("acme/matched", &full, None),
-                &full,
+                pull_request_add_command("acme/matched", full, None),
+                full,
                 &[
                     "p3-name",
                     "is already a checkout of",
@@ -11602,20 +11760,30 @@ mod tests {
             ),
             (
                 "an add of a folder that holds something else",
-                pull_request_add_command("acme/widget", &full, None),
-                &full,
+                pull_request_add_command("acme/widget", full, None),
+                full,
                 &[
                     "already holds something that isn't a checkout of github.com/acme/widget",
                     "Nothing was added",
                 ],
             ),
+        ]
+    }
+
+    /// The pull request clones refused before git runs for a review copy
+    /// nobody agreed to, as [`plain_clone_refusals`] lists them.
+    fn unagreed_review_copy_refusals(
+        fixture: &RefusalFixture,
+    ) -> Vec<(&'static str, WireCommand, &Path, &'static [&'static str])> {
+        let pr_dest = &fixture.pr_dest;
+        vec![
             // The branch the clone would check out in the project folder is
             // the pull request's own, so the agent needs a copy: refused before
             // anything is cloned unless the agreement was for that reason.
             (
                 "a clone that needs a review copy nobody agreed to",
-                pull_request_clone_command("acme/widget", &pr_dest, None),
-                &pr_dest,
+                pull_request_clone_command("acme/widget", pr_dest, None),
+                pr_dest,
                 &[
                     "Branch \"feature\" will be checked out in the project folder dux clones into.",
                     "pushes from this agent would land on \"feature-review\"",
@@ -11627,8 +11795,8 @@ mod tests {
             // the same, and only an agreement for that reason covers it.
             (
                 "a clone named like a review copy of the pull request's branch",
-                pull_request_clone_command("acme/widget", &pr_dest, Some("feature-review-2")),
-                &pr_dest,
+                pull_request_clone_command("acme/widget", pr_dest, Some("feature-review-2")),
+                pr_dest,
                 &[
                     "The name \"feature-review-2\" is a review copy of branch \"feature\".",
                     "Nothing was cloned.",
@@ -11637,102 +11805,108 @@ mod tests {
             (
                 "a clone that needs a review copy, agreed to for another copy name",
                 agreeing_to_a_copy_for(
-                    pull_request_clone_command("acme/widget", &pr_dest, None),
+                    pull_request_clone_command("acme/widget", pr_dest, None),
                     "busy",
                     Some("elsewhere-review"),
                 ),
-                &pr_dest,
+                pr_dest,
                 &["on \"feature-review\"", "Nothing was cloned."],
             ),
             (
                 "a clone that needs a review copy, agreed to for another reason",
                 agreeing_to_a_copy_for(
-                    pull_request_clone_command("acme/widget", &pr_dest, None),
+                    pull_request_clone_command("acme/widget", pr_dest, None),
                     "diverged",
                     None,
                 ),
-                &pr_dest,
+                pr_dest,
                 &[
                     "will be checked out in the project folder",
                     "Nothing was cloned.",
                 ],
             ),
-        ];
-        for (what, command, untouched, needles) in cases {
-            let existed = untouched.exists();
-            let (mut engine, _engine_dir) = test_engine();
-            serve_pull_requests(&mut engine, &gh, &remote);
-            engine
-                .projects
-                .push(crate::engine::test_support::sample_project(
-                    "p3",
-                    &checkout.to_string_lossy(),
-                ));
-            engine
-                .projects
-                .push(crate::engine::test_support::sample_project(
-                    "p1",
-                    &project.to_string_lossy(),
-                ));
-            engine
-                .projects
-                .push(crate::engine::test_support::sample_project(
-                    "p2",
-                    &root.join("alias/spelled").to_string_lossy(),
-                ));
-            // Refused at once, or by the worker before it runs git.
-            let mut asked = None;
-            let sentence = if let Err(refused) = engine.apply_wire(command) {
-                refused.to_string()
-            } else {
-                let chain = drive_clone_chain(&mut engine);
-                let finals = finals(&chain);
-                assert_eq!(finals.len(), 1, "{what}: {finals:?}");
-                assert_eq!(finals[0].tone, "error", "{what}");
-                asked = finals[0].ask.clone();
-                finals[0].message.clone()
-            };
-            for needle in needles {
-                assert!(sentence.contains(needle), "{what}: {sentence}");
-            }
-            // A review copy nobody agreed to puts its question to the surface,
-            // which has no project to name yet.
-            let question = match what {
-                "a clone that needs a review copy nobody agreed to"
-                | "a clone that needs a review copy, agreed to for another copy name"
-                | "a clone that needs a review copy, agreed to for another reason" => {
-                    Some("busy:feature-review")
-                }
-                "a clone named like a review copy of the pull request's branch" => {
-                    Some("typed:feature-review-2")
-                }
-                _ => None,
-            };
-            match (question, asked) {
-                (Some(warned), Some(crate::status_text::StatusAsk::ReviewCopy(ask))) => {
-                    assert_eq!(ask.warned, warned, "{what}");
-                    assert_eq!(ask.project_id, None, "{what}");
-                    assert_eq!(
-                        ask.pull_request.map(|t| (t.owner_repo, t.number)),
-                        Some(("acme/widget".to_string(), 7)),
-                        "{what}"
-                    );
-                }
-                (None, None) => {}
-                (question, asked) => panic!("{what}: wanted {question:?}, got {asked:?}"),
-            }
-            assert!(!untouched.join(".git").exists(), "{what}: git ran");
-            assert_eq!(untouched.exists(), existed, "{what}: a folder appeared");
-            assert_eq!(engine.projects.len(), 3, "{what}");
-            assert!(engine.clones.pending.is_empty(), "{what}");
-        }
+        ]
+    }
 
-        // A second pull request clone of the repository while one runs is
-        // refused at once, and leaves the first one's keys alone.
+    /// One refused clone: it is refused with its words, before git runs and
+    /// before any folder appears.
+    fn check_a_refused_clone(fixture: &RefusalFixture, case: (&str, WireCommand, &Path, &[&str])) {
+        let (what, command, untouched, needles) = case;
+        let existed = untouched.exists();
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &gh, &remote);
-        let first = root.join("first");
-        let second = root.join("second");
+        serve_pull_requests(&mut engine, &fixture.gh, &fixture.remote);
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project(
+                "p3",
+                &fixture.checkout.to_string_lossy(),
+            ));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project(
+                "p1",
+                &fixture.project.to_string_lossy(),
+            ));
+        engine
+            .projects
+            .push(crate::engine::test_support::sample_project(
+                "p2",
+                &fixture.root.join("alias/spelled").to_string_lossy(),
+            ));
+        // Refused at once, or by the worker before it runs git.
+        let mut asked = None;
+        let sentence = if let Err(refused) = engine.apply_wire(command) {
+            refused.to_string()
+        } else {
+            let chain = drive_clone_chain(&mut engine);
+            let finals = finals(&chain);
+            assert_eq!(finals.len(), 1, "{what}: {finals:?}");
+            assert_eq!(finals[0].tone, "error", "{what}");
+            asked = finals[0].ask.clone();
+            finals[0].message.clone()
+        };
+        for needle in needles {
+            assert!(sentence.contains(needle), "{what}: {sentence}");
+        }
+        // A review copy nobody agreed to puts its question to the surface,
+        // which has no project to name yet.
+        let question = match what {
+            "a clone that needs a review copy nobody agreed to"
+            | "a clone that needs a review copy, agreed to for another copy name"
+            | "a clone that needs a review copy, agreed to for another reason" => {
+                Some("busy:feature-review")
+            }
+            "a clone named like a review copy of the pull request's branch" => {
+                Some("typed:feature-review-2")
+            }
+            _ => None,
+        };
+        match (question, asked) {
+            (Some(warned), Some(crate::status_text::StatusAsk::ReviewCopy(ask))) => {
+                assert_eq!(ask.warned, warned, "{what}");
+                assert_eq!(ask.project_id, None, "{what}");
+                assert_eq!(
+                    ask.pull_request.map(|t| (t.owner_repo, t.number)),
+                    Some(("acme/widget".to_string(), 7)),
+                    "{what}"
+                );
+            }
+            (None, None) => {}
+            (question, asked) => panic!("{what}: wanted {question:?}, got {asked:?}"),
+        }
+        assert!(!untouched.join(".git").exists(), "{what}: git ran");
+        assert_eq!(untouched.exists(), existed, "{what}: a folder appeared");
+        assert_eq!(engine.projects.len(), 3, "{what}");
+        assert!(engine.clones.pending.is_empty(), "{what}");
+    }
+
+    /// A second pull request clone of the repository while one runs is
+    /// refused at once, and leaves the first one's keys alone.
+    fn check_a_second_pull_request_clone_is_refused(fixture: &RefusalFixture) {
+        let (mut engine, _engine_dir) = test_engine();
+        serve_pull_requests(&mut engine, &fixture.gh, &fixture.remote);
+        let first = fixture.root.join("first");
+        let second = fixture.root.join("second");
         engine
             .apply_wire(pull_request_clone_command("acme/widget", &first, None))
             .expect("the first clone is accepted");
@@ -11755,16 +11929,19 @@ mod tests {
         )));
         assert!(!engine.is_in_flight(&InFlightKey::Clone(second)));
         drive_clone_chain(&mut engine);
+    }
 
-        // A pull request clone needs GitHub integration and a host gh is
-        // signed in to; an ordinary clone needs neither.
+    /// A pull request clone needs GitHub integration and a host gh is signed
+    /// in to; an ordinary clone needs neither.
+    fn check_a_pull_request_clone_needs_github(fixture: &RefusalFixture) {
+        let first = fixture.root.join("first");
         let (mut engine, _engine_dir) = test_engine();
         let refused = engine
             .apply_wire(pull_request_clone_command("acme/widget", &first, None))
             .expect_err("integration is off")
             .to_string();
         assert!(refused.contains("requires GitHub integration"), "{refused}");
-        serve_pull_requests(&mut engine, &gh, &remote);
+        serve_pull_requests(&mut engine, &fixture.gh, &fixture.remote);
         engine.set_github_host_policy(crate::gh::GithubHostPolicy::DenyAll);
         let refused = engine
             .apply_wire(pull_request_clone_command("acme/widget", &first, None))
@@ -11844,8 +12021,13 @@ mod tests {
             assert!(engine.sessions.is_empty(), "{what}");
         }
 
-        // A worker that panicked sends the failure its guard builds; that frees
-        // the destination the same way.
+        check_a_panicked_clone_frees_its_destination(&root);
+        check_an_ssh_clone_says_how_to_reach_the_host(&root);
+    }
+
+    /// A worker that panicked sends the failure its guard builds; that frees
+    /// the destination the same way.
+    fn check_a_panicked_clone_frees_its_destination(root: &Path) {
         let (mut engine, _engine_dir) = test_engine();
         let dest = root.join("dest-panicked");
         let key = InFlightKey::Clone(dest.clone());
@@ -11869,12 +12051,14 @@ mod tests {
         });
         assert!(engine.worktree_ops().holders(&dest).is_empty());
         assert!(!engine.is_in_flight(&key));
+    }
 
-        // A pull request clone over ssh that git cannot finish also says how
-        // to make the first contact with the host from a terminal.
+    /// A pull request clone over ssh that git cannot finish also says how
+    /// to make the first contact with the host from a terminal.
+    fn check_an_ssh_clone_says_how_to_reach_the_host(root: &Path) {
         let (mut engine, _engine_dir) = test_engine();
         let gh = crate::gh::probe_test_support::stand_in_gh(
-            &root,
+            root,
             &gh_prints(&pull_request_json("feature")),
         );
         serve_pull_requests(&mut engine, &gh, &root.join("nothing-here.git"));
@@ -11925,12 +12109,34 @@ mod tests {
             assert!(engine.sessions.is_empty(), "{name}");
         }
 
-        // A branch that appears in the clone after the clone's own look is
-        // refused by the create itself, never attached to, in the clone's words.
+        check_a_late_branch_is_refused_by_the_create(&root, &remote);
+        check_a_pull_request_head_nobody_serves(&root, &remote);
+        let gh = crate::gh::probe_test_support::stand_in_gh(
+            &root,
+            &gh_prints(&pull_request_json("main")),
+        );
+        let (pr_remote, _) = remote_with_pull_request(&root.join("with-pr"));
+        check_a_checked_out_pull_request_branch_asks_for_a_copy(&root, &gh, &pr_remote);
+        check_an_agreed_copy_with_a_known_default(&root, &pr_remote);
+        check_a_held_checkout_needs_a_copy(&root, &pr_remote);
+        let gh_dir = root.join("add-gh");
+        std::fs::create_dir(&gh_dir).unwrap();
+        let gh_add = crate::gh::probe_test_support::stand_in_gh(
+            &gh_dir,
+            &gh_prints(&pull_request_json("pr-branch")),
+        );
+        check_a_folder_that_cannot_be_a_project(&root, &gh_add, &remote);
+        check_a_plain_and_a_pull_request_clone_race(&root, &gh, &pr_remote);
+        check_an_add_race_names_the_add(&root, &gh_add, &remote);
+    }
+
+    /// A branch that appears in the clone after the clone's own look is
+    /// refused by the create itself, never attached to, in the clone's words.
+    fn check_a_late_branch_is_refused_by_the_create(root: &Path, remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
         let dest = root.join("dest-late");
         engine
-            .apply_wire(clone_command(&remote, &dest, "feature"))
+            .apply_wire(clone_command(remote, &dest, "feature"))
             .expect("dispatch the clone");
         let chain = drive_clone_chain_with(&mut engine, |reaction| {
             if let EventReaction::AddProjectAfterClone(done) = reaction {
@@ -11948,17 +12154,19 @@ mod tests {
             engine.sessions.is_empty(),
             "the create attached to the branch"
         );
+    }
 
-        // A pull request whose head branch the clone does not have and whose
-        // head the remote does not serve: the clone and the project stay, no
-        // agent is made, the final names the project and the agent, and the
-        // repository is free for the next request.
+    /// A pull request whose head branch the clone does not have and whose
+    /// head the remote does not serve: the clone and the project stay, no
+    /// agent is made, the final names the project and the agent, and the
+    /// repository is free for the next request.
+    fn check_a_pull_request_head_nobody_serves(root: &Path, remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
         let gh = crate::gh::probe_test_support::stand_in_gh(
-            &root,
+            root,
             &gh_prints(&pull_request_json("ghost-branch")),
         );
-        serve_pull_requests(&mut engine, &gh, &remote);
+        serve_pull_requests(&mut engine, &gh, remote);
         let dest = root.join("dest-pull-request");
         engine
             .apply_wire(pull_request_clone_command("acme/widget", &dest, None))
@@ -11981,20 +12189,21 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::CloneRepository(
             "github.com/acme/widget".to_string()
         )));
+    }
 
-        // A pull request whose branch is the one the clone has checked out
-        // needs a review copy, and nothing before the clone could say so (this
-        // `gh` cannot name the default branch), so the create refuses and asks
-        // once the project exists. The project stays, the sentence says the
-        // agent still needs an answer rather than naming a box the user cannot
-        // see, and the question carries what a surface needs to reopen New
-        // agent from PR for that project. An agreement given for another
-        // reason does not cover this copy.
-        let gh = crate::gh::probe_test_support::stand_in_gh(
-            &root,
-            &gh_prints(&pull_request_json("main")),
-        );
-        let (pr_remote, _) = remote_with_pull_request(&root.join("with-pr"));
+    /// A pull request whose branch is the one the clone has checked out
+    /// needs a review copy, and nothing before the clone could say so (this
+    /// `gh` cannot name the default branch), so the create refuses and asks
+    /// once the project exists. The project stays, the sentence says the
+    /// agent still needs an answer rather than naming a box the user cannot
+    /// see, and the question carries what a surface needs to reopen New
+    /// agent from PR for that project. An agreement given for another
+    /// reason does not cover this copy.
+    fn check_a_checked_out_pull_request_branch_asks_for_a_copy(
+        root: &Path,
+        gh: &Path,
+        pr_remote: &Path,
+    ) {
         for (index, command) in [
             pull_request_clone_command("acme/widget", &root.join("dest-checked-out-0"), None),
             agreeing_to_a_copy_for(
@@ -12012,7 +12221,7 @@ mod tests {
         .enumerate()
         {
             let (mut engine, _engine_dir) = test_engine();
-            serve_pull_requests(&mut engine, &gh, &pr_remote);
+            serve_pull_requests(&mut engine, gh, pr_remote);
             let dest = root.join(format!("dest-checked-out-{index}"));
             engine
                 .apply_wire(command)
@@ -12056,14 +12265,16 @@ mod tests {
             );
             assert!(engine.sessions.is_empty());
         }
+    }
 
-        // The same pull request, with the default branch known before the
-        // clone: the agreement that was asked for lets the clone end in the
-        // agent on the copy, and the project still leads with the default.
+    /// The same pull request, with the default branch known before the
+    /// clone: the agreement that was asked for lets the clone end in the
+    /// agent on the copy, and the project still leads with the default.
+    fn check_an_agreed_copy_with_a_known_default(root: &Path, pr_remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
         std::fs::create_dir(root.join("with-default")).unwrap();
         let gh = gh_with_default_branch(&root.join("with-default"), "main", "main");
-        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        serve_pull_requests(&mut engine, &gh, pr_remote);
         let dest = root.join("dest-agreed");
         engine
             .apply_wire(agreeing_to_a_copy_for(
@@ -12081,11 +12292,13 @@ mod tests {
             .filter_map(|s| s.branch_name())
             .collect();
         assert_eq!(branches, vec!["main-review"]);
+    }
 
-        // A checkout that has the pull request's branch out needs a copy, and
-        // the folder says so before anything is added: refused without the
-        // agreement, and with it the agent goes on the copy while the folder
-        // keeps its branch.
+    /// A checkout that has the pull request's branch out needs a copy, and
+    /// the folder says so before anything is added: refused without the
+    /// agreement, and with it the agent goes on the copy while the folder
+    /// keeps its branch.
+    fn check_a_held_checkout_needs_a_copy(root: &Path, pr_remote: &Path) {
         let held_gh_dir = root.join("held-gh");
         std::fs::create_dir(&held_gh_dir).unwrap();
         let held_gh = crate::gh::probe_test_support::stand_in_gh(
@@ -12093,8 +12306,8 @@ mod tests {
             &gh_prints(&pull_request_json("feature")),
         );
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
-        let folder = checkout_of_widget(&root, "held-refused", &pr_remote, "");
+        serve_pull_requests(&mut engine, &held_gh, pr_remote);
+        let folder = checkout_of_widget(root, "held-refused", pr_remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &folder, None))
             .expect("dispatch the add");
@@ -12114,8 +12327,8 @@ mod tests {
         );
         assert!(engine.projects.is_empty() && engine.sessions.is_empty());
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
-        let crowded = checkout_of_widget(&root, "held-crowded", &pr_remote, "");
+        serve_pull_requests(&mut engine, &held_gh, pr_remote);
+        let crowded = checkout_of_widget(root, "held-crowded", pr_remote, "");
         for n in 1..=20 {
             let name = if n == 1 {
                 "feature-review".to_string()
@@ -12151,8 +12364,8 @@ mod tests {
         );
         assert!(engine.projects.is_empty());
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &held_gh, &pr_remote);
-        let folder = checkout_of_widget(&root, "held-agreed", &pr_remote, "");
+        serve_pull_requests(&mut engine, &held_gh, pr_remote);
+        let folder = checkout_of_widget(root, "held-agreed", pr_remote, "");
         engine
             .apply_wire(agreeing_to_a_copy_for(
                 pull_request_add_command("acme/widget", &folder, None),
@@ -12168,20 +12381,16 @@ mod tests {
             .collect();
         assert_eq!(branches, vec!["feature-review"]);
         assert_eq!(engine.projects[0].current_branch, "feature");
+    }
 
-        // A folder that cannot be registered as a project stays exactly as it
-        // was, and the final says so without claiming a clone.
+    /// A folder that cannot be registered as a project stays exactly as it
+    /// was, and the final says so without claiming a clone.
+    fn check_a_folder_that_cannot_be_a_project(root: &Path, gh_add: &Path, remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
-        let gh_dir = root.join("add-gh");
-        std::fs::create_dir(&gh_dir).unwrap();
-        let gh_add = crate::gh::probe_test_support::stand_in_gh(
-            &gh_dir,
-            &gh_prints(&pull_request_json("pr-branch")),
-        );
-        serve_pull_requests(&mut engine, &gh_add, &remote);
+        serve_pull_requests(&mut engine, gh_add, remote);
         engine.config_writer =
             crate::config_queue::ConfigWriteQueue::with_dead_writer(&engine.paths.config_path);
-        let folder = checkout_of_widget(&root, "dest-add-fails", &remote, "");
+        let folder = checkout_of_widget(root, "dest-add-fails", remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &folder, None))
             .expect("dispatch the add");
@@ -12208,11 +12417,13 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::CloneRepository(
             "github.com/acme/widget".to_string()
         )));
+    }
 
-        // A plain clone of the same repository is refused while a pull request
-        // clone of it runs, and the other way round.
+    /// A plain clone of the same repository is refused while a pull request
+    /// clone of it runs, and the other way round.
+    fn check_a_plain_and_a_pull_request_clone_race(root: &Path, gh: &Path, pr_remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        serve_pull_requests(&mut engine, gh, pr_remote);
         let plain = |path: &Path| WireCommand::CloneProject {
             url: "https://github.com/acme/widget.git".to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -12236,7 +12447,7 @@ mod tests {
         );
         drive_clone_chain(&mut engine);
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &gh, &pr_remote);
+        serve_pull_requests(&mut engine, gh, pr_remote);
         engine.apply_wire(plain(&one)).expect("accepted");
         let refused = engine
             .apply_wire(pull_request_clone_command("acme/widget", &two, None))
@@ -12244,13 +12455,15 @@ mod tests {
             .to_string();
         assert!(refused.contains("already cloning"), "{refused}");
         drive_clone_chain(&mut engine);
+    }
 
-        // While an add runs, what refuses a second request says it is an add
-        // that holds the folder or the repository, never a clone.
+    /// While an add runs, what refuses a second request says it is an add
+    /// that holds the folder or the repository, never a clone.
+    fn check_an_add_race_names_the_add(root: &Path, gh_add: &Path, remote: &Path) {
         let (mut engine, _engine_dir) = test_engine();
-        serve_pull_requests(&mut engine, &gh_add, &remote);
-        let one = checkout_of_widget(&root, "race-add-one", &remote, "");
-        let two = checkout_of_widget(&root, "race-add-two", &remote, "");
+        serve_pull_requests(&mut engine, gh_add, remote);
+        let one = checkout_of_widget(root, "race-add-one", remote, "");
+        let two = checkout_of_widget(root, "race-add-two", remote, "");
         engine
             .apply_wire(pull_request_add_command("acme/widget", &one, None))
             .expect("the add is accepted");
@@ -12295,6 +12508,36 @@ mod tests {
         drive_clone_chain(&mut engine);
     }
 
+    /// The next clone worker's event `engine` receives, every other worker
+    /// event on the way processed.
+    fn next_cloned_event(engine: &mut Engine) -> WorkerEvent {
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("the clone worker's event");
+            if matches!(event, WorkerEvent::RepositoryCloned { .. }) {
+                break event;
+            }
+            engine.process_worker_event(event);
+        }
+    }
+
+    /// The failure a clone worker that stopped unexpectedly sends for the clone
+    /// of the repository `key` into `path`, under `status_op_id`.
+    fn stopped_clone_event(status_op_id: Option<String>, path: &Path, key: &str) -> WorkerEvent {
+        WorkerEvent::RepositoryCloned {
+            status_op_id,
+            path: path.to_path_buf(),
+            agent_name: String::new(),
+            repository_key: Some(key.to_string()),
+            mode: crate::clone_project::CloneMode::Clone,
+            result: Err(crate::clone_project::CloneOutcome::Failed(
+                "The clone worker stopped unexpectedly.".into(),
+            )),
+        }
+    }
+
     #[test]
     fn a_repository_is_free_for_another_pull_request_clone_after_every_way_one_ends() {
         let tmp = tempfile::tempdir().unwrap();
@@ -12312,16 +12555,6 @@ mod tests {
             "echo 'no pull requests found' >&2; exit 1".to_string(),
         );
         let missing_remote = root.join("missing.git");
-        let cloned_event = |engine: &mut Engine| loop {
-            let event = engine
-                .worker_rx
-                .recv_timeout(std::time::Duration::from_secs(60))
-                .expect("the clone worker's event");
-            if matches!(event, WorkerEvent::RepositoryCloned { .. }) {
-                break event;
-            }
-            engine.process_worker_event(event);
-        };
         let key = "github.com/acme/widget".to_string();
         for (index, what) in [
             "a worker refusal",
@@ -12359,41 +12592,27 @@ mod tests {
             match what {
                 "a worker that panicked" => {
                     let WorkerEvent::RepositoryCloned { status_op_id, .. } =
-                        cloned_event(&mut engine)
+                        next_cloned_event(&mut engine)
                     else {
                         unreachable!()
                     };
-                    engine.process_worker_event(WorkerEvent::RepositoryCloned {
-                        status_op_id,
-                        path: first.clone(),
-                        agent_name: String::new(),
-                        repository_key: Some(key.clone()),
-                        mode: crate::clone_project::CloneMode::Clone,
-                        result: Err(crate::clone_project::CloneOutcome::Failed(
-                            "The clone worker stopped unexpectedly.".into(),
-                        )),
-                    });
+                    engine.process_worker_event(stopped_clone_event(status_op_id, &first, &key));
                 }
                 "a clone whose operation is no longer pending" => {
-                    let event = cloned_event(&mut engine);
+                    let event = next_cloned_event(&mut engine);
                     engine.clones.pending.clear();
                     let reaction = engine.process_worker_event(event);
                     let followup = engine.drive_clone_followup(&reaction);
                     assert_eq!(followup.clear_keys, vec![busy.clone()], "{what}");
                 }
                 "a failure whose operation is no longer pending" => {
-                    cloned_event(&mut engine);
+                    next_cloned_event(&mut engine);
                     engine.clones.pending.clear();
-                    let reaction = engine.process_worker_event(WorkerEvent::RepositoryCloned {
-                        status_op_id: Some(busy.clone()),
-                        path: first.clone(),
-                        agent_name: String::new(),
-                        repository_key: Some(key.clone()),
-                        mode: crate::clone_project::CloneMode::Clone,
-                        result: Err(crate::clone_project::CloneOutcome::Failed(
-                            "The clone worker stopped unexpectedly.".into(),
-                        )),
-                    });
+                    let reaction = engine.process_worker_event(stopped_clone_event(
+                        Some(busy.clone()),
+                        &first,
+                        &key,
+                    ));
                     // The final replaces the busy that is still on screen.
                     let ended = wire_statuses_from_reaction(&reaction);
                     assert_eq!(ended.len(), 1, "{what}: {ended:?}");
@@ -15151,14 +15370,11 @@ mod tests {
         None
     }
 
-    /// A resolved PR with a `custom_name` drives the create dispatch directly
-    /// (no name prompt), building a `CreateAgentRequest::PullRequest` with
-    /// `use_existing_branch: false` and the carried name.
-    #[test]
-    fn drive_pr_lookup_followup_dispatches_create_with_carried_name() {
+    /// A repository with a commit, and the origin it names, which carries the
+    /// head of pull request 42, so a create's fetch resolves without a network
+    /// and the create can run to its end.
+    fn repo_with_pull_request_42_on_origin() -> (tempfile::TempDir, tempfile::TempDir) {
         let repo = init_repo_with_commit();
-        // An origin carrying the pull request's head, so the create's fetch
-        // resolves without a network and the create can run to its end.
         let origin = init_repo_with_commit();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let ok = crate::git::test_support::git_command()
@@ -15179,6 +15395,52 @@ mod tests {
                 origin.path().to_string_lossy().as_ref(),
             ],
         );
+        (repo, origin)
+    }
+
+    /// Process `engine`'s worker events until the operation `record` reads is
+    /// no longer running, raising their finals the way the web's status emitter
+    /// does.
+    fn run_until_the_record_ends(
+        engine: &mut Engine,
+        record: &dyn Fn(&Engine) -> crate::operations::OperationView,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while record(engine).state == crate::operations::OperationState::Running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the create never finished"
+            );
+            let Ok(event) = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+            else {
+                continue;
+            };
+            let reaction = engine.process_worker_event(event);
+            for status in wire_statuses_from_reaction(&reaction) {
+                let tone = crate::statusline::StatusTone::from_wire(&status.tone);
+                if let Some(key) = &status.key
+                    && tone != crate::statusline::StatusTone::Busy
+                {
+                    engine.operations.finish_by_key(
+                        key,
+                        tone,
+                        &status.message,
+                        None,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// A resolved PR with a `custom_name` drives the create dispatch directly
+    /// (no name prompt), building a `CreateAgentRequest::PullRequest` with
+    /// `use_existing_branch: false` and the carried name.
+    #[test]
+    fn drive_pr_lookup_followup_dispatches_create_with_carried_name() {
+        let (repo, _origin) = repo_with_pull_request_42_on_origin();
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", &repo.path().to_string_lossy());
         project.path_missing = false;
@@ -15252,34 +15514,7 @@ mod tests {
         );
         // Run the create to its end, raising its finals the way the web's
         // status emitter does, and the record resolves to the agent it made.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while record(&engine).state == crate::operations::OperationState::Running {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the create never finished"
-            );
-            let Ok(event) = engine
-                .worker_rx
-                .recv_timeout(std::time::Duration::from_millis(200))
-            else {
-                continue;
-            };
-            let reaction = engine.process_worker_event(event);
-            for status in wire_statuses_from_reaction(&reaction) {
-                let tone = crate::statusline::StatusTone::from_wire(&status.tone);
-                if let Some(key) = &status.key
-                    && tone != crate::statusline::StatusTone::Busy
-                {
-                    engine.operations.finish_by_key(
-                        key,
-                        tone,
-                        &status.message,
-                        None,
-                        std::time::Instant::now(),
-                    );
-                }
-            }
-        }
+        run_until_the_record_ends(&mut engine, &record);
         let record = record(&engine);
         assert_eq!(
             record.state,
@@ -16187,6 +16422,14 @@ mod tests {
     /// destructure in `set_settings`, and the length assertion below is what
     /// tells a contributor adding a field that a row is owed here too.
     fn settings_field_rows() -> Vec<SettingsFieldRow> {
+        let mut rows = layout_and_input_setting_rows();
+        rows.extend(timing_attention_and_identity_setting_rows());
+        rows
+    }
+
+    /// The rows of [`settings_field_rows`] for the layout, the input surfaces,
+    /// uploads and the icons.
+    fn layout_and_input_setting_rows() -> Vec<SettingsFieldRow> {
         vec![
             SettingsFieldRow {
                 key: "copy_on_select",
@@ -16265,6 +16508,13 @@ mod tests {
                 read: |c| c.ui.nerd_font_icons.to_string(),
                 expect: "true",
             },
+        ]
+    }
+
+    /// The rows of [`settings_field_rows`] for status timing, attention, the
+    /// welcome screens, the banner, links, names, the provider and the font.
+    fn timing_attention_and_identity_setting_rows() -> Vec<SettingsFieldRow> {
+        vec![
             SettingsFieldRow {
                 key: "status_clear_seconds",
                 seed: |c| c.ui.status_clear_seconds = 6,
@@ -16396,19 +16646,11 @@ mod tests {
         }
     }
 
-    /// ENFORCEMENT TEST. Every field, in one patch, must land in the RUNNING
-    /// config AND on disk, and the two must agree. The existing suite asserted
-    /// disk content only, which is how a field missing from the copy-back
-    /// shipped: the file updated while the engine kept serving the stale value
-    /// until the next reload. The patch is an exhaustive literal with no `..`,
-    /// so adding a field fails to COMPILE here rather than silently skipping it.
-    #[test]
-    fn set_settings_round_trips_every_field_into_the_running_config() {
-        let (mut engine, _tmp) = test_engine();
-        let before = engine.config.clone();
+    /// A patch of every setting, each changed from what `before` holds.
+    fn every_setting_changed_from(before: &crate::config::Config) -> WireCommand {
         // Every value is derived from the current config, so no field can pass
         // by accidentally already holding the value we send.
-        let patch = WireCommand::SetSettings(SettingsPatch {
+        WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
             compose_bar: Some(if before.ui.compose_bar == "never" {
                 "always".to_string()
@@ -16447,7 +16689,62 @@ mod tests {
             // Presentation flag, maps to no config field; false keeps this
             // full-patch round trip on the normal (status-emitting) path.
             quiet: false,
-        });
+        })
+    }
+
+    /// Every setting a full patch wrote holds the same value on disk as in
+    /// memory.
+    fn assert_disk_agrees_with_memory(disk: &crate::config::Config, after: &crate::config::Config) {
+        assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
+        assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
+        assert_eq!(disk.ui.mobile_accessory_bar, after.ui.mobile_accessory_bar);
+        assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
+        assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
+        assert_eq!(
+            disk.capabilities.web_notifications,
+            after.capabilities.web_notifications
+        );
+        assert_eq!(
+            disk.ui.always_show_tab_strip,
+            after.ui.always_show_tab_strip
+        );
+        assert_eq!(disk.ui.status_clear_seconds, after.ui.status_clear_seconds);
+        assert_eq!(
+            disk.ui.attention_grace_seconds,
+            after.ui.attention_grace_seconds
+        );
+        assert_eq!(disk.ui.attention_indicator, after.ui.attention_indicator);
+        assert_eq!(disk.ui.attention_on_bell, after.ui.attention_on_bell);
+        assert_eq!(disk.ui.pr_banner_position, after.ui.pr_banner_position);
+        assert_eq!(disk.capabilities.hyperlinks, after.capabilities.hyperlinks);
+        assert_eq!(
+            disk.defaults.enable_randomized_pet_name_by_default,
+            after.defaults.enable_randomized_pet_name_by_default
+        );
+        assert_eq!(disk.defaults.provider, after.defaults.provider);
+        assert_eq!(
+            disk.ui.disable_automated_welcome_screen,
+            after.ui.disable_automated_welcome_screen
+        );
+        assert_eq!(
+            disk.ui.disable_release_notes,
+            after.ui.disable_release_notes
+        );
+        assert_eq!(disk.ui.terminal_font_family, after.ui.terminal_font_family);
+        assert_eq!(disk.ui.terminal_font_size, after.ui.terminal_font_size);
+    }
+
+    /// ENFORCEMENT TEST. Every field, in one patch, must land in the RUNNING
+    /// config AND on disk, and the two must agree. The existing suite asserted
+    /// disk content only, which is how a field missing from the copy-back
+    /// shipped: the file updated while the engine kept serving the stale value
+    /// until the next reload. The patch is an exhaustive literal with no `..`,
+    /// so adding a field fails to COMPILE here rather than silently skipping it.
+    #[test]
+    fn set_settings_round_trips_every_field_into_the_running_config() {
+        let (mut engine, _tmp) = test_engine();
+        let before = engine.config.clone();
+        let patch = every_setting_changed_from(&before);
         engine.apply_wire(patch).expect("dispatch ok");
 
         let after = &engine.config;
@@ -16515,43 +16812,7 @@ mod tests {
         engine.config_writer.flush();
         let raw = std::fs::read_to_string(&engine.paths.config_path).expect("read config");
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
-        assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
-        assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
-        assert_eq!(disk.ui.mobile_accessory_bar, after.ui.mobile_accessory_bar);
-        assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
-        assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
-        assert_eq!(
-            disk.capabilities.web_notifications,
-            after.capabilities.web_notifications
-        );
-        assert_eq!(
-            disk.ui.always_show_tab_strip,
-            after.ui.always_show_tab_strip
-        );
-        assert_eq!(disk.ui.status_clear_seconds, after.ui.status_clear_seconds);
-        assert_eq!(
-            disk.ui.attention_grace_seconds,
-            after.ui.attention_grace_seconds
-        );
-        assert_eq!(disk.ui.attention_indicator, after.ui.attention_indicator);
-        assert_eq!(disk.ui.attention_on_bell, after.ui.attention_on_bell);
-        assert_eq!(disk.ui.pr_banner_position, after.ui.pr_banner_position);
-        assert_eq!(disk.capabilities.hyperlinks, after.capabilities.hyperlinks);
-        assert_eq!(
-            disk.defaults.enable_randomized_pet_name_by_default,
-            after.defaults.enable_randomized_pet_name_by_default
-        );
-        assert_eq!(disk.defaults.provider, after.defaults.provider);
-        assert_eq!(
-            disk.ui.disable_automated_welcome_screen,
-            after.ui.disable_automated_welcome_screen
-        );
-        assert_eq!(
-            disk.ui.disable_release_notes,
-            after.ui.disable_release_notes
-        );
-        assert_eq!(disk.ui.terminal_font_family, after.ui.terminal_font_family);
-        assert_eq!(disk.ui.terminal_font_size, after.ui.terminal_font_size);
+        assert_disk_agrees_with_memory(&disk, after);
     }
 
     #[test]

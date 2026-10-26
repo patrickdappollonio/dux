@@ -2347,6 +2347,29 @@ mod randomized_model {
         std::fs::write(path, doc.to_string()).unwrap();
     }
 
+    /// What a save of `memory` over `base` leaves on disk: every tracked key
+    /// and environment variable memory changed takes memory's value in
+    /// `expect` and `expect_env`.
+    fn expect_saved_changes(
+        memory: &Config,
+        base: &Config,
+        expect: &mut [Option<String>],
+        expect_env: &mut [Option<String>],
+    ) {
+        for (i, slot) in expect.iter_mut().enumerate() {
+            if mem_get(memory, i) != mem_get(base, i) {
+                *slot = Some(mem_get(memory, i));
+            }
+        }
+        for (i, k) in ENV.iter().enumerate() {
+            let m = memory.env.get(*k).cloned();
+            let b = base.env.get(*k).cloned();
+            if m != b {
+                expect_env[i] = m;
+            }
+        }
+    }
+
     #[test]
     fn random_hand_edits_saves_and_reloads_follow_the_three_way_rules() {
         let mut failures = Vec::new();
@@ -2414,18 +2437,7 @@ mod randomized_model {
                     }
                     4 => {
                         q.save_eager(memory.clone()).unwrap();
-                        for (i, slot) in expect.iter_mut().enumerate() {
-                            if mem_get(&memory, i) != mem_get(&base, i) {
-                                *slot = Some(mem_get(&memory, i));
-                            }
-                        }
-                        for (i, k) in ENV.iter().enumerate() {
-                            let m = memory.env.get(*k).cloned();
-                            let b = base.env.get(*k).cloned();
-                            if m != b {
-                                expect_env[i] = m;
-                            }
-                        }
+                        expect_saved_changes(&memory, &base, &mut expect, &mut expect_env);
                         base = memory.clone();
                         log.push("save".into());
                     }
