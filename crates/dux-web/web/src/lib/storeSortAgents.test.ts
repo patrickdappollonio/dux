@@ -2,9 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { Bootstrap } from "./bootstrapApi"
 
-// Exercises the one-shot agent sort: agents are one global list, so the sort
-// persists ONE global order covering every agent, whatever project each
-// belongs to.
+const notifyError = vi.hoisted(() => vi.fn())
+vi.mock("./notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./notify")>()
+  return { ...actual, notifyError }
+})
+
+// Exercises the one-shot agent sort and the optimistic reorder overlays: agents
+// are one global list, so the sort persists ONE global order covering every
+// agent, whatever project each belongs to.
 
 function makeBootstrap(): Bootstrap {
   return {
@@ -40,6 +46,15 @@ function managed(id: string, projectId: string, createdAt: string) {
   }
 }
 
+function terminal(id: string, sortOrder: number) {
+  return {
+    id,
+    label: id,
+    sort_order: sortOrder,
+    owner: { kind: "standalone", cwd_label: "~" },
+  }
+}
+
 // Listed so that the two projects' agents interleave, oldest first.
 const spineBody = {
   projects: [
@@ -52,9 +67,11 @@ const spineBody = {
     managed("c", "p2", "2026-01-03T00:00:00Z"),
     managed("d", "p1", "2026-01-04T00:00:00Z"),
   ],
-  terminals: [],
+  terminals: [terminal("t1", 0), terminal("t2", 1)],
   sidebar: { groups: [] },
 }
+// What the workspace route answers; `pushSpine` replaces it.
+let currentSpine: unknown = spineBody
 
 let calls: [string, RequestInit | undefined][] = []
 // When set, the next reorder answers only when the test settles it.
@@ -74,8 +91,8 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   calls.push([u, init])
   if (u.includes("/api/v1/bootstrap")) return ok(makeBootstrap())
-  if (u.includes("/api/v1/workspace")) return ok(spineBody)
-  if (u.startsWith("/api/v1/sessions/reorder")) {
+  if (u.includes("/api/v1/workspace")) return ok(currentSpine)
+  if (u.startsWith("/api/v1/sessions/reorder") || u === "/api/v1/terminals/reorder") {
     const hold = holdNextReorder
     holdNextReorder = null
     if (!hold) return ok({})
@@ -106,6 +123,8 @@ class FakeWebSocket {
 beforeEach(() => {
   calls = []
   holdNextReorder = null
+  currentSpine = spineBody
+  notifyError.mockClear()
   vi.stubGlobal("location", { host: "localhost:0", protocol: "http:" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -122,6 +141,25 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+type Store = typeof import("./store")
+
+// Serve `spine` from the workspace route, announce a change, and wait for the
+// refetch to be applied.
+async function pushSpine(mod: Store, spine: unknown): Promise<void> {
+  const prev = mod.getSnapshot().spine
+  currentSpine = spine
+  mod.eventsSocket.onEvent({ event: "sessions.changed" })
+  await vi.waitFor(() => {
+    expect(mod.getSnapshot().spine).not.toBe(prev)
+  })
+}
+
+function sessionsIn(order: string[]) {
+  return order.map((id, i) =>
+    managed(id, "p1", `2026-01-0${i + 1}T00:00:00Z`),
+  )
+}
 
 describe("sortAgents", () => {
   it("persists one global order over every project's agents", async () => {
@@ -158,9 +196,103 @@ describe("sortAgents", () => {
     settleFirst!(false)
 
     await vi.waitFor(() => {
-      expect(calls.filter(([u]) => u.startsWith("/api/v1/sessions/reorder"))).toHaveLength(2)
+      expect(notifyError).toHaveBeenCalledWith("nope")
     })
-    await new Promise((r) => setTimeout(r, 0))
     expect(mod.getSnapshot().pendingAgentOrder).toEqual(["d", "c", "b", "a"])
+  })
+})
+
+describe("reorderTerminals", () => {
+  it("a failed earlier reorder leaves a later reorder's order on screen", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+    let settleFirst: ((ok: boolean) => void) | null = null
+    holdNextReorder = (settle) => {
+      settleFirst = settle
+    }
+
+    mod.reorderTerminals(["t1", "t2"])
+    await vi.waitFor(() => expect(settleFirst).not.toBeNull())
+    mod.reorderTerminals(["t2", "t1"])
+    settleFirst!(false)
+
+    await vi.waitFor(() => {
+      expect(notifyError).toHaveBeenCalledWith("nope")
+    })
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+  })
+
+  it("an events-socket close drops an in-flight reorder's overlay", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+    holdNextReorder = () => {}
+
+    mod.reorderTerminals(["t2", "t1"])
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+    mod.eventsSocket.onConn("closed")
+
+    expect(mod.getSnapshot().pendingTerminalOrder).toBeNull()
+  })
+})
+
+describe("the reorder overlays clear once the server shows their order", () => {
+  it("clears the agent overlay when an agent arrived alongside the confirmed order", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+
+    mod.reorderAgents(["b", "a", "c", "d"])
+    await pushSpine(mod, { ...spineBody, sessions: sessionsIn(["a", "b", "c", "d", "e"]) })
+    expect(mod.getSnapshot().pendingAgentOrder).toEqual(["b", "a", "c", "d"])
+
+    await pushSpine(mod, { ...spineBody, sessions: sessionsIn(["b", "a", "c", "d", "e"]) })
+    expect(mod.getSnapshot().pendingAgentOrder).toBeNull()
+  })
+
+  it("clears the agent overlay when an agent left alongside the confirmed order", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+
+    mod.reorderAgents(["b", "a", "d", "c"])
+    await pushSpine(mod, { ...spineBody, sessions: sessionsIn(["b", "a", "d"]) })
+    expect(mod.getSnapshot().pendingAgentOrder).toBeNull()
+  })
+
+  it("clears the terminal overlay when a terminal arrived alongside the confirmed order", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+
+    mod.reorderTerminals(["t2", "t1"])
+    await pushSpine(mod, {
+      ...spineBody,
+      terminals: [terminal("t1", 0), terminal("t2", 1), terminal("t3", 2)],
+    })
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+
+    await pushSpine(mod, {
+      ...spineBody,
+      terminals: [terminal("t1", 1), terminal("t2", 0), terminal("t3", 2)],
+    })
+    expect(mod.getSnapshot().pendingTerminalOrder).toBeNull()
+  })
+
+  it("clears the terminal overlay when a terminal left alongside the confirmed order", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine).not.toBeNull()
+    })
+
+    mod.reorderTerminals(["t2", "t1"])
+    await pushSpine(mod, { ...spineBody, terminals: [terminal("t2", 0)] })
+    expect(mod.getSnapshot().pendingTerminalOrder).toBeNull()
   })
 })

@@ -46,3 +46,17 @@ export function ordersMatch(a: string[], b: string[]): boolean {
   }
   return true
 }
+
+// Whether the server's order already shows an optimistic overlay: the ids both lists
+// share stand in the same relative order in each. An id only one side has (one created
+// or closed since the overlay was set) cannot be reordered, so it is left out. This is
+// exactly when `reorderById` with `pending` would leave `server` unchanged, which is what
+// clears the overlay even though the two lists no longer hold the same set.
+export function overlayShown(server: string[], pending: string[]): boolean {
+  const inServer = new Set(server)
+  const inPending = new Set(pending)
+  return ordersMatch(
+    server.filter((id) => inPending.has(id)),
+    pending.filter((id) => inServer.has(id)),
+  )
+}

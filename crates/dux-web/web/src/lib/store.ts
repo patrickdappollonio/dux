@@ -36,7 +36,7 @@ import {
   SessionsApiError,
 } from "./sessionsApi"
 
-import { ordersMatch, reorderById } from "./reorder"
+import { overlayShown, reorderById } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { isMobileViewport } from "@/hooks/use-mobile"
@@ -2201,22 +2201,24 @@ function pruneDeadEditorTabs(live: Set<string>, heldKey: string | null): void {
 }
 
 // Drop the global agent-order overlay once the server's session order (spine is
-// already in global sort_order) matches what we optimistically applied. The
-// server's list is the full session set, so compare against every session id.
+// already in global sort_order) shows what we optimistically applied, judged
+// over the sessions both still name, so an agent created or deleted before the
+// confirming spine cannot pin the overlay.
 function reconcilePendingAgentOrder(
   spine: Spine,
   pending: string[] | null,
 ): string[] | null {
   if (!pending) return null
   const serverIds = spine.sessions.map((s) => s.id)
-  return ordersMatch(serverIds, pending) ? null : pending
+  return overlayShown(serverIds, pending) ? null : pending
 }
 
 // Mirror of `reconcilePendingAgentOrder` for the flat Terminals section. The
 // spine carries EVERY terminal (any owner) in one flat collection, and the
 // authoritative flat order is that collection sorted by the global `sort_order`
 // (which a reorder restamps to the dragged order). The overlay clears once that
-// server order matches what we optimistically applied.
+// server order shows what we optimistically applied, over the terminals both
+// still name.
 function reconcilePendingTerminalOrder(
   spine: Spine,
   pending: string[] | null,
@@ -2226,7 +2228,7 @@ function reconcilePendingTerminalOrder(
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((t) => t.id)
-  return ordersMatch(serverIds, pending) ? null : pending
+  return overlayShown(serverIds, pending) ? null : pending
 }
 
 // Drop a promoted-slot overlay once the spine has caught up with the close it
@@ -2622,12 +2624,13 @@ eventsSocket.onConn = (conn) => {
 // as `status`/`status_cleared` events over `/ws/events` (see
 // `eventsSocket.onEvent`).
 
-// Reset the optimistic agent-order overlay. Returned as a patch so callers can
-// fold it into a single `setState`. Used on every error path so a rejected
-// reorder snaps the UI back to the server's authoritative order.
+// Reset the optimistic agent- and terminal-order overlays. Returned as a patch
+// so callers can fold it into a single `setState`. Used on every error path so
+// a rejected reorder snaps the UI back to the server's authoritative order.
 function clearPendingOrders(): Partial<DuxState> {
   return {
     pendingAgentOrder: null,
+    pendingTerminalOrder: null,
   }
 }
 
@@ -7634,8 +7637,9 @@ export function reorderTerminals(orderedIds: string[]): void {
   terminalsApi.reorder(orderedIds).catch((e) => {
     // A rejected reorder is never reconciled by a spine, so the overlay would
     // linger forever. Clear it so the UI snaps back to the authoritative order,
-    // then surface the failure.
-    setState({ pendingTerminalOrder: null })
+    // then surface the failure. Only this request's own overlay: a later
+    // reorder that replaced it is still waiting on its own answer.
+    if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
     notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
   })
 }
