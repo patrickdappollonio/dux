@@ -577,11 +577,18 @@ impl Attachments {
     }
 
     /// A tab's new events connection `new` takes over what its lost one `old`
-    /// still counts, so the tab is not in its own way; a live `old` keeps it.
+    /// still counts, the terminal sockets that stayed open across the reconnect
+    /// as well as the ones lost with it, so the tab is not in its own way; a
+    /// live `old` keeps it.
     pub fn inherit(&self, old: &str, new: &str) {
         self.with(|state| {
             if state.connections.contains_key(old) {
                 return;
+            }
+            for attachment in state.attachments.values_mut() {
+                if attachment.connection == old {
+                    attachment.connection = new.to_string();
+                }
             }
             for presence in &mut state.presences {
                 if presence.connection == old {
@@ -1475,6 +1482,30 @@ mod tests {
         assert_eq!(
             attachments.blockers(&agent_scope("s1"), Some("phone-again"), at(60)),
             Vec::<Blocker>::new()
+        );
+    }
+
+    /// A terminal socket that stayed open across its tab's events reconnect is
+    /// the tab's own too, so it does not block a change the tab asks for.
+    #[test]
+    fn a_live_terminal_socket_follows_its_tab_to_the_new_events_connection() {
+        let attachments = Attachments::default();
+        let now = Instant::now();
+        attachments.register("phone", browser("100.64.0.9", "Safari"), None);
+        attachments
+            .attach("phone", tab("s1-slot", "s1"), None, None)
+            .unwrap();
+        attachments.deregister("phone", Ending::Lost);
+        attachments.register("phone-again", browser("100.64.0.9", "Safari"), None);
+        attachments.inherit("phone", "phone-again");
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), Some("phone-again"), now),
+            Vec::<Blocker>::new()
+        );
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), None, now).len(),
+            1,
+            "the socket still counts for everybody else"
         );
     }
 

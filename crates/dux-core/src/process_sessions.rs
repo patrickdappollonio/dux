@@ -187,14 +187,9 @@ pub fn session_processes_where(
 
 /// End exactly these processes, and nothing else of their sessions: SIGTERM
 /// and SIGHUP, SIGKILL whatever is left once `grace` has passed, then wait up
-/// to [`KILL_SETTLE`] more. Answers the ones still running after that.
-/// Blocking: a worker thread's call.
-pub fn end_exactly(rows: &[ProcRow], grace: Duration) -> Vec<ProcRow> {
-    end_exactly_with(rows, grace, &|| Ok(read_process_table())).unwrap_or_default()
-}
-
-/// [`end_exactly`] with the process table handed in, as
-/// [`read_process_table_strict`] reads it.
+/// to [`KILL_SETTLE`] more. Answers the ones still running after that. The
+/// process table comes from `read_table`, as [`read_process_table_strict`]
+/// reads it. Blocking: a worker thread's call.
 ///
 /// # Errors
 ///
@@ -486,6 +481,35 @@ fn parse_linux_stat(pid: u32, stat: &str) -> Option<ProcRow> {
     parse_linux_stat_with(pid, stat, clock_ticks_per_second())
 }
 
+/// One process's row from what reading its `/proc/<pid>/stat` gave, for the
+/// strict table read. `None` for a process this read cannot see: one that
+/// exited mid-read, or one `/proc` hides from this user (mounted `hidepid`),
+/// which is somebody else's and so never dux's. The command name is decoded
+/// lossily, since it is only a label; the numbers that identify the process
+/// must parse or the read fails.
+#[cfg(target_os = "linux")]
+fn linux_stat_row(
+    pid: u32,
+    read: std::io::Result<Vec<u8>>,
+    ticks_per_second: u64,
+) -> Result<Option<ProcRow>, String> {
+    use rustix::io::Errno;
+    match read {
+        Ok(stat) => parse_linux_stat_with(pid, &String::from_utf8_lossy(&stat), ticks_per_second)
+            .map(Some)
+            .ok_or_else(|| format!("/proc/{pid}/stat could not be understood")),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || [Errno::SRCH, Errno::ACCESS, Errno::PERM]
+                    .iter()
+                    .any(|errno| error.raw_os_error() == Some(errno.raw_os_error())) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(format!("/proc/{pid}/stat could not be read: {error}")),
+    }
+}
+
 /// Mach absolute time in nanoseconds.
 #[cfg(target_os = "macos")]
 #[expect(
@@ -749,9 +773,13 @@ pub fn read_process_table() -> Vec<ProcRow> {
 /// Fails when the process table cannot be listed or a process's entry cannot be read or understood.
 pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
     crate::engine::destructive_guard::assert_off_engine_thread("reading the process table");
+    #[cfg(test)]
+    if TABLE_UNREADABLE.get() {
+        return Err("/proc could not be listed: Too many open files (os error 24)".to_string());
+    }
     #[cfg(target_os = "linux")]
     {
-        let gone = rustix::io::Errno::SRCH.raw_os_error();
+        let ticks_per_second = clock_ticks_per_second();
         let entries = std::fs::read_dir("/proc")
             .map_err(|error| format!("/proc could not be listed: {error}"))?;
         let mut rows = Vec::new();
@@ -764,15 +792,9 @@ pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
             else {
                 continue;
             };
-            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                Ok(stat) => rows.push(
-                    parse_linux_stat(pid, &stat)
-                        .ok_or_else(|| format!("/proc/{pid}/stat could not be understood"))?,
-                ),
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        || error.raw_os_error() == Some(gone) => {}
-                Err(error) => return Err(format!("/proc/{pid}/stat could not be read: {error}")),
+            let read = std::fs::read(format!("/proc/{pid}/stat"));
+            if let Some(row) = linux_stat_row(pid, read, ticks_per_second)? {
+                rows.push(row);
             }
         }
         non_empty_table(rows)
@@ -781,6 +803,13 @@ pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
     {
         non_empty_table(read_process_table())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes [`read_process_table_strict`] fail on this thread, the way it does
+    /// when dux has run out of file descriptors.
+    static TABLE_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// dux is always in the table, so an empty one was not read.
@@ -926,7 +955,11 @@ pub fn snapshot(sessions: &[ProcessSession]) -> Vec<ProcessIdentity> {
 /// table and sends real signals; tests substitute a scripted one.
 pub trait ProcessOps {
     /// The current process table.
-    fn table(&mut self) -> Vec<ProcRow>;
+    ///
+    /// # Errors
+    ///
+    /// Fails when the table cannot be read.
+    fn table(&mut self) -> Result<Vec<ProcRow>, String>;
     /// Sends `signal` to `pid`; a process already gone is not an error.
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal);
     /// The current time.
@@ -939,8 +972,8 @@ pub trait ProcessOps {
 pub(crate) struct SystemProcesses;
 
 impl ProcessOps for SystemProcesses {
-    fn table(&mut self) -> Vec<ProcRow> {
-        read_process_table()
+    fn table(&mut self) -> Result<Vec<ProcRow>, String> {
+        read_process_table_strict()
     }
 
     fn signal(&mut self, pid: u32, signal: rustix::process::Signal) {
@@ -971,6 +1004,9 @@ pub enum PurgeOutcome {
     },
     /// These were still running after SIGKILL and the settle wait.
     Survivors(Vec<ProcRow>),
+    /// The process table could not be read, so what is still running is not
+    /// known; the reason says why.
+    Unreadable(String),
 }
 
 /// End every process in `sessions` (and in `known`, and below either): ask
@@ -985,6 +1021,9 @@ pub fn purge(
     known: &[ProcessIdentity],
     grace: Duration,
 ) -> PurgeOutcome {
+    if sessions.is_empty() && known.is_empty() {
+        return PurgeOutcome::Clean { stopped: 0 };
+    }
     let self_pid = std::process::id();
     let start = ops.now();
     let kill_at = start + grace;
@@ -992,7 +1031,11 @@ pub fn purge(
     let mut asked: HashSet<ProcessIdentity> = HashSet::new();
     loop {
         let now = ops.now();
-        let alive = members(&ops.table(), sessions, known, self_pid);
+        let table = match ops.table() {
+            Ok(table) => table,
+            Err(why) => return PurgeOutcome::Unreadable(why),
+        };
+        let alive = members(&table, sessions, known, self_pid);
         if alive.is_empty() {
             return PurgeOutcome::Clean {
                 stopped: asked.len(),
@@ -1684,7 +1727,15 @@ impl AgentProcessRegistry {
         if tracked.is_empty() {
             return None;
         }
-        let table = read_process_table();
+        let table = match read_process_table_strict() {
+            Ok(table) => table,
+            Err(why) => {
+                return Some(format!(
+                    "dux could not check whether anything it started is still working there: \
+                     the process list could not be read ({why}); try again in a moment"
+                ));
+            }
+        };
         let self_pid = std::process::id();
         for (session, started_in, known, label) in tracked {
             let running = members(&table, &[session], &known, self_pid);
@@ -1954,12 +2005,14 @@ impl AgentProcessRegistry {
 
     /// Drop every session nothing of which is still running, under the one
     /// membership rule, and save the result. Blocking: a worker thread's call.
+    /// A table that cannot be read prunes nothing, because every session would
+    /// read as ended.
     pub(crate) fn prune_gone(&self) {
-        self.prune_gone_with(read_process_table);
+        self.prune_gone_with(read_process_table_strict);
     }
 
     /// [`Self::prune_gone`] against the table `read` returns.
-    fn prune_gone_with(&self, read: impl FnOnce() -> Vec<ProcRow>) {
+    fn prune_gone_with(&self, read: impl FnOnce() -> Result<Vec<ProcRow>, String>) {
         // Only what was registered BEFORE the table is read can be judged by
         // it: a session registered after the read is missing from that table
         // because it did not exist yet, not because it ended.
@@ -1973,7 +2026,16 @@ impl AgentProcessRegistry {
                 .map(|(session, _)| *session)
                 .collect()
         };
-        let table = read();
+        let table = match read() {
+            Ok(table) => table,
+            Err(why) => {
+                crate::logger::warn(&format!(
+                    "kept every recorded process session this round, because the process list \
+                     could not be read: {why}"
+                ));
+                return;
+            }
+        };
         let gone: HashSet<ProcessSession> = {
             let inner = self.lock();
             candidates
@@ -2110,14 +2172,15 @@ impl AgentProcessRegistry {
         known: &[ProcessIdentity],
     ) -> Result<Vec<ProcRow>, String> {
         self.recordings_settled()?;
+        let table = read_process_table_strict().map_err(|why| {
+            format!(
+                "dux could not confirm what its processes are running there: the process list \
+                 could not be read ({why}); try again in a moment"
+            )
+        })?;
         let mut known = known.to_vec();
         known.extend(self.survivors_of(sessions));
-        Ok(members(
-            &read_process_table(),
-            sessions,
-            &known,
-            std::process::id(),
-        ))
+        Ok(members(&table, sessions, &known, std::process::id()))
     }
 
     /// [`Self::wait_for_recordings`] for every recording in flight.
@@ -2432,18 +2495,21 @@ impl AgentProcessRegistry {
     ) {
         let grace = stop.as_ref().map_or(KILL_SETTLE, |(grace, _)| *grace);
         let known = self.survivors_of(&[startup]);
-        if let PurgeOutcome::Survivors(left) =
-            purge(&mut SystemProcesses, &[startup], &known, grace)
-        {
-            let sentence = format!(
+        let sentence = match purge(&mut SystemProcesses, &[startup], &known, grace) {
+            PurgeOutcome::Clean { .. } => return,
+            PurgeOutcome::Survivors(left) => format!(
                 "A deleted agent's startup command would not stop: {} still running. Stop it \
                  yourself.",
                 describe(&left)
-            );
-            crate::logger::warn(&sentence);
-            if let Some((_, notice)) = stop {
-                notice(sentence);
-            }
+            ),
+            PurgeOutcome::Unreadable(why) => format!(
+                "dux could not tell whether a deleted agent's startup command stopped, because \
+                 the process list could not be read ({why}). Check for it and stop it yourself."
+            ),
+        };
+        crate::logger::warn(&sentence);
+        if let Some((_, notice)) = stop {
+            notice(sentence);
         }
     }
 
@@ -2644,6 +2710,36 @@ mod tests {
             parse_linux_stat_with(7, "7 (z) Z 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 9 0", 100)
                 .unwrap();
         assert!(zombie.exited);
+    }
+
+    /// Nothing to end needs no process table, so a table that cannot be read
+    /// does not hold up a removal that had nothing running.
+    #[test]
+    fn a_purge_of_no_targets_never_reads_the_table() {
+        TABLE_UNREADABLE.set(true);
+        let outcome = purge(&mut SystemProcesses, &[], &[], Duration::ZERO);
+        TABLE_UNREADABLE.set(false);
+        assert_eq!(outcome, PurgeOutcome::Clean { stopped: 0 });
+    }
+
+    /// One process the strict read cannot use does not make the whole table
+    /// unreadable: a process hidden from this user is skipped, and a command
+    /// name that is not UTF-8 is still a row.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_strict_read_skips_a_hidden_process_and_keeps_an_odd_name() {
+        for errno in [rustix::io::Errno::ACCESS, rustix::io::Errno::PERM] {
+            let hidden = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert_eq!(linux_stat_row(9, Err(hidden), 100), Ok(None));
+        }
+        let mut stat = b"9 (name\xff) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0".to_vec();
+        let row = linux_stat_row(9, Ok(stat.clone()), 100).unwrap().unwrap();
+        assert_eq!((row.pid, row.ppid, row.sid), (9, Some(1), Some(9)));
+        assert_eq!(row.name, "name\u{fffd}");
+        stat.truncate(12);
+        assert!(linux_stat_row(9, Ok(stat), 100).is_err());
+        let broken = std::io::Error::from_raw_os_error(rustix::io::Errno::IO.raw_os_error());
+        assert!(linux_stat_row(9, Err(broken), 100).is_err());
     }
 
     /// A session's recorded start and the process table's are read off the
@@ -2998,7 +3094,7 @@ mod tests {
         registry.register("a", old, &folder);
         registry.prune_gone_with(|| {
             registry.register("b", fresh, &folder);
-            Vec::new()
+            Ok(vec![row(1, 0, 1)])
         });
         let left = registry.sessions_in(&folder);
         assert_eq!(
@@ -3169,8 +3265,8 @@ mod tests {
     }
 
     impl ProcessOps for Scripted {
-        fn table(&mut self) -> Vec<ProcRow> {
-            self.rows.iter().map(|(r, _)| r.clone()).collect()
+        fn table(&mut self) -> Result<Vec<ProcRow>, String> {
+            Ok(self.rows.iter().map(|(r, _)| r.clone()).collect())
         }
         fn signal(&mut self, pid: u32, signal: rustix::process::Signal) {
             self.sent.push((pid, signal));
@@ -3222,7 +3318,9 @@ mod tests {
         let outcome = purge(&mut ops, &[session(100)], &known, Duration::from_secs(1));
         match outcome {
             PurgeOutcome::Survivors(rows) => assert_eq!(pids(&rows), vec![101]),
-            other @ PurgeOutcome::Clean { .. } => panic!("expected survivors, got {other:?}"),
+            other @ (PurgeOutcome::Clean { .. } | PurgeOutcome::Unreadable(_)) => {
+                panic!("expected survivors, got {other:?}")
+            }
         }
         let waited = ops.clock - start;
         assert!(
@@ -3386,6 +3484,33 @@ mod tests {
         assert!(end_exactly_with(&rows, Duration::ZERO, &|| Err("no /proc".to_string())).is_err());
         assert!(non_empty_table(Vec::new()).is_err());
         assert_eq!(non_empty_table(vec![proc_row(1)]).unwrap().len(), 1);
+    }
+
+    /// An unreadable process table is not an empty one: nothing is forgotten,
+    /// nothing reads as clear, and a purge does not report it stopped
+    /// everything.
+    #[test]
+    fn an_unreadable_process_table_fails_every_guard_closed() {
+        let registry = AgentProcessRegistry::default();
+        let folder = std::path::PathBuf::from("/tmp/dux-unreadable-table-test");
+        // A session nothing runs in, so a readable table would clear it.
+        let ended = session(4_000_003);
+        registry.register("a", ended, &folder);
+        TABLE_UNREADABLE.set(true);
+        let occupant = registry.cwd_occupant(&folder, &[]);
+        let running = registry.running_members(&[ended], &[]);
+        let purged = purge(&mut SystemProcesses, &[ended], &[], Duration::ZERO);
+        registry.prune_gone();
+        TABLE_UNREADABLE.set(false);
+        assert!(
+            occupant
+                .as_deref()
+                .is_some_and(|why| why.contains("Too many open files")),
+            "{occupant:?}"
+        );
+        assert!(running.is_err(), "{running:?}");
+        assert!(matches!(purged, PurgeOutcome::Unreadable(_)), "{purged:?}");
+        assert_eq!(registry.sessions_in(&folder), vec![ended]);
     }
 
     #[cfg(target_os = "linux")]

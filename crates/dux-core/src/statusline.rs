@@ -1582,7 +1582,10 @@ impl KeyedStatusController {
             // by the snapshot already and must not be told twice.
             .filter(|entry| match entry.key.as_deref() {
                 Some(key) => !self.entries.contains_key(key),
-                None => self.anon.is_none(),
+                None => self
+                    .anon
+                    .as_ref()
+                    .is_none_or(|anon| anon.generation != entry.generation),
             })
             .map(|entry| KeyedWireStatus {
                 key: entry.key,
@@ -2585,6 +2588,27 @@ mod tests {
     ) {
         c.set(now, key.map(str::to_string), tone, message);
         c.mark_unwatched(key);
+    }
+
+    #[test]
+    fn a_held_unkeyed_warning_survives_a_newer_unkeyed_info_in_the_slot() {
+        // The info took the one unkeyed slot, so the snapshot no longer hands
+        // the warning to the joining page and nothing else will.
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        set_unwatched(
+            &mut c,
+            t0,
+            None,
+            StatusTone::Warning,
+            "the push was refused",
+        );
+        c.set(t0, None, StatusTone::Info, "copied the path");
+        let late = c.take_late_finals();
+        assert_eq!(
+            late.iter().map(|s| s.message.as_str()).collect::<Vec<_>>(),
+            ["the push was refused"]
+        );
     }
 
     fn named() -> crate::status_text::StatusText {

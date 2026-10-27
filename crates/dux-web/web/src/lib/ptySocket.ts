@@ -37,6 +37,7 @@ import { authPaused } from "./authGate"
 import { browserId } from "./browserId"
 import { awaitingConnectionId, getConnectionId, onConnectionIdSettled } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
+import { ptyGridInBounds } from "./ptyGrid"
 import { appSocketGivenUp } from "./appSocketGiveUp"
 import { onServerValidated, serverValidated } from "./serverValidated"
 import type { TerminalOwnerRef } from "./terminalOwner"
@@ -447,12 +448,16 @@ export class PtySocket extends ReconnectingSocket {
   // re-typed by nobody: the caller skips a size it believes is already there, so
   // a frame discarded here must be reported rather than booked as delivered and
   // never re-asserted. A take-over intent is cleared only when this returns true.
+  //
+  // A grid outside the PTY's bounds is not sent either: the server would drop
+  // it without a word, and a take-over riding on it would be spent on nothing.
   sendResize(
     rows: number,
     cols: number,
     takeover = false,
     expectedOwner?: string,
   ): boolean {
+    if (!ptyGridInBounds(rows, cols)) return false
     // Refused, and reported as refused: the resize coordinator re-asserts the
     // size once the page is signed in again (`authResync.ts`), through its own
     // ownership rules.

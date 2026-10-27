@@ -819,6 +819,27 @@ describe("PtySocket", () => {
   })
 })
 
+describe("a resize outside the PTY's grid bounds", () => {
+  // The server refuses such a frame without a word, so sending it would spend
+  // a take-over on a claim that never happened. Reported as not sent, which is
+  // what keeps the caller's take-over intent armed for the next real frame.
+  it("never goes on the wire and is reported as not sent", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    const ws = last()
+    ws.open()
+    expect(sock.sendResize(0, 0, true)).toBe(false)
+    expect(sock.sendResize(65535, 65535, true, "41")).toBe(false)
+    expect(ws.sent).toEqual([])
+    expect(sock.sendResize(24, 80, true)).toBe(true)
+    expect(JSON.parse(ws.sent[0] as string)).toEqual({
+      rows: 24,
+      cols: 80,
+      takeover: true,
+    })
+  })
+})
+
 describe("the take-over frame names the ghost it expects to succeed", () => {
   it("a PRESSED take-over carries no expected_owner, because a press may take from anyone", () => {
     const sock = new PtySocket("ws://x/pty")

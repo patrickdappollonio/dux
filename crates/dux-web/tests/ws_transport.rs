@@ -2708,6 +2708,54 @@ async fn an_applied_resize_tells_every_attached_socket_the_ptys_new_grid() {
     );
 }
 
+/// A resize frame naming a grid no terminal can have (empty, or tens of
+/// gigabytes of cells) is refused whole and silently: it applies nothing,
+/// announces nothing and claims nothing, take-over or not.
+#[tokio::test]
+async fn a_resize_to_a_degenerate_or_absurd_grid_is_refused_whole() {
+    let (addr, _tmp) = boot().await;
+    let url = format!("ws://{addr}/ws/sessions/s1/pty");
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect first pty socket");
+    let _ = next_event_frame(&mut ws_a, "connected", Duration::from_secs(8))
+        .await
+        .expect("the first handshake");
+
+    ws_a.send(Message::Text(r#"{"rows":0,"cols":0}"#.into()))
+        .await
+        .unwrap();
+    ws_a.send(Message::Text(
+        r#"{"rows":65535,"cols":65535,"takeover":true}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let refused = next_event_frame(&mut ws_a, "size", Duration::from_secs(2)).await;
+    assert!(
+        refused.is_none(),
+        "an out-of-bounds resize was applied: {refused:?}"
+    );
+
+    // Neither frame claimed the pty, so a second connection's PLAIN resize is
+    // still the one that sizes it.
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect second pty socket");
+    let _ = next_event_frame(&mut ws_b, "connected", Duration::from_secs(8))
+        .await
+        .expect("the second handshake");
+    ws_b.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    let size = next_event_frame(&mut ws_a, "size", Duration::from_secs(8))
+        .await
+        .expect("the unowned pty takes the second connection's plain resize");
+    assert_eq!(
+        (size["rows"].as_u64(), size["cols"].as_u64()),
+        (Some(24), Some(80))
+    );
+}
+
 #[tokio::test]
 async fn a_grid_change_is_forwarded_only_to_sockets_for_that_pty() {
     let (addr, _tmp) = boot().await;

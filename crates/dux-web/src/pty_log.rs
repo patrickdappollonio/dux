@@ -108,6 +108,19 @@ pub fn describe_claim_refused(
     )
 }
 
+/// A resize frame named a grid outside the bounds a PTY supports.
+pub fn describe_resize_out_of_bounds(pty_id: &str, conn_id: u64, rows: u16, cols: u16) -> String {
+    format!(
+        "PTY {pty_id}: resize from connection {conn_id} to {cols}x{rows} refused whole, \
+         nothing applied, claimed or broadcast; a terminal grid must be between {}x{} and \
+         {}x{} (columns by rows)",
+        dux_core::pty::PTY_MIN_COLS,
+        dux_core::pty::PTY_MIN_ROWS,
+        dux_core::pty::PTY_MAX_COLS,
+        dux_core::pty::PTY_MAX_ROWS,
+    )
+}
+
 /// A socket ended and gave the pty back.
 pub fn describe_ownership_released(pty_id: &str, conn_id: u64, epoch: u64) -> String {
     format!(
@@ -134,6 +147,16 @@ pub fn describe_replay_sent(pty_id: &str, generation: u64, bytes: usize) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_out_of_bounds_resize_line_reads_as_one_sentence() {
+        let line = describe_resize_out_of_bounds("s1", 7, 0, 0);
+        assert!(
+            line.contains("to 0x0 refused whole, nothing applied"),
+            "{line}"
+        );
+        assert!(!line.contains("  "), "{line}");
+    }
 
     #[test]
     fn a_granted_claim_names_the_pty_the_connection_the_device_and_how_it_won() {

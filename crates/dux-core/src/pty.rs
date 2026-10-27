@@ -217,6 +217,35 @@ pub struct TerminalSnapshot {
 /// beyond the cap render as plain text (`link = None`).
 const MAX_SNAPSHOT_LINKS: usize = 256;
 
+/// The smallest grid a PTY is given: the emulator's own minimum
+/// (`alacritty_terminal::term::MIN_SCREEN_LINES` and `MIN_COLUMNS`), two
+/// columns being what one wide character needs. Below it the emulator's
+/// arithmetic on the last column underflows.
+pub const PTY_MIN_ROWS: u16 = 1;
+/// See [`PTY_MIN_ROWS`].
+pub const PTY_MIN_COLS: u16 = 2;
+/// The largest grid a PTY is given, well past what a full 8K display holds at
+/// a small font (about 1300 by 450 cells). The bound is on memory: the
+/// emulator allocates every cell of the viewport and every scrollback row at
+/// this width, so an unbounded `u16` square is tens of gigabytes.
+pub const PTY_MAX_ROWS: u16 = 1024;
+/// See [`PTY_MAX_ROWS`].
+pub const PTY_MAX_COLS: u16 = 2048;
+
+/// Whether `rows` by `cols` lies within the grid bounds a PTY supports.
+pub const fn grid_in_bounds(rows: u16, cols: u16) -> bool {
+    rows >= PTY_MIN_ROWS && rows <= PTY_MAX_ROWS && cols >= PTY_MIN_COLS && cols <= PTY_MAX_COLS
+}
+
+/// `rows` by `cols` pulled into the grid bounds a PTY supports: the grid a
+/// PTY handed that size actually gets.
+pub fn bounded_grid(rows: u16, cols: u16) -> (u16, u16) {
+    (
+        rows.clamp(PTY_MIN_ROWS, PTY_MAX_ROWS),
+        cols.clamp(PTY_MIN_COLS, PTY_MAX_COLS),
+    )
+}
+
 /// Whether an OSC 8 hyperlink URI is safe to forward to the host terminal: an
 /// `http://` or `https://` scheme (case-insensitive) with no control bytes. This
 /// mirrors the web link handler's gate so both surfaces treat the same links as
@@ -1242,6 +1271,7 @@ impl PtyClient {
         // can reach a developer's real agent CLI.
         #[cfg(any(test, feature = "test-support"))]
         crate::test_provider::refuse_unlisted_spawn(command)?;
+        let (rows, cols) = bounded_grid(rows, cols);
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -1562,37 +1592,40 @@ impl PtyClient {
     /// the fan-out list; the receiver will observe disconnection on the next
     /// `recv` or `try_recv` call after the guard is dropped.
     ///
+    /// The channel is unbounded on purpose: the reader fans out under the
+    /// terminal lock and must never wait on a viewer, and dropping a viewer
+    /// that falls behind would send it round a full-replay reconnect. What it
+    /// holds is bounded by the socket instead. Before the forwarder starts, the
+    /// web layer's opening sends run under their own deadline. After it, the
+    /// forwarder drains this into a bounded queue a stalled peer stops
+    /// emptying, and its socket holds the sink while it waits; that socket's next
+    /// liveness ping then cannot get onto the wire and ends the socket, and a
+    /// peer that stops answering is ended at its quiet deadline. Either way the
+    /// receiver is dropped and this subscriber pruned, so a viewer that stops
+    /// reading holds at most the child's output over those deadlines.
+    ///
     /// # Panics
     ///
     /// Panics when the subscribers lock is poisoned by an earlier panic while it was held.
     pub fn subscribe(&self) -> (PtyViewerGuard, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
-        // Guard against the subscribe-after-clear window: the reader thread
-        // sets `exited` and then does a ONE-SHOT `subs.clear()` on EOF/error
-        // (see `spawn_reader` above); `prune_exited_ptys` is the only later
-        // remover, running once per tick. A subscribe landing after that
-        // one-shot clear but before the next prune tick used to attach to a
-        // client that will never see another `subs.clear()` call: the
-        // forwarder's `recv_timeout` would only ever see `Timeout`, never
-        // `Disconnected`, so its task (and the PTY socket, connection-cap
-        // permit, and per-tab subscriber-quota slot it holds) would never be
-        // reaped until the browser itself disconnected. `exited` is monotonic
-        // (set once, never reset), so checking it here (instead of pushing
-        // unconditionally) closes the window: if the PTY has already exited,
-        // don't register at all. `tx` is dropped without being stored, so `rx`
-        // observes `Disconnected` on its very next `recv`/`try_recv`, letting
-        // the caller's forwarder complete and reap immediately instead of
-        // leaking until the next prune tick (which would still miss it, since
-        // the entry was never in `subscribers` for `prune_exited_ptys` to see
-        // in the first place; the leak was in never delivering `Disconnected`
-        // at all).
+        // The reader sets `exited` and then does a ONE-SHOT `subs.clear()` under
+        // this lock on EOF/error (see `spawn_reader` above), and nothing clears
+        // the list again. A subscriber registered after that clear would never
+        // be disconnected: the forwarder's `recv_timeout` would only ever see
+        // `Timeout`, so its task (and the PTY socket, connection-cap permit and
+        // per-tab subscriber-quota slot it holds) would live until the browser
+        // itself disconnected. Reading `exited` under the same lock makes the
+        // check and the push one step against that clear: either this push lands
+        // first and the clear removes it, or the clear came first and `exited`
+        // reads true here. `tx` is then dropped without being stored, so `rx`
+        // observes `Disconnected` on its very next `recv`/`try_recv`.
+        let mut subs = self.subscribers.lock().expect("subscribers mutex poisoned");
         if !self.is_exited() {
-            self.subscribers
-                .lock()
-                .expect("subscribers mutex poisoned")
-                .push((id, tx));
+            subs.push((id, tx));
         }
+        drop(subs);
         let guard = PtyViewerGuard {
             id,
             subs: Arc::clone(&self.subscribers),
@@ -1734,10 +1767,14 @@ impl PtyClient {
     /// first closes it. `TIOCSWINSZ` does not block, so nothing long-running runs
     /// under the lock here.
     ///
+    /// A geometry outside the supported bounds is pulled into them, so no
+    /// caller can hand the emulator a grid it cannot hold.
+    ///
     /// # Errors
     ///
     /// Fails when the PTY cannot be resized.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let (rows, cols) = bounded_grid(rows, cols);
         // A resize can move the scrollback offset (growing the viewport pulls
         // history into the grid and resets the display offset to 0). That is
         // purely a view change now, so there is nothing to synchronize beyond
@@ -6361,6 +6398,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resize_and_spawn_survive_a_degenerate_or_absurd_geometry() {
+        // The emulator subtracts one from the width and allocates rows times
+        // columns cells, so a zero-sized grid corrupts it and a 65535-square one
+        // aborts the process on allocation. Whatever a caller hands over, the
+        // grid lands inside the supported bounds.
+        let client = PtyClient::spawn("cat", &[], Path::new("."), 0, 0, 100).expect("spawn");
+        assert_eq!(client.grid_size(), Some((PTY_MIN_ROWS, PTY_MIN_COLS)));
+        client
+            .resize(u16::MAX, u16::MAX)
+            .expect("resize to the maximum");
+        assert_eq!(client.grid_size(), Some((PTY_MAX_ROWS, PTY_MAX_COLS)));
+        client.resize(0, 0).expect("resize to nothing");
+        assert_eq!(client.grid_size(), Some((PTY_MIN_ROWS, PTY_MIN_COLS)));
+    }
+
     /// A shell that exits at once, reaped and with its reader finished. The
     /// reader thread has returned by then, so a test can set the client back to
     /// "no end of input yet" or hand it a reader that never ends, and stand in
@@ -6772,6 +6825,38 @@ mod tests {
         );
         drop(guard);
         assert_eq!(client.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn subscribe_racing_the_exit_disconnect_never_registers_after_it() {
+        // The reader marks the PTY exited and then clears the subscriber list
+        // once, under its lock. A subscribe that read "not exited" before that
+        // and registered after it would never be disconnected. The helper holds
+        // the lock while the subscribe is under way and publishes the exit
+        // inside it, exactly as the reader does.
+        let client = PtyClient::spawn("cat", &[], Path::new("."), 5, 40, 100).expect("spawn");
+        let subscribers = Arc::clone(&client.subscribers);
+        let exited = Arc::clone(&client.exited);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let helper = thread::spawn(move || {
+            let mut subs = subscribers.lock().expect("subscribers mutex poisoned");
+            locked_tx.send(()).expect("test thread alive");
+            thread::sleep(std::time::Duration::from_millis(100));
+            exited.store(true, Ordering::Release);
+            subs.clear();
+        });
+        locked_rx.recv().expect("helper took the lock");
+        let (_guard, rx) = client.subscribe();
+        helper.join().expect("helper thread panicked");
+        assert_eq!(
+            client.subscriber_count(),
+            0,
+            "a subscriber registered after the one-shot disconnect is never disconnected"
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]

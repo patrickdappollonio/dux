@@ -352,6 +352,8 @@ impl App {
     /// authoritative grid instead, and the card covering it names the device
     /// whose grid that is.
     pub(crate) fn resize_pty_if_permitted(&mut self, pty_id: &str, rows: u16, cols: u16) -> bool {
+        // The grid the child will really get, which is the one to announce.
+        let (rows, cols) = dux_core::pty::bounded_grid(rows, cols);
         let Some(seat) = self.pty_ownership() else {
             // Nothing serving means no registry, no gate and no apply order to
             // take part in: resize the child directly, exactly as this surface
@@ -799,6 +801,28 @@ mod tests {
                 },
             ],
             "an unowned pty is claimed and its new grid announced, in that order"
+        );
+    }
+
+    /// A pane smaller than the smallest grid a PTY takes announces the grid the
+    /// child really got, so a watcher adopts that rather than the request.
+    #[test]
+    fn a_granted_resize_announces_the_grid_the_child_was_given() {
+        let (mut app, recorded, _seat) = app_with_a_live_pty();
+        app.claim_launched_pty("session-1-slot");
+
+        assert!(app.resize_pty_if_permitted("session-1-slot", 0, 1));
+        let published = recorded.lock().expect("not poisoned").published.clone();
+        let announced: Vec<(u16, u16)> = published
+            .iter()
+            .filter_map(|event| match event {
+                PtyOwnershipEvent::GridApplied { rows, cols, .. } => Some((*rows, *cols)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            announced,
+            [(dux_core::pty::PTY_MIN_ROWS, dux_core::pty::PTY_MIN_COLS)]
         );
     }
 

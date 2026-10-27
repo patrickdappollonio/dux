@@ -1402,6 +1402,16 @@ pub(crate) fn end_agent_processes_before_removal(
             logger::warn(&message);
             Err(message)
         }
+        crate::process_sessions::PurgeOutcome::Unreadable(why) => {
+            let path = crate::home_path::shorten_home(std::path::Path::new(worktree_path));
+            let message = format!(
+                "the worktree at {path} was kept, untouched: dux could not read the process \
+                 list ({why}), so it could not stop what the agent started there or confirm \
+                 that nothing is still writing into it. Try the delete again in a moment."
+            );
+            logger::warn(&message);
+            Err(message)
+        }
     }
 }
 

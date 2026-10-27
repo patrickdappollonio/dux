@@ -2733,6 +2733,18 @@ impl AttachedPtySocket<'_> {
 
     fn handle_resize_frame(&self, frame: &PtyResizeFrame) {
         let pty_id = self.target.pty_id();
+        // A grid no terminal can have is a client bug, never a window: refused
+        // before the claim, so it neither resizes nor takes the pty, and
+        // silently, like every other refused resize.
+        if !dux_core::pty::grid_in_bounds(frame.rows, frame.cols) {
+            dux_core::logger::info(&crate::pty_log::describe_resize_out_of_bounds(
+                pty_id,
+                self.conn_id,
+                frame.rows,
+                frame.cols,
+            ));
+            return;
+        }
         let expected_owner = parse_expected_owner(frame.expected_owner.as_deref());
         let intent = if frame.takeover {
             dux_core::pty_owners::ResizeIntent::TakeOver { expected_owner }

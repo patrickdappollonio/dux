@@ -531,6 +531,9 @@ impl PtySizeOwners {
         mut apply: impl FnMut(u16, u16) -> T,
         mut before_heal: impl FnMut(u16, u16),
     ) -> GridApplyOutcome<T> {
+        // Recorded as the child will really have it, so a later heal and every
+        // handshake carry the applied grid rather than the request.
+        let (rows, cols) = crate::pty::bounded_grid(rows, cols);
         if !self.accept_grid_apply(pty_id, seq, rows, cols) {
             return GridApplyOutcome::Dropped;
         }
