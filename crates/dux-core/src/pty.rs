@@ -6208,10 +6208,20 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn sleep");
-        let name = process_name(child.id());
+        // Until the child has exec'd, it still carries the test binary's name.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut name = process_name(child.id());
+        while name.as_deref() != Some("sleep") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            name = process_name(child.id());
+        }
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(name.as_deref(), Some("sleep"));
+        assert_eq!(
+            name.as_deref(),
+            Some("sleep"),
+            "the child never reported its name within 10s of spawning"
+        );
     }
 
     #[test]

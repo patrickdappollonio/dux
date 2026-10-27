@@ -1342,7 +1342,7 @@ pub(crate) fn occupied_after_wait_message(worktree_path: &str, occupant: &str) -
 /// own. A failure is logged: the cost is the next start running a removal that
 /// is already done, which git answers as a no-op.
 pub(crate) fn forget_pending_removal_in(db_path: &std::path::Path, session_id: &str) {
-    let cleared = crate::storage::SessionStore::open(db_path)
+    let cleared = crate::storage::SessionStore::open_live(db_path)
         .and_then(|store| store.delete_pending_worktree_removal(session_id));
     if let Err(err) = cleared {
         logger::warn(&format!(
@@ -2847,7 +2847,7 @@ impl Engine {
                 for target in &targets {
                     target.terminate();
                 }
-                let recorded = crate::storage::SessionStore::open(&db_path)
+                let recorded = crate::storage::SessionStore::open_live(&db_path)
                     .and_then(|store| store.set_pending_removal_snapshot(&row_id, &found));
                 if let Err(err) = recorded {
                     logger::warn(&format!(
@@ -5303,6 +5303,28 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn clearing_a_finished_removal_leaves_a_tab_another_writer_is_moving_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let store = crate::storage::SessionStore::open(&db).unwrap();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store
+            .insert_agent_tab(&sample_tab("t2", "s1", "codex", 1))
+            .unwrap();
+        // Mid-change on the engine's connection: the first tab's row is gone
+        // and its pointer has not moved yet.
+        store.delete_agent_tab("slot-1").unwrap();
+
+        forget_pending_removal_in(&db, "s1");
+
+        let stored = store.load_sessions().unwrap();
+        assert_eq!(stored[0].slot_tab_id, "slot-1");
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 1);
+    }
 
     #[test]
     fn finish_delete_session_unknown_id_returns_none() {

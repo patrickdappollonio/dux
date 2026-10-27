@@ -3068,7 +3068,7 @@ impl Engine {
             },
             move |tx| {
                 let result = (|| -> anyhow::Result<()> {
-                    let store = SessionStore::open(&db_path)?;
+                    let store = SessionStore::open_live(&db_path)?;
                     match &action {
                         ProjectPersistenceAction::Add { project, .. } => {
                             store.upsert_project(&ProjectConfig {

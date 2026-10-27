@@ -1330,7 +1330,7 @@ impl RegistryWriter {
                 Self::take(job, &mut registry, &mut merges, &mut highest);
             }
             if store.is_none() {
-                match crate::storage::SessionStore::open(db_path) {
+                match crate::storage::SessionStore::open_live(db_path) {
                     Ok(opened) => store = Some(opened),
                     Err(err) => crate::logger::warn(&format!(
                         "could not open the session database to save the process sessions dux \
@@ -1990,7 +1990,7 @@ impl AgentProcessRegistry {
         &self,
         db_path: &std::path::Path,
     ) -> Option<std::thread::JoinHandle<()>> {
-        let loaded = crate::storage::SessionStore::open(db_path)
+        let loaded = crate::storage::SessionStore::open_live(db_path)
             .and_then(|store| store.load_process_registry());
         {
             let mut inner = self.lock();

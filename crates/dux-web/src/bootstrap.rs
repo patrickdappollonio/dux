@@ -72,7 +72,7 @@ impl ConfigSurface for WebConfigSurface {
             // Config wins: an edited `[[projects]]` applies its preferences to
             // SQLite on a live serve. Errors ride the reload result rather than
             // crashing the reload thread.
-            let reconciled = SessionStore::open(&paths.sessions_db_path)
+            let reconciled = SessionStore::open_live(&paths.sessions_db_path)
                 .map_err(|e| format!("{e:#}"))
                 .and_then(|store| {
                     // Three-way against the config as read: the sync writes

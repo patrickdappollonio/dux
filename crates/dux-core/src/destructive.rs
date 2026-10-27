@@ -292,6 +292,7 @@ mod tests {
     fn a_clearance_covers_only_the_paths_it_was_granted_for() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("sessions.sqlite3");
+        crate::storage::SessionStore::open(&db).unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
         std::fs::create_dir_all(&a).unwrap();

@@ -168,7 +168,8 @@ impl SessionStore {
     }
 
     /// Open a second connection to a database this process has already
-    /// opened, for a worker making one small write while dux runs. Unlike
+    /// opened, for anything that reads or writes it after start-up (a worker,
+    /// a reload, the process-session writer). Unlike
     /// [`Self::open`] it runs none of the start-up migrations or repairs:
     /// those belong to the moment the database is first opened, and run again
     /// against a live database they act on rows other code is in the middle of

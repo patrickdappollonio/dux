@@ -635,7 +635,7 @@ pub(crate) fn stored_occupant(
     removing: Option<&str>,
 ) -> Result<Option<Occupant>, String> {
     crate::engine::destructive_guard::assert_off_engine_thread("reading the session database");
-    let (agents, projects) = crate::storage::SessionStore::open(db_path)
+    let (agents, projects) = crate::storage::SessionStore::open_live(db_path)
         .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
         .map_err(|e| {
             format!(

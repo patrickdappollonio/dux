@@ -198,14 +198,16 @@ impl CheckoutMoveGuard {
         let around = |dir: &Path| {
             contains_location(dir) && !crate::worktree_ops::folder_contains(dir, checkout)
         };
-        let (stored_agents, stored_projects) = crate::storage::SessionStore::open(&self.db_path)
-            .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
-            .map_err(|e| {
-                anyhow!(
-                    "dux could not read its list of agents and projects to confirm nothing lives \
+        let (stored_agents, stored_projects) = crate::storage::SessionStore::open_live(
+            &self.db_path,
+        )
+        .and_then(|store| Ok((store.load_sessions()?, store.load_projects()?)))
+        .map_err(|e| {
+            anyhow!(
+                "dux could not read its list of agents and projects to confirm nothing lives \
                      there ({e:#})"
-                )
-            })?;
+            )
+        })?;
         if let Some(agent) = self
             .agents
             .iter()

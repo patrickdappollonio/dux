@@ -44,7 +44,7 @@ impl ConfigSurface for TuiConfigSurface {
                     |mut config| match crate::config::validate_keys(&config.keys) {
                         Ok(()) => {
                             let bindings = RuntimeBindings::from_keys_config(&config.keys);
-                            let store = SessionStore::open(&paths.sessions_db_path)
+                            let store = SessionStore::open_live(&paths.sessions_db_path)
                                 .map_err(|err| format!("{err:#}"))?;
                             crate::app::sync_config_projects_with_store(
                                 &mut config,

@@ -407,6 +407,7 @@ fn a_leader_dux_has_not_reaped_leads_its_session_without_the_table() {
 fn the_writer_saves_every_change_and_flush_waits_for_it() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("sessions.sqlite3");
+    let _ = crate::storage::SessionStore::open(&db).unwrap();
     let registry = crate::process_sessions::AgentProcessRegistry::default();
     // The attach-time prune drops every session nothing runs in, and these
     // sessions are made up: it must be finished before they are registered,
@@ -449,6 +450,7 @@ fn the_writer_saves_every_change_and_flush_waits_for_it() {
 fn the_attach_time_prune_drops_made_up_sessions_registered_before_it_runs() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("sessions.sqlite3");
+    let _ = crate::storage::SessionStore::open(&db).unwrap();
     let registry = crate::process_sessions::AgentProcessRegistry::default();
     if let Some(prune) = registry.attach_store(&db) {
         prune.join().expect("the prune finished");

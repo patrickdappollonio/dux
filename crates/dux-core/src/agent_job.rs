@@ -3850,6 +3850,8 @@ mod tests {
             socket_path: paths_root.path().join("dux.sock"),
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        // The database as start-up leaves it, before any job runs.
+        crate::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
         setup(&paths);
 
         let _ = repo; // repo is referenced by the request; kept alive by caller.
