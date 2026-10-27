@@ -2,6 +2,7 @@ use super::changes_tree::ChangesRow;
 use super::components::BUTTON_HEIGHT;
 use super::components::ButtonState;
 use super::components::CheckMark;
+use super::components::button::BUTTON_GAP;
 use super::components::ellipsis::{
     ELLIPSIS, ellipsize_end, ellipsize_middle, ellipsize_spans, ellipsize_start, fit_to_width,
     mark_cut_row, min_end_cut_width, min_start_cut_width, pad_to_width, path_tail,
@@ -22,6 +23,7 @@ use super::components::{PickerList, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
 };
+use super::input::{configure_project_text_input, configure_project_text_input_mut};
 use super::pr_clone::{PrFolder, PrReviewQuestion, PullRequestClone};
 use super::pty_ownership::PtyTakeoverCard;
 use super::text_input::TextInput;
@@ -1808,6 +1810,14 @@ fn macro_edit_text_inner_area(popup: Rect) -> Rect {
     Block::bordered().inner(macro_edit_rows(popup)[3])
 }
 
+/// Fit a full-text field's wrap width and visible height to the `text_area`
+/// it is drawn in, and keep its caret's row in view there.
+fn sync_multiline_field_layout(input: &mut TextInput, text_area: Rect) {
+    input.set_display_width((text_area.width > 0).then_some(usize::from(text_area.width)));
+    input.set_visible_lines(usize::from(text_area.height));
+    input.ensure_cursor_visible();
+}
+
 fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
     let text_inner = macro_edit_text_inner_area(popup);
     let wrap_w = usize::from(text_inner.width.saturating_sub(1));
@@ -2283,7 +2293,7 @@ impl App {
                 self.right_width_pct
             };
             let center_pct = 100u16
-                .saturating_sub(self.left_width_pct + right_pct)
+                .saturating_sub(self.left_width_pct.saturating_add(right_pct))
                 .max(20);
             Layout::default()
                 .direction(Direction::Horizontal)
@@ -5921,7 +5931,7 @@ impl App {
         } else {
             // Render visible lines from TextInput (handles wrapping + scroll).
             let visible = self.commit_input.visible_lines();
-            let (cursor_row, cursor_col) = self.commit_input.cursor_display_position();
+            let cursor = self.commit_input.cursor_display_position();
             let is_empty = self.commit_input.is_empty();
 
             // When empty and focused, show the placeholder.
@@ -5943,7 +5953,10 @@ impl App {
             }
 
             // Position the hardware cursor when focused.
-            if focused && !is_empty {
+            if focused
+                && !is_empty
+                && let Some((cursor_row, cursor_col)) = cursor
+            {
                 let cx = text_area.x + usize_to_u16_wrapping(cursor_col);
                 let cy = text_area.y + usize_to_u16_wrapping(cursor_row);
                 if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
@@ -11190,19 +11203,16 @@ impl App {
     fn render_configure_prompt(&mut self, frame: &mut Frame<'_>) {
         let (PromptState::ConfigureStartupCommand {
             project_name,
-            input,
             focus,
             ..
         }
         | PromptState::ConfigureProjectEnv {
             project_name,
-            input,
             focus,
             ..
         }
         | PromptState::ConfigureGlobalEnv {
             project_name,
-            input,
             focus,
             ..
         }) = &self.prompt
@@ -11273,6 +11283,14 @@ impl App {
         } else {
             FieldEngagement::Unengaged
         };
+        // The field's own wrap width and height, not a copy's: a click maps
+        // through the real input, so it must wrap the way it is drawn.
+        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+            sync_multiline_field_layout(input, text_area);
+        }
+        let Some(input) = configure_project_text_input(&self.prompt) else {
+            return;
+        };
         self.render_multiline_body(frame, (input_area, text_area), input, engagement);
 
         let (cancel_button, save_button) =
@@ -11289,18 +11307,15 @@ impl App {
 
     /// A full-text field's body: its visible lines (or its placeholder when
     /// empty), the one caret while it is engaged, and the scroll marker in the
-    /// field's frame `areas.0` for the text area `areas.1`.
+    /// field's frame `areas.0` for the text area `areas.1`. The input's layout
+    /// is already synced to `areas.1` by [`sync_multiline_field_layout`].
     fn render_multiline_body(
         &self,
         frame: &mut Frame<'_>,
         (input_area, text_area): (Rect, Rect),
-        input: &TextInput,
+        render_input: &TextInput,
         engagement: FieldEngagement,
     ) {
-        let mut render_input = input.clone();
-        render_input
-            .set_display_width((text_area.width > 0).then_some(usize::from(text_area.width)));
-        render_input.set_visible_lines(usize::from(text_area.height));
         let visible = render_input.visible_lines();
         let is_empty = render_input.is_empty();
         if is_empty {
@@ -11325,8 +11340,9 @@ impl App {
         }
         // Exactly one caret, and only on an ENGAGED field. A caret on a
         // field that will not receive your keys is a lie.
-        if engagement == FieldEngagement::Engaged {
-            let (cursor_row, cursor_col) = render_input.cursor_display_position();
+        if engagement == FieldEngagement::Engaged
+            && let Some((cursor_row, cursor_col)) = render_input.cursor_display_position()
+        {
             let cx = text_area.x + usize_to_u16_wrapping(cursor_col);
             let cy = text_area.y + usize_to_u16_wrapping(cursor_row);
             if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
@@ -11336,7 +11352,7 @@ impl App {
 
         // The body can hold more than the pane shows, so it carries the
         // shared one-cell marker. Units are wrapped visual rows, which
-        // is what `render_input` counts after `set_display_width`.
+        // is what `render_input` counts after its layout sync.
         render_scroll_marker(
             frame,
             input_area,
@@ -11881,6 +11897,14 @@ impl App {
             selected_button: button_rects[2],
             visible_button: button_rects[3],
         };
+        // A button this frame could not draw cannot keep keyboard focus.
+        let shown = self.kill_running_footer_shown();
+        if let PromptState::KillRunning(prompt) = &mut self.prompt
+            && let KillRunningFocus::Footer(action) = prompt.focus
+            && !shown(action)
+        {
+            prompt.focus = KillRunningFocus::List;
+        }
     }
 
     /// The kill list's footer keys: the search keys while searching, the list
@@ -11978,16 +12002,29 @@ impl App {
             KillRunningFooterAction::Selected,
             KillRunningFooterAction::Visible,
         ];
-        let gap = 2u16;
+        let gap = BUTTON_GAP;
         // These are four distinct actions, not picker confirmation controls;
-        // three have no keyboard equivalent. Extra width balances long labels.
-        let button_widths = buttons.map(|action| {
-            let label_chars =
-                u16::try_from(action.button_label().chars().count()).unwrap_or(u16::MAX);
-            label_chars.saturating_add(6)
-        });
-        let total_width = button_widths.iter().sum::<u16>() + gap * 3;
+        // three have no keyboard equivalent. Extra width balances long labels,
+        // and gives way first when the dialog is too narrow for the row: the
+        // padding shrinks down to the borders alone before anything is clipped.
+        let row_width = |padding: u16| {
+            let widths = buttons.map(|action| {
+                let label = u16::try_from(display_width(action.button_label())).unwrap_or(u16::MAX);
+                label.saturating_add(padding)
+            });
+            let total = widths.iter().fold(gap.saturating_mul(3), |sum, width| {
+                sum.saturating_add(*width)
+            });
+            (widths, total)
+        };
+        let (button_widths, total_width) = [6, 4]
+            .into_iter()
+            .map(row_width)
+            .find(|(_, total)| *total <= buttons_area.width)
+            .unwrap_or_else(|| row_width(2));
         let start_x = buttons_area.x + buttons_area.width.saturating_sub(total_width) / 2;
+        // A button the dialog cannot show must not stay clickable past its edge.
+        let bounds = buttons_area.intersection(frame.area());
         let mut cursor_x = start_x;
         let mut button_rects = [Rect::default(); 4];
         for (index, action) in buttons.iter().enumerate() {
@@ -11995,9 +12032,16 @@ impl App {
                 x: cursor_x,
                 y: buttons_area.y,
                 width: button_widths[index],
-                height: 3,
+                height: BUTTON_HEIGHT,
             };
+            cursor_x = cursor_x
+                .saturating_add(button_widths[index])
+                .saturating_add(gap);
+            let rect = clip_to(rect, bounds);
             button_rects[index] = rect;
+            if rect.is_empty() {
+                continue;
+            }
             let kind = if matches!(action, KillRunningFooterAction::Cancel) {
                 ButtonKind::Confirm
             } else {
@@ -12018,7 +12062,6 @@ impl App {
                 .kind(kind)
                 .state(state)
                 .render(frame, rect, &self.theme);
-            cursor_x += button_widths[index] + gap;
         }
         button_rects
     }
@@ -13036,8 +13079,10 @@ impl App {
             if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
                 frame.set_cursor_position((cx, cy));
             }
-        } else if focus == MacroEditFocus::Text && engagement == FieldEngagement::Engaged {
-            let (cursor_row, cursor_col) = state.text_input.cursor_display_position();
+        } else if focus == MacroEditFocus::Text
+            && engagement == FieldEngagement::Engaged
+            && let Some((cursor_row, cursor_col)) = state.text_input.cursor_display_position()
+        {
             let (cx, cy) = (
                 text_inner.x + usize_to_u16_wrapping(cursor_col) + 1,
                 text_inner.y + usize_to_u16_wrapping(cursor_row),

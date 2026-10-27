@@ -5113,29 +5113,26 @@ impl App {
 
     pub(crate) fn run(&mut self) -> Result<RunExit> {
         self.start_run_services();
-        let mut terminal = ratatui::init();
-        execute!(
-            stdout(),
-            EnableMouseCapture,
-            EnableFocusChange,
-            EnableBracketedPaste
-        )?;
-
-        let result = self.run_loop(&mut terminal);
+        install_terminal_restore_panic_hook();
+        let result = enter_tui_terminal().and_then(|mut terminal| {
+            execute!(
+                stdout(),
+                EnableMouseCapture,
+                EnableFocusChange,
+                EnableBracketedPaste
+            )?;
+            Ok(self.run_loop(&mut terminal))
+        });
 
         // Nothing is drawn from here on, so nothing here is attached.
         self.release_drawn_attachments();
         // Stop PTY forwarders while the engine and terminal screen are still owned here.
         self.stop_background_server_quietly();
         self.release_companion();
-        let _ = execute!(
-            stdout(),
-            DisableMouseCapture,
-            DisableFocusChange,
-            DisableBracketedPaste
-        );
+        disable_input_modes();
         ratatui::restore();
 
+        let result = result?;
         if matches!(result, RunExit::Quit) {
             self.shutdown_agents_gracefully();
         }
@@ -8589,10 +8586,80 @@ pub(crate) fn runtime_project_to_config(
     }
 }
 
+/// Enter raw mode and the alternate screen and build the terminal on them:
+/// what `ratatui::init` does, without the panic hook it installs, which
+/// restores the host terminal on a panic on ANY thread, including a worker
+/// panic dux catches and keeps running after. A partial failure is undone by
+/// the unconditional teardown in [`App::run`].
+fn enter_tui_terminal() -> std::io::Result<ratatui::DefaultTerminal> {
+    crossterm::terminal::enable_raw_mode()?;
+    execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))
+}
+
+/// Turn off the input modes [`App::run`] turns on beside raw mode and the
+/// alternate screen, which `ratatui::restore` does not know about. Left on,
+/// the user's shell prints every mouse move and focus change as escape text.
+fn disable_input_modes() {
+    let _ = execute!(
+        stdout(),
+        DisableMouseCapture,
+        DisableFocusChange,
+        DisableBracketedPaste
+    );
+}
+
+/// The thread [`App::run`] draws the terminal UI on.
+static TUI_THREAD: Mutex<Option<thread::ThreadId>> = Mutex::new(None);
+
+fn register_tui_thread() {
+    *TUI_THREAD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(thread::current().id());
+}
+
+/// Whether a panic on `thread` ends the terminal UI. Only the thread the UI
+/// runs on does: a worker's panic ends that worker (dux catches several and
+/// reports them), and the UI keeps drawing on a terminal that must stay set up.
+fn panic_takes_the_tui_down(thread: thread::ThreadId) -> bool {
+    *TUI_THREAD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == Some(thread)
+}
+
+/// Make a panic that ends the terminal UI hand the host terminal back: input
+/// modes off, alternate screen left, raw mode off, before the panic message is
+/// printed. Installed once per process; every run records its thread.
+fn install_terminal_restore_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    register_tui_thread();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if panic_takes_the_tui_down(thread::current().id()) {
+                disable_input_modes();
+                ratatui::restore();
+            }
+            previous(info);
+        }));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn only_a_panic_on_the_terminal_ui_thread_restores_the_terminal() {
+        register_tui_thread();
+        assert!(panic_takes_the_tui_down(thread::current().id()));
+        let worker = thread::spawn(|| thread::current().id())
+            .join()
+            .expect("worker thread");
+        assert!(!panic_takes_the_tui_down(worker));
+    }
 
     /// A changed-files read whose worker never starts still gets its keyed
     /// busy a final: the engine answers for the worker.

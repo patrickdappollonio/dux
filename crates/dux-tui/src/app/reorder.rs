@@ -81,18 +81,30 @@ pub(crate) fn drop_marker_boundary(source: usize, hover: usize) -> usize {
     if hover > source { hover + 1 } else { hover }
 }
 
+/// What a move that changed nothing says: the selected row is already at the
+/// edge it was sent toward, so the order and the sort mode stay as they are.
+fn already_at_edge_message(kind: &str, dir: MoveDir) -> String {
+    let edge = match dir {
+        MoveDir::Up | MoveDir::Top => "top",
+        MoveDir::Down | MoveDir::Bottom => "bottom",
+    };
+    format!("That {kind} is already at the {edge} of the list, so nothing moved.")
+}
+
 impl App {
     /// Move the selected agent within the global agent order and switch the sort
     /// to manual (like the web's drag-to-reorder), keeping the selection on the
-    /// moved agent. Guards like the rest of the palette: no selected agent posts
-    /// a status and does nothing; a single agent or an already-at-the-edge move
-    /// is a no-op that leaves the sort mode untouched.
+    /// moved agent. The move is made in the order the user is looking at, the
+    /// same baseline a drag uses, so under a computed sort the agent steps past
+    /// the row it is drawn next to. Guards like the rest of the palette: no
+    /// selected agent posts a status and does nothing; a single agent or an
+    /// already-at-the-edge move says so and leaves the sort mode untouched.
     pub(crate) fn move_selected_agent(&mut self, dir: MoveDir) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select an agent to move.");
             return;
         };
-        let order: Vec<String> = self.engine.sessions.iter().map(|s| s.id.clone()).collect();
+        let order = self.agent_drag_baseline();
         if order.len() < 2 {
             self.set_info("Only one agent; nothing to reorder.");
             return;
@@ -101,6 +113,10 @@ impl App {
             return;
         };
         let new_order = move_in_order(&order, idx, dir);
+        if new_order == order {
+            self.set_info(already_at_edge_message("agent", dir));
+            return;
+        }
         self.apply_agent_order(&order, new_order, &session_id);
     }
 
@@ -208,7 +224,7 @@ impl App {
         // from there; the move itself happens in the FULL order, which is the
         // thing being persisted. Same shape as `move_selected_agent`, which
         // resolves the agent from the filtered sidebar and then moves it within
-        // `engine.sessions`: a reorder must never rewrite the order as if the
+        // the whole agent baseline: a reorder must never rewrite the order as if the
         // rows a live query is hiding did not exist.
         let Some(terminal_id) = self
             .terminal_items()
@@ -231,6 +247,10 @@ impl App {
             return;
         };
         let new_order = move_in_order(&order, idx, dir);
+        if new_order == order {
+            self.set_info(already_at_edge_message("terminal", dir));
+            return;
+        }
         self.apply_terminal_order(&order, new_order, &terminal_id);
     }
 

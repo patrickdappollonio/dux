@@ -109,9 +109,7 @@ const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
 /// The full-text field of whichever `Configure*` modal is open, read-only.
-/// Only the tests read a configure field without intending to mutate it.
-#[cfg(test)]
-fn configure_project_text_input(prompt: &PromptState) -> Option<&TextInput> {
+pub(super) fn configure_project_text_input(prompt: &PromptState) -> Option<&TextInput> {
     match prompt {
         PromptState::ConfigureStartupCommand { input, .. }
         | PromptState::ConfigureProjectEnv { input, .. }
@@ -142,7 +140,7 @@ fn set_configure_focus(prompt: &mut PromptState, next: ConfigureFieldFocus) {
     }
 }
 
-fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut TextInput> {
+pub(super) fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut TextInput> {
     match prompt {
         PromptState::ConfigureStartupCommand { input, .. }
         | PromptState::ConfigureProjectEnv { input, .. }
@@ -174,6 +172,15 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
         let drop = buf.len() - max;
         buf.drain(..drop);
     }
+}
+
+/// Read whatever the terminal has ready straight from its file descriptor.
+///
+/// The raw-input loop decides when to read by polling the descriptor, so a
+/// user-space buffer in between (std's `StdinLock` keeps one) would hold bytes
+/// the next poll cannot see: they would wait for the next keypress.
+fn read_raw_chunk(fd: impl std::os::fd::AsFd, buf: &mut [u8]) -> rustix::io::Result<usize> {
+    crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
 }
 
 /// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
@@ -771,12 +778,20 @@ fn cursor_from_single_line_position(
 }
 
 fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
-    let max_left = MAX_LEFT_WIDTH_PCT.min(100 - MIN_CENTER_WIDTH_PCT - right_width_pct);
+    let max_left = MAX_LEFT_WIDTH_PCT.min(
+        100u16
+            .saturating_sub(MIN_CENTER_WIDTH_PCT)
+            .saturating_sub(right_width_pct),
+    );
     left_width_pct.clamp(MIN_LEFT_WIDTH_PCT, max_left.max(MIN_LEFT_WIDTH_PCT))
 }
 
 fn clamp_right_width_pct(right_width_pct: u16, left_width_pct: u16) -> u16 {
-    let max_right = MAX_RIGHT_WIDTH_PCT.min(100 - MIN_CENTER_WIDTH_PCT - left_width_pct);
+    let max_right = MAX_RIGHT_WIDTH_PCT.min(
+        100u16
+            .saturating_sub(MIN_CENTER_WIDTH_PCT)
+            .saturating_sub(left_width_pct),
+    );
     right_width_pct.clamp(MIN_RIGHT_WIDTH_PCT, max_right.max(MIN_RIGHT_WIDTH_PCT))
 }
 
@@ -3154,7 +3169,6 @@ impl App {
     /// kitty keyboard protocol sequences, etc.) reach the child process.
     pub(crate) fn poll_and_forward_raw_input(&mut self) -> Result<bool> {
         use rustix::event::{PollFd, PollFlags, poll};
-        use std::io::Read;
         use std::os::fd::AsFd;
 
         if !self.raw_input_target_available() {
@@ -3179,13 +3193,11 @@ impl App {
             poll(&mut pollfd, Some(&timeout))
         })?;
         if ready == 0 {
-            self.resolve_pending_bare_esc(&stdin_borrow, None, &mut buf)?;
+            self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
             return Ok(false);
         }
 
-        // Read available bytes from the same handle used for polling.
-        let mut stdin_lock = stdin_handle.lock();
-        let n = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(&mut buf))?;
+        let n = read_raw_chunk(stdin_borrow, &mut buf)?;
         if n == 0 {
             return Ok(false);
         }
@@ -3201,11 +3213,11 @@ impl App {
             return Ok(true);
         }
 
-        if self.drain_ready_raw_input(&stdin_borrow, &mut stdin_lock, &mut buf)? {
+        if self.drain_ready_raw_input(&stdin_borrow, &mut buf)? {
             return Ok(true);
         }
 
-        self.resolve_pending_bare_esc(&stdin_borrow, Some(&mut stdin_lock), &mut buf)?;
+        self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
         Ok(false)
     }
 
@@ -3260,11 +3272,9 @@ impl App {
     fn drain_ready_raw_input(
         &mut self,
         stdin_borrow: &impl std::os::fd::AsFd,
-        stdin_lock: &mut std::io::StdinLock<'_>,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
         use rustix::event::{PollFd, PollFlags, poll};
-        use std::io::Read;
 
         let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
         let zero_timeout = rustix::time::Timespec {
@@ -3290,7 +3300,7 @@ impl App {
             if more == 0 {
                 break;
             }
-            let n2 = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?;
+            let n2 = read_raw_chunk(stdin_borrow, buf)?;
             if n2 == 0 {
                 break;
             }
@@ -3311,13 +3321,17 @@ impl App {
     fn resolve_pending_bare_esc(
         &mut self,
         stdin_borrow: &impl std::os::fd::AsFd,
-        stdin_lock: Option<&mut std::io::StdinLock<'_>>,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
         use rustix::event::{PollFd, PollFlags, poll};
-        use std::io::Read;
 
-        if self.raw_input_parser.pending() != [0x1b] {
+        if self
+            .raw_input_parser
+            .expire_held_host_reply(std::time::Instant::now())
+        {
+            self.raw_input_buf.clear();
+        }
+        if !self.raw_input_parser.pending_resolves_on_timeout() {
             return Ok(false);
         }
 
@@ -3331,13 +3345,7 @@ impl App {
             poll(&mut pollfd, Some(&zero_timeout))
         })?;
         if more != 0 {
-            let n = if let Some(stdin_lock) = stdin_lock {
-                crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
-            } else {
-                let stdin_handle = std::io::stdin();
-                let mut stdin_lock = stdin_handle.lock();
-                crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
-            };
+            let n = read_raw_chunk(stdin_borrow, buf)?;
             if n != 0 {
                 return Ok(self.process_raw_input_bytes(&buf[..n]));
             }
@@ -3353,13 +3361,8 @@ impl App {
         }
 
         let mut sequences = self.raw_input_parser.feed_sequences(bytes);
-        if bytes.is_empty()
-            && let Some(seq) = self.raw_input_parser.resolve_pending_esc()
-        {
-            sequences.push(crate::raw_input::ParsedSequence {
-                bytes: seq,
-                in_bracket_paste: self.raw_input_parser.in_bracket_paste(),
-            });
+        if bytes.is_empty() {
+            sequences.extend(self.raw_input_parser.resolve_pending_esc());
         }
         self.raw_input_buf = self.raw_input_parser.pending().to_vec();
         self.raw_paste.in_bracket = self.raw_input_parser.in_bracket_paste();
@@ -4173,17 +4176,50 @@ impl App {
     }
 
     fn move_kill_running_focus(&mut self, direction: FocusStep) {
+        let shown = self.kill_running_footer_shown();
         let PromptState::KillRunning(prompt) = &mut self.prompt else {
             return;
         };
         prompt.focus = match prompt.focus {
             KillRunningFocus::List => {
-                Self::next_kill_running_footer_action(prompt, None, direction)
+                Self::next_kill_running_footer_action(prompt, &shown, None, direction)
             }
             KillRunningFocus::Footer(action) => {
-                Self::next_kill_running_footer_action(prompt, Some(action), direction)
+                Self::next_kill_running_footer_action(prompt, &shown, Some(action), direction)
             }
         };
+    }
+
+    /// Which kill-list footer buttons the last frame actually drew: a button
+    /// clipped off a narrow dialog is published empty and is not a control.
+    /// Before the first frame nothing is known to be hidden.
+    pub(crate) fn kill_running_footer_shown(
+        &self,
+    ) -> impl Fn(KillRunningFooterAction) -> bool + use<> {
+        let rects = match self.overlay_layout.active {
+            OverlayMouseLayout::KillRunning {
+                cancel_button,
+                hovered_button,
+                selected_button,
+                visible_button,
+                ..
+            } => Some([
+                cancel_button,
+                hovered_button,
+                selected_button,
+                visible_button,
+            ]),
+            _ => None,
+        };
+        move |action| {
+            let index = match action {
+                KillRunningFooterAction::Cancel => 0,
+                KillRunningFooterAction::Hovered => 1,
+                KillRunningFooterAction::Selected => 2,
+                KillRunningFooterAction::Visible => 3,
+            };
+            rects.is_none_or(|rects| !rects[index].is_empty())
+        }
     }
 
     fn confirm_kill_running_prompt(&mut self) {
@@ -6838,7 +6874,9 @@ impl App {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Resize) {
             if self.focus == FocusPane::Files {
                 match action {
-                    Action::ResizeShrink => self.set_right_width_pct(self.right_width_pct + 2),
+                    Action::ResizeShrink => {
+                        self.set_right_width_pct(self.right_width_pct.saturating_add(2));
+                    }
                     Action::ResizeGrow => {
                         self.set_right_width_pct(self.right_width_pct.saturating_sub(2));
                     }
@@ -6849,7 +6887,9 @@ impl App {
                     Action::ResizeShrink => {
                         self.set_left_width_pct(self.left_width_pct.saturating_sub(2));
                     }
-                    Action::ResizeGrow => self.set_left_width_pct(self.left_width_pct + 2),
+                    Action::ResizeGrow => {
+                        self.set_left_width_pct(self.left_width_pct.saturating_add(2));
+                    }
                     _ => {}
                 }
             }
@@ -8137,6 +8177,7 @@ impl App {
 
     fn next_kill_running_footer_action(
         prompt: &KillRunningPrompt,
+        shown: &impl Fn(KillRunningFooterAction) -> bool,
         current: Option<KillRunningFooterAction>,
         direction: FocusStep,
     ) -> KillRunningFocus {
@@ -8149,7 +8190,7 @@ impl App {
 
         let enabled: Vec<KillRunningFooterAction> = ACTIONS
             .into_iter()
-            .filter(|action| Self::kill_running_footer_enabled(prompt, *action))
+            .filter(|action| Self::kill_running_footer_enabled(prompt, *action) && shown(*action))
             .collect();
 
         if enabled.is_empty() {
@@ -13156,6 +13197,51 @@ mod tests {
         );
     }
 
+    /// Select the agent row carrying `id` in the sidebar as it is drawn now.
+    fn select_agent_row(app: &mut App, id: &str) {
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| match item {
+                LeftItem::Session(i) => app.engine.sessions[*i].id == id,
+                LeftItem::InactiveToggle => false,
+            })
+            .expect("the agent has a row");
+    }
+
+    #[test]
+    fn a_palette_move_under_a_computed_sort_moves_the_row_the_user_sees() {
+        let mut app = drag_test_app();
+        // Shown as s3, s2, s1, then the quiet s4.
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        select_agent_row(&mut app, "s3");
+
+        app.move_selected_agent(crate::app::reorder::MoveDir::Down);
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s2", "s3", "s1", "s4"]);
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+    }
+
+    #[test]
+    fn a_palette_move_at_the_shown_edge_says_nothing_moved() {
+        let mut app = drag_test_app();
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        select_agent_row(&mut app, "s3");
+
+        app.move_selected_agent(crate::app::reorder::MoveDir::Up);
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s1", "s2", "s3", "s4"]);
+        assert_eq!(app.engine.config.ui.agent_sort, "name_desc");
+        assert!(
+            app.status.message().contains("already at the top"),
+            "got {:?}",
+            app.status.message()
+        );
+    }
+
     #[test]
     fn a_drop_on_another_row_reorders_the_whole_list_and_switches_to_manual() {
         let mut app = drag_test_app();
@@ -15609,6 +15695,32 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn configure_modal_click_on_a_wrapped_row_lands_on_that_row() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, "");
+            let (input, _, _) = configure_modal_rects(&mut app);
+            let first = "x".repeat(usize::from(input.width) + 10);
+            app.prompt = configure_prompt(which, &project_id, &format!("{first}\nsecond"));
+            configure_modal_rects(&mut app);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                input.x + 3,
+                input.y + 1,
+            ));
+
+            let cursor = configure_project_text_input(&app.prompt).map(|field| field.cursor);
+            assert_eq!(
+                cursor,
+                Some(usize::from(input.width) + 3),
+                "{which}: the second row on screen is the wrapped tail of the first line"
+            );
+        }
+    }
+
+    #[test]
     fn configure_modal_clicking_save_commits_and_clicking_cancel_abandons() {
         for which in CONFIGURE_MODALS {
             // Save.
@@ -16420,6 +16532,105 @@ not_a_real_action = ["x"]
             .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
             .expect("terminal runtime");
         assert_eq!(terminal.label, "sleep");
+    }
+
+    #[test]
+    fn kill_running_footer_buttons_stay_inside_the_dialog_at_80_columns() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            list: SearchableList::new(),
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+
+        let OverlayMouseLayout::KillRunning {
+            list,
+            cancel_button,
+            hovered_button,
+            selected_button,
+            visible_button,
+            ..
+        } = app.overlay_layout.active
+        else {
+            panic!("expected the kill-running layout");
+        };
+        // The list sits one border column inside the dialog on each side.
+        let (left, right) = (list.x - 1, list.right() + 1);
+        let buttons = [
+            cancel_button,
+            hovered_button,
+            selected_button,
+            visible_button,
+        ];
+        for button in buttons {
+            assert!(
+                button.width > 0 && button.x >= left && button.right() <= right,
+                "{button:?} must sit inside the dialog spanning {left}..{right}"
+            );
+        }
+        for pair in buttons.windows(2) {
+            assert!(
+                pair[0].right() < pair[1].x,
+                "adjacent buttons need a gap: {pair:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kill_running_button_clipped_off_a_narrow_dialog_cannot_take_focus() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            list: SearchableList::new(),
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Visible),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let OverlayMouseLayout::KillRunning { visible_button, .. } = app.overlay_layout.active
+        else {
+            panic!("expected the kill-running layout");
+        };
+        assert!(
+            visible_button.is_empty(),
+            "the width must clip Kill Visible"
+        );
+        let focus = |app: &App| match &app.prompt {
+            PromptState::KillRunning(prompt) => prompt.focus,
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        };
+        assert_eq!(
+            focus(&app),
+            KillRunningFocus::List,
+            "focus cannot stay on a button that is not drawn"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(
+            focus(&app),
+            KillRunningFocus::Footer(KillRunningFooterAction::Hovered),
+            "stepping back from the list skips the hidden button"
+        );
     }
 
     #[test]
@@ -35198,6 +35409,35 @@ cyan = "#00ffff"
     /// answer would land at the child's prompt as literal garbage. A pasted copy
     /// of the same bytes is user data and must still forward.
     #[test]
+    fn a_host_reply_split_across_a_slow_link_is_still_dropped() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.engine.providers.insert(
+            TabId::new("session-1-slot"),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        app.process_raw_input_bytes(b"\x1b]11;rgb:0000/");
+        // The ambiguity timeout passes with nothing more on stdin.
+        app.process_raw_input_bytes(&[]);
+        app.process_raw_input_bytes(b"0000/0000\x07");
+
+        assert!(
+            app.engine.pty_input.is_empty(),
+            "neither half of the host's answer may reach the child"
+        );
+    }
+
+    #[test]
     fn host_device_reports_are_dropped_instead_of_typed_at_the_child() {
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
@@ -41107,5 +41347,40 @@ cyan = "#00ffff"
             .expect("Enter");
 
         assert_eq!(app.active_terminal_id.as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn a_raw_read_leaves_the_rest_of_a_burst_visible_to_poll() {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use std::io::Write;
+
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        writer.write_all(&[b'x'; 6000]).expect("write burst");
+        let mut buf = [0u8; 4096];
+        let n = super::read_raw_chunk(&reader, &mut buf).expect("read");
+        assert!(n <= buf.len());
+
+        let zero = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut pollfd = [PollFd::new(&reader, PollFlags::IN)];
+        let ready = poll(&mut pollfd, Some(&zero)).expect("poll");
+        assert_eq!(
+            ready, 1,
+            "the unread tail of the burst must still be readable"
+        );
+    }
+
+    #[test]
+    fn a_pane_width_from_config_that_leaves_no_room_clamps_instead_of_underflowing() {
+        assert_eq!(
+            super::clamp_left_width_pct(20, 90),
+            super::MIN_LEFT_WIDTH_PCT
+        );
+        assert_eq!(
+            super::clamp_right_width_pct(30, 90),
+            super::MIN_RIGHT_WIDTH_PCT
+        );
     }
 }

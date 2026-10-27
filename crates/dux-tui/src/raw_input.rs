@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Bracket paste mode start marker: `ESC [ 200 ~`
@@ -246,6 +248,27 @@ enum SequenceStatus {
 pub(crate) struct RawInputParser {
     pending: Vec<u8>,
     in_bracket_paste: bool,
+    /// When the held bytes started looking like a host's OSC answer, so a
+    /// reply whose end never comes is dropped after [`HOST_REPLY_HOLD`].
+    host_reply_since: Option<Instant>,
+}
+
+/// How long an unfinished OSC shaped like a host's answer is held for the rest
+/// of it. A reply split by a slow link (SSH, mosh) can arrive in two reads well
+/// past the ambiguity timeout, and typing either half at the child is the harm
+/// being avoided; the bound keeps a reply that never finishes from holding
+/// input for longer than this.
+pub(crate) const HOST_REPLY_HOLD: Duration = Duration::from_secs(1);
+
+/// Whether `pending` begins the way a host's OSC answer does: `ESC ]`, a
+/// numeric selector, then `;` or nothing more yet. A lone `ESC ]` is not, so
+/// a typed Alt-] still resolves on the ambiguity timeout.
+fn is_host_reply_shaped(pending: &[u8]) -> bool {
+    let Some(body) = pending.strip_prefix(b"\x1b]") else {
+        return false;
+    };
+    let digits = body.iter().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && body.get(digits).is_none_or(|&b| b == b';')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,16 +304,62 @@ impl RawInputParser {
             }
         }
 
+        self.note_pending_changed();
         sequences
     }
 
-    pub(crate) fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
-        if self.pending == [0x1b] {
-            self.pending.clear();
-            Some(vec![0x1b])
+    /// Whether the held bytes are a host's answer still arriving. Inside a
+    /// bracketed paste they are user data, never a reply.
+    fn holds_host_reply(&self) -> bool {
+        !self.in_bracket_paste && is_host_reply_shaped(&self.pending)
+    }
+
+    fn note_pending_changed(&mut self) {
+        if self.holds_host_reply() {
+            self.host_reply_since.get_or_insert_with(Instant::now);
         } else {
-            None
+            self.host_reply_since = None;
         }
+    }
+
+    /// Drop a held host answer that has waited [`HOST_REPLY_HOLD`] for its end
+    /// by `now`. Returns whether anything was dropped.
+    pub(crate) fn expire_held_host_reply(&mut self, now: Instant) -> bool {
+        let expired = self
+            .host_reply_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= HOST_REPLY_HOLD);
+        if expired {
+            self.pending.clear();
+            self.host_reply_since = None;
+        }
+        expired
+    }
+
+    /// Whether the held bytes are a keystroke the parser cannot tell from the
+    /// start of a longer sequence: a bare Escape, or an `ESC ]` (Alt-]) with
+    /// no BEL or ST behind it yet that is not shaped like a host's answer.
+    /// Once the ambiguity timeout passes with nothing more, it was typed. A
+    /// reply-shaped one is held instead (see [`Self::expire_held_host_reply`]).
+    pub(crate) fn pending_resolves_on_timeout(&self) -> bool {
+        self.pending == [0x1b] || (self.pending.starts_with(b"\x1b]") && !self.holds_host_reply())
+    }
+
+    /// Release what [`Self::pending_resolves_on_timeout`] holds as the
+    /// keystrokes it was: the Escape or the `ESC ]` on its own, then whatever
+    /// was typed after it parsed afresh, so a later BEL (Ctrl-g) is its own key
+    /// rather than the end of an OSC that swallows everything before it.
+    pub(crate) fn resolve_pending_esc(&mut self) -> Vec<ParsedSequence> {
+        if !self.pending_resolves_on_timeout() {
+            return Vec::new();
+        }
+        let rest = self.pending.split_off(self.pending.len().min(2));
+        let introducer = ParsedSequence {
+            bytes: std::mem::take(&mut self.pending),
+            in_bracket_paste: self.in_bracket_paste,
+        };
+        let mut sequences = vec![introducer];
+        sequences.extend(self.feed_sequences(&rest));
+        sequences
     }
 
     pub(crate) fn in_bracket_paste(&self) -> bool {
@@ -304,16 +373,20 @@ impl RawInputParser {
     pub(crate) fn replace_pending(&mut self, bytes: &[u8]) {
         self.pending.clear();
         self.pending.extend_from_slice(bytes);
+        self.note_pending_changed();
     }
 
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
         self.in_bracket_paste = false;
+        self.host_reply_since = None;
     }
 }
 
 /// Measure the CSI sequence starting at `buf[0..2]` (`ESC [`), which runs to
-/// the first byte in the final-byte range.
+/// the first byte in the final-byte range. An ESC before that cancels the
+/// sequence (ECMA-48), so it ends short and the caller reconsiders that ESC as
+/// its own introducer.
 fn scan_csi(buf: &[u8]) -> SequenceStatus {
     let mut i = 2;
     loop {
@@ -321,6 +394,9 @@ fn scan_csi(buf: &[u8]) -> SequenceStatus {
             return SequenceStatus::Incomplete;
         }
         let c = buf[i];
+        if c == 0x1b {
+            return SequenceStatus::Complete(i);
+        }
         i += 1;
         if (0x40..=0x7e).contains(&c) {
             return SequenceStatus::Complete(i);
@@ -774,8 +850,78 @@ mod tests {
         let mut parser = RawInputParser::default();
         assert_eq!(parser.feed_sequences(b"\x1b"), Vec::<ParsedSequence>::new());
         assert_eq!(parser.pending(), b"\x1b");
-        assert_eq!(parser.resolve_pending_esc(), Some(b"\x1b".to_vec()));
+        let seqs = parser.resolve_pending_esc();
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0].bytes, b"\x1b".to_vec());
         assert_eq!(parser.pending(), b"");
+    }
+
+    #[test]
+    fn parser_flushes_a_timed_out_osc_introducer_as_keystrokes() {
+        let mut parser = RawInputParser::default();
+        assert_eq!(
+            parser.feed_sequences(b"\x1b]fix"),
+            Vec::<ParsedSequence>::new()
+        );
+        assert!(parser.pending_resolves_on_timeout());
+        let flushed: Vec<Vec<u8>> = parser
+            .resolve_pending_esc()
+            .into_iter()
+            .map(|seq| seq.bytes)
+            .collect();
+        assert_eq!(
+            flushed,
+            vec![
+                b"\x1b]".to_vec(),
+                b"f".to_vec(),
+                b"i".to_vec(),
+                b"x".to_vec()
+            ]
+        );
+        assert_eq!(parser.pending(), b"");
+
+        let seqs = parser.feed_sequences(b"\x07");
+        assert_eq!(seqs[0].bytes, b"\x07".to_vec());
+    }
+
+    #[test]
+    fn a_host_reply_split_across_reads_is_held_and_recognised_whole() {
+        let mut parser = RawInputParser::default();
+        assert_eq!(
+            parser.feed_sequences(b"\x1b]11;rgb:0000/"),
+            Vec::<ParsedSequence>::new()
+        );
+        assert!(!parser.pending_resolves_on_timeout());
+        assert_eq!(parser.resolve_pending_esc(), Vec::<ParsedSequence>::new());
+
+        let seqs = parser.feed_sequences(b"0000/0000\x07");
+        assert_eq!(seqs.len(), 1);
+        assert!(is_device_report(&seqs[0].bytes));
+    }
+
+    #[test]
+    fn a_held_host_reply_is_dropped_once_it_has_waited_too_long() {
+        let mut parser = RawInputParser::default();
+        parser.feed_sequences(b"\x1b]11;rgb:00");
+        let start = std::time::Instant::now();
+        assert!(!parser.expire_held_host_reply(start));
+        assert_eq!(parser.pending(), b"\x1b]11;rgb:00");
+
+        assert!(parser.expire_held_host_reply(start + HOST_REPLY_HOLD));
+        assert_eq!(parser.pending(), b"");
+        let seqs = parser.feed_sequences(b"x");
+        assert_eq!(seqs[0].bytes, b"x".to_vec());
+    }
+
+    #[test]
+    fn an_esc_inside_a_csi_cancels_it_so_the_paste_end_marker_still_lands() {
+        let mut parser = RawInputParser::default();
+        let seqs = parser.feed_sequences(b"\x1b[200~ab\x1b[\x1b[201~");
+        assert_eq!(
+            seqs.last().map(|seq| seq.bytes.as_slice()),
+            Some(BRACKET_PASTE_END)
+        );
+        assert!(!parser.in_bracket_paste());
     }
 
     #[test]
@@ -786,7 +932,8 @@ mod tests {
             Vec::<ParsedSequence>::new()
         );
         assert_eq!(parser.pending(), b"\x1b[");
-        assert!(parser.resolve_pending_esc().is_none());
+        assert!(!parser.pending_resolves_on_timeout());
+        assert_eq!(parser.resolve_pending_esc(), Vec::<ParsedSequence>::new());
         assert_eq!(parser.pending(), b"\x1b[");
     }
 
