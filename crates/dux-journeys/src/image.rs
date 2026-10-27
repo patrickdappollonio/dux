@@ -243,7 +243,7 @@ fn content_tag() -> String {
     format!("j-{}", &hex[..16])
 }
 
-static SETUP: OnceCell<(String, String)> = OnceCell::const_new();
+static SETUP: OnceCell<Result<(String, String), String>> = OnceCell::const_new();
 
 /// Everything a journey needs that is not its own containers, done once per
 /// test process before any journey's deadline starts: this run started (its
@@ -254,32 +254,71 @@ static SETUP: OnceCell<(String, String)> = OnceCell::const_new();
 /// # Panics
 ///
 /// When a step fails (Docker missing, a heartbeat, build or pull failing) or the setup takes
-/// over 30 minutes.
+/// over 30 minutes; every later call in the process then panics with the same reason.
 pub async fn setup() -> (String, String) {
-    SETUP
-        .get_or_init(|| async {
-            let work = tokio::task::spawn_blocking(|| {
-                run_id();
-                sweep_dead_runs();
-                let image = if let Ok(full) = std::env::var("DUX_JOURNEY_IMAGE") {
-                    split_reference(&full)
-                } else {
-                    let tag = content_tag();
-                    ensure_built(&tag);
-                    (IMAGE_NAME.to_string(), tag)
-                };
-                for key in ["JOURNEY_NGINX_IMAGE", "JOURNEY_CADDY_IMAGE"] {
-                    ensure_pulled(&pinned(key));
-                }
-                image
-            });
-            let Ok(result) = tokio::time::timeout(SETUP_DEADLINE, work).await else {
-                panic!("the journey setup (image build and pulls) took over {SETUP_DEADLINE:?}")
+    once_within(
+        &SETUP,
+        "the journey setup (image build and pulls)",
+        SETUP_DEADLINE,
+        || {
+            run_id();
+            sweep_dead_runs();
+            let image = if let Ok(full) = std::env::var("DUX_JOURNEY_IMAGE") {
+                split_reference(&full)
+            } else {
+                let tag = content_tag();
+                ensure_built(&tag);
+                (IMAGE_NAME.to_string(), tag)
             };
-            result.expect("the journey setup")
+            for key in ["JOURNEY_NGINX_IMAGE", "JOURNEY_CADDY_IMAGE"] {
+                ensure_pulled(&pinned(key));
+            }
+            image
+        },
+    )
+    .await
+}
+
+/// Run `work` on a blocking thread once for `cell`, within `deadline`, and
+/// remember how it ended. A failure or a run past the deadline is said again
+/// to every later caller instead of being run again, so a broken or hung step
+/// costs one journey its deadline rather than every journey.
+async fn once_within<T: Clone + Send + 'static>(
+    cell: &OnceCell<Result<T, String>>,
+    what: &str,
+    deadline: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let ended = cell
+        .get_or_init(|| async {
+            match tokio::time::timeout(deadline, tokio::task::spawn_blocking(work)).await {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(error)) => Err(format!("{what} failed: {}", panic_text(error))),
+                Err(_) => Err(format!("{what} took over {deadline:?}")),
+            }
         })
-        .await
-        .clone()
+        .await;
+    match ended {
+        Ok(value) => value.clone(),
+        Err(why) => panic!("{why}"),
+    }
+}
+
+/// What a blocking task that did not finish said as it ended.
+fn panic_text(error: tokio::task::JoinError) -> String {
+    if !error.is_panic() {
+        return error.to_string();
+    }
+    let payload = error.into_panic();
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+        })
+        .unwrap_or_else(|| "it panicked".to_string())
 }
 
 /// The journey image, after [`setup`].
@@ -474,6 +513,69 @@ mod tests {
                 "{reference}"
             );
         }
+    }
+
+    /// How a call to [`once_within`] on `cell` ended: its value, or its panic's text.
+    async fn try_once(
+        cell: &'static OnceCell<Result<u32, String>>,
+        deadline: Duration,
+        work: impl FnOnce() -> u32 + Send + 'static,
+    ) -> Result<u32, String> {
+        tokio::spawn(once_within(cell, "the step", deadline, work))
+            .await
+            .map_err(panic_text)
+    }
+
+    fn fresh_cell() -> &'static OnceCell<Result<u32, String>> {
+        Box::leak(Box::new(OnceCell::new()))
+    }
+
+    #[tokio::test]
+    async fn a_failed_step_is_remembered_and_not_run_again() {
+        let cell = fresh_cell();
+        let first = try_once(cell, Duration::from_secs(10), || {
+            panic!("docker build failed")
+        })
+        .await;
+        assert_eq!(
+            first,
+            Err("the step failed: docker build failed".to_string())
+        );
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_again = std::sync::Arc::clone(&ran);
+        let second = try_once(cell, Duration::from_secs(10), move || {
+            ran_again.store(true, std::sync::atomic::Ordering::SeqCst);
+            1
+        })
+        .await;
+        assert_eq!(second, first);
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_step_past_its_deadline_is_remembered_and_later_callers_do_not_wait() {
+        let cell = fresh_cell();
+        let first = try_once(cell, Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(2));
+            1
+        })
+        .await;
+        assert_eq!(first, Err("the step took over 50ms".to_string()));
+        let began = std::time::Instant::now();
+        let second = try_once(cell, Duration::from_secs(10), || 2).await;
+        assert_eq!(second, first);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_step_that_succeeds_is_run_once() {
+        let cell = fresh_cell();
+        assert_eq!(try_once(cell, Duration::from_secs(10), || 7).await, Ok(7));
+        assert_eq!(try_once(cell, Duration::from_secs(10), || 8).await, Ok(7));
     }
 
     #[test]

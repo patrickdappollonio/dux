@@ -106,8 +106,12 @@ pub struct Response {
 pub enum TransportError {
     /// Nothing could be reached at the address.
     Unreachable(String),
-    /// Reached, but the connection ended before a whole reply arrived.
+    /// Reached, but the connection ended before the whole request was sent,
+    /// so the dux cannot have acted on it.
     Dropped(String),
+    /// The request was sent, or may have been, and the connection ended
+    /// before a whole reply arrived: the dux may have acted on it.
+    DroppedAfterSend(String),
     /// Not sent, for the reason given.
     Refused(String),
     /// Not sent: the control socket's other end is another user's process.
@@ -119,6 +123,7 @@ impl std::fmt::Display for TransportError {
         match self {
             TransportError::Unreachable(why)
             | TransportError::Dropped(why)
+            | TransportError::DroppedAfterSend(why)
             | TransportError::Refused(why)
             | TransportError::NotOwner(why) => f.write_str(why),
         }
@@ -144,7 +149,8 @@ pub trait Transport {
     ///
     /// # Errors
     ///
-    /// [`TransportError::Dropped`] when the reply ends before its framing says it is whole.
+    /// [`TransportError::DroppedAfterSend`] when the reply ends before its framing says it is
+    /// whole.
     fn stream(
         &self,
         request: &Request,
@@ -336,7 +342,7 @@ impl Transport for UnixTransport {
         let mut stream = Deadline { stream, until };
         stream.write_all(&request_bytes(request)).map_err(dropped)?;
         stream.flush().map_err(dropped)?;
-        read_response(BufReader::new(stream))
+        read_response(BufReader::new(stream)).map_err(after_send)
     }
 
     fn stream(
@@ -355,44 +361,59 @@ impl Transport for UnixTransport {
         };
         stream.write_all(&request_bytes(request)).map_err(dropped)?;
         stream.flush().map_err(dropped)?;
-        let mut reader = BufReader::new(stream);
-        let (status, framing) = read_head(&mut reader)?;
-        let mut piece = |bytes: &[u8]| on_body(status, bytes);
-        if piece(&[]).is_break() {
-            return Ok(());
-        }
-        match framing {
-            Framing::Chunked => each_chunk_piece(&mut reader, &mut piece),
-            Framing::Length(length) => {
-                let mut left = length;
-                let mut buffer = [0u8; STREAM_PIECE];
-                while left > 0 {
-                    let want =
-                        usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
-                    let read = reader
-                        .read(&mut buffer[..want])
-                        .map_err(|e| TransportError::Dropped(e.to_string()))?;
-                    if read == 0 {
-                        return Err(TransportError::Dropped(
-                            "the connection closed inside the reply's body".to_string(),
-                        ));
-                    }
-                    left -= crate::numeric::usize_to_u64(read);
-                    if piece(&buffer[..read]).is_break() {
-                        return Ok(());
-                    }
+        read_streamed(BufReader::new(stream), on_body).map_err(after_send)
+    }
+}
+
+/// A reply that ended short once its request was written whole: the dux may have acted on it.
+fn after_send(error: TransportError) -> TransportError {
+    match error {
+        TransportError::Dropped(why) => TransportError::DroppedAfterSend(why),
+        other => other,
+    }
+}
+
+/// Read one reply from `reader`, handing its body to `on_body` as it arrives.
+fn read_streamed(
+    mut reader: impl BufRead,
+    on_body: &mut dyn FnMut(u16, &[u8]) -> ControlFlow<()>,
+) -> Result<(), TransportError> {
+    let (status, framing) = read_head(&mut reader)?;
+    let mut piece = |bytes: &[u8]| on_body(status, bytes);
+    if piece(&[]).is_break() {
+        return Ok(());
+    }
+    match framing {
+        Framing::Chunked => each_chunk_piece(&mut reader, &mut piece),
+        Framing::Length(length) => {
+            let mut left = length;
+            let mut buffer = [0u8; STREAM_PIECE];
+            while left > 0 {
+                let want =
+                    usize::try_from(left).map_or(STREAM_PIECE, |left| left.min(STREAM_PIECE));
+                let read = reader
+                    .read(&mut buffer[..want])
+                    .map_err(|e| TransportError::Dropped(e.to_string()))?;
+                if read == 0 {
+                    return Err(TransportError::Dropped(
+                        "the connection closed inside the reply's body".to_string(),
+                    ));
                 }
-                Ok(())
+                left -= crate::numeric::usize_to_u64(read);
+                if piece(&buffer[..read]).is_break() {
+                    return Ok(());
+                }
             }
-            Framing::UntilClose => {
-                let mut buffer = [0u8; STREAM_PIECE];
-                loop {
-                    let read = reader
-                        .read(&mut buffer)
-                        .map_err(|e| TransportError::Dropped(e.to_string()))?;
-                    if read == 0 || piece(&buffer[..read]).is_break() {
-                        return Ok(());
-                    }
+            Ok(())
+        }
+        Framing::UntilClose => {
+            let mut buffer = [0u8; STREAM_PIECE];
+            loop {
+                let read = reader
+                    .read(&mut buffer)
+                    .map_err(|e| TransportError::Dropped(e.to_string()))?;
+                if read == 0 || piece(&buffer[..read]).is_break() {
+                    return Ok(());
                 }
             }
         }
@@ -674,20 +695,23 @@ impl HttpTransport {
         let http_request = builder
             .body(request.body.clone().unwrap_or_default())
             .map_err(|error| TransportError::Unreachable(error.to_string()))?;
+        // Looking the name up and connecting (TLS included) each get under a third of the
+        // whole, so a run out of time before anything was sent is always ureq's resolve or
+        // connect timeout and never its global one.
+        let reaching = whole.map_or(CONNECT_TIMEOUT, |whole| CONNECT_TIMEOUT.min(whole / 3));
         let configured = self
             .agent
             .configure_request(http_request)
+            .timeout_resolve(Some(reaching))
+            .timeout_connect(Some(reaching))
             .timeout_global(whole);
         let http_request = configured.build();
-        self.agent.run(http_request).map_err(|error| match error {
-            ureq::Error::ConnectionFailed
-            | ureq::Error::HostNotFound
-            | ureq::Error::BadUri(_)
-            | ureq::Error::Tls(_) => TransportError::Unreachable(error.to_string()),
-            ureq::Error::Io(ref io) if io.kind() == std::io::ErrorKind::ConnectionRefused => {
+        self.agent.run(http_request).map_err(|error| {
+            if sent_nothing(&error) {
                 TransportError::Unreachable(error.to_string())
+            } else {
+                TransportError::DroppedAfterSend(error.to_string())
             }
-            other => TransportError::Dropped(other.to_string()),
         })
     }
 
@@ -705,7 +729,7 @@ impl HttpTransport {
             .with_config()
             .limit(BODY_LIMIT)
             .read_to_vec()
-            .map_err(|error| TransportError::Dropped(error.to_string()))?;
+            .map_err(|error| TransportError::DroppedAfterSend(error.to_string()))?;
         Ok(Response { status, body })
     }
 
@@ -727,7 +751,7 @@ impl HttpTransport {
         loop {
             let read = reader
                 .read(&mut buffer)
-                .map_err(|error| TransportError::Dropped(error.to_string()))?;
+                .map_err(|error| TransportError::DroppedAfterSend(error.to_string()))?;
             if read == 0 || on_body(status, &buffer[..read]).is_break() {
                 return Ok(());
             }
@@ -761,6 +785,35 @@ impl HttpTransport {
             }
         }
         Err(last)
+    }
+}
+
+/// Whether ureq failed before any of the request could have been sent: the request could not
+/// be built, the name not looked up, or the connection (TLS included) not made. Every other
+/// failure may have come after the dux read the request.
+fn sent_nothing(error: &ureq::Error) -> bool {
+    use std::io::ErrorKind;
+    match error {
+        ureq::Error::Http(_)
+        | ureq::Error::BadUri(_)
+        | ureq::Error::InvalidProxyUrl
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::Tls(_)
+        | ureq::Error::Pem(_)
+        | ureq::Error::Rustls(_)
+        | ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => true,
+        ureq::Error::Io(io) => matches!(
+            io.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::NetworkDown
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::AddrInUse
+                | ErrorKind::PermissionDenied
+        ),
+        _ => false,
     }
 }
 
@@ -980,7 +1033,7 @@ mod tests {
             assert!(
                 matches!(
                     transport.send(&Request::get(path)),
-                    Err(TransportError::Dropped(_))
+                    Err(TransportError::DroppedAfterSend(_))
                 ),
                 "{path}"
             );
@@ -1021,7 +1074,7 @@ mod tests {
                 transport.stream(&Request::get("/cut-short"), &mut |_, _| {
                     std::ops::ControlFlow::Continue(())
                 }),
-                Err(TransportError::Dropped(_))
+                Err(TransportError::DroppedAfterSend(_))
             ),
             "a stream that ends without its last chunk was cut off"
         );
@@ -1057,7 +1110,7 @@ mod tests {
             ..Request::get("/trickle")
         });
         assert!(
-            matches!(trickled, Err(TransportError::Dropped(_))),
+            matches!(trickled, Err(TransportError::DroppedAfterSend(_))),
             "{trickled:?}"
         );
         assert!(
@@ -1242,14 +1295,15 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_that_closes_without_a_reply_is_dropped_and_a_missing_socket_unreachable() {
+    fn a_connection_that_closes_after_the_request_is_dropped_after_send_and_a_missing_socket_unreachable()
+     {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, |_| Reply::Close);
         let transport = UnixTransport::new(&socket);
         assert!(matches!(
             transport.send(&Request::get("/api/v1/build")),
-            Err(TransportError::Dropped(_))
+            Err(TransportError::DroppedAfterSend(_))
         ));
         let missing = UnixTransport::new(dir.path().join("absent.sock"));
         assert!(!missing.answers());
@@ -1257,6 +1311,42 @@ mod tests {
             missing.send(&Request::get("/api/v1/build")),
             Err(TransportError::Unreachable(_))
         ));
+    }
+
+    #[test]
+    fn an_http_request_that_never_left_is_unreachable_and_one_that_did_is_dropped_after_send() {
+        let post = |timeout| Request {
+            method: Method::Post,
+            body: Some(b"{}".to_vec()),
+            timeout: Some(timeout),
+            ..Request::get("/api/v1/sessions/a1/kill")
+        };
+        // Nothing listens on this port: the connect is refused.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = free.local_addr().unwrap();
+        drop(free);
+        let refused = HttpTransport::new(&format!("http://{closed}"), PlainHttp::Anywhere)
+            .send(&post(Duration::from_secs(2)));
+        assert!(
+            matches!(refused, Err(TransportError::Unreachable(_))),
+            "{refused:?}"
+        );
+        // A documentation address no network routes: the connect never completes, or is
+        // refused by the network at once.
+        let blackholed = HttpTransport::new("http://192.0.2.1:9", PlainHttp::Anywhere)
+            .send(&post(Duration::from_millis(600)));
+        assert!(
+            matches!(blackholed, Err(TransportError::Unreachable(_))),
+            "{blackholed:?}"
+        );
+        // Accepted and read whole, then never answered.
+        let (_fake, addr) = FakeDux::tcp(|_| Reply::Hang(Duration::from_secs(5)));
+        let silent = HttpTransport::new(&format!("http://{addr}"), PlainHttp::Anywhere)
+            .send(&post(Duration::from_millis(600)));
+        assert!(
+            matches!(silent, Err(TransportError::DroppedAfterSend(_))),
+            "{silent:?}"
+        );
     }
 
     #[test]

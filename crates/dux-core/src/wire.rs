@@ -3834,7 +3834,11 @@ impl Engine {
             seeded_gitignore: false,
             seed_warning: None,
         };
-        let busy = format!("Creating an initial commit in {path_str} before adding the project...");
+        let busy = crate::status_text![
+            "Creating an initial commit in ",
+            n(path_str),
+            " before adding the project..."
+        ];
         // Mint a HandlerStatusOp: SUCCESS resolved in `drive_add_project_followup`
         // after the inline add; FAILURE resolved in `process_worker_event`. Both
         // share this op id so the busy is replaced, not stranded.
@@ -3921,8 +3925,11 @@ impl Engine {
             seeded_gitignore: false,
             seed_warning: None,
         };
-        let busy =
-            format!("Initializing a git repository in {path_str} before adding the project...");
+        let busy = crate::status_text![
+            "Initializing a git repository in ",
+            n(path_str),
+            " before adding the project..."
+        ];
         let op = crate::engine::status_op(busy).resolve_in_handler(
             move |o: &crate::engine::WebAddProjectOutcome| {
                 use crate::engine::{Final, WebAddProjectOutcome};
@@ -4285,9 +4292,13 @@ impl Engine {
                 status_op_id,
             } => {
                 let display_name = display_project_name(name, path);
-                let status_message = format!(
-                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to the workspace."
-                );
+                let status_message = crate::status_text![
+                    "Checked out ",
+                    q(target_branch),
+                    " and added project ",
+                    q(display_name),
+                    " to the workspace."
+                ];
                 let add_failed_prefix = crate::status_text![
                     "Checked out ",
                     q(target_branch),
@@ -4298,7 +4309,7 @@ impl Engine {
                     display_name,
                     current_branch: target_branch,
                     leading_branch,
-                    status_message: status_message.into(),
+                    status_message,
                     add_failed_prefix: &add_failed_prefix,
                     status_op_id,
                 })
@@ -11181,6 +11192,72 @@ mod tests {
                 .any(|s| s.tone == "error" && s.message.contains("no identity")),
             "the error final must still be emitted, got {statuses:?}"
         );
+    }
+
+    /// The names in a status's parts, in order.
+    fn chipped_names(status: &WireStatus) -> Vec<&str> {
+        status
+            .segments
+            .iter()
+            .flatten()
+            .filter_map(|segment| match segment {
+                ProseSegment::Name { name, .. } => Some(name.as_str()),
+                ProseSegment::Text(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_add_after_checkout_success_chips_the_branch_and_the_project() {
+        let (mut engine, _tmp) = test_engine();
+        let statuses =
+            engine.drive_add_project_followup(&EventReaction::AddProjectAfterBranchCheckout {
+                path: "/checked".to_string(),
+                name: "Checked".to_string(),
+                target_branch: "develop".to_string(),
+                leading_branch: "develop".to_string(),
+                status_op_id: None,
+            });
+        let info = statuses.iter().find(|s| s.tone == "info").expect("info");
+        assert_eq!(
+            info.message,
+            "Checked out \"develop\" and added project \"Checked\" to the workspace."
+        );
+        assert_eq!(chipped_names(info), ["develop", "Checked"]);
+    }
+
+    #[test]
+    fn the_add_project_busy_texts_chip_the_path() {
+        let plain = tempfile::tempdir().expect("tempdir");
+        let path = plain.path().to_string_lossy().into_owned();
+        let (mut engine, _tmp) = test_engine();
+        let busy = engine
+            .apply_wire(WireCommand::AddProjectInitRepo {
+                path: path.clone(),
+                name: "Adopted".to_string(),
+            })
+            .expect("dispatch init-repo add")
+            .status
+            .expect("a keyed busy status");
+        assert_eq!(chipped_names(&busy).len(), 1, "{busy:?}");
+        assert!(
+            busy.message
+                .starts_with("Initializing a git repository in /")
+        );
+        let _ = drive_add_project_chain(&mut engine);
+
+        let repo = init_unborn_repo_dir();
+        let busy = engine
+            .apply_wire(WireCommand::AddProjectCreateInitialCommit {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("dispatch initial-commit add")
+            .status
+            .expect("a keyed busy status");
+        assert_eq!(chipped_names(&busy).len(), 1, "{busy:?}");
+        assert!(busy.message.starts_with("Creating an initial commit in /"));
+        let _ = drive_add_project_chain(&mut engine);
     }
 
     #[test]

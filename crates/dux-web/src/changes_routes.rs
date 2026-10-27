@@ -311,14 +311,17 @@ mod tests {
                 std::process::id()
             ));
             let _ = std::fs::remove_file(&trace);
-            // SAFETY: an ignored measurement run single-threaded on its own.
+            // SAFETY: this line is reached only with DUX_FOLD_BENCH_REPO set (the test
+            // returns at its start otherwise), which only the benchmark command above
+            // does, running this test alone; an `--ignored` run of the suite without it
+            // returns before touching the environment.
             unsafe { std::env::set_var("GIT_TRACE2_EVENT", &trace) };
             for dir in dirs {
                 let listing = use_cache.then(|| cached.clone());
                 list_children(&worktree, dir, ChangesSide::Unstaged, listing)
                     .unwrap_or_else(|_| panic!("{dir} listable"));
             }
-            // SAFETY: the same single-threaded measurement run as the set above.
+            // SAFETY: as for the set above.
             unsafe { std::env::remove_var("GIT_TRACE2_EVENT") };
             let events = std::fs::read_to_string(&trace).unwrap_or_default();
             let processes = events

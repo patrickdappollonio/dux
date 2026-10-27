@@ -159,6 +159,21 @@ impl Client {
             bearer: None,
             timeout,
         })?;
+        // A server error, the dux's own or a proxy's in front of it, does not prove
+        // nothing changed. A 503 is a dux that is not taking requests yet.
+        if matches!(reply.status, 500 | 502 | 504) {
+            return Err(CliError::new(
+                Exit::Unknown,
+                format!(
+                    "{} answered the change with server error {}, so whether the change was made \
+                     is unknown: {}\nCheck before running it again.",
+                    self.target(),
+                    reply.status,
+                    super::connect::reply_sentence(&reply)
+                ),
+            )
+            .into());
+        }
         if reply.status != 202 {
             let operation = serde_json::from_slice::<serde_json::Value>(&reply.body)
                 .ok()
@@ -168,7 +183,18 @@ impl Client {
                 operation,
             });
         }
-        Ok(self.parse(&reply)?)
+        self.parse(&reply).map_err(|error| {
+            CliError::new(
+                Exit::Unknown,
+                format!(
+                    "{} took the change, so it may be running, but its answer could not be read: \
+                     {}",
+                    self.target(),
+                    error.message
+                ),
+            )
+            .into()
+        })
     }
 
     /// The record `id` as it stands, without waiting.
@@ -193,7 +219,8 @@ impl Client {
     }
 
     /// Read `record` again by its id until it has an outcome or `timeout` passes. A read
-    /// that drops is retried by the same id; an outcome that arrived is reported, however late.
+    /// that drops or meets a server error is retried by the same id; an outcome that arrived
+    /// is reported, however late.
     ///
     /// # Errors
     ///
@@ -208,7 +235,7 @@ impl Client {
 
     /// Wait for somebody else's operation `id`, until `deadline`, as [`Self::wait`] does, except
     /// that an id the dux no longer knows has finished and been forgotten (it counts as an
-    /// outcome), and a server error is read again within the time rather than ending the wait.
+    /// outcome).
     pub(crate) fn wait_for_other(&self, id: &str, deadline: Instant) -> Result<(), CliError> {
         let stand_in = OperationRecord {
             id: id.to_string(),
@@ -252,13 +279,15 @@ impl Client {
             };
             match self.try_send(read) {
                 Ok(reply) if reply.status == 200 => {
-                    record = self.parse(&reply)?;
+                    record = self
+                        .parse(&reply)
+                        .map_err(|error| unreadable(&record.id, &error))?;
                     if wait == 0 && !record.state.is_final() {
                         std::thread::sleep(RETRY_PAUSE.min(left));
                     }
                 }
                 Ok(reply) if other && reply.status == 404 => return Ok(record),
-                Ok(reply) if other && reply.status >= 500 => {
+                Ok(reply) if reply.status >= 500 => {
                     std::thread::sleep(RETRY_PAUSE.min(left));
                 }
                 Ok(reply) if reply.status == 404 => {
@@ -272,12 +301,13 @@ impl Client {
                         ),
                     ));
                 }
-                Ok(reply) => return Err(self.refusal(&reply)),
+                Ok(reply) if other => return Err(self.refusal(&reply)),
+                Ok(reply) => return Err(read_refused(&record.id, self.refusal(&reply))),
                 Err(
                     error @ (super::transport::TransportError::Refused(_)
                     | super::transport::TransportError::NotOwner(_)),
                 ) => {
-                    return Err(self.no_reply(&error));
+                    return Err(self.no_reply(Method::Get, &error));
                 }
                 Err(_) => std::thread::sleep(
                     RETRY_PAUSE.min(deadline.saturating_duration_since(Instant::now())),
@@ -317,6 +347,35 @@ fn unknown_after(id: &str, waited: Duration) -> CliError {
         format!(
             "operation {id} was still running after {seconds} {unit}, so its outcome is unknown; \
              it has not been stopped. Look it up with \"dux operations show {id}\""
+        ),
+    )
+}
+
+/// A read of operation `id` whose answer could not be read: the change itself may
+/// have ended either way.
+fn unreadable(id: &str, error: &CliError) -> CliError {
+    CliError::new(
+        Exit::Unknown,
+        format!(
+            "{}, so how operation {id} ended is unknown. Look it up with \
+             \"dux operations show {id}\"",
+            error.message
+        ),
+    )
+}
+
+/// A read of operation `id` that was refused. The refusal is about the read,
+/// not the change, so a refusal that would end as failed ends as unknown.
+fn read_refused(id: &str, refusal: CliError) -> CliError {
+    if refusal.exit != Exit::Failed {
+        return refusal;
+    }
+    CliError::new(
+        Exit::Unknown,
+        format!(
+            "{}\nReading operation {id} was refused, so how it ended is unknown. Look it up \
+             with \"dux operations show {id}\"",
+            refusal.message
         ),
     )
 }
@@ -511,6 +570,84 @@ mod tests {
             "{}",
             ended.message
         );
+    }
+
+    #[test]
+    fn a_server_error_while_waiting_on_an_own_change_is_read_again() {
+        let dir = private_dir();
+        let (_fake, _lock, client) = local(dir.path(), |n, _| match n {
+            0 => Reply::json(502, r#"{"error":"bad gateway"}"#),
+            _ => Reply::json(200, DONE),
+        });
+        let started = client
+            .change(Method::Post, "/api/v1/sessions/a1/kill", None)
+            .unwrap();
+        let finished = client.wait(started, Duration::from_secs(10)).unwrap();
+        assert_eq!(finished.state, RecordState::Partial);
+    }
+
+    #[test]
+    fn an_unreadable_record_while_waiting_is_unknown_not_failed() {
+        let dir = private_dir();
+        let (_fake, _lock, client) = local(dir.path(), |_, _| Reply::json(200, "not json"));
+        let started = client
+            .change(Method::Post, "/api/v1/sessions/a1/kill", None)
+            .unwrap();
+        let error = client.wait(started, Duration::from_secs(10)).unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown, "{}", error.message);
+        assert!(
+            error.message.contains("dux operations show op-7"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_change_whose_reply_never_arrives_is_unknown_and_a_read_is_not_running() {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/sessions/a2/kill?operation=1" => {
+                Reply::json(504, r#"{"error":"gateway timeout"}"#)
+            }
+            "/api/v1/sessions/a3/kill?operation=1" => {
+                Reply::json(500, r#"{"error":"internal","message":"the engine failed"}"#)
+            }
+            // Every other request is read whole, then the connection closes unanswered.
+            _ => Reply::Close,
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let _lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        let error = client
+            .change(Method::Post, "/api/v1/sessions/a1/kill", None)
+            .unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown, "{}", error.message);
+        let error = client
+            .change(Method::Post, "/api/v1/sessions/a2/kill", None)
+            .unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown, "{}", error.message);
+        let error = client
+            .change(Method::Post, "/api/v1/sessions/a3/kill", None)
+            .unwrap_err();
+        assert_eq!(error.exit, Exit::Unknown, "{}", error.message);
+        assert!(
+            error.message.contains("the engine failed"),
+            "{}",
+            error.message
+        );
+        let error = client.operation("op-7").unwrap_err();
+        assert_eq!(error.exit, Exit::NotRunning, "{}", error.message);
     }
 
     #[test]

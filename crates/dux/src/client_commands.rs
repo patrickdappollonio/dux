@@ -7,6 +7,7 @@ use dux_core::client::output::{self, Shape};
 use dux_core::client::remotes::{self, Remotes};
 use dux_core::client::{CliError, Exit, server_inspect, sign_in, wait, workspace};
 use dux_core::config::DuxPaths;
+use dux_core::config_resources::StoppedDux;
 use dux_tui::SecretInput;
 use std::fmt::Write as _;
 use std::io::Write;
@@ -435,14 +436,40 @@ fn change_with(
     change: impl FnOnce(Writer<'_>) -> Result<String, CliError>,
 ) -> Result<String, CliError> {
     let paths = discover()?;
-    let Some(client) = client_if_running(&selection.target(&paths)?, &paths)? else {
-        ask(
-            question,
-            &paths.config_path.display().to_string(),
-            flags.consent(),
-            stdin,
-        )?;
-        return change(Writer::File(&paths));
+    let target = selection.target(&paths)?;
+    let client = match client_if_running(&target, &paths)? {
+        Some(client) => client,
+        None => match StoppedDux::hold(&paths) {
+            // Held across the question and the edit, so no dux starts in between.
+            Ok(stopped) => {
+                ask(
+                    question,
+                    &paths.config_path.display().to_string(),
+                    flags.consent(),
+                    stdin,
+                )?;
+                return change(Writer::File(&stopped));
+            }
+            Err(dux_core::lockfile::AcquireError::AlreadyRunning { .. }) => {
+                client_if_running(&target, &paths)?.ok_or_else(|| {
+                    CliError::new(
+                        Exit::NotRunning,
+                        "dux started while this command ran and does not answer yet; try again \
+                         in a moment",
+                    )
+                })?
+            }
+            Err(error) => {
+                return Err(CliError::new(
+                    Exit::Failed,
+                    format!(
+                        "could not keep dux from starting while {} is edited, so nothing was \
+                         changed: {error}",
+                        paths.config_path.display()
+                    ),
+                ));
+            }
+        },
     };
     ask(question, client.target(), flags.consent(), stdin)?;
     let wait = if flags.no_wait {

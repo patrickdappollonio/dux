@@ -36,6 +36,8 @@ use crate::io_retry::retry_on_interrupt_errno;
 pub struct SingleInstanceLock {
     file: File,
     control_socket: ControlSocketState,
+    /// Held by a command-line edit of `config.toml` rather than by a dux.
+    config_edit: bool,
 }
 
 /// What the lock holder knows about its control socket, and so what its lock
@@ -89,10 +91,21 @@ impl SingleInstanceLock {
         }
     }
 
+    /// Say in the lock file that a command-line edit of `config.toml` holds
+    /// it, not a dux, so other commands can say so instead of waiting for a
+    /// control socket that will never open.
+    pub fn mark_config_edit(&mut self) {
+        self.config_edit = true;
+        self.rewrite();
+    }
+
     /// Replace the lock file's text with what this holder knows now.
     /// Best-effort like the first write: the lock itself is the `flock`.
     fn rewrite(&mut self) {
         let mut text = lock_file_text(std::process::id());
+        if self.config_edit {
+            let _ = writeln!(text, "{CONFIG_EDIT_MARKER}");
+        }
         match &self.control_socket {
             ControlSocketState::NotOpened => {}
             ControlSocketState::Open(socket) => {
@@ -224,6 +237,7 @@ impl SingleInstanceLock {
                 Ok(Self {
                     file,
                     control_socket: ControlSocketState::NotOpened,
+                    config_edit: false,
                 })
             }
             Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
@@ -305,6 +319,10 @@ fn lock_file_text(pid: u32) -> String {
     }
 }
 
+/// The line a command-line edit of `config.toml` adds to the lock file it
+/// holds, after its PID: no dux is running, and none can start until it ends.
+pub(crate) const CONFIG_EDIT_MARKER: &str = "holder=config-edit";
+
 /// The line a dux adds to its lock file once its control socket is bound,
 /// followed by the socket's path.
 pub(crate) const CONTROL_SOCKET_PREFIX: &str = "control-socket=";
@@ -323,6 +341,8 @@ pub struct LockFileContents {
     /// Where the holder's control socket is bound, when it wrote one.
     pub control_socket: Option<PathBuf>,
     pub(crate) control_socket_unavailable: Option<String>,
+    /// The holder is a command-line edit of `config.toml`, not a dux.
+    pub(crate) config_edit: bool,
 }
 
 impl LockFileContents {
@@ -339,6 +359,8 @@ impl LockFileContents {
         for line in lines {
             if line.trim() == RELOAD_SIGNAL_MARKER {
                 contents.handles_reload_signal = true;
+            } else if line.trim() == CONFIG_EDIT_MARKER {
+                contents.config_edit = true;
             } else if let Some(reason) = line.strip_prefix(CONTROL_SOCKET_UNAVAILABLE_PREFIX) {
                 contents.control_socket_unavailable = Some(reason.to_string());
             } else if let Some(path) = line.strip_prefix(CONTROL_SOCKET_PREFIX) {

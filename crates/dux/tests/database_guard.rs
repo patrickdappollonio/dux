@@ -258,18 +258,12 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {}: {e}", full.display()))
 }
 
-/// `text` without its unit tests and its comments: what runs.
+/// `text` without its unit tests and its comments: what runs. A test module
+/// is left out from its `#[cfg(test)]` to its closing brace (or its `;`), and
+/// whatever follows it is read.
 fn code_of(text: &str) -> String {
     let mut code = String::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
-        if line.trim() == "#[cfg(test)]"
-            && lines
-                .peek()
-                .is_some_and(|next| next.trim_start().starts_with("mod tests"))
-        {
-            break;
-        }
+    for line in text.lines() {
         let without_comment = match line.find("//") {
             // A `//` inside a string ("http://…") is not a comment.
             Some(at) if line[..at].matches('"').count() % 2 == 0 => &line[..at],
@@ -278,7 +272,36 @@ fn code_of(text: &str) -> String {
         code.push_str(without_comment);
         code.push('\n');
     }
-    code
+    without_test_modules(&code)
+}
+
+/// `code` with every `#[cfg(test)]` module taken out, its body included.
+fn without_test_modules(code: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = code;
+    while let Some(at) = rest.find("#[cfg(test)]") {
+        let after = &rest[at + "#[cfg(test)]".len()..];
+        let module = after.trim_start();
+        if !module.starts_with("mod ") {
+            kept.push_str(&rest[..at + "#[cfg(test)]".len()]);
+            rest = after;
+            continue;
+        }
+        kept.push_str(&rest[..at]);
+        let start = rest.len() - module.len();
+        let end = match (module.find(';'), module.find('{')) {
+            (Some(semi), Some(open)) if semi < open => start + semi + 1,
+            (Some(semi), None) => start + semi + 1,
+            _ => {
+                let end = block_end(&rest[start..])
+                    .expect("a test module's closing brace, so what follows it is read");
+                start + end
+            }
+        };
+        rest = &rest[end..];
+    }
+    kept.push_str(rest);
+    kept
 }
 
 /// The command line's own code, file by file, with the crate `crate::`
@@ -328,6 +351,13 @@ fn client_sources() -> Vec<(String, &'static str, String)> {
 fn body_of(code: &str, start: &str) -> Option<String> {
     let at = code.find(start)?;
     let open = at + code[at..].find('{')?;
+    block_end(&code[open..]).map(|end| code[open..open + end].to_string())
+}
+
+/// Where the block opened by the first `{` in `code` ends: the index just past
+/// its closing brace.
+fn block_end(code: &str) -> Option<usize> {
+    let open = code.find('{')?;
     let mut depth = 0usize;
     let mut chars = code[open..].char_indices().peekable();
     let mut in_string = false;
@@ -349,7 +379,7 @@ fn body_of(code: &str, start: &str) -> Option<String> {
             '}' if !in_string => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(code[open..=open + i].to_string());
+                    return Some(open + i + 1);
                 }
             }
             _ => {}
@@ -486,12 +516,50 @@ fn expand(tree: &str, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Every path rooted at `crate`, `dux_core` or `dux_tui` that `code` names
+/// The names the command line's code calls this workspace's crates by: every
+/// dependency in `crates/dux/Cargo.toml` that is a crate of this workspace,
+/// under the name its key gives it, a renamed one included.
+fn workspace_crates() -> Vec<String> {
+    let manifest = read("crates/dux/Cargo.toml");
+    let mut names = Vec::new();
+    let mut in_dependencies = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_dependencies = line == "[dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_end_matches(".workspace").trim();
+        let package = value
+            .split_once("package")
+            .and_then(|(_, rest)| rest.split('"').nth(1))
+            .unwrap_or(key);
+        if workspace()
+            .join("crates")
+            .join(package)
+            .join("Cargo.toml")
+            .is_file()
+        {
+            names.push(key.replace('-', "_"));
+        }
+    }
+    names
+}
+
+/// Every path rooted at `crate` or at one of `crates` that `code` names
 /// outside its `use` statements.
-fn inline_paths(code: &str) -> Vec<String> {
+fn inline_paths(code: &str, crates: &[String]) -> Vec<String> {
     let mut paths = Vec::new();
-    for root in ["crate::", "dux_core::", "dux_tui::"] {
-        for (at, _) in code.match_indices(root) {
+    let roots =
+        std::iter::once("crate::".to_string()).chain(crates.iter().map(|c| format!("{c}::")));
+    for root in roots {
+        for (at, _) in code.match_indices(root.as_str()) {
             let before = code[..at].chars().last();
             if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':') {
                 continue;
@@ -507,16 +575,17 @@ fn inline_paths(code: &str) -> Vec<String> {
 }
 
 /// `path` with `crate` replaced by the crate it means, or `None` for a path
-/// inside the command line's own code.
-fn outside(path: &str, krate: &str) -> Option<String> {
+/// inside the command line's own code or outside this workspace's `crates`.
+fn outside(path: &str, krate: &str, crates: &[String]) -> Option<String> {
     let path = match path.strip_prefix("crate::") {
         Some(rest) => format!("{krate}::{rest}"),
         None => path.to_string(),
     };
+    let first = path.split("::").next().unwrap_or_default();
     let own = path == "dux_core::client"
         || path.starts_with("dux_core::client::")
-        || path.starts_with("dux::")
-        || !(path.starts_with("dux_core::") || path.starts_with("dux_tui::"));
+        || first == "dux"
+        || !crates.iter().any(|name| name == first);
     (!own).then_some(path)
 }
 
@@ -538,6 +607,14 @@ fn named(code: &str, tokens: &[&str]) -> Vec<String> {
 fn the_command_line_never_opens_the_session_database() {
     let mut problems = Vec::new();
     let mut reached = BTreeSet::new();
+    let crates = workspace_crates();
+    for expected in ["dux_core", "dux_tui", "dux_web"] {
+        assert!(
+            crates.iter().any(|name| name == expected),
+            "{expected} is not among the workspace crates read from crates/dux/Cargo.toml: \
+             {crates:?}"
+        );
+    }
 
     for (file, krate, code) in client_sources() {
         let forbidden: Vec<&str> = OPENS_A_DATABASE
@@ -555,8 +632,8 @@ fn the_command_line_never_opens_the_session_database() {
             ));
         }
         let (uses, rest) = split_uses(&code);
-        for path in uses.iter().chain(inline_paths(&rest).iter()) {
-            if let Some(path) = outside(path, krate) {
+        for path in uses.iter().chain(inline_paths(&rest, &crates).iter()) {
+            if let Some(path) = outside(path, krate, &crates) {
                 match vetted_for(&path) {
                     Some((entry, _, _)) => {
                         reached.insert(*entry);
@@ -605,4 +682,15 @@ fn the_command_line_never_opens_the_session_database() {
          only through a running dux:\n  {}",
         problems.join("\n  ")
     );
+}
+
+#[test]
+fn code_after_a_test_module_is_still_read() {
+    let text = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn inside() { let s = \"}\"; }\n}\nfn after() {}\n";
+    let code = code_of(text);
+    assert!(code.contains("fn before"), "{code}");
+    assert!(!code.contains("fn inside"), "{code}");
+    assert!(code.contains("fn after"), "{code}");
+    let declared = code_of("#[cfg(test)]\nmod tests;\nfn after() {}\n");
+    assert!(declared.contains("fn after"), "{declared}");
 }

@@ -23,7 +23,7 @@ use super::{CliError, Exit};
 use crate::config::DuxPaths;
 use crate::config_keys::{HeldBack, NOT_SHOWN};
 use crate::config_resources::{
-    self as resources, EnvItem, KeyItem, MacroItem, ProviderItem, ThemeItem,
+    self as resources, EnvItem, KeyItem, MacroItem, ProviderItem, StoppedDux, ThemeItem,
 };
 
 /// Where a listing is read from.
@@ -344,8 +344,9 @@ pub fn themes_ls(source: &Source<'_>, shape: Shape) -> Result<String, CliError> 
 /// Where a change goes, and how long it waits for a running dux.
 #[derive(Clone, Copy, Debug)]
 pub enum Writer<'a> {
-    /// No dux is running on this machine: the change edits `config.toml`.
-    File(&'a DuxPaths),
+    /// No dux is running on this machine, and none can start while the change
+    /// edits `config.toml`.
+    File(&'a StoppedDux<'a>),
     /// A running dux applies it. `wait` is how long to wait for its outcome;
     /// `None` returns the operation's id at once.
     Dux {
@@ -415,12 +416,12 @@ pub fn set_macro(
             Some(serde_json::json!({ "text": text, "surface": surface })),
         )
         .map(|said| own_outcome(said, wait, format!("Saved macro {label}.\n"))),
-        Writer::File(paths) => resources::set_macro_in_file(paths, name, text, surface)
+        Writer::File(stopped) => resources::set_macro_in_file(stopped, name, text, surface)
             .map_err(|error| edit_failed(&error))
             .map(|_| {
                 format!(
                     "Saved macro {label} in {}. {APPLIES_AT_START}\n",
-                    paths.config_path.display()
+                    stopped.paths().config_path.display()
                 )
             }),
     };
@@ -444,12 +445,12 @@ pub fn remove_macro(writer: Writer<'_>, name: &str) -> Result<String, CliError> 
             None,
         )
         .map(|said| own_outcome(said, wait, format!("Removed macro {label}.\n"))),
-        Writer::File(paths) => resources::remove_macro_in_file(paths, name)
+        Writer::File(stopped) => resources::remove_macro_in_file(stopped, name)
             .map_err(|error| edit_failed(&error))
             .map(|()| {
                 format!(
                     "Removed macro {label} from {}. {APPLIES_AT_START}\n",
-                    paths.config_path.display()
+                    stopped.paths().config_path.display()
                 )
             }),
     };
@@ -525,12 +526,13 @@ pub fn set_env(writer: Writer<'_>, name: &str, value: &str) -> Result<String, Cl
             &entry_path("global-env", name),
             Some(serde_json::json!({ "value": value })),
         ),
-        Writer::File(paths) => {
-            resources::set_env_in_file(paths, name, value).map_err(|error| edit_failed(&error))?;
+        Writer::File(stopped) => {
+            resources::set_env_in_file(stopped, name, value)
+                .map_err(|error| edit_failed(&error))?;
             Ok(format!(
                 "Saved global environment variable {name} in {} (the value is not shown). \
                  {APPLIES_AT_START}\n",
-                paths.config_path.display()
+                stopped.paths().config_path.display()
             ))
         }
     }
@@ -551,12 +553,12 @@ pub fn remove_env(writer: Writer<'_>, name: &str) -> Result<String, CliError> {
             &entry_path("global-env", name),
             None,
         ),
-        Writer::File(paths) => {
-            let label = resources::env_label(&file_text(paths), name);
-            resources::remove_env_in_file(paths, name).map_err(|error| edit_failed(&error))?;
+        Writer::File(stopped) => {
+            let label = resources::env_label(&file_text(stopped.paths()), name);
+            resources::remove_env_in_file(stopped, name).map_err(|error| edit_failed(&error))?;
             Ok(format!(
                 "Removed {label} from the global environment in {}. {APPLIES_AT_START}\n",
-                paths.config_path.display()
+                stopped.paths().config_path.display()
             ))
         }
     }

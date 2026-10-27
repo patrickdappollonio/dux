@@ -473,13 +473,7 @@ fn a_config_reset_refuses_while_another_dux_holds_the_lock_and_touches_nothing()
             .expect("this test plays the running dux");
         std::fs::write(dir.join("config.toml"), "# mine\n").unwrap();
         std::fs::write(dir.join("sessions.sqlite3"), "not really a database").unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_dux"))
-            .args(&args)
-            .env("DUX_HOME", &dir)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let run = Run { out };
+        let run = dux_in(&dir, &args, &[]);
         assert_eq!(run.code(), 1, "{name}: {}", run.stderr());
         assert!(
             run.stderr()

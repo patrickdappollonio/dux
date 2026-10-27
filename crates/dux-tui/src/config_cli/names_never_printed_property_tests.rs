@@ -173,6 +173,7 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
         Ok(text) => text,
         Err(error) => error.message,
     };
+    let stopped = dux_core::config_resources::StoppedDux::hold(paths).expect("hold the lock");
     let mut said = vec![
         ("env set question".to_string(), set_env_question(name)),
         ("env rm question".to_string(), remove_env_question(name)),
@@ -199,12 +200,12 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
     std::fs::write(&paths.config_path, body).expect("seed");
     said.push((
         "env set".to_string(),
-        text(set_env(Writer::File(paths), name, "v")),
+        text(set_env(Writer::File(&stopped), name, "v")),
     ));
     std::fs::write(&paths.config_path, body).expect("seed");
     said.push((
         "env rm".to_string(),
-        text(remove_env(Writer::File(paths), name)),
+        text(remove_env(Writer::File(&stopped), name)),
     ));
     // A save that succeeds, and the two it refuses for what it was given.
     for (text_given, surface) in [("t", "agent"), ("", "agent"), ("t", "nowhere")] {
@@ -212,7 +213,7 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
         said.push((
             format!("macros add ({text_given:?}, {surface})"),
             text(set_macro(
-                Writer::File(paths),
+                Writer::File(&stopped),
                 name,
                 text_given.to_string(),
                 surface,
@@ -222,7 +223,7 @@ fn named(paths: &DuxPaths, body: &str, name: &str) -> Vec<(String, String)> {
     std::fs::write(&paths.config_path, body).expect("seed");
     said.push((
         "macros rm".to_string(),
-        text(remove_macro(Writer::File(paths), name)),
+        text(remove_macro(Writer::File(&stopped), name)),
     ));
     said
 }

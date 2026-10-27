@@ -319,31 +319,43 @@ pub fn themes(paths: &DuxPaths, current: &str) -> Vec<ThemeItem> {
 // Edits with no dux running
 // ---------------------------------------------------------------------------
 
-/// What a missing config.toml means to an edit: refused while a dux may be
-/// running, whose next reload would drop its settings; otherwise the default.
-fn missing_file(paths: &DuxPaths) -> crate::config_write::MissingConfig<'static> {
-    let lock_path = paths.lock_path.clone();
-    let config_path = paths.config_path.clone();
-    crate::config_write::MissingConfig::CheckFirst(Box::new(move || {
-        if crate::reload_signal::dux_may_be_running(&lock_path) {
-            anyhow::bail!(
-                "{} is missing while dux may be running; nothing was changed",
-                config_path.display()
-            );
-        }
-        Ok(())
-    }))
+/// This machine's dux kept from starting while `config.toml` is edited as a
+/// file: its single-instance lock, held for as long as this value lives, so a
+/// dux started meanwhile cannot have its file rewritten under it. With no dux
+/// able to run, a missing file is started from the documented default.
+#[derive(Debug)]
+pub struct StoppedDux<'a> {
+    paths: &'a DuxPaths,
+    _lock: crate::lockfile::SingleInstanceLock,
+}
+
+impl<'a> StoppedDux<'a> {
+    /// Take the single-instance lock at `paths.lock_path`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a dux holds the lock, or the lock cannot be taken.
+    pub fn hold(paths: &'a DuxPaths) -> Result<Self, crate::lockfile::AcquireError> {
+        let mut lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)?;
+        lock.mark_config_edit();
+        Ok(Self { paths, _lock: lock })
+    }
+
+    /// Where this machine's dux keeps its files.
+    pub fn paths(&self) -> &DuxPaths {
+        self.paths
+    }
 }
 
 /// Add the macro `name`, or replace it where it stands, in the file.
 pub(crate) fn set_macro_in_file(
-    paths: &DuxPaths,
+    stopped: &StoppedDux<'_>,
     name: &str,
     text: String,
     surface: &str,
 ) -> anyhow::Result<String> {
     let (name, entry) = crate::config::checked_macro(name, text, surface)?;
-    crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
+    crate::config_write::mutate_config_file(&stopped.paths.config_path, |doc| {
         crate::config_write::set_macro(doc, &name, &entry);
         Ok(())
     })?;
@@ -351,8 +363,8 @@ pub(crate) fn set_macro_in_file(
 }
 
 /// Remove the macro `name` from the file.
-pub(crate) fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
-    crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
+pub(crate) fn remove_macro_in_file(stopped: &StoppedDux<'_>, name: &str) -> anyhow::Result<()> {
+    crate::config_write::mutate_config_file(&stopped.paths.config_path, |doc| {
         let table = crate::config_write::ensure_table(doc, "macros");
         if table.remove(name).is_none() {
             anyhow::bail!("{}", unknown_macro(name));
@@ -362,9 +374,13 @@ pub(crate) fn remove_macro_in_file(paths: &DuxPaths, name: &str) -> anyhow::Resu
 }
 
 /// Set the global environment variable `name` in the file.
-pub(crate) fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyhow::Result<()> {
+pub(crate) fn set_env_in_file(
+    stopped: &StoppedDux<'_>,
+    name: &str,
+    value: &str,
+) -> anyhow::Result<()> {
     crate::config::check_global_env_var(name, value)?;
-    crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
+    crate::config_write::mutate_config_file(&stopped.paths.config_path, |doc| {
         // Where `dux config set` writes, so a replaced value keeps the
         // comment and spacing around it.
         crate::config_keys::set_in_doc(
@@ -376,8 +392,8 @@ pub(crate) fn set_env_in_file(paths: &DuxPaths, name: &str, value: &str) -> anyh
 }
 
 /// Remove the global environment variable `name` from the file.
-pub(crate) fn remove_env_in_file(paths: &DuxPaths, name: &str) -> anyhow::Result<()> {
-    crate::config_write::mutate_config_file_with(&paths.config_path, missing_file(paths), |doc| {
+pub(crate) fn remove_env_in_file(stopped: &StoppedDux<'_>, name: &str) -> anyhow::Result<()> {
+    crate::config_write::mutate_config_file(&stopped.paths.config_path, |doc| {
         let table = crate::config_write::ensure_table(doc, "env");
         if table.remove(name).is_none() {
             anyhow::bail!("{}", unknown_env_var(name));
@@ -434,16 +450,17 @@ mod tests {
         let (_tmp, paths) = paths_with(Some(
             "# my settings\n[macros]\n# says hi\nhi = { text = \"hello\", surface = \"agent\" } # greets\n\n[env]\n# for the API\nTOKEN   = \"old\" # production credential\n# gone soon\nOLD = \"x\"\n",
         ));
-        set_macro_in_file(&paths, " bye ", "see you".to_string(), "both").unwrap();
-        set_macro_in_file(&paths, "hi", "hey".to_string(), "terminal").unwrap();
-        set_env_in_file(&paths, "TOKEN", "new").unwrap();
-        set_env_in_file(&paths, "REGION", "eu").unwrap();
-        remove_env_in_file(&paths, "OLD").unwrap();
+        let stopped = StoppedDux::hold(&paths).unwrap();
+        set_macro_in_file(&stopped, " bye ", "see you".to_string(), "both").unwrap();
+        set_macro_in_file(&stopped, "hi", "hey".to_string(), "terminal").unwrap();
+        set_env_in_file(&stopped, "TOKEN", "new").unwrap();
+        set_env_in_file(&stopped, "REGION", "eu").unwrap();
+        remove_env_in_file(&stopped, "OLD").unwrap();
         assert_eq!(
             std::fs::read_to_string(&paths.config_path).unwrap(),
             "# my settings\n[macros]\n# says hi\nhi = { text = \"hey\", surface = \"terminal\" } # greets\nbye = { text = \"see you\", surface = \"both\" }\n\n[env]\n# for the API\nTOKEN   = \"new\" # production credential\nREGION = \"eu\"\n"
         );
-        remove_macro_in_file(&paths, "hi").unwrap();
+        remove_macro_in_file(&stopped, "hi").unwrap();
         let text = std::fs::read_to_string(&paths.config_path).unwrap();
         assert!(!text.contains("hey"), "{text}");
         assert!(text.contains("bye"), "{text}");
@@ -453,25 +470,26 @@ mod tests {
     fn a_file_edit_refuses_what_a_running_dux_would_refuse_and_writes_nothing() {
         let body = "[macros]\nhi = { text = \"hello\", surface = \"agent\" }\n";
         let (_tmp, paths) = paths_with(Some(body));
+        let stopped = StoppedDux::hold(&paths).unwrap();
         for (result, says) in [
             (
-                set_macro_in_file(&paths, "x", String::new(), "agent").map(drop),
+                set_macro_in_file(&stopped, "x", String::new(), "agent").map(drop),
                 "Macro \"x\" has no text. Enter the text to send.",
             ),
             (
-                set_macro_in_file(&paths, "x", "t".to_string(), "everywhere").map(drop),
+                set_macro_in_file(&stopped, "x", "t".to_string(), "everywhere").map(drop),
                 "Macro \"x\" has an unknown surface \"everywhere\".",
             ),
             (
-                remove_macro_in_file(&paths, "nope"),
+                remove_macro_in_file(&stopped, "nope"),
                 "unknown macro \"nope\"",
             ),
             (
-                set_env_in_file(&paths, "1BAD", "v"),
+                set_env_in_file(&stopped, "1BAD", "v"),
                 "That is not a valid environment variable name",
             ),
             (
-                remove_env_in_file(&paths, "NOPE"),
+                remove_env_in_file(&stopped, "NOPE"),
                 "unknown global environment variable \"NOPE\"",
             ),
         ] {
@@ -479,5 +497,21 @@ mod tests {
             assert!(error.starts_with(says), "{error}");
         }
         assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), body);
+    }
+
+    #[test]
+    fn a_file_edit_keeps_dux_from_starting_until_it_is_done() {
+        let (_tmp, paths) = paths_with(None);
+        let stopped = StoppedDux::hold(&paths).unwrap();
+        assert!(matches!(
+            crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path),
+            Err(crate::lockfile::AcquireError::AlreadyRunning { .. })
+        ));
+        // Nothing can be running, so a missing file starts from the default.
+        set_env_in_file(&stopped, "REGION", "eu").unwrap();
+        let text = std::fs::read_to_string(&paths.config_path).unwrap();
+        assert!(text.contains("REGION = \"eu\""), "{text}");
+        drop(stopped);
+        assert!(crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path).is_ok());
     }
 }

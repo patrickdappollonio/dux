@@ -13,6 +13,7 @@ use super::connect::{Target, connect};
 use super::transport::Method;
 use super::wait::RecordState;
 use super::{CliError, Exit};
+use crate::lockfile::LockFileContents;
 use crate::reload_signal::{LockHolder, lock_holder};
 
 /// How asking the local dux to reload ended.
@@ -39,13 +40,19 @@ pub enum ReloadAnswer {
 pub fn ask_to_reload(lock_path: &Path, wait: Duration) -> ReloadAnswer {
     let client = match connect(&Target::Local, lock_path) {
         Ok(client) => client,
-        Err(error) if error.exit == Exit::NotRunning => {
+        Err(error) => {
+            // A command-line edit of the file holding the lock means no dux is
+            // running: the change applies when one starts, like a free lock.
+            let config_edit = || {
+                std::fs::read_to_string(lock_path)
+                    .is_ok_and(|text| LockFileContents::parse(&text).config_edit)
+            };
             return match lock_holder(lock_path) {
-                LockHolder::Free => ReloadAnswer::NotRunning,
+                LockHolder::Free if error.exit == Exit::NotRunning => ReloadAnswer::NotRunning,
+                LockHolder::Held(_) if config_edit() => ReloadAnswer::NotRunning,
                 _ => ReloadAnswer::NotReached(error.message),
             };
         }
-        Err(error) => return ReloadAnswer::NotReached(error.message),
     };
     let started = match client.change(Method::Post, "/api/v1/config/reload", None) {
         Ok(record) => record,
@@ -200,6 +207,18 @@ mod tests {
         assert!(
             message.contains("is still starting and has not opened its control socket yet"),
             "{message}"
+        );
+    }
+
+    #[test]
+    fn a_lock_held_by_a_config_edit_is_no_dux_running() {
+        let dir = private_dir();
+        let lock_path = dir.path().join("dux.lock");
+        let mut lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        lock.mark_config_edit();
+        assert_eq!(
+            ask_to_reload(&lock_path, Duration::from_secs(1)),
+            ReloadAnswer::NotRunning
         );
     }
 }

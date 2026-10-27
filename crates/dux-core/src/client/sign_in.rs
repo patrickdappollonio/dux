@@ -15,7 +15,20 @@ fn send(name: &str, remote: &Remote, request: &Request) -> Result<Response, CliE
         .send(request)
         .map_err(|error| match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why),
-            _ => CliError::new(
+            TransportError::DroppedAfterSend(why) if request.method != Method::Get => {
+                CliError::new(
+                    Exit::Unknown,
+                    format!(
+                        "{name} ({}) stopped answering after the request was sent, so whether it \
+                         took effect is unknown: {why}",
+                        remote.url
+                    ),
+                )
+            }
+            TransportError::Unreachable(_)
+            | TransportError::Dropped(_)
+            | TransportError::DroppedAfterSend(_)
+            | TransportError::NotOwner(_) => CliError::new(
                 Exit::NotRunning,
                 format!("{name} ({}) does not answer: {error}", remote.url),
             ),
@@ -201,6 +214,38 @@ fn end_sign_in(name: &str, remote: &Remote, token: &str) -> Result<Response, Cli
 mod tests {
     use super::*;
     use crate::client::test_server::{FakeDux, Reply};
+
+    #[test]
+    fn a_sign_in_lost_after_it_was_sent_is_unknown_and_one_never_sent_is_not_running() {
+        let (_fake, addr) = FakeDux::tcp(|_| Reply::Close);
+        let remote = Remote {
+            url: format!("http://{addr}"),
+            insecure: false,
+            token: None,
+            instance: None,
+        };
+        let lost = login("work", &remote, "right").unwrap_err();
+        assert_eq!(lost.exit, Exit::Unknown, "{}", lost.message);
+        assert!(
+            lost.message.contains("whether it took effect is unknown"),
+            "{}",
+            lost.message
+        );
+        let lost = logout("work", &remote, "T0K").unwrap_err();
+        assert_eq!(lost.exit, Exit::Unknown, "{}", lost.message);
+        // A read that is lost changed nothing.
+        assert_eq!(look("work", &remote).unwrap_err().exit, Exit::NotRunning);
+
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = free.local_addr().unwrap();
+        drop(free);
+        let nobody = Remote {
+            url: format!("http://{closed}"),
+            ..remote
+        };
+        let unreached = login("work", &nobody, "right").unwrap_err();
+        assert_eq!(unreached.exit, Exit::NotRunning, "{}", unreached.message);
+    }
 
     #[test]
     fn a_sign_in_returns_the_token_ends_the_one_it_replaces_and_a_wrong_password_gets_the_remote_sentence()

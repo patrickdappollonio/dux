@@ -2704,9 +2704,23 @@ pub(crate) fn discover_root(home: &Path, xdg_config_home: Option<&std::ffi::OsSt
 // Env/path helpers
 // ---------------------------------------------------------------------------
 
+/// What a variable reads in this process's environment, `None` when it is
+/// unset or not Unicode.
+pub(crate) fn process_env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 /// Expand environment variables (`$VAR`, `${VAR}`) in a config string.
 /// Returns `None` when variable syntax is invalid.
 pub(crate) fn expand_env_vars(raw: &str) -> Option<String> {
+    expand_env_vars_with(raw, &process_env_var)
+}
+
+/// [`expand_env_vars`], reading each variable through `var`.
+pub(crate) fn expand_env_vars_with(
+    raw: &str,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
@@ -2732,7 +2746,7 @@ pub(crate) fn expand_env_vars(raw: &str) -> Option<String> {
             if var_name.is_empty() || !is_valid_var_name(&var_name) {
                 return None;
             }
-            if let Ok(value) = std::env::var(&var_name) {
+            if let Some(value) = var(&var_name) {
                 result.push_str(&value);
             } else {
                 result.push('$');
@@ -2753,10 +2767,18 @@ pub(crate) fn expand_env_vars(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
+    resolve_project_env_with(env, &process_env_var)
+}
+
+/// [`resolve_project_env`], reading each referenced variable through `var`.
+fn resolve_project_env_with(
+    env: &BTreeMap<String, String>,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>> {
     let mut resolved = Vec::with_capacity(env.len());
     for (name, value) in env {
         validate_project_env_name(name)?;
-        let expanded = expand_env_vars(value)
+        let expanded = expand_env_vars_with(value, var)
             .ok_or_else(|| anyhow!("environment variable {name} has invalid expansion syntax"))?;
         if expanded.contains('\0') {
             bail!("environment variable {name} contains a NUL byte");
@@ -2841,13 +2863,18 @@ fn validate_project_env_name(name: &str) -> Result<()> {
 /// string.  Returns `None` when the result is unsafe (relative path, directory
 /// traversal via `..`, or invalid variable names).
 pub(crate) fn expand_path(raw: &str) -> Option<String> {
+    expand_path_with(raw, &process_env_var)
+}
+
+/// [`expand_path`], reading each variable through `var`.
+fn expand_path_with(raw: &str, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
 
     result.push_str(&expand_leading_tilde(&mut chars)?);
     while let Some(ch) = chars.next() {
         if ch == '$' {
-            result.push_str(&expand_variable(&mut chars)?);
+            result.push_str(&expand_variable(&mut chars, var)?);
         } else {
             result.push(ch);
         }
@@ -2879,7 +2906,11 @@ fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 /// The text the `$VAR`/`${VAR}` reference starting at `chars` expands to, or
 /// the literal reference itself when the variable is unset, so the user can see
 /// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`.
-fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+/// The variable is read through `var`.
+fn expand_variable(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
     let braced = chars.peek() == Some(&'{');
     if braced {
         chars.next();
@@ -2900,10 +2931,10 @@ fn expand_variable(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Opti
     if var_name.is_empty() || !is_valid_var_name(&var_name) {
         return None;
     }
-    match std::env::var(&var_name) {
-        Ok(value) => Some(value),
-        Err(_) if braced => Some(format!("${{{var_name}}}")),
-        Err(_) => Some(format!("${var_name}")),
+    match var(&var_name) {
+        Some(value) => Some(value),
+        None if braced => Some(format!("${{{var_name}}}")),
+        None => Some(format!("${var_name}")),
     }
 }
 
@@ -6608,6 +6639,11 @@ mod resolve_plan_tests {
 
 #[cfg(test)]
 mod tests {
+    /// An environment holding only `name`, set to `value`.
+    fn only(name: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |asked| (asked == name).then(|| value.to_string())
+    }
+
     /// `[git] network_timeout_seconds` bounds the network git commands by the
     /// configured seconds, and `0` takes the bound away.
     #[test]
@@ -7497,26 +7533,16 @@ mod tests {
 
     #[test]
     fn expand_path_dollar_var() {
-        // SAFETY: test-only env manipulation; tests are run with --test-threads=1
-        // or use unique variable names to avoid races.
-        unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
-        let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
+        let var = only("DUX_TEST_VAR_1", "/test/value");
+        let result = expand_path_with("$DUX_TEST_VAR_1/subdir", &var).unwrap();
         assert_eq!(result, "/test/value/subdir");
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_VAR_1") };
     }
 
     #[test]
     fn expand_path_braced_var() {
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is set.
-        unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
-        let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
+        let var = only("DUX_TEST_VAR_2", "/braced");
+        let result = expand_path_with("${DUX_TEST_VAR_2}/sub", &var).unwrap();
         assert_eq!(result, "/braced/sub");
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_VAR_2") };
     }
 
     #[test]
@@ -7542,13 +7568,8 @@ mod tests {
 
     #[test]
     fn expand_path_rejects_traversal() {
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is set.
-        unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
-        assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_VAR_3") };
+        let var = only("DUX_TEST_VAR_3", "/safe");
+        assert!(expand_path_with("$DUX_TEST_VAR_3/../etc/passwd", &var).is_none());
     }
 
     #[test]
@@ -8155,36 +8176,37 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn expand_variable_reads_both_forms_and_stops_at_the_name() {
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is set.
-        unsafe { std::env::set_var("DUX_TEST_VAR_4", "/value") };
+        let var = only("DUX_TEST_VAR_4", "/value");
         let mut plain = "DUX_TEST_VAR_4/rest".chars().peekable();
-        assert_eq!(expand_variable(&mut plain).as_deref(), Some("/value"));
+        assert_eq!(expand_variable(&mut plain, &var).as_deref(), Some("/value"));
         assert_eq!(plain.collect::<String>(), "/rest");
 
         let mut braced = "{DUX_TEST_VAR_4}/rest".chars().peekable();
-        assert_eq!(expand_variable(&mut braced).as_deref(), Some("/value"));
+        assert_eq!(
+            expand_variable(&mut braced, &var).as_deref(),
+            Some("/value")
+        );
         assert_eq!(braced.collect::<String>(), "/rest");
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_VAR_4") };
 
         let mut unset = "NONEXISTENT_DUX_VAR_998/rest".chars().peekable();
         assert_eq!(
-            expand_variable(&mut unset).as_deref(),
+            expand_variable(&mut unset, &var).as_deref(),
             Some("$NONEXISTENT_DUX_VAR_998"),
             "an unset variable keeps its literal reference"
         );
         let mut unset_braced = "{NONEXISTENT_DUX_VAR_998}".chars().peekable();
         assert_eq!(
-            expand_variable(&mut unset_braced).as_deref(),
+            expand_variable(&mut unset_braced, &var).as_deref(),
             Some("${NONEXISTENT_DUX_VAR_998}"),
             "the braces are part of the literal reference"
         );
 
-        assert_eq!(expand_variable(&mut "(whoami)".chars().peekable()), None);
-        assert_eq!(expand_variable(&mut "{}".chars().peekable()), None);
-        assert_eq!(expand_variable(&mut "1BAD".chars().peekable()), None);
+        assert_eq!(
+            expand_variable(&mut "(whoami)".chars().peekable(), &var),
+            None
+        );
+        assert_eq!(expand_variable(&mut "{}".chars().peekable(), &var), None);
+        assert_eq!(expand_variable(&mut "1BAD".chars().peekable(), &var), None);
     }
 
     #[test]
@@ -8197,17 +8219,12 @@ auth = { minimum_password_score = 9 }
 
     #[test]
     fn project_env_lines_parse_and_expand() {
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is set.
-        unsafe { std::env::set_var("DUX_TEST_PROJECT_ENV_SOURCE", "secret") };
+        let var = only("DUX_TEST_PROJECT_ENV_SOURCE", "secret");
         let env = parse_project_env_lines("EDITOR=true\nAPI_KEY=${DUX_TEST_PROJECT_ENV_SOURCE}")
             .expect("parse env");
-        let resolved = resolve_project_env(&env).expect("resolve env");
+        let resolved = resolve_project_env_with(&env, &var).expect("resolve env");
         assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
         assert!(resolved.contains(&("API_KEY".to_string(), "secret".to_string())));
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_PROJECT_ENV_SOURCE") };
     }
 
     #[test]

@@ -156,6 +156,9 @@ command returns. If part of a change failed, the command says which part and exi
 - A wait that runs out says the outcome is unknown, prints the id, and exits 6. The change
   has not been stopped: it carries on, and `dux operations show <id>` tells you how it
   ends.
+- A change whose answer is lost (the connection drops after the change was sent) or that
+  is answered with a server error, by dux or by a proxy in front of it, may or may not
+  have been made, so it also exits 6. Check before running it again.
 
 > [!NOTE]
 > A second `dux agents add` that runs while another agent is still being created waits for
@@ -199,7 +202,9 @@ this machine their listings read the file itself, whether dux is running or not.
 Changes (`dux macros add` and `rm`, `dux env set` and `rm`) go through the running dux
 when there is one, so they apply at once, in the terminal UI and in every browser. With
 no dux running they edit the file, keeping its comments, and apply the next time dux
-starts.
+starts. Until such a change has been confirmed and written, dux cannot start on this
+machine (it says another dux is running and names the command's process), and a command
+that needs the running dux is refused with exit 3, saying the edit is in progress.
 
 Providers, keys and themes are read-only here: change a provider's fields with
 `dux config set`, and keys and themes in the terminal UI or the file.
@@ -351,7 +356,7 @@ Scripts can rely on these:
 | `3` | Refused: somebody is connected, another change is in the way, or the change was not confirmed. |
 | `4` | dux isn't running, or does not answer. |
 | `5` | The remote asks for its password and this machine needs a sign-in there (none saved, or the saved one ended). |
-| `6` | The outcome is unknown: the wait ran out, and the change keeps running. |
+| `6` | The outcome is unknown: the wait ran out and the change keeps running, or the change was sent and its answer was lost or was a server error. |
 
 `dux operations show <id>` exits 0 for a change that succeeded, 1 for one that failed or
 partly failed, and 6 for one still running.

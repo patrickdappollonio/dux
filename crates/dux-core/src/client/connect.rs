@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 
 use super::remotes::{Remote, Remotes};
 use super::transport::{
-    HttpTransport, Request, Response, Transport, TransportError, UnixTransport,
+    HttpTransport, Method, Request, Response, Transport, TransportError, UnixTransport,
 };
 use super::{API_VERSION, CliError, Exit};
 use crate::lockfile::LockFileContents;
@@ -243,7 +243,9 @@ fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliErro
             .unwrap_or_default()
     };
     let says_nothing = |lock: &LockFileContents| {
-        lock.control_socket.is_none() && lock.control_socket_unavailable.is_none()
+        lock.control_socket.is_none()
+            && lock.control_socket_unavailable.is_none()
+            && !lock.config_edit
     };
     let mut lock = read();
     // A held lock that says nothing about a socket yet is a dux still starting.
@@ -270,6 +272,15 @@ fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliErro
         LockHolder::Free => Ok(None),
         LockHolder::Held(pid) => {
             let lock = read();
+            if lock.config_edit {
+                return Err(CliError::new(
+                    Exit::Refused,
+                    format!(
+                        "another dux command (PID {pid}) is editing config.toml while dux is \
+                         stopped; try again when it finishes"
+                    ),
+                ));
+            }
             match (lock.control_socket_unavailable, lock.control_socket) {
                 (Some(reason), _) => Err(not_running(format!(
                     "dux (PID {pid}) is running without a control socket: {reason}"
@@ -302,16 +313,17 @@ impl Client {
     }
 
     /// Send `request` with this client's sign-in. No reply is
-    /// [`Exit::NotRunning`]; a reply of any status is returned.
+    /// [`Exit::NotRunning`], or [`Exit::Unknown`] for a change the dux may
+    /// have acted on; a reply of any status is returned.
     ///
     /// # Errors
     ///
-    /// Fails with [`Exit::NotRunning`] when no reply arrives.
+    /// Fails when no reply arrives.
     pub fn send(&self, mut request: Request) -> Result<Response, CliError> {
         request.bearer.clone_from(&self.token);
         self.transport
             .send(&request)
-            .map_err(|error| self.no_reply(&error))
+            .map_err(|error| self.no_reply(request.method, &error))
     }
 
     /// [`Self::send`] without mapping a missing reply, for a caller that
@@ -339,15 +351,26 @@ impl Client {
         request.bearer.clone_from(&self.token);
         self.transport
             .stream(&request, on_body)
-            .map_err(|error| self.no_reply(&error))
+            .map_err(|error| self.no_reply(request.method, &error))
     }
 
-    /// The error for a request that got no reply.
-    pub(crate) fn no_reply(&self, error: &TransportError) -> CliError {
+    /// The error for a `method` request that got no reply. A change that was
+    /// sent may have been made, so how it ended is unknown.
+    pub(crate) fn no_reply(&self, method: Method, error: &TransportError) -> CliError {
         match error {
             TransportError::Refused(why) => CliError::new(Exit::Failed, why.clone()),
             TransportError::NotOwner(why) => CliError::new(Exit::NotRunning, why.clone()),
-            _ => CliError::new(
+            TransportError::DroppedAfterSend(why) if method != Method::Get => CliError::new(
+                Exit::Unknown,
+                format!(
+                    "{} stopped answering after the change was sent, so whether it was made is \
+                     unknown: {why}\nCheck before running it again.",
+                    self.target
+                ),
+            ),
+            TransportError::Unreachable(_)
+            | TransportError::Dropped(_)
+            | TransportError::DroppedAfterSend(_) => CliError::new(
                 Exit::NotRunning,
                 format!("{} does not answer: {error}", self.target),
             ),
@@ -415,7 +438,7 @@ impl Client {
         let reply = self
             .transport
             .send(&Request::get("/api/v1/auth/status"))
-            .map_err(|error| self.no_reply(&error))?;
+            .map_err(|error| self.no_reply(Method::Get, &error))?;
         let status = read_auth_status(&self.target, &reply)?;
         if let (Some(name), Some(known)) = (&self.remote, &remote.instance) {
             // An answer that names no dux is not taken for the pinned one.
@@ -604,6 +627,30 @@ mod tests {
             error.message
         );
         assert!(!dir.path().join("sessions.sqlite3").exists());
+    }
+
+    #[test]
+    fn a_lock_held_by_a_config_edit_says_so_at_once() {
+        let dir = private_dir();
+        let lock_path = dir.path().join("dux.lock");
+        let mut lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        lock.mark_config_edit();
+        let pid = std::process::id();
+        let asked = std::time::Instant::now();
+        let error = connect(&Target::Local, &lock_path).unwrap_err();
+        assert!(
+            asked.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert_eq!(error.exit, Exit::Refused);
+        assert_eq!(
+            error.message,
+            format!(
+                "another dux command (PID {pid}) is editing config.toml while dux is stopped; \
+                 try again when it finishes"
+            )
+        );
     }
 
     #[test]

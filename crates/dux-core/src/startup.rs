@@ -872,15 +872,19 @@ pub(crate) fn startup_already_running_message(agent_label: &str) -> String {
 }
 
 fn startup_shell_command(raw: &str) -> String {
+    startup_shell_command_with(raw, &crate::config::process_env_var)
+}
+
+/// [`startup_shell_command`], reading each variable through `var`.
+fn startup_shell_command_with(raw: &str, var: &dyn Fn(&str) -> Option<String>) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "$SHELL" || trimmed == "${SHELL}" {
-        return std::env::var("SHELL")
-            .ok()
+        return var("SHELL")
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "/bin/sh".to_string());
     }
 
-    crate::config::expand_env_vars(trimmed).unwrap_or_else(|| trimmed.to_string())
+    crate::config::expand_env_vars_with(trimmed, var).unwrap_or_else(|| trimmed.to_string())
 }
 
 struct CommandOutcome {
@@ -1105,13 +1109,11 @@ mod tests {
 
     #[test]
     fn startup_command_shell_expands_config_env_vars() {
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is set.
-        unsafe { std::env::set_var("DUX_TEST_STARTUP_SHELL", "/bin/sh") };
-        assert_eq!(startup_shell_command("$DUX_TEST_STARTUP_SHELL"), "/bin/sh");
-        // SAFETY: the variable's name is unique to this test, so nothing else in the
-        // process reads or writes it while it is removed.
-        unsafe { std::env::remove_var("DUX_TEST_STARTUP_SHELL") };
+        let var = |name: &str| (name == "DUX_TEST_STARTUP_SHELL").then(|| "/bin/sh".to_string());
+        assert_eq!(
+            startup_shell_command_with("$DUX_TEST_STARTUP_SHELL", &var),
+            "/bin/sh"
+        );
     }
 
     #[test]
