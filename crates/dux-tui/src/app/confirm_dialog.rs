@@ -639,10 +639,10 @@ mod tests {
                 PromptState::ConfirmDeleteAgent {
                     attached: Vec::new(),
                     delete_branch: false,
-                    unpushed_commits: Some(dux_core::git::UnpushedCommits {
+                    unpushed_commits: Some(Ok(dux_core::git::UnpushedCommits {
                         count: 3,
                         has_remote_refs: true,
-                    }),
+                    })),
                     session_id: "s1".to_string(),
                     agent_label: "my cool agent".to_string(),
                     target: DeleteAgentTarget::Managed {

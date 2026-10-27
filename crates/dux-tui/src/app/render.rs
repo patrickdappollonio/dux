@@ -1482,22 +1482,24 @@ pub(super) fn delete_agent_branch_checkbox_prose(branches: &[&str]) -> Prose {
 /// nothing.
 ///
 /// The danger lives in this sentence rather than in a red checkbox. `unpushed` is
-/// `None` both while the count is being computed and when git could not answer,
-/// and the sentence is absent in both cases: the dialog never guesses a number.
+/// `None` while the count is being computed, and the count sentence is absent
+/// then; when git could not count, the sentence says so and why: the dialog
+/// never guesses a number.
 #[cfg(test)]
 pub(super) fn delete_agent_branch_warning(
     provenance: dux_core::model::BranchProvenance,
     branches: &[&str],
     unpushed: Option<dux_core::git::UnpushedCommits>,
 ) -> Option<String> {
-    delete_agent_branch_warning_prose(provenance, branches, unpushed).map(|prose| prose.plain())
+    delete_agent_branch_warning_prose(provenance, branches, unpushed.map(Ok).as_ref())
+        .map(|prose| prose.plain())
 }
 
 /// [`delete_agent_branch_warning`] with every branch it names marked as a name.
 pub(super) fn delete_agent_branch_warning_prose(
     provenance: dux_core::model::BranchProvenance,
     branches: &[&str],
-    unpushed: Option<dux_core::git::UnpushedCommits>,
+    unpushed: Option<&Result<dux_core::git::UnpushedCommits, String>>,
 ) -> Option<Prose> {
     let drifted = branches.len() > 1;
     let predates = !provenance.dux_may_delete_branch();
@@ -1532,15 +1534,24 @@ pub(super) fn delete_agent_branch_warning_prose(
             _ => " existed before the agent.",
         });
     }
-    if let Some(sentence) = unpushed_commits_sentence(
-        unpushed,
-        if drifted {
-            BranchSpread::Drifted
-        } else {
-            BranchSpread::Single
-        },
-    ) {
-        text.push_text(sentence);
+    let spread = if drifted {
+        BranchSpread::Drifted
+    } else {
+        BranchSpread::Single
+    };
+    match unpushed {
+        Some(Ok(answer)) => {
+            if let Some(sentence) = unpushed_commits_sentence(Some(*answer), spread) {
+                text.push_text(sentence);
+            }
+        }
+        Some(Err(reason)) => {
+            text.push_text(" ");
+            text = text.then(dux_core::delete_agent_prose::unpushed_count_failure_prose(
+                branches, reason,
+            ));
+        }
+        None => {}
     }
     Some(text)
 }
@@ -3683,19 +3694,15 @@ impl App {
             });
         }
         let total_rows = self.diff_rows.as_ref().map_or(0, |cache| cache.rows.len());
-        // Rows past 65,535 are unreachable by scrolling: the offset is a u16
-        // and this is the extent it is clamped against.
-        self.last_diff_visual_lines = u16::try_from(total_rows).unwrap_or(u16::MAX);
+        self.last_diff_visual_lines = total_rows;
 
         // The offset actually DRAWN, which is the outer `scroll` clamped to the
         // wrapped extent. The scroll marker and the hint bar are rendered from
         // it, so neither can drift from what the pane put on screen.
-        let max_scroll = self
-            .last_diff_visual_lines
-            .saturating_sub(content_area.height);
+        let max_scroll = total_rows.saturating_sub(usize::from(content_area.height));
         let drawn_scroll = scroll.min(max_scroll);
 
-        let start = usize::from(drawn_scroll);
+        let start = drawn_scroll;
         let end = start
             .saturating_add(usize::from(content_area.height))
             .min(total_rows);
@@ -3715,9 +3722,9 @@ impl App {
             frame,
             area,
             content_area,
-            usize::from(drawn_scroll),
+            drawn_scroll,
             usize::from(content_area.height),
-            usize::from(self.last_diff_visual_lines),
+            self.last_diff_visual_lines,
             self.theme.hint_key_fg,
         );
 
@@ -3737,7 +3744,7 @@ impl App {
 
     /// The diff pane's hint bar: where the reader is when scrolled back, and the
     /// keys that scroll and close it.
-    fn diff_hint_line(&self, drawn_scroll: u16, width: u16) -> Line<'static> {
+    fn diff_hint_line(&self, drawn_scroll: usize, width: u16) -> Line<'static> {
         let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
         let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
@@ -3752,10 +3759,7 @@ impl App {
             pane_hint_line_after(
                 &self.theme,
                 Span::styled(
-                    format!(
-                        "Scrolled back {}.",
-                        count_of(usize::from(drawn_scroll), "line")
-                    ),
+                    format!("Scrolled back {}.", count_of(drawn_scroll, "line")),
                     Style::default().fg(self.theme.hint_key_fg),
                 ),
                 &[
@@ -6560,7 +6564,7 @@ impl App {
                 })
                 .max()
                 .unwrap_or(0);
-            let inner_width = usize::from(popup.width) - 3;
+            let inner_width = usize::from(popup.width.saturating_sub(3));
             let gap = 2usize;
             commands
                 .iter()
@@ -9928,7 +9932,13 @@ impl App {
             return;
         };
         let inner_width = confirm_inner_width(frame.area());
-        let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
+        // The checkbox offers to check out the default branch, so it exists
+        // only when that branch is known.
+        let known_default = match kind {
+            BranchWarningKind::Known { default_branch } => Some(default_branch),
+            BranchWarningKind::Heuristic => None,
+        };
+        let has_checkbox = known_default.is_some();
 
         let checkout = if *checkout_default {
             dux_core::add_project_plan::DefaultCheckout::CheckOutDefault
@@ -9938,10 +9948,7 @@ impl App {
         let body_lines = self.non_default_branch_body(current_branch, kind, checkout, inner_width);
         // Checkbox height is measured up-front so the outer rect can
         // be sized exactly, mirroring the Delete Agent modal.
-        let checkbox_height = if has_checkbox {
-            let BranchWarningKind::Known { default_branch } = kind else {
-                unreachable!("has_checkbox requires a known default branch");
-            };
+        let checkbox_height = if let Some(default_branch) = known_default {
             let state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let checkbox = Checkbox::with_prose(&label, &self.theme)
@@ -9985,10 +9992,7 @@ impl App {
         );
         let checkbox_area = layout.controls;
 
-        let checkbox_rect = if has_checkbox {
-            let BranchWarningKind::Known { default_branch } = kind else {
-                unreachable!("has_checkbox requires a known default branch");
-            };
+        let checkbox_rect = if let Some(default_branch) = known_default {
             let checkbox_state = CheckboxState::of(*focus, ConfirmNonDefaultBranchFocus::Checkbox);
             let label = checkout_default_label(default_branch);
             let (rect, _) = self.render_overlay_prose_checkbox(
@@ -11969,10 +11973,6 @@ impl App {
             .render(area, frame.buffer_mut());
     }
 
-    /// The kill list's four footer buttons, centred in `buttons_area`, each
-    /// disabled when it would act on nothing. These are four distinct actions,
-    /// not picker confirmation controls; three have no keyboard equivalent.
-    /// Returns their rects in footer order.
     /// How a kill-running footer button looks before any press: disabled
     /// when it has nothing to act on, even with keyboard focus on it, else
     /// focused or normal.
@@ -11990,6 +11990,9 @@ impl App {
         }
     }
 
+    /// The kill list's four footer buttons, centred in `buttons_area`, each
+    /// disabled when it would act on nothing. These are four distinct actions,
+    /// not picker confirmation controls. Returns their rects in footer order.
     fn render_kill_running_buttons(
         &self,
         frame: &mut Frame<'_>,
@@ -12003,10 +12006,9 @@ impl App {
             KillRunningFooterAction::Visible,
         ];
         let gap = BUTTON_GAP;
-        // These are four distinct actions, not picker confirmation controls;
-        // three have no keyboard equivalent. Extra width balances long labels,
-        // and gives way first when the dialog is too narrow for the row: the
-        // padding shrinks down to the borders alone before anything is clipped.
+        // Extra width balances long labels, and gives way first when the
+        // dialog is too narrow for the row: the padding shrinks down to the
+        // borders alone before anything is clipped.
         let row_width = |padding: u16| {
             let widths = buttons.map(|action| {
                 let label = u16::try_from(display_width(action.button_label())).unwrap_or(u16::MAX);
@@ -12192,7 +12194,7 @@ impl App {
             target,
             &warned_branches,
             on_delete,
-            *unpushed_commits,
+            unpushed_commits.as_ref(),
             inner_width,
         ));
         body_lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
@@ -12236,7 +12238,7 @@ impl App {
         target: &DeleteAgentTarget,
         warned_branches: &[&str],
         on_delete: dux_core::engine::WorktreeOnDelete,
-        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
+        unpushed_commits: Option<&Result<dux_core::git::UnpushedCommits, String>>,
         inner_width: u16,
     ) -> Vec<Line<'static>> {
         let DeleteAgentTarget::Managed {
@@ -24400,6 +24402,14 @@ mod tests {
     }
 
     #[test]
+    fn the_command_palette_draws_on_a_terminal_narrower_than_its_borders() {
+        for width in 1..=4 {
+            let (app, _) = palette_frame((width, 20), "", 0);
+            assert!(matches!(app.prompt, PromptState::Command { .. }));
+        }
+    }
+
+    #[test]
     fn the_command_palette_shows_no_marker_when_the_filtered_list_fits() {
         // A filter narrow enough that every match is on screen.
         let (app, buf) = palette_frame((120, 40), "toggle-github", 0);
@@ -24420,7 +24430,7 @@ mod tests {
         size: (u16, u16),
         count: usize,
         gutter_width: usize,
-        scroll: u16,
+        scroll: usize,
     ) -> (App, ratatui::buffer::Buffer) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -24475,7 +24485,7 @@ mod tests {
             let (app, buf) = diff_frame((120, 40), 400, gutter_width, 0);
             let (content, border_column) = diff_rects(&app);
             assert!(
-                app.last_diff_visual_lines > content.height,
+                app.last_diff_visual_lines > usize::from(content.height),
                 "the fixture must overflow (gutter {gutter_width})"
             );
             assert_eq!(
@@ -24484,7 +24494,7 @@ mod tests {
                 "at the top of the diff (gutter {gutter_width})"
             );
 
-            let max = app.last_diff_visual_lines - content.height;
+            let max = app.last_diff_visual_lines - usize::from(content.height);
             let (app, buf) = diff_frame((120, 40), 400, gutter_width, max / 2);
             let (_, border_column) = diff_rects(&app);
             assert_eq!(
@@ -24509,11 +24519,45 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_longer_than_a_u16_scrolls_to_its_last_row() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let count = usize::from(u16::MAX) + 5_000;
+        let (mut app, _) = diff_frame((120, 40), count, 0, 0);
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .expect("scroll to the bottom");
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        let (content, _) = diff_rects(&app);
+        let last = format!("line {}", count - 1);
+        let bottom_row: String = (content.x..content.x + content.width)
+            .map(|x| {
+                buf[(x, content.y + content.height - 1)]
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            bottom_row.trim_end(),
+            last,
+            "the end of the diff is reachable"
+        );
+    }
+
+    #[test]
     fn a_short_diff_gets_no_marker() {
         for gutter_width in [0usize, 6] {
             let (app, buf) = diff_frame((120, 40), 3, gutter_width, 0);
             let (content, border_column) = diff_rects(&app);
-            assert!(app.last_diff_visual_lines <= content.height, "fixture fits");
+            assert!(
+                app.last_diff_visual_lines <= usize::from(content.height),
+                "fixture fits"
+            );
             assert_eq!(marker_in(&buf, border_column), None);
         }
     }
@@ -24791,13 +24835,13 @@ mod tests {
         // rows it is not drawing, the rows it IS drawing start at the scroll
         // offset and run to the bottom of the content area.
         for gutter_width in [0usize, 6] {
-            let scroll = 12_345u16;
+            let scroll = 12_345usize;
             let (app, buf) = diff_frame((120, 40), 20_000, gutter_width, scroll);
             let (content, _) = diff_rects(&app);
             let rows = diff_content_rows(&buf, content);
             assert_eq!(rows.len(), usize::from(content.height));
             for (offset, row) in rows.iter().enumerate() {
-                let index = usize::from(scroll) + offset;
+                let index = scroll + offset;
                 let expected = if gutter_width > 0 {
                     format!("{:>4}│ line {index}", index + 1)
                 } else {
@@ -24848,7 +24892,7 @@ mod tests {
             // report the position the view actually drew.
             let (app, buf) = diff_frame((120, 40), 400, gutter_width, 10_000);
             let (content, _) = diff_rects(&app);
-            let max = app.last_diff_visual_lines - content.height;
+            let max = app.last_diff_visual_lines - usize::from(content.height);
             let rows = buffer_rows(&buf);
             let hint = rows
                 .iter()
@@ -27363,7 +27407,7 @@ mod tests {
             focus: super::DeleteAgentFocus::WorktreeCheckbox,
             delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
             delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
-            unpushed_commits,
+            unpushed_commits: unpushed_commits.map(Ok),
         }
     }
 
@@ -27551,6 +27595,44 @@ mod tests {
         assert_eq!(
             super::unpushed_commits_sentence(never_pushed(4), BranchSpread::Drifted).unwrap(),
             " Nothing on them has been pushed anywhere: all 4 of their commits exist only on this machine."
+        );
+    }
+
+    /// A count git could not give is said, with every branch it was about as a
+    /// name and git's reason, rather than left out.
+    #[test]
+    fn the_delete_dialog_says_when_the_commits_could_not_be_counted() {
+        let failed = Err("fatal: bad revision".to_string());
+        let said = |provenance, branches: &[&str]| {
+            super::delete_agent_branch_warning_prose(provenance, branches, Some(&failed))
+                .expect("a warning")
+        };
+        let single = said(
+            dux_core::model::BranchProvenance::AttachedExisting,
+            &["feature"],
+        );
+        assert_eq!(
+            single.plain(),
+            "This branch existed before the agent. dux could not count the unpushed commits on \
+             feature (fatal: bad revision); check it before deleting it."
+        );
+        assert!(
+            single
+                .segments()
+                .iter()
+                .any(|segment| matches!(segment, dux_core::prose::ProseSegment::Name { name, .. } if name == "feature")),
+            "the branch is a name, so it renders as a chip"
+        );
+        assert!(
+            said(
+                dux_core::model::BranchProvenance::CreatedByDux,
+                &["develop-next", "develop"],
+            )
+            .plain()
+            .ends_with(
+                "dux could not count the unpushed commits on develop-next and develop \
+                 (fatal: bad revision); check them before deleting them."
+            )
         );
     }
 

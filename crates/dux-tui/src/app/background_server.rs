@@ -721,6 +721,25 @@ impl App {
     /// shared half of the palette command, the config-reload transition and the
     /// quit path.
     pub(crate) fn stop_background_server_quietly(&mut self) {
+        self.let_go_of_serving();
+        if let Some(companion) = self.companion.as_mut()
+            && companion.is_serving()
+        {
+            companion.stop(&mut self.engine);
+        }
+    }
+
+    /// Leaving the run loop (a quit or the flip): let go of serving as
+    /// [`Self::stop_background_server_quietly`] does, then release every core
+    /// at once. Stopping the serve first would start a control-socket core
+    /// only for the release to stop it again.
+    pub(crate) fn release_serving_on_exit(&mut self) {
+        self.let_go_of_serving();
+        self.release_companion();
+    }
+
+    /// What every stop of the serve does before the listener goes.
+    fn let_go_of_serving(&mut self) {
         // Runtime intent, not the saved setting: quitting stops the listener
         // without deciding anything about next time, and that distinction lives in
         // config, which this deliberately does not touch.
@@ -730,15 +749,7 @@ impl App {
         // buses are still up to carry the news. After the stop there is nothing
         // left to announce on, and every browser watching one of those ptys would
         // keep showing a take-over card naming a terminal that stopped serving.
-        //
-        // This is also the flip's release and the quit's release: both leave the
-        // run loop, and both exits call through here.
         self.release_owned_ptys();
-        if let Some(companion) = self.companion.as_mut()
-            && companion.is_serving()
-        {
-            companion.stop(&mut self.engine);
-        }
     }
 
     /// Palette action: open the `[server] tailscale` picker.

@@ -458,24 +458,36 @@ fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
                 }
             }
             b']' => scan_osc(buf),
+            // Alt with a non-ASCII character: the ESC prefix and the whole
+            // character are one keystroke, never split inside the character.
+            lead if utf8_len(lead).is_some() => utf8_sequence(&buf[1..])
+                .map_or(SequenceStatus::Incomplete, |len| {
+                    SequenceStatus::Complete(len + 1)
+                }),
             _ => SequenceStatus::Complete(2),
         }
-    } else if (0xc0..0xfe).contains(&b) {
-        let expected = if b < 0xe0 {
-            2
-        } else if b < 0xf0 {
-            3
-        } else {
-            4
-        };
-        if expected <= buf.len() {
-            SequenceStatus::Complete(expected)
-        } else {
-            SequenceStatus::Incomplete
-        }
+    } else if utf8_len(b).is_some() {
+        utf8_sequence(buf).map_or(SequenceStatus::Incomplete, SequenceStatus::Complete)
     } else {
         SequenceStatus::Complete(1)
     }
+}
+
+/// The length of the UTF-8 character `lead` starts, for a multi-byte lead byte.
+fn utf8_len(lead: u8) -> Option<usize> {
+    match lead {
+        0xc0..0xe0 => Some(2),
+        0xe0..0xf0 => Some(3),
+        0xf0..0xfe => Some(4),
+        _ => None,
+    }
+}
+
+/// The length of the multi-byte character `buf` starts with, once all of it
+/// has arrived.
+fn utf8_sequence(buf: &[u8]) -> Option<usize> {
+    let len = utf8_len(*buf.first()?)?;
+    (len <= buf.len()).then_some(len)
 }
 
 /// Splits a raw byte buffer into complete terminal input sequences.
@@ -504,6 +516,19 @@ pub(crate) fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_with_a_multibyte_character_is_one_sequence() {
+        let (complete, rest) = split_sequences("\x1bé\x1b漢x".as_bytes());
+        assert_eq!(
+            complete,
+            vec!["\x1bé".as_bytes(), "\x1b漢".as_bytes(), b"x".as_slice()]
+        );
+        assert_eq!(rest, b"");
+        let (complete, rest) = split_sequences(b"\x1b\xc3");
+        assert!(complete.is_empty(), "{complete:?}");
+        assert_eq!(rest, b"\x1b\xc3");
+    }
 
     #[test]
     fn parse_focus_event_recognizes_gained_and_lost() {

@@ -675,7 +675,8 @@ fn syntect_color(c: SynColor) -> Option<Color> {
     }
 }
 
-/// Expand tab characters to spaces, aligning to tab stops of the given width.
+/// Expand tab characters to spaces, aligning to tab stops of the given width,
+/// counted in display columns so a wide glyph moves the next stop by two.
 /// If `tab_width` is 0, tabs are left as-is.
 fn expand_tabs(line: &str, tab_width: u16) -> String {
     if tab_width == 0 || !line.contains('\t') {
@@ -693,7 +694,7 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
             col += spaces;
         } else {
             out.push(ch);
-            col += 1;
+            col += char_display_width(ch);
         }
     }
     out
@@ -1228,6 +1229,7 @@ mod tests {
         assert_eq!(expand_tabs("abcd\te", 4), "abcd    e");
         assert_eq!(expand_tabs("no tabs", 4), "no tabs");
         assert_eq!(expand_tabs("\t", 0), "\t");
+        assert_eq!(expand_tabs("漢\tb", 4), "漢  b");
     }
 
     #[test]

@@ -60,6 +60,9 @@ pub(crate) struct RedrawGate {
     pub(crate) renders: u64,
     /// Iterations whose passthrough half ran, drawn or not.
     pub(crate) forwards: u64,
+    /// The last draw failed, so the failure has already been reported and a
+    /// draw that keeps failing does not report it again every iteration.
+    draw_failing: bool,
 }
 
 impl App {
@@ -261,20 +264,30 @@ impl App {
         needed
     }
 
-    /// The draw half of one run-loop iteration: EXACTLY ONE gate decision, and a
-    /// skipped draw is not a skipped iteration, so the passthrough still runs.
-    /// Returns whether the iteration may carry on to its input half.
-    pub(crate) fn draw_and_forward(
-        &mut self,
-        now: Instant,
-        draw: impl FnOnce(&mut Self) -> bool,
-    ) -> bool {
-        if self.frame_needed(now) && !draw(self) {
-            return false;
+    /// The draw half of one run-loop iteration: EXACTLY ONE gate decision, and
+    /// neither a skipped draw nor a failed one is a skipped iteration, so the
+    /// passthrough runs and the input half follows. A draw that keeps failing
+    /// must not starve the keys that would quit.
+    pub(crate) fn draw_and_forward(&mut self, now: Instant, draw: impl FnOnce(&mut Self)) {
+        if self.frame_needed(now) {
+            draw(self);
         }
         self.redraw.forwards = self.redraw.forwards.wrapping_add(1);
         self.forward_host_passthrough();
-        true
+    }
+
+    /// Record a failed draw: the frame is owed again, and the failure is
+    /// reported only when it starts a run of failures. Returns whether to
+    /// report it.
+    pub(crate) fn note_draw_failed(&mut self) -> bool {
+        // The gate consumed the mark for a frame that never landed.
+        self.mark_frame_dirty();
+        !std::mem::replace(&mut self.redraw.draw_failing, true)
+    }
+
+    /// Record a draw that landed. Returns whether it ended a run of failures.
+    pub(crate) fn note_draw_succeeded(&mut self) -> bool {
+        std::mem::replace(&mut self.redraw.draw_failing, false)
     }
 }
 
@@ -719,12 +732,10 @@ mod tests {
         let forwards = app.redraw.forwards;
 
         let mut drew = false;
-        let carried_on = app.draw_and_forward(start + Duration::from_millis(33), |app| {
+        app.draw_and_forward(start + Duration::from_millis(33), |app| {
             drew = true;
             terminal.draw(|frame| app.render(frame)).expect("draw");
-            true
         });
-        assert!(carried_on, "the iteration carries on to its input half");
         assert!(!drew, "nothing changed, so the frame is skipped");
         assert_eq!(
             app.redraw.forwards,
@@ -733,12 +744,10 @@ mod tests {
         );
 
         app.mark_frame_dirty();
-        let carried_on = app.draw_and_forward(start + Duration::from_millis(66), |app| {
+        app.draw_and_forward(start + Duration::from_millis(66), |app| {
             drew = true;
             terminal.draw(|frame| app.render(frame)).expect("draw");
-            true
         });
-        assert!(carried_on);
         assert!(drew, "a marked frame draws");
         assert_eq!(app.redraw.forwards, forwards + 2);
 
@@ -751,5 +760,30 @@ mod tests {
             !app.frame_needed(now),
             "the gate is consuming, so it must be asked exactly once per iteration"
         );
+    }
+
+    /// A draw that fails is still an iteration: the passthrough runs, the frame
+    /// is owed again, and a run of failures is reported once rather than once
+    /// per iteration.
+    #[test]
+    fn a_failed_draw_still_carries_the_iteration_and_reports_once() {
+        let (mut app, _terminal, start) = app_at_rest();
+        let forwards = app.redraw.forwards;
+        let mut reported = Vec::new();
+        for tick in 1..=3 {
+            app.mark_frame_dirty();
+            app.draw_and_forward(start + Duration::from_millis(33 * tick), |app| {
+                reported.push(app.note_draw_failed());
+            });
+        }
+        assert_eq!(reported, [true, false, false]);
+        assert_eq!(app.redraw.forwards, forwards + 3);
+        assert!(
+            app.frame_needed(start + Duration::from_millis(200)),
+            "the frame that never landed is drawn again"
+        );
+        assert!(app.note_draw_succeeded(), "the run of failures ended");
+        assert!(!app.note_draw_succeeded());
+        assert!(app.note_draw_failed(), "a new run is reported again");
     }
 }

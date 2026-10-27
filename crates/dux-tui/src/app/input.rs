@@ -1,6 +1,8 @@
 use super::components::wrap_lines::cluster_width;
 use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
-use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
+use super::modal::{
+    ModalKeyStep, binding_lookup_is_suppressed, click_target, focus_move_step, modal_key_step,
+};
 use super::*;
 use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
 use chrono::Local;
@@ -14,6 +16,12 @@ use ratatui::buffer::CellWidth;
 /// mouse-tracking app is never over-scrolled. Keyboard scrolling is unaffected.
 /// Must match xterm's `scrollSensitivity` in the web's TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
+
+/// The furthest a diff of `visual_lines` wrapped rows scrolls in a pane
+/// `height` rows tall: its last row on the pane's last row.
+fn diff_max_scroll(visual_lines: usize, height: u16) -> usize {
+    visual_lines.saturating_sub(usize::from(height.max(1)))
+}
 
 /// [`MOUSE_WHEEL_LINES`] as the integer type a scroll call takes.
 fn wheel_lines<T: TryFrom<usize>>() -> T {
@@ -149,6 +157,17 @@ pub(super) fn configure_project_text_input_mut(prompt: &mut PromptState) -> Opti
     }
 }
 
+/// The most lines the input debugger keeps; older ones scroll away for good.
+pub(super) const DEBUG_INPUT_MAX_LINES: usize = 1_000;
+
+/// Drop the input debugger's oldest lines past [`DEBUG_INPUT_MAX_LINES`] and
+/// return the scroll offset that pins its newest line on screen.
+fn trim_debug_input_lines(lines: &mut Vec<Line<'static>>) -> u16 {
+    let excess = lines.len().saturating_sub(DEBUG_INPUT_MAX_LINES);
+    lines.drain(..excess);
+    u16::try_from(lines.len()).unwrap_or(u16::MAX)
+}
+
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) `ToggleFullscreen`
 /// binding. Since any realistic binding fits in well under this cap, we
@@ -188,26 +207,6 @@ fn read_raw_chunk(fd: impl std::os::fd::AsFd, buf: &mut [u8]) -> rustix::io::Res
 fn is_reverse_tab(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::BackTab)
         || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
-}
-
-/// Whether a focus-movement key means "backwards".
-///
-/// The movement action carries no direction of its own, so the key that
-/// triggered it supplies one: `Shift-Tab`/`BackTab` and the two conventional
-/// "left" keys walk backwards, and anything else walks forwards. This is a
-/// directional hint for the default key set, not a hardcoded binding: a
-/// rebound key simply moves forwards.
-fn focus_move_is_reverse(key: KeyEvent) -> bool {
-    is_reverse_tab(key) || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
-}
-
-/// Which way a focus-moving key travels.
-fn focus_move_step(key: KeyEvent) -> FocusStep {
-    if focus_move_is_reverse(key) {
-        FocusStep::Backward
-    } else {
-        FocusStep::Forward
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1180,6 +1179,25 @@ impl App {
     }
 
     fn should_defer_global_key(&self, key: &KeyEvent) -> bool {
+        // A global binding that only extends the chord (Ctrl-x taking
+        // Ctrl-Alt-x) yields to a binding in the focused pane naming it
+        // exactly, the same rule a lookup applies inside one scope. Resize mode
+        // has no pane handler behind it, so it keeps the global answer.
+        let focused_pane = match self.focus {
+            FocusPane::Left => BindingScope::Left,
+            FocusPane::Center => BindingScope::Center,
+            FocusPane::Files => BindingScope::Files,
+        };
+        if !self.resize_mode
+            && self.bindings.lookup(key, BindingScope::Global).is_some()
+            && self
+                .bindings
+                .lookup_exact(key, BindingScope::Global)
+                .is_none()
+            && self.bindings.lookup_exact(key, focused_pane).is_some()
+        {
+            return true;
+        }
         if self.bindings.lookup(key, BindingScope::Global) != Some(Action::Quit) {
             return false;
         }
@@ -1721,7 +1739,7 @@ impl App {
 
     fn scroll_center_page_up(&mut self, key: &KeyEvent) {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let page = self.last_diff_height.max(1);
+            let page = usize::from(self.last_diff_height.max(1));
             *scroll = scroll.saturating_sub(page);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
@@ -1732,11 +1750,9 @@ impl App {
 
     fn scroll_center_page_down(&mut self, key: &KeyEvent) {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let page = self.last_diff_height.max(1);
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(self.last_diff_height.max(1));
-            *scroll = (*scroll + page).min(max_scroll);
+            let page = usize::from(self.last_diff_height.max(1));
+            let max_scroll = diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
+            *scroll = scroll.saturating_add(page).min(max_scroll);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
         } else if self.last_pty_size.0 > 0 {
@@ -1758,10 +1774,8 @@ impl App {
 
     fn scroll_center_line_down(&mut self, key: &KeyEvent) {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(self.last_diff_height.max(1));
-            *scroll = (*scroll + 1).min(max_scroll);
+            let max_scroll = diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
+            *scroll = scroll.saturating_add(1).min(max_scroll);
         } else if !self.center_scroll_keys_gated() {
             if self.last_pty_size.0 > 0 {
                 self.scroll_pty(ScrollDirection::Down, 1);
@@ -1773,10 +1787,7 @@ impl App {
 
     fn scroll_center_to_bottom(&mut self, key: &KeyEvent) {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(self.last_diff_height.max(1));
-            *scroll = max_scroll;
+            *scroll = diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
         } else if !self.center_scroll_keys_gated() {
             self.reset_pty_scrollback();
         } else {
@@ -3304,10 +3315,10 @@ impl App {
             if n2 == 0 {
                 break;
             }
-            // Re-check output guard.
-            if let Some(provider) = self.selected_terminal_surface_client()
-                && !provider.has_output()
-            {
+            // A chunk that lands while the provider is still loading gets the
+            // loading phase's treatment, as the first chunk did, rather than
+            // being read and then dropped.
+            if self.consume_loading_raw_input(&buf[..n2]) {
                 break;
             }
             let should_exit = self.process_raw_input_bytes(&buf[..n2]);
@@ -4054,7 +4065,7 @@ impl App {
                 Span::raw(" │ "),
                 Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
             ]));
-            *scroll_offset = usize_to_u16_wrapping(lines.len());
+            *scroll_offset = trim_debug_input_lines(lines);
 
             return Some(false);
         }
@@ -9944,7 +9955,9 @@ impl App {
                 return Some(false);
             }
             MouseEventKind::ScrollDown => {
-                *scroll_offset = (*scroll_offset + 3).min(usize_to_u16_wrapping(lines.len()));
+                *scroll_offset = scroll_offset
+                    .saturating_add(wheel_lines::<u16>())
+                    .min(u16::try_from(lines.len()).unwrap_or(u16::MAX));
                 return Some(false);
             }
             _ => {}
@@ -9970,7 +9983,7 @@ impl App {
                 Style::default().add_modifier(Modifier::DIM),
             ),
         ]));
-        *scroll_offset = usize_to_u16_wrapping(lines.len());
+        *scroll_offset = trim_debug_input_lines(lines);
         Some(false)
     }
 
@@ -10937,12 +10950,11 @@ impl App {
     fn handle_center_mouse_wheel(&mut self, mouse: MouseEvent) {
         self.focus = FocusPane::Center;
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-            let delta = wheel_lines::<u16>();
+            let delta = wheel_lines::<usize>();
             if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                let max_scroll = self
-                    .last_diff_visual_lines
-                    .saturating_sub(self.last_diff_height.max(1));
-                *scroll = (*scroll + delta).min(max_scroll);
+                let max_scroll =
+                    diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
+                *scroll = scroll.saturating_add(delta).min(max_scroll);
             } else if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                 *scroll = scroll.saturating_sub(delta);
             }
@@ -12320,11 +12332,7 @@ impl App {
         }
         let text = self.terminal_selection_text();
         if !text.is_empty() {
-            let _ = self.clipboard.copy_text(
-                &text,
-                "Terminal text copied to clipboard.",
-                &self.engine.worker_tx,
-            );
+            self.copy_to_clipboard(&text, "Terminal text copied to clipboard.");
         }
     }
 
@@ -12498,11 +12506,7 @@ impl App {
         }
         let text = selected.join("\n");
         if !text.is_empty() {
-            let _ = self.clipboard.copy_text(
-                &text,
-                "Startup command log text copied to clipboard.",
-                &self.engine.worker_tx,
-            );
+            self.copy_to_clipboard(&text, "Startup command log text copied to clipboard.");
         }
     }
 
@@ -18991,6 +18995,77 @@ not_a_real_action = ["x"]
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert_eq!(app.status.text(), "No projects yet. Add one first.");
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn the_input_debugger_keeps_only_its_newest_lines_and_stays_pinned() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+        for _ in 0..super::DEBUG_INPUT_MAX_LINES + 10 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                .unwrap();
+        }
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("the debugger stays open");
+        };
+        assert_eq!(lines.len(), super::DEBUG_INPUT_MAX_LINES);
+        assert_eq!(
+            usize::from(*scroll_offset),
+            lines.len(),
+            "the newest line stays on screen"
+        );
+    }
+
+    /// A global binding that only extends a chord gives it to the focused
+    /// pane's binding naming it exactly, and keeps it where nothing does.
+    #[test]
+    fn a_pane_binding_naming_a_chord_exactly_wins_over_a_global_that_extends_it() {
+        let ctrl_alt_x = KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        let bindings = || {
+            bindings_with_overrides(&[
+                (Action::ToggleHelp, &["ctrl-x"]),
+                (Action::FilterAgents, &["ctrl-alt-x"]),
+            ])
+        };
+        let mut app = test_app(bindings());
+        app.focus = FocusPane::Left;
+        app.handle_key(ctrl_alt_x).unwrap();
+        assert!(app.agent_filter.is_some(), "the pane's exact binding ran");
+        assert_eq!(app.help_scroll, None, "the global one did not");
+
+        let mut app = test_app(bindings());
+        app.focus = FocusPane::Files;
+        app.handle_key(ctrl_alt_x).unwrap();
+        assert_eq!(
+            app.help_scroll,
+            Some(0),
+            "with no exact binding in the pane the global takes the chord"
+        );
+    }
+
+    #[test]
+    fn a_copy_the_clipboard_worker_cannot_take_says_so() {
+        let mut app = test_app(default_bindings());
+        app.clipboard = Clipboard::without_worker();
+        app.copy_to_clipboard("selected text", "Terminal text copied to clipboard.");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("clipboard worker is not running"),
+            "{}",
+            app.status.text()
+        );
     }
 
     #[test]

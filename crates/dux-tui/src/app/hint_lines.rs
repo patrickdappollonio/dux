@@ -360,7 +360,7 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
         });
     }
 
-    for scroll in [0u16, 3] {
+    for scroll in [0usize, 3] {
         let mut app = fresh();
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Diff {

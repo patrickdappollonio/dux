@@ -377,6 +377,7 @@ pub(crate) fn run_set(
     // asking it, and only once that outcome is known.
     let wait = dux_core::client::wait::wait_timeout(None, &paths.config_path);
     let answer = dux_core::client::reload::ask_to_reload(&paths.lock_path, wait);
+    let password_note = password.then(|| password_sentence(&answer)).flatten();
     say_reload(
         &answer,
         if remaining.is_empty() {
@@ -384,25 +385,35 @@ pub(crate) fn run_set(
         } else {
             Remaining::Problems
         },
+        password_note.as_deref(),
         out,
-    )?;
-    if password && let Some(sentence) = password_sentence(&answer) {
-        writeln!(out, "{sentence}")?;
-    }
-    Ok(())
+    )
 }
 
 /// Say how the running dux answered the reload: no answer in time exits with the
 /// unknown code (6), a refusal or a failed step fails the command on standard error.
-fn say_reload(answer: &ReloadAnswer, remaining: Remaining, out: &mut dyn Write) -> Result<()> {
+/// `note` follows the answer's sentence, on the failure too, since a reload with
+/// a step failed still put the rest of the file in force.
+fn say_reload(
+    answer: &ReloadAnswer,
+    remaining: Remaining,
+    note: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<()> {
     let sentence = reload_sentence(answer, remaining);
     match answer {
         ReloadAnswer::Unknown(_) => {
             Err(dux_core::client::CliError::new(dux_core::client::Exit::Unknown, sentence).into())
         }
-        ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_) => bail!("{sentence}"),
+        ReloadAnswer::Refused(_) | ReloadAnswer::PartlyApplied(_) => match note {
+            Some(note) => bail!("{sentence}\n{note}"),
+            None => bail!("{sentence}"),
+        },
         _ => {
             writeln!(out, "{sentence}")?;
+            if let Some(note) = note {
+                writeln!(out, "{note}")?;
+            }
             Ok(())
         }
     }
@@ -868,8 +879,10 @@ const ENV_VALUE_STDIN_LIMIT: u64 = 1024 * 1024;
 /// More than that is refused rather than buffered.
 const STDIN_LIMIT: u64 = ENV_VALUE_STDIN_LIMIT + 2;
 
-/// Standard input held more than [`STDIN_LIMIT`]. The caller words it, since
-/// only it knows whether a password or an environment value was being read.
+/// Standard input held more than [`STDIN_LIMIT`], or a value longer than
+/// [`ENV_VALUE_STDIN_LIMIT`] once its line break is stripped. The caller words
+/// it, since only it knows whether a password or an environment value was
+/// being read.
 #[derive(Debug)]
 struct StdinTooLarge;
 
@@ -901,6 +914,10 @@ fn read_secret(input: impl Read) -> Result<Password> {
         if bytes.ends_with(b"\r") {
             bytes.pop();
         }
+    }
+    // The read allows for a line break; the value itself gets no allowance.
+    if usize_to_u64(bytes.len()) > ENV_VALUE_STDIN_LIMIT {
+        return Err(StdinTooLarge.into());
     }
     Password::from_utf8(std::mem::take(&mut *bytes)).map_err(|e| anyhow!("{e}"))
 }
@@ -1343,6 +1360,23 @@ port = 3890
             large.len()
         );
         assert_eq!(read_secret(&b"abc\r\n"[..]).unwrap().expose(), "abc");
+        // The line break is the only allowance: a value one byte over is
+        // refused whatever its ending.
+        for over in [
+            "x".repeat(u64_to_usize(ENV_VALUE_STDIN_LIMIT) + 1),
+            "x".repeat(u64_to_usize(ENV_VALUE_STDIN_LIMIT) + 1) + "\n",
+        ] {
+            assert!(
+                read_secret(over.as_bytes())
+                    .unwrap_err()
+                    .is::<StdinTooLarge>()
+            );
+        }
+        let at_limit = "x".repeat(u64_to_usize(ENV_VALUE_STDIN_LIMIT)) + "\r\n";
+        assert_eq!(
+            read_secret(at_limit.as_bytes()).unwrap().byte_len(),
+            u64_to_usize(ENV_VALUE_STDIN_LIMIT)
+        );
         assert_eq!(
             read_secret(&b"two\nlines\n"[..]).unwrap().expose(),
             "two\nlines"
@@ -1462,13 +1496,14 @@ port = 3890
             ReloadAnswer::NotReached("why".into()),
         ] {
             let mut out = Vec::new();
-            say_reload(&answer, Remaining::Clean, &mut out).expect("not a failure");
+            say_reload(&answer, Remaining::Clean, None, &mut out).expect("not a failure");
             assert!(!out.is_empty(), "{answer:?} says something");
         }
         let mut out = Vec::new();
         let error = say_reload(
             &ReloadAnswer::Refused("no".into()),
             Remaining::Clean,
+            None,
             &mut out,
         )
         .expect_err("refused fails");
@@ -1479,6 +1514,7 @@ port = 3890
         let error = say_reload(
             &ReloadAnswer::Unknown("operation op-1 ran out; see dux operations show op-1".into()),
             Remaining::Clean,
+            None,
             &mut out,
         )
         .expect_err("no answer in time ends the command");
@@ -1495,6 +1531,7 @@ port = 3890
         let error = say_reload(
             &ReloadAnswer::PartlyApplied("one step failed: the database is locked".into()),
             Remaining::Clean,
+            None,
             &mut out,
         )
         .expect_err("a half-applied reload fails");
@@ -1504,6 +1541,25 @@ port = 3890
             said.contains("the database is locked"),
             "names the step: {said}"
         );
+    }
+
+    /// A password change that a half-applied reload put in force still says
+    /// so, beside the failure that ends the command.
+    #[test]
+    fn a_half_applied_reload_still_says_the_new_password_is_in_force() {
+        let answer = ReloadAnswer::PartlyApplied("one step failed".into());
+        let note = password_sentence(&answer).expect("in force");
+        let mut out = Vec::new();
+        let error = say_reload(&answer, Remaining::Clean, Some(&note), &mut out)
+            .expect_err("a half-applied reload fails");
+        let said = format!("{}{error}", String::from_utf8_lossy(&out));
+        assert!(said.contains("is signed out"), "{said}");
+
+        let answer = ReloadAnswer::Applied("Reloaded.".into());
+        let mut out = Vec::new();
+        say_reload(&answer, Remaining::Clean, Some(&note), &mut out).expect("applied");
+        let said = String::from_utf8_lossy(&out);
+        assert!(said.contains("is signed out"), "{said}");
     }
 
     #[test]

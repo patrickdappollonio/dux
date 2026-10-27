@@ -521,7 +521,7 @@ pub(crate) enum ModalKeyStep {
     /// Dismiss the modal, through its real cancel path (never a bare
     /// `prompt = None`; see [`super::overlay_dismiss`]).
     Close,
-    /// Move focus. `true` is forwards.
+    /// Move focus in the given direction.
     MoveFocus(FocusStep),
     /// The confirm key. What it means is the family's business: a `Confirm` or
     /// `Picker` acts on whatever has focus, while a `Form` whose fields are all
@@ -583,10 +583,13 @@ pub(crate) fn modal_key_step(
     }
 }
 
-/// Whether a focus-movement key means "backwards". The movement action carries
-/// no direction of its own, so the key that triggered it supplies one. Mirrors
-/// `super::input::focus_move_is_reverse`, kept here so the ladder stays a pure
-/// function the tests can drive without an `App`.
+/// Whether a focus-movement key means "backwards".
+///
+/// The movement action carries no direction of its own, so the key that
+/// triggered it supplies one: `Shift-Tab`/`BackTab` and the two conventional
+/// "left" keys walk backwards, and anything else walks forwards. This is a
+/// directional hint for the default key set, not a hardcoded binding: a
+/// rebound key simply moves forwards.
 fn focus_move_is_reverse(key: KeyEvent) -> bool {
     use ratatui::crossterm::event::KeyModifiers;
     matches!(key.code, KeyCode::BackTab)
@@ -595,7 +598,7 @@ fn focus_move_is_reverse(key: KeyEvent) -> bool {
 }
 
 /// Which way a focus-moving key travels.
-fn focus_move_step(key: KeyEvent) -> FocusStep {
+pub(crate) fn focus_move_step(key: KeyEvent) -> FocusStep {
     if focus_move_is_reverse(key) {
         FocusStep::Backward
     } else {

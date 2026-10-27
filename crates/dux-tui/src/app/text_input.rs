@@ -520,27 +520,27 @@ impl TextInput {
 // ── Private helpers ─────────────────────────────────────────────────
 
 fn prev_char_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
+    let index = clamp_cursor(text, index);
     text[..index].char_indices().last().map_or(0, |(i, _)| i)
 }
 
 fn next_char_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
+    let index = clamp_cursor(text, index);
     text[index..]
         .char_indices()
         .nth(1)
         .map_or(text.len(), |(offset, _)| index + offset)
 }
 
+/// `cursor` as a byte offset `text` can be cut at: past the end is the end,
+/// and inside a character is that character's start. Every helper that slices
+/// the text takes its index through here, since the fields are public.
 pub(crate) fn clamp_cursor(text: &str, cursor: usize) -> usize {
-    if cursor >= text.len() {
-        return text.len();
+    let mut cursor = cursor.min(text.len());
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
     }
-    if text.is_char_boundary(cursor) {
-        cursor
-    } else {
-        prev_char_boundary(text, cursor)
-    }
+    cursor
 }
 
 /// Compute visual lines using word-aware soft-wrapping.
@@ -575,7 +575,7 @@ fn is_word_char(c: char) -> bool {
 /// Scan backward from `index` to find the previous word boundary.
 /// Skips non-word chars, then skips word chars, standard terminal behaviour.
 fn prev_word_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
+    let index = clamp_cursor(text, index);
     let before = &text[..index];
     let mut chars = before.char_indices().rev().peekable();
 
@@ -602,7 +602,7 @@ fn prev_word_boundary(text: &str, index: usize) -> usize {
 /// Scan forward from `index` to find the next word boundary.
 /// Skips non-word chars, then skips word chars, standard terminal behaviour.
 fn next_word_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
+    let index = clamp_cursor(text, index);
     let after = &text[index..];
     let mut chars = after.char_indices().peekable();
 
@@ -972,6 +972,27 @@ mod tests {
     }
 
     // ── handle_key dispatch ────────────────────────────────────────
+
+    #[test]
+    fn a_cursor_inside_a_character_is_floored_to_its_start() {
+        let edits: [fn(&mut TextInput); 8] = [
+            TextInput::move_left,
+            TextInput::move_right,
+            TextInput::move_left_word,
+            TextInput::move_right_word,
+            TextInput::backspace,
+            TextInput::delete,
+            TextInput::backspace_word,
+            |input| input.insert_char('x'),
+        ];
+        for edit in edits {
+            let mut input = TextInput::with_text("aé b".to_string());
+            input.cursor = 2;
+            edit(&mut input);
+            assert!(input.text.is_char_boundary(input.cursor), "{input:?}");
+        }
+        assert_eq!(clamp_cursor("aé", 2), 1);
+    }
 
     #[test]
     fn handle_key_plain_char() {

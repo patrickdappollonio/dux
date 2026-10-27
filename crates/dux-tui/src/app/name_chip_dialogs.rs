@@ -415,10 +415,10 @@ fn delete_agent_prompt(
         focus: DeleteAgentFocus::Cancel,
         delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
         delete_branch: true,
-        unpushed_commits: Some(dux_core::git::UnpushedCommits {
+        unpushed_commits: Some(Ok(dux_core::git::UnpushedCommits {
             count: 2,
             has_remote_refs: true,
-        }),
+        })),
     }
 }
 

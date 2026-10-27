@@ -188,6 +188,9 @@ export type BranchUnpushed = {
   // because it means a different thing without it: with nowhere to have pushed to,
   // the count is simply the whole history.
   unpushed: { count: number; has_remote_refs: boolean } | null
+  // Why git could not count, when it could not; the dialog says so in place of
+  // a number. Absent from a server that predates it, which reads as no reason.
+  unpushed_error?: string | null
 }
 
 export const sessionsApi = {

@@ -14,6 +14,7 @@ import {
 import { attachedEntryProse, attachedLeadProse } from "./attached"
 import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
+import { unpushedCountFailureProse } from "./deleteAgent"
 import { detachConfirmProse } from "./detachAgent"
 import { deleteProjectProse, removeProjectProse } from "./projectConfirm"
 import {
@@ -173,6 +174,11 @@ describe("the sentences both surfaces print", () => {
           args.branch as string,
           args.open_pr as number | null,
           args.pushed as boolean,
+        )
+      case "unpushed_count_failure":
+        return unpushedCountFailureProse(
+          args.branches as string[],
+          args.reason as string,
         )
       case "attached_lead":
         return attachedLeadProse()

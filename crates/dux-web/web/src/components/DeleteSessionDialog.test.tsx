@@ -499,6 +499,28 @@ describe("DeleteSessionDialog", () => {
     expect(screen.queryByText(/not pushed anywhere/)).toBeNull()
   })
 
+  // A count git could not give is said, with git's reason and the branch as a
+  // chip, rather than dropped: silence would read as "nothing to lose".
+  it("says when git could not count the unpushed commits", async () => {
+    branchUnpushed.mockResolvedValue({
+      branches: ["develop"],
+      unpushed: null,
+      unpushed_error: "git rev-list failed: fatal: bad revision",
+    })
+    seed("s3", [attachedSession])
+    render(<DeleteSessionDialog />)
+    fireEvent.click(screen.getByRole("checkbox"))
+    const said = await screen.findByText(
+      /dux could not count the unpushed commits on/,
+    )
+    expect(said.textContent).toContain(
+      "This branch existed before the agent. dux could not count the unpushed commits on develop (git rev-list failed: fatal: bad revision); check it before deleting it.",
+    )
+    expect(
+      Array.from(said.querySelectorAll("code")).map((code) => code.textContent),
+    ).toContain("develop")
+  })
+
   it("asks git nothing until the branch box is on screen", () => {
     // One git call, bought only where its answer is rendered: with the worktree
     // kept there is no branch offer at all.

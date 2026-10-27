@@ -2733,18 +2733,13 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
     }
 }
 
-/// Every problem with the bindings in `keys`, none of them repeating a
-/// binding (a value pasted in the wrong place, a token, may be what is
-/// there): an action dux does not have, a binding that is not a key, and two
-/// actions binding the same key in a shared scope, each named by its action.
-/// `line_of` places an action's binding by its line where the file's text is
-/// at hand; an action the file leaves out binds its default key.
 /// Every binding in `keys` that loads but never runs on its key: a pane
 /// action whose key a global action also holds, which the main key handler
-/// answers first. Each is named by both actions and never by the key. These
+/// answers first, and an interactive-mode key the terminal sends no bytes of
+/// its own for. Each is named by its actions and never by the key. These
 /// warn rather than refuse, because a file holding one used to load.
 pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
-    keybindings::detect_conflicts(keys)
+    let shadowed = keybindings::detect_conflicts(keys)
         .into_iter()
         .filter(|conflict| conflict.kind == keybindings::ConflictKind::Shadowed)
         .map(|conflict| {
@@ -2755,10 +2750,26 @@ pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
                 global = conflict.action_a,
                 scope = conflict.scope.display_name(),
             )
-        })
-        .collect()
+        });
+    let unmatchable = keybindings::unmatchable_interactive_bindings(keys)
+        .into_iter()
+        .map(|action| {
+            format!(
+                "[keys] a key bound to {action} cannot be matched in {scope}: the terminal sends \
+                 no bytes of its own for that chord while you type into a pane; give it a \
+                 different key in [keys]",
+                scope = keybindings::BindingScope::Interactive.display_name(),
+            )
+        });
+    shadowed.chain(unmatchable).collect()
 }
 
+/// Every problem with the bindings in `keys`, none of them repeating a
+/// binding (a value pasted in the wrong place, a token, may be what is
+/// there): an action dux does not have, a binding that is not a key, and two
+/// actions binding the same key in a shared scope, each named by its action.
+/// `line_of` places an action's binding by its line where the file's text is
+/// at hand; an action the file leaves out binds its default key.
 fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usize>) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, key_strs) in &keys.bindings {
@@ -4439,6 +4450,35 @@ oneshot_output = "stdout"
         assert_eq!(
             bindings.labels_for(keybindings::Action::SelectTab5),
             "Alt-5"
+        );
+    }
+
+    /// A key bound in interactive mode that sends no bytes of its own is a
+    /// warning naming the action and never the key; the defaults raise none.
+    #[test]
+    fn an_interactive_chord_with_no_bytes_starts_with_a_warning() {
+        let raw = "[keys]\nscroll_to_bottom = [\"f20\", \"end\"]\n";
+        assert_eq!(keys_start_problems(raw), Vec::<String>::new());
+        let keys = toml::from_str::<Config>(raw).expect("parses").keys;
+        let warnings = key_binding_warnings(&keys);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("scroll_to_bottom")
+                && warnings[0].contains("Interactive mode")
+                && !warnings[0].contains("f20"),
+            "{warnings:?}"
+        );
+        // A Ctrl-digit chord is the same case: no byte is invented for it.
+        let keys = toml::from_str::<Config>("[keys]\nscroll_to_bottom = [\"ctrl-1\"]\n")
+            .expect("parses")
+            .keys;
+        assert_eq!(
+            keybindings::unmatchable_interactive_bindings(&keys),
+            vec!["scroll_to_bottom"]
+        );
+        assert_eq!(
+            key_binding_warnings(&KeysConfig::default()),
+            Vec::<String>::new()
         );
     }
 

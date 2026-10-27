@@ -21,6 +21,7 @@ import {
   sessionLabel,
   type AgentWorkspaceWire,
 } from "@/lib/agentWorkspace"
+import { unpushedCountFailureProse } from "@/lib/deleteAgent"
 import { chip, type Prose, renderProse } from "@/lib/prose"
 import { sessionsApi } from "@/lib/sessionsApi"
 import type { SessionView } from "@/lib/types"
@@ -49,7 +50,10 @@ function branchCheckboxLabel(branches: string[]): Prose {
   ]
 }
 
-type UnpushedCount = { count: number; has_remote_refs: boolean } | null
+type UnpushedCount =
+  | { count: number; has_remote_refs: boolean }
+  | { failed: string }
+  | null
 
 // How much work the tick would destroy, or `null` when there is nothing to say:
 // no count yet, or none unpushed. `drifted` puts the sentence in the plural,
@@ -58,7 +62,8 @@ function unpushedSentence(
   unpushed: UnpushedCount,
   drifted: boolean,
 ): string | null {
-  if (unpushed === null || unpushed.count === 0) return null
+  if (unpushed === null || "failed" in unpushed || unpushed.count === 0)
+    return null
   const count = unpushed.count
   const plural = count === 1 ? "commit" : "commits"
   if (unpushed.has_remote_refs) {
@@ -81,7 +86,8 @@ function unpushedSentence(
 
 // The warning under the branch box, or `null`: either the branch predates the
 // agent, or drift means the tick takes a second branch. A null `unpushed` count
-// (in flight, or unanswerable) drops the count sentence.
+// (in flight, or the request failed) drops the count sentence; a count git could
+// not give says so.
 function branchWarning(
   provenance: string,
   branches: string[],
@@ -110,6 +116,8 @@ function branchWarning(
   }
   const unpushedText = unpushedSentence(unpushed, drifted)
   if (unpushedText !== null) parts.push([unpushedText])
+  if (unpushed !== null && "failed" in unpushed)
+    parts.push(unpushedCountFailureProse(branches, unpushed.failed))
   return parts.flatMap((part, index) => (index === 0 ? part : [" ", ...part]))
 }
 
@@ -168,7 +176,8 @@ export function DeleteSessionDialog() {
   // default, so reopening on another agent picks up ITS default.
   const [branchAnswer, setBranchAnswer] = useState<boolean | null>(null)
   // How much work ticking the branch box would destroy, arriving after the dialog
-  // opens. `null` throughout means git could not answer, and nothing is said.
+  // opens, or why git could not count it. `null` throughout means no answer
+  // arrived, and nothing is said.
   const [unpushed, setUnpushed] = useState<UnpushedCount>(null)
   // The branches the server says the delete would remove. `null` until it lands.
   const [answeredBranches, setAnsweredBranches] = useState<string[] | null>(
@@ -215,7 +224,10 @@ export function DeleteSessionDialog() {
       .branchUnpushed(deleteTarget)
       .then((answer) => {
         if (!live) return
-        setUnpushed(answer.unpushed)
+        setUnpushed(
+          answer.unpushed ??
+            (answer.unpushed_error ? { failed: answer.unpushed_error } : null),
+        )
         setAnsweredBranches(answer.branches)
       })
       // A failure is simply no number to show: the sentence saying the branch

@@ -394,6 +394,11 @@ mod tests {
                 &s("repository"),
                 s("number").parse().expect("number"),
             ),
+            "unpushed_count_failure" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                crate::delete_agent_prose::unpushed_count_failure_prose(&branches, &s("reason"))
+            }
             "attached_lead" => crate::attached_prose::attached_lead_prose(),
             "attached_entry" => {
                 use crate::attachments::{Surface, TargetKind};

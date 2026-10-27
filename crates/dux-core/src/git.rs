@@ -1880,17 +1880,17 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<Unpu
     args.push("--not".to_string());
     args.push("--remotes".to_string());
     args.push("--".to_string());
-    let output = Command::new("git").args(&args).output()?;
+    let output = Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|err| anyhow!("git could not be run: {err}"))?;
+    // The caller names the branches; the error says only what git said.
     if !output.status.success() {
-        let named = branches
-            .iter()
-            .map(|branch| format!("\"{branch}\""))
-            .collect::<Vec<_>>()
-            .join(" and ");
-        return Err(anyhow!(
-            "git rev-list failed for branch {named}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        let said = String::from_utf8_lossy(&output.stderr);
+        return Err(match said.trim() {
+            "" => anyhow!("git rev-list failed ({})", output.status),
+            said => anyhow!("git rev-list failed: {said}"),
+        });
     }
     let text = String::from_utf8_lossy(&output.stdout);
     let count = text
@@ -1901,6 +1901,26 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<Unpu
         count,
         has_remote_refs: has_remote_tracking_refs(repo_path),
     })
+}
+
+/// Why [`unpushed_commit_count`] could not answer, short enough to sit inside
+/// a sentence: git's own `fatal:` or `error:` line when it printed one (a
+/// hint or warning can come first), else the error's first line, without its
+/// closing full stop.
+pub fn unpushed_count_failure_reason(err: &anyhow::Error) -> String {
+    let full = format!("{err:#}");
+    let said = full
+        .lines()
+        .find_map(|line| {
+            ["fatal:", "error:"]
+                .iter()
+                .filter_map(|marker| line.find(marker))
+                .min()
+                .map(|at| &line[at..])
+        })
+        .or_else(|| full.lines().next())
+        .unwrap_or_default();
+    said.trim().trim_end_matches('.').to_string()
 }
 
 /// How many commits branch `have` has that branch `want` lacks.
@@ -11141,6 +11161,23 @@ mod tests {
     }
 
     // ── unpushed_commit_count ────────────────────────────────
+
+    #[test]
+    fn a_count_failure_reason_prefers_gits_fatal_line() {
+        let reason = |text: &str| unpushed_count_failure_reason(&anyhow!("{text}"));
+        assert_eq!(
+            reason("git rev-list failed: hint: look here\nfatal: bad revision 'x'."),
+            "fatal: bad revision 'x'"
+        );
+        assert_eq!(
+            reason("git rev-list failed: error: object file is empty\nmore"),
+            "error: object file is empty"
+        );
+        assert_eq!(
+            reason("git could not be run: No such file or directory.\nsecond"),
+            "git could not be run: No such file or directory"
+        );
+    }
 
     /// Commit an empty change on `branch` (creating it from HEAD the first
     /// time), so a test can put a known number of commits on it.

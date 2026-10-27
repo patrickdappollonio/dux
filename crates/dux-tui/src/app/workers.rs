@@ -456,12 +456,7 @@ impl App {
         if answer.error.is_some() {
             return;
         }
-        let watched = self
-            .engine
-            .watched_worktree
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
+        let watched = self.engine.watched_worktree_path();
         if watched.as_deref() == Some(answer.worktree.as_path()) {
             self.changes_tree.lists_for = self.engine.watched_session_id.clone();
         }
@@ -1045,7 +1040,7 @@ impl App {
                 }
             }
             Err(error) => self.set_error(format!(
-                "Project branch was detected, but config.toml could not be updated: {error:#}"
+                "Project branch was detected, but the session database could not be updated: {error:#}"
             )),
         }
         self.continue_create_agent_after_branch_inspection(project, inspection);

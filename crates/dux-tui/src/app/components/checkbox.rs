@@ -8,7 +8,7 @@ use ratatui::widgets::Widget;
 use dux_core::prose::Prose;
 
 use super::name_chip::prose_lines;
-use super::wrap_lines::wrap_styled_lines;
+use super::wrap_lines::{char_display_width, display_width, wrap_styled_lines};
 use crate::theme::Theme;
 
 /// Whether a checkbox is ticked.
@@ -143,7 +143,7 @@ impl<'a> Checkbox<'a> {
             return CheckboxLayout::empty();
         }
 
-        let indent_width = Self::INDENT.chars().count();
+        let indent_width = display_width(Self::INDENT);
         let available = usize::from(max_width);
         let label_width = available.saturating_sub(indent_width).max(1);
         let rows: Vec<Vec<Span<'static>>> = match self.label {
@@ -257,7 +257,7 @@ fn wrap_checkbox_label(label: &str, max_width: usize) -> Vec<String> {
         let mut current = String::new();
         let mut current_width = 0usize;
         for word in paragraph.split_whitespace() {
-            let word_width = word.chars().count();
+            let word_width = display_width(word);
             if current.is_empty() {
                 if word_width <= max_width {
                     current.push_str(word);
@@ -302,12 +302,13 @@ fn push_broken_word_lines(word: &str, max_width: usize, lines: &mut Vec<String>)
     let mut chunk = String::new();
     let mut chunk_width = 0usize;
     for ch in word.chars() {
-        if chunk_width == max_width {
+        let width = char_display_width(ch);
+        if !chunk.is_empty() && chunk_width + width > max_width {
             lines.push(std::mem::take(&mut chunk));
             chunk_width = 0;
         }
         chunk.push(ch);
-        chunk_width += 1;
+        chunk_width += width;
     }
     if !chunk.is_empty() {
         lines.push(chunk);
@@ -317,6 +318,22 @@ fn push_broken_word_lines(word: &str, max_width: usize, lines: &mut Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_label_wraps_by_display_width() {
+        for label in ["漢字漢字", "ab 漢字漢字"] {
+            let checkbox = Checkbox::new(label);
+            let layout = checkbox.layout(9, Style::default(), Style::default());
+            for line in &layout.lines {
+                let width: usize = line
+                    .spans
+                    .iter()
+                    .map(|span| super::super::wrap_lines::display_width(&span.content))
+                    .sum();
+                assert!(width <= 9, "{label:?} painted a {width}-column row");
+            }
+        }
+    }
 
     #[test]
     fn checkbox_wraps_label_with_continuation_indent() {

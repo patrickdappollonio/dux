@@ -306,6 +306,17 @@ fn lock_changed_files_queue(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The worktree a changed-files watch is on, recovering from poisoning: the
+/// guarded value is one plain path a panic cannot leave half-written, and
+/// reading a poisoned watch as "nothing watched" would drop every answer about
+/// the worktree that is in fact still on screen.
+fn watched_worktree_of(watch: &Mutex<Option<PathBuf>>) -> Option<PathBuf> {
+    watch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// See [`Engine::serve_memory`].
 pub(crate) type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
 
@@ -3763,6 +3774,13 @@ impl Engine {
         }
     }
 
+    /// The worktree the changed-files watch is on, if any, read through a
+    /// poisoned lock too, since the path behind it cannot be half-written.
+    #[must_use]
+    pub fn watched_worktree_path(&self) -> Option<PathBuf> {
+        watched_worktree_of(&self.watched_worktree)
+    }
+
     /// Point the changed-files watch at a session's worktree, or clear it. The
     /// cheap half, running no git: it resolves the session, sets
     /// `watched_worktree` and `watched_session_id`, and always empties the
@@ -4171,10 +4189,7 @@ impl Engine {
                     Duration::from_secs(10)
                 };
                 thread::sleep(changed_files_poll_delay(interval, last_sweep));
-                let path = watched
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
+                let path = watched_worktree_of(&watched);
                 let started = Instant::now();
                 let swept = path
                     .as_ref()

@@ -23,6 +23,7 @@ use crate::statusline::StatusTone;
 use crate::{git, logger};
 use anyhow::Result;
 use dux_core::clone_project::UpfrontReviewCopy;
+use dux_core::engine::status_op::PendingStatusOp;
 use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 use dux_core::model::CompanionTerminal;
@@ -2408,7 +2409,12 @@ impl App {
                 std::path::Path::new(&inputs.project_path),
                 &inputs.warned_branches(),
             )
-            .ok();
+            .map_err(|err| {
+                logger::warn(&format!(
+                    "could not count the unpushed commits for the delete dialog: {err:#}"
+                ));
+                dux_core::git::unpushed_count_failure_reason(&err)
+            });
             let _ = tx.send(UnpushedCountAnswer { session_id, count });
         });
     }
@@ -2435,7 +2441,7 @@ impl App {
         } = &mut self.prompt
             && *session_id == answer.session_id
         {
-            *unpushed_commits = answer.count;
+            *unpushed_commits = Some(answer.count);
         }
     }
 
@@ -3429,6 +3435,34 @@ impl App {
         })
     }
 
+    /// The rerun's status op: its busy, and the final for each outcome.
+    fn startup_rerun_op(
+        &self,
+        branch: &str,
+        project_name: &str,
+    ) -> dux_core::engine::StatusOp<(), String> {
+        // Declare the loading→final states together. The success message needs
+        // the palette keybinding label (render context only the main thread has);
+        // resolve it HERE and bake it into the op's outcomes. The status rides a
+        // separate StatusOpCompleted event from the worker.
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        let success_name = project_name.to_string();
+        let failure_name = project_name.to_string();
+        dux_core::engine::status_op(format!(
+            "Rerunning startup command for agent \"{branch}\"..."
+        ))
+        .on_success(move |(): &()| {
+            dux_core::engine::Final::info(format!(
+                "Startup command completed for project \"{success_name}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
+            ))
+        })
+        .on_failure(move |err: &String| {
+            dux_core::engine::Final::error(format!(
+                "Startup command failed for project \"{failure_name}\": {err}. Run read-startup-command-logs for details.",
+            ))
+        })
+    }
+
     pub(crate) fn rerun_startup_command_on_agent(&mut self) {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent first.");
@@ -3475,50 +3509,41 @@ impl App {
         };
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
-        let branch = managed.branch_name.clone();
         let terminal = self.engine.config.startup_command_terminal.clone();
-        // Declare the loading→final states together. The success message needs
-        // the palette keybinding label (render context only the main thread has);
-        // resolve it HERE and bake it into the op's outcomes. The status rides a
-        // separate StatusOpCompleted event from the worker.
-        let palette_key = self.bindings.label_for(Action::OpenPalette);
-        let success_name = project.name.clone();
-        let failure_name = project.name.clone();
-        let op = dux_core::engine::status_op(format!(
-            "Rerunning startup command for agent \"{branch}\"..."
-        ))
-        .on_success(move |(): &()| {
-            dux_core::engine::Final::info(format!(
-                "Startup command completed for project \"{success_name}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
-            ))
-        })
-        .on_failure(move |err: &String| {
-            dux_core::engine::Final::error(format!(
-                "Startup command failed for project \"{failure_name}\": {err}. Run read-startup-command-logs for details.",
-            ))
-        });
+        let op = self.startup_rerun_op(&managed.branch_name, &project.name);
         let pending = self.engine.begin_status_op(&op);
-        std::thread::spawn(move || {
-            let dux_core::engine::StartupRerunClaim {
-                run: run_claim,
-                hold,
-            } = claim;
-            let _hold = hold;
-            let result = crate::startup::run_claimed_startup_command(
-                &paths,
-                crate::startup::StartupCommandRun {
-                    project,
-                    session,
-                    managed,
-                    command,
-                    terminal,
-                    env,
-                },
-                run_claim,
-            );
-            let resolved = op.resolve(&result.status);
-            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-        });
+        let panic_final = status_op_panic_final(
+            PendingStatusOp::status_key(&op),
+            "rerun the startup command",
+        );
+        let panic_tx = tx.clone();
+        spawn_guarded(
+            "startup command rerun",
+            move || {
+                let dux_core::engine::StartupRerunClaim {
+                    run: run_claim,
+                    hold,
+                } = claim;
+                let _hold = hold;
+                let result = crate::startup::run_claimed_startup_command(
+                    &paths,
+                    crate::startup::StartupCommandRun {
+                        project,
+                        session,
+                        managed,
+                        command,
+                        terminal,
+                        env,
+                    },
+                    run_claim,
+                );
+                let resolved = op.resolve(&result.status);
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+            },
+            move |reason| {
+                let _ = panic_tx.send(panic_final(reason));
+            },
+        );
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }
 
@@ -3786,24 +3811,35 @@ impl App {
             ))
         });
         let pending = self.engine.begin_status_op(&op);
-        std::thread::spawn(move || {
-            let result = crate::startup::load_logs_for_scope(&paths, scope)
-                .map_err(|err| format!("{err:#}"));
-            let resolved = op.resolve(&result);
-            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-            // Domain work exists only when there is something to open. The
-            // failure AND the nothing-recorded outcomes are fully carried by
-            // the StatusOpCompleted above.
-            match result {
-                Ok(listing) if !listing.entries.is_empty() => {
-                    let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
-                        scope_label,
-                        result: Ok(listing),
-                    });
+        let panic_final = status_op_panic_final(
+            PendingStatusOp::status_key(&op),
+            "read the startup command logs",
+        );
+        let panic_tx = tx.clone();
+        spawn_guarded(
+            "startup command logs",
+            move || {
+                let result = crate::startup::load_logs_for_scope(&paths, scope)
+                    .map_err(|err| format!("{err:#}"));
+                let resolved = op.resolve(&result);
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+                // Domain work exists only when there is something to open. The
+                // failure AND the nothing-recorded outcomes are fully carried by
+                // the StatusOpCompleted above.
+                match result {
+                    Ok(listing) if !listing.entries.is_empty() => {
+                        let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
+                            scope_label,
+                            result: Ok(listing),
+                        });
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-        });
+            },
+            move |reason| {
+                let _ = panic_tx.send(panic_final(reason));
+            },
+        );
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }
 
@@ -3825,12 +3861,28 @@ impl App {
                 });
         let pending = self.engine.begin_status_op(&op);
         let read_path = path.clone();
-        std::thread::spawn(move || {
-            let result = crate::startup::read_log(&read_path).map_err(|err| format!("{err:#}"));
-            let resolved = op.resolve(&result);
-            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-            let _ = tx.send(WorkerEvent::StartupCommandLogContentLoaded { path, result });
-        });
+        let panic_path = path.clone();
+        let panic_final = status_op_panic_final(
+            PendingStatusOp::status_key(&op),
+            "read the startup command log",
+        );
+        let panic_tx = tx.clone();
+        spawn_guarded(
+            "startup command log",
+            move || {
+                let result = crate::startup::read_log(&read_path).map_err(|err| format!("{err:#}"));
+                let resolved = op.resolve(&result);
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+                let _ = tx.send(WorkerEvent::StartupCommandLogContentLoaded { path, result });
+            },
+            move |reason| {
+                let _ = panic_tx.send(panic_final(reason.clone()));
+                let _ = panic_tx.send(WorkerEvent::StartupCommandLogContentLoaded {
+                    path: panic_path,
+                    result: Err(format!("the reader stopped unexpectedly: {reason}")),
+                });
+            },
+        );
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }
 
@@ -4280,7 +4332,7 @@ impl App {
     /// The busy is deferred by [`SLOW_DIFF_READ`]: most diffs land before anyone
     /// could read a spinner, and writing over the status line on every file the
     /// user arrows through would bury whatever it was saying.
-    fn begin_diff_computation(&mut self, worktree_path: String, rel_path: String, scroll: u16) {
+    fn begin_diff_computation(&mut self, worktree_path: String, rel_path: String, scroll: usize) {
         self.diff_request_seq = self.diff_request_seq.wrapping_add(1);
         let key = crate::diff::DiffRequestKey {
             worktree_path,
@@ -4427,22 +4479,24 @@ impl App {
         let Some(path) = agent_path else {
             return self.run_project_command(ProjectAction::CopyPath);
         };
-        self.copy_path_to_clipboard(&path, "Agent's path copied to clipboard.");
+        self.copy_to_clipboard(&path, "Agent's path copied to clipboard.");
         Ok(())
     }
 
     /// Copy `project`'s folder path to the clipboard.
     pub(crate) fn copy_project_path(&mut self, project: &Project) {
-        self.copy_path_to_clipboard(&project.path, "Project's path copied to clipboard.");
+        self.copy_to_clipboard(&project.path, "Project's path copied to clipboard.");
     }
 
-    fn copy_path_to_clipboard(&mut self, path: &str, label: &str) {
+    /// Hand `text` to the clipboard worker, its spinner and `label` (the
+    /// success sentence) with it, or say why it could not be handed over.
+    pub(crate) fn copy_to_clipboard(&mut self, text: &str, label: &str) {
         match self
             .clipboard
-            .copy_text(path, label, &self.engine.worker_tx)
+            .copy_text(text, label, &self.engine.worker_tx)
         {
             Ok(pending) => self.apply_reaction(dux_core::engine::EventReaction::Status(pending)),
-            Err(e) => self.set_error(format!("Copy path failed: {e}")),
+            Err(e) => self.set_error(format!("Clipboard copy failed: {e}.")),
         }
     }
 
@@ -5024,58 +5078,103 @@ impl App {
         let port = self.engine.config.server.port;
         let tailscale = self.engine.config.server.tailscale_mode();
         let tx = self.engine.worker_tx.clone();
-        std::thread::spawn(move || {
-            // Detect the Tailscale address off the UI thread; the CLI call is the
-            // reason this runs on a worker. A failed detection the user opted in
-            // to carries a non-fatal warning whose wording differs by mode: on
-            // "auto" dux keeps watching and binds the leg when the interface
-            // shows up, on "yes" this run is loopback-only for good.
-            let (tailscale_ip, detect_warning) = if tailscale.wants_tailscale() {
-                match dux_core::tailscale::detect_ip() {
-                    Ok(ip) => (Some(ip), None),
-                    Err(reason) => (
-                        None,
-                        Some(dux_core::tailscale::undetected_warning(
-                            tailscale, &reason, "loopback",
-                        )),
-                    ),
-                }
-            } else {
-                (None, None)
-            };
+        let panic_tx = tx.clone();
+        spawn_guarded(
+            "web server pre-flight",
+            move || {
+                // Detect the Tailscale address off the UI thread; the CLI call is the
+                // reason this runs on a worker. A failed detection the user opted in
+                // to carries a non-fatal warning whose wording differs by mode: on
+                // "auto" dux keeps watching and binds the leg when the interface
+                // shows up, on "yes" this run is loopback-only for good.
+                let (tailscale_ip, detect_warning) = if tailscale.wants_tailscale() {
+                    match dux_core::tailscale::detect_ip() {
+                        Ok(ip) => (Some(ip), None),
+                        Err(reason) => (
+                            None,
+                            Some(dux_core::tailscale::undetected_warning(
+                                tailscale, &reason, "loopback",
+                            )),
+                        ),
+                    }
+                } else {
+                    (None, None)
+                };
 
-            // The pre-flight returns its own best-effort (Tailscale BIND-failure)
-            // warnings; combine them with the detection warning into the single
-            // `warning` the event carries, so a busy Tailscale port and a missing
-            // Tailscale daemon both surface the same way (serving loopback-only).
-            let result = match preflight_server_listeners(port, tailscale_ip) {
-                Ok((listeners, urls, bind_warnings)) => {
-                    // The flip's log opens with these, exactly as `dux server`
-                    // prints them: the detection warning as a line of its own,
-                    // the bind failures as banner rows.
-                    let startup = dux_core::serve_log::StartupNotes {
-                        warnings: detect_warning.iter().cloned().collect(),
-                        bind_warnings: bind_warnings.clone(),
-                        tailscale_detected: tailscale_ip.is_some(),
-                    };
-                    let warning = combine_flip_warnings(detect_warning, bind_warnings);
-                    let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
-                        result: Ok((listeners, urls)),
-                        warning,
-                        startup,
-                    });
-                    return;
-                }
-                Err(err) => Err(format!("{err:#}")),
-            };
-            // A required (loopback) bind failed: surface the error; the detection
-            // warning (if any) is moot because the flip is not happening.
-            let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
-                result,
-                warning: detect_warning,
-                startup: dux_core::serve_log::StartupNotes::default(),
-            });
-        });
+                // The pre-flight returns its own best-effort (Tailscale BIND-failure)
+                // warnings; combine them with the detection warning into the single
+                // `warning` the event carries, so a busy Tailscale port and a missing
+                // Tailscale daemon both surface the same way (serving loopback-only).
+                let result = match preflight_server_listeners(port, tailscale_ip) {
+                    Ok((listeners, urls, bind_warnings)) => {
+                        // The flip's log opens with these, exactly as `dux server`
+                        // prints them: the detection warning as a line of its own,
+                        // the bind failures as banner rows.
+                        let startup = dux_core::serve_log::StartupNotes {
+                            warnings: detect_warning.iter().cloned().collect(),
+                            bind_warnings: bind_warnings.clone(),
+                            tailscale_detected: tailscale_ip.is_some(),
+                        };
+                        let warning = combine_flip_warnings(detect_warning, bind_warnings);
+                        let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
+                            result: Ok((listeners, urls)),
+                            warning,
+                            startup,
+                        });
+                        return;
+                    }
+                    Err(err) => Err(format!("{err:#}")),
+                };
+                // A required (loopback) bind failed: surface the error; the detection
+                // warning (if any) is moot because the flip is not happening.
+                let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
+                    result,
+                    warning: detect_warning,
+                    startup: dux_core::serve_log::StartupNotes::default(),
+                });
+            },
+            move |reason| {
+                let _ = panic_tx.send(WorkerEvent::ServerFlipPreflightReady {
+                    result: Err(format!("the pre-flight stopped unexpectedly: {reason}")),
+                    warning: None,
+                    startup: dux_core::serve_log::StartupNotes::default(),
+                });
+            },
+        );
+    }
+}
+
+/// Run `job` on a thread of its own. A panic in it is logged and its message
+/// handed to `on_panic`, which sends whatever event the job owed: the job's
+/// keyed busy is live until a final lands, so a job that dies silently would
+/// keep a spinner up with nothing behind it.
+fn spawn_guarded(
+    label: &'static str,
+    job: impl FnOnce() + Send + 'static,
+    on_panic: impl FnOnce(String) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+            let reason = dux_core::engine::format_panic_payload(&*payload);
+            dux_core::logger::error(&format!("{label} worker panicked: {reason}"));
+            on_panic(reason);
+        }
+    });
+}
+
+/// The final that retires a status op whose worker panicked, keyed to `key`.
+fn status_op_panic_final(
+    key: &str,
+    what: &'static str,
+) -> impl FnOnce(String) -> WorkerEvent + use<> {
+    let key = key.to_string();
+    move |reason| WorkerEvent::StatusOpCompleted {
+        resolved: dux_core::engine::ResolvedFinal::error(
+            key,
+            format!(
+                "Could not {what}: the worker stopped unexpectedly ({reason}). dux.log has the details."
+            ),
+        ),
     }
 }
 
@@ -5495,6 +5594,24 @@ mod tests {
                 },
             ),
         }
+    }
+
+    /// A guarded worker that panics still answers: the panic's message reaches
+    /// `on_panic`, which is what retires the busy the work was shown under.
+    #[test]
+    fn a_guarded_worker_that_panics_hands_its_message_on() {
+        let (tx, rx) = mpsc::channel();
+        spawn_guarded(
+            "test",
+            || panic!("the job broke"),
+            move |reason| {
+                let _ = tx.send(reason);
+            },
+        );
+        let reason = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the panic is handed on");
+        assert!(reason.contains("the job broke"), "{reason}");
     }
 
     /// Forking a standalone agent gives the purposeful refusal, not "select an

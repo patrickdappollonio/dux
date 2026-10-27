@@ -556,11 +556,13 @@ struct BranchUnpushedResponse {
     /// what the user is asked about is what the server would delete.
     branches: Vec<String>,
     /// Commits on those branches reachable from no remote-tracking ref, counted as a
-    /// union, or `null` when git could not answer; the dialog then omits the
-    /// sentence rather than guessing a number. The count and whether the repository
-    /// has remote-tracking refs at all travel as one object, because the number
-    /// means a different thing without the flag.
+    /// union, or `null` when git could not answer. The count and whether the
+    /// repository has remote-tracking refs at all travel as one object, because the
+    /// number means a different thing without the flag.
     unpushed: Option<UnpushedPayload>,
+    /// Why git could not count, when it could not: the dialog says so in place of
+    /// a number rather than guessing one. `null` beside a count.
+    unpushed_error: Option<String>,
 }
 
 /// The wire shape of [`dux_core::git::UnpushedCommits`].
@@ -595,17 +597,30 @@ async fn session_branch_unpushed(
         let branches = branches.clone();
         tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-            dux_core::git::unpushed_commit_count(&repo, &refs).ok()
+            dux_core::git::unpushed_commit_count(&repo, &refs).map_err(|err| {
+                dux_core::logger::warn(&format!(
+                    "could not count the unpushed commits for the delete dialog: {err:#}"
+                ));
+                dux_core::git::unpushed_count_failure_reason(&err)
+            })
         })
         .await
-        .unwrap_or(None)
+        .unwrap_or_else(|err| Err(format!("the count stopped unexpectedly: {err}")))
+    };
+    let (unpushed, unpushed_error) = match counted {
+        Ok(answer) => (
+            Some(UnpushedPayload {
+                count: answer.count,
+                has_remote_refs: answer.has_remote_refs,
+            }),
+            None,
+        ),
+        Err(reason) => (None, Some(reason)),
     };
     axum::Json(BranchUnpushedResponse {
         branches,
-        unpushed: counted.map(|answer| UnpushedPayload {
-            count: answer.count,
-            has_remote_refs: answer.has_remote_refs,
-        }),
+        unpushed,
+        unpushed_error,
     })
     .into_response()
 }

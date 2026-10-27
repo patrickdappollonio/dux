@@ -35,6 +35,7 @@ pub mod config_sync;
 pub mod config_write;
 pub mod container;
 pub mod control_socket;
+pub mod delete_agent_prose;
 pub mod destructive;
 pub mod device_label;
 pub mod diff;

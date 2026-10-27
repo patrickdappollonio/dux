@@ -1864,8 +1864,28 @@ impl RuntimeBindings {
 
     /// Find the action for a key event in the given scope.
     /// Plain bindings (no modifiers) reject Ctrl/Alt combos so that e.g.
-    /// Ctrl+d does not accidentally match a plain `d` binding.
+    /// Ctrl+d does not accidentally match a plain `d` binding. A modifier
+    /// binding also takes a chord holding MORE modifiers than it names, but a
+    /// binding naming exactly the modifiers held wins over it, so binding
+    /// `ctrl-alt-x` beside `ctrl-x` makes both reachable. Across scopes the
+    /// key handler applies the same rule through [`Self::lookup_exact`].
     pub(crate) fn lookup(&self, key: &KeyEvent, scope: BindingScope) -> Option<Action> {
+        self.lookup_matching(key, scope, ModifierMatch::Exact)
+            .or_else(|| self.lookup_matching(key, scope, ModifierMatch::Extending))
+    }
+
+    /// The action in `scope` bound to exactly the key and modifiers of `key`,
+    /// never one a chord holding more modifiers merely extends.
+    pub(crate) fn lookup_exact(&self, key: &KeyEvent, scope: BindingScope) -> Option<Action> {
+        self.lookup_matching(key, scope, ModifierMatch::Exact)
+    }
+
+    fn lookup_matching(
+        &self,
+        key: &KeyEvent,
+        scope: BindingScope,
+        modifiers: ModifierMatch,
+    ) -> Option<Action> {
         let incoming =
             normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()));
         self.bindings
@@ -1877,9 +1897,9 @@ impl RuntimeBindings {
                     if norm.codes != incoming.codes {
                         return false;
                     }
-                    if norm.modifiers.is_empty() {
+                    if modifiers == ModifierMatch::Exact || norm.modifiers.is_empty() {
                         // Plain binding: reject if any modifier is pressed
-                        incoming.modifiers.is_empty()
+                        incoming.modifiers == norm.modifiers
                     } else {
                         incoming.modifiers.contains(norm.modifiers)
                     }
@@ -2301,22 +2321,28 @@ pub(crate) struct KeyConflict {
     pub action_b: &'static str,
 }
 
+/// How a binding's modifiers must match the modifiers a chord holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModifierMatch {
+    /// The chord holds exactly the binding's modifiers.
+    Exact,
+    /// The chord holds at least the binding's modifiers.
+    Extending,
+}
+
 /// Check whether two `KeyCombination` values would conflict in `lookup()`.
 ///
-/// Mirrors the matching semantics of `RuntimeBindings::lookup()`:
-/// - Plain bindings (no modifiers) only conflict with other plain bindings.
-/// - Modifier bindings conflict only when modifiers are identical.
+/// Mirrors the matching semantics of `RuntimeBindings::lookup()`: two bindings
+/// conflict only when they name the same key with the same modifiers. A plain
+/// binding never takes a modified chord, and a modifier binding takes a chord
+/// holding more modifiers only when no binding names that chord exactly, in
+/// its own scope or, for a global binding, in the focused pane (the key
+/// handler defers a global that only extends the chord to a pane binding that
+/// names it), so a binding is never shadowed by one it extends.
 fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
     let na = normalize_ctrl_punct(normalize_backtab(a.normalized()));
     let nb = normalize_ctrl_punct(normalize_backtab(b.normalized()));
-    if na.codes != nb.codes {
-        return false;
-    }
-    match (na.modifiers.is_empty(), nb.modifiers.is_empty()) {
-        (true, true) => true,
-        (true, false) | (false, true) => false,
-        (false, false) => na.modifiers == nb.modifiers,
-    }
+    na.codes == nb.codes && na.modifiers == nb.modifiers
 }
 
 /// Build the resolved key list for each action (config overrides, falling
@@ -2407,6 +2433,26 @@ fn global_shadows(action: Action, scope: BindingScope) -> bool {
         | BindingScope::Help
         | BindingScope::ServerScreen => false,
     }
+}
+
+/// Every action bound in interactive mode to a key that sends no bytes of its
+/// own. Interactive mode matches the raw bytes the terminal sends, and dux asks
+/// for no keyboard protocol, so a chord such as Ctrl-5 arrives as another
+/// key's byte or as nothing at all: the binding can never fire there. No byte
+/// is guessed for it, because the guess would fire on that other key too.
+pub(crate) fn unmatchable_interactive_bindings(
+    keys: &crate::config::KeysConfig,
+) -> Vec<&'static str> {
+    resolve_keys(keys)
+        .into_iter()
+        .filter(|(_, bound, scopes)| {
+            scopes.contains(&BindingScope::Interactive)
+                && bound
+                    .iter()
+                    .any(|kc| key_combination_to_bytes(kc).is_none())
+        })
+        .map(|(action, _, _)| action.config_name())
+        .collect()
 }
 
 /// Detect key combination conflicts across bindings that share scopes.
@@ -2580,6 +2626,36 @@ mod tests {
                 .map(|d| d.default_keys.to_vec())
                 .unwrap_or_default()
         })
+    }
+
+    #[test]
+    fn an_exact_chord_wins_over_a_binding_it_extends() {
+        let bindings = RuntimeBindings::new(|action| match action {
+            Action::Confirm => vec![crokey::parse("ctrl-x").unwrap()],
+            Action::ToggleSelection => vec![crokey::parse("ctrl-alt-x").unwrap()],
+            _ => Vec::new(),
+        });
+        let chord = |modifiers| KeyEvent::new(KeyCode::Char('x'), modifiers);
+        assert_eq!(
+            bindings.lookup(
+                &chord(KeyModifiers::CONTROL | KeyModifiers::ALT),
+                BindingScope::Dialog
+            ),
+            Some(Action::ToggleSelection),
+            "the binding naming every modifier held is the one that fires"
+        );
+        assert_eq!(
+            bindings.lookup(&chord(KeyModifiers::CONTROL), BindingScope::Dialog),
+            Some(Action::Confirm)
+        );
+        assert_eq!(
+            bindings.lookup(
+                &chord(KeyModifiers::CONTROL | KeyModifiers::SUPER),
+                BindingScope::Dialog
+            ),
+            Some(Action::Confirm),
+            "a chord nothing names exactly still reaches the binding it extends"
+        );
     }
 
     #[test]

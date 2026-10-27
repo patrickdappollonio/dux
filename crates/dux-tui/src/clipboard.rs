@@ -55,7 +55,7 @@ impl Clipboard {
         // Declare the loading→final states together. The success message is the
         // label; the failure message matches the engine's prior wording.
         let success_label = label.to_string();
-        let op = status_op("Copying path to clipboard\u{2026}")
+        let op = status_op("Copying to the clipboard\u{2026}")
             .on_success(move |(): &()| Final::info(success_label.clone()))
             .on_failure(|e: &String| Final::error(format!("Clipboard copy failed: {e}")));
         let pending = op.pending_status();
@@ -66,8 +66,17 @@ impl Clipboard {
                 op,
                 worker_tx: worker_tx.clone(),
             })
-            .map_err(|_| anyhow!("Clipboard worker thread is not running"))?;
+            .map_err(|_| {
+                anyhow!("the clipboard worker is not running; restart dux to copy again")
+            })?;
         Ok(pending)
+    }
+
+    /// A handle whose worker is gone, so every copy is refused at the send.
+    #[cfg(test)]
+    pub(crate) fn without_worker() -> Self {
+        let (tx, _) = mpsc::channel::<CopyRequest>();
+        Self { tx }
     }
 
     #[cfg(test)]
@@ -99,7 +108,7 @@ fn clipboard_worker(rx: mpsc::Receiver<CopyRequest>) {
         Err(e) => {
             // If we can't initialize arboard at all, still drain requests
             // so senders don't block, and report the error for each.
-            let msg = format!("Failed to access clipboard: {e}");
+            let msg = format!("could not access the clipboard: {e}");
             for req in rx {
                 let result = Err(msg.clone());
                 let status = req.op.resolve(&result);
@@ -114,9 +123,7 @@ fn clipboard_worker(rx: mpsc::Receiver<CopyRequest>) {
     };
 
     while let Ok(req) = rx.recv() {
-        let result = board
-            .set_text(&req.text)
-            .map_err(|e| format!("Failed to copy to clipboard: {e}"));
+        let result = board.set_text(&req.text).map_err(|e| e.to_string());
         let status = req.op.resolve(&result);
         let _ = req.worker_tx.send(WorkerEvent::ClipboardCopyCompleted {
             label: req.label,

@@ -701,7 +701,7 @@ pub(crate) struct App {
     /// the user believed they were still reading history.
     pub(crate) scroll_mode: std::collections::HashSet<String>,
     pub(crate) last_diff_height: u16,
-    pub(crate) last_diff_visual_lines: u16,
+    pub(crate) last_diff_visual_lines: usize,
     /// The diff's wrapped rows, kept so a frame draws its viewport instead of
     /// re-wrapping the whole file. See [`DiffRowCache`].
     pub(crate) diff_rows: Option<DiffRowCache>,
@@ -1216,7 +1216,7 @@ pub(crate) struct PendingDiff {
     /// Where the pane was scrolled to when the request went out, restored when
     /// the answer lands so a re-render (a line-numbers toggle, a config reload)
     /// does not throw the user back to the top of the file.
-    pub scroll: u16,
+    pub scroll: usize,
     /// When the busy is still owed to the status line, and from when. `None`
     /// once it has been shown.
     pub announce_at: Option<Instant>,
@@ -1595,7 +1595,7 @@ pub(crate) enum CenterMode {
     Agent,
     Diff {
         lines: Arc<Vec<Line<'static>>>,
-        scroll: u16,
+        scroll: usize,
         /// Display-column width of the gutter (0 when line numbers are off).
         gutter_width: usize,
         /// Source paths for re-generating the diff on setting changes.
@@ -2768,8 +2768,8 @@ impl DeleteAgentTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UnpushedCountAnswer {
     pub(crate) session_id: String,
-    /// `None` when git could not answer, which the dialog renders as silence.
-    pub(crate) count: Option<dux_core::git::UnpushedCommits>,
+    /// The count, or why git could not give one, which the dialog says.
+    pub(crate) count: Result<dux_core::git::UnpushedCommits, String>,
 }
 
 /// Which selectable element has focus in the Delete Agent confirmation modal.
@@ -3073,11 +3073,11 @@ pub(crate) enum PromptState {
         delete_branch: bool,
         /// Commits on those branches reachable from no remote-tracking ref,
         /// once the background worker has answered, and whether the repository
-        /// has any such ref to be reachable from. `None` is "not known": either
-        /// the answer has not landed yet or git could not give one, and the
-        /// dialog says nothing about commits in both cases rather than
+        /// has any such ref to be reachable from. `None` until the answer
+        /// lands, and the dialog says nothing about commits meanwhile; an
+        /// `Err` is why git could not count, which the dialog says rather than
         /// guessing a number.
-        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
+        unpushed_commits: Option<Result<dux_core::git::UnpushedCommits, String>>,
         /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
@@ -5164,8 +5164,7 @@ impl App {
         // Nothing is drawn from here on, so nothing here is attached.
         self.release_drawn_attachments();
         // Stop PTY forwarders while the engine and terminal screen are still owned here.
-        self.stop_background_server_quietly();
-        self.release_companion();
+        self.release_serving_on_exit();
         disable_input_modes();
         ratatui::restore();
 
@@ -5195,9 +5194,7 @@ impl App {
             self.prepare_run_tick();
             self.refresh_run_terminal(terminal);
             // The loop keeps polling at its own cadence; only the DRAW is gated.
-            if !self.draw_and_forward(Instant::now(), |app| app.draw_run_frame(terminal)) {
-                continue;
-            }
+            self.draw_and_forward(Instant::now(), |app| app.draw_run_frame(terminal));
 
             if let Some(flip) = self.pending_server_flip.take() {
                 return RunExit::FlipToServer {
@@ -5275,15 +5272,22 @@ impl App {
         );
     }
 
-    fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) -> bool {
-        if let Err(err) = terminal.draw(|frame| self.render(frame)) {
-            // The gate consumed the mark for a frame that never landed.
-            self.mark_frame_dirty();
-            self.report_runtime_error("terminal draw failed", &err);
-            thread::sleep(Duration::from_millis(100));
-            return false;
+    fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+        match terminal.draw(|frame| self.render(frame)) {
+            Ok(_) => {
+                if self.note_draw_succeeded() {
+                    logger::info("terminal draw works again");
+                }
+            }
+            Err(err) => {
+                if self.note_draw_failed() {
+                    self.report_runtime_error("terminal draw failed", &err);
+                }
+                // A pause before the next attempt, so a terminal that keeps
+                // refusing does not spin the loop.
+                thread::sleep(Duration::from_millis(100));
+            }
         }
-        true
     }
 
     fn focused_host_passthrough_tab(&self) -> Option<String> {
@@ -7452,10 +7456,7 @@ impl App {
         // would describe another agent. Retire the busy with no replacement.
         let still_watched = self
             .engine
-            .watched_worktree
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+            .watched_worktree_path()
             .is_some_and(|current| current == pending.worktree);
         if !still_watched {
             self.status.clear(&pending.key, None);
@@ -8726,6 +8727,36 @@ mod tests {
             "the read landed"
         );
         assert!(!app.engine.status_op_is_live(&key));
+    }
+
+    /// The watched worktree is plain data, so a thread that panicked while
+    /// holding its lock leaves it readable: a failed read is still reported.
+    #[test]
+    fn a_poisoned_watch_still_reports_a_failed_changed_files_read() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let path = PathBuf::from("/tmp/watched-worktree");
+        *app.engine.watched_worktree.lock().unwrap() = Some(path.clone());
+        let watched = Arc::clone(&app.engine.watched_worktree);
+        let _ = thread::spawn(move || {
+            let _guard = watched.lock().unwrap();
+            panic!("poison the watch");
+        })
+        .join();
+        assert!(app.engine.watched_worktree.is_poisoned());
+        app.pending_changed_files_refresh = Some(PendingChangedFilesRefresh {
+            key: "refresh-changes:test".to_string(),
+            label: "agent".to_string(),
+            worktree: path.clone(),
+            voice: ChangedFilesReadVoice::Spoken,
+            announce_at: None,
+        });
+        app.apply_changed_files_refresh_outcome(&path, Some("git broke".to_string()));
+        assert_eq!(app.status.tone(), StatusTone::Error);
+        assert!(
+            app.status.text().contains("git broke"),
+            "{}",
+            app.status.text()
+        );
     }
 
     /// A changed-files read whose worker never starts still gets its keyed

@@ -3625,10 +3625,7 @@ impl Engine {
         // worktree's files, nor report a failure about a watch that has moved
         // on.
         let still_watched = self
-            .watched_worktree
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+            .watched_worktree_path()
             .is_some_and(|current| current == worktree);
         if !still_watched {
             return EventReaction::Nothing;

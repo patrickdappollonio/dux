@@ -394,6 +394,28 @@ async fn branch_unpushed_names_both_branches_of_a_drifted_agent() {
     // the initial commit plus the one made on `develop-next`.
     assert_eq!(body["unpushed"]["count"], 2, "{body}");
     assert_eq!(body["unpushed"]["has_remote_refs"], false, "{body}");
+    assert_eq!(body["unpushed_error"], serde_json::Value::Null, "{body}");
+}
+
+/// A count git cannot give is answered with git's reason rather than left
+/// out, so the dialog can say it could not count instead of saying nothing.
+#[tokio::test]
+async fn branch_unpushed_says_why_git_could_not_count() {
+    let f = boot().await;
+    // The drifted agent's birth branch is not checked out anywhere, so it can
+    // go out from under the count.
+    git(&f.repo, &["branch", "-D", "develop"]);
+    let (status, body) = branch_unpushed(f.addr, "drifted").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["branches"],
+        serde_json::json!(["develop-next", "develop"]),
+        "{body}"
+    );
+    assert_eq!(body["unpushed"], serde_json::Value::Null, "{body}");
+    let reason = body["unpushed_error"].as_str().expect("a reason");
+    assert!(reason.starts_with("fatal: bad revision"), "{reason}");
+    assert!(!reason.contains('\n'), "one line: {reason}");
 }
 
 /// A standalone agent has no branch, so there is no question to answer. It is

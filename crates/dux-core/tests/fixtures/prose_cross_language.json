@@ -777,6 +777,48 @@
         },
         "."
       ]
+    },
+    {
+      "what": "the delete dialog when git could not count one branch's unpushed commits",
+      "sentence": "unpushed_count_failure",
+      "args": {
+        "branches": [
+          "feature/x"
+        ],
+        "reason": "fatal: bad revision 'refs/heads/feature/x'"
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "feature/x",
+          "quoted": false
+        },
+        " (fatal: bad revision 'refs/heads/feature/x'); check it before deleting it."
+      ]
+    },
+    {
+      "what": "the delete dialog when git could not count a drifted agent's two branches",
+      "sentence": "unpushed_count_failure",
+      "args": {
+        "branches": [
+          "develop-next",
+          "develop"
+        ],
+        "reason": "git could not be run: No such file or directory"
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "develop-next",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "develop",
+          "quoted": false
+        },
+        " (git could not be run: No such file or directory); check them before deleting them."
+      ]
     }
   ]
 }

@@ -201,7 +201,7 @@ pub(crate) fn plan_pane_card(
     loop {
         if ring_possible {
             let heights = measure_all(&kept, blocks, ring_w, &measure);
-            if stack_height(&kept, blocks, &heights) + 2 <= area.height {
+            if stack_height(&kept, blocks, &heights).saturating_add(2) <= area.height {
                 return Some(place(area, Some(ring_inner), &kept, blocks, &heights));
             }
         }
@@ -307,13 +307,19 @@ fn place(
 /// ending the card gets a blank row under it except a button, which sits on the
 /// bottom edge.
 fn stack_height(kept: &[usize], blocks: &[CardBlockPlan], heights: &[u16]) -> u16 {
-    let bodies: u16 = heights.iter().sum();
-    let gaps = BLOCK_GAP * u16::try_from(kept.len().saturating_sub(1)).unwrap_or(0);
+    let bodies = heights
+        .iter()
+        .fold(0u16, |sum, height| sum.saturating_add(*height));
+    let gaps =
+        BLOCK_GAP.saturating_mul(u16::try_from(kept.len().saturating_sub(1)).unwrap_or(u16::MAX));
     let bottom = match kept.last() {
         Some(index) if blocks[*index].is_button => 0,
         _ => TOP_PADDING,
     };
-    TOP_PADDING + bodies + gaps + bottom
+    TOP_PADDING
+        .saturating_add(bodies)
+        .saturating_add(gaps)
+        .saturating_add(bottom)
 }
 
 /// Lay the surviving blocks out from `y` downwards.
@@ -374,6 +380,19 @@ mod tests {
         plan_pane_card(area, preferred, button, &plans, |index, _width| {
             blocks[index].1
         })
+    }
+
+    #[test]
+    fn blocks_measuring_past_a_u16_between_them_still_plan() {
+        let plan = laid_out(
+            Rect::new(0, 0, 60, 24),
+            46,
+            None,
+            &[block(0, 3), block(1, u16::MAX), block(2, u16::MAX)],
+        )
+        .expect("the short block fits once the tall ones are dropped");
+        assert_eq!(plan.blocks.len(), 1);
+        assert_eq!(plan.blocks[0].index, 0);
     }
 
     #[test]

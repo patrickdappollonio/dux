@@ -455,7 +455,24 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope, report: &mut ResetReport) -> R
 // dux config diff
 // ---------------------------------------------------------------------------
 
+/// Refuse when config.toml is a symbolic link to a file that is gone: that is
+/// not "no config file yet", and reading it as one would print a wrong answer
+/// about a config the user keeps somewhere else.
+fn refuse_dangling_config_link(paths: &DuxPaths) -> Result<()> {
+    if let Some(target) = dux_core::config::dangling_link_target(&paths.config_path) {
+        bail!(
+            "{} is a symbolic link to {}, which does not exist, so there is no config file to \
+             read; nothing was changed. Restore {} or point the link at your config file.",
+            paths.config_path.display(),
+            target.display(),
+            target.display()
+        );
+    }
+    Ok(())
+}
+
 fn run_diff(paths: &DuxPaths, form: DiffForm, out: &mut dyn std::io::Write) -> Result<()> {
+    refuse_dangling_config_link(paths)?;
     if !paths.config_path.exists() {
         writeln!(
             out,
@@ -760,6 +777,7 @@ fn run_regenerate(
     let fresh = config::render_default_config();
 
     if rewrite == ConfigRewrite::Preview {
+        refuse_dangling_config_link(paths)?;
         if paths.config_path.exists() {
             let current =
                 fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
@@ -844,6 +862,7 @@ fn run_restore_docs(
     held_back: dux_core::config_keys::HeldBack,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
+    refuse_dangling_config_link(paths)?;
     if !paths.config_path.exists() {
         writeln!(
             out,
@@ -1730,6 +1749,36 @@ mod tests {
 
         let own = finish_config(Err(anyhow!("unknown flag: --nope"))).unwrap_err();
         assert_eq!(own.to_string(), "unknown flag: --nope");
+    }
+
+    /// A config.toml that is a link to a file that is gone is not "no config
+    /// file": the commands that read it say what the link points at.
+    #[test]
+    fn a_dangling_config_link_is_named_rather_than_read_as_no_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            lock_path: tmp.path().join("dux.lock"),
+            socket_path: tmp.path().join("dux.sock"),
+            worktrees_root: tmp.path().join("worktrees"),
+        };
+        std::os::unix::fs::symlink(tmp.path().join("gone.toml"), &paths.config_path).expect("link");
+        let held_back = dux_core::config_keys::HeldBack::Masked;
+        let outcomes = [
+            run_diff(&paths, DiffForm::Summary, &mut Vec::new()),
+            run_restore_docs(&paths, ConfigRewrite::Preview, held_back, &mut Vec::new()),
+            run_regenerate(&paths, ConfigRewrite::Preview, held_back, &mut Vec::new()),
+        ];
+        for outcome in outcomes {
+            let said = outcome.expect_err("refused").to_string();
+            assert!(said.contains("gone.toml"), "{said}");
+        }
+        assert!(
+            fs::symlink_metadata(&paths.config_path).is_ok_and(|meta| meta.is_symlink()),
+            "the link is left alone"
+        );
     }
 
     #[test]
