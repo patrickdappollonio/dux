@@ -485,27 +485,55 @@ fn parse_linux_stat(pid: u32, stat: &str) -> Option<ProcRow> {
 /// strict table read. `None` for a process this read cannot see: one that
 /// exited mid-read, or one `/proc` hides from this user (mounted `hidepid`),
 /// which is somebody else's and so never dux's. The command name is decoded
-/// lossily, since it is only a label; the numbers that identify the process
-/// must parse or the read fails.
+/// lossily, since it is only a label.
+///
+/// A read that does not parse is read again through `reread` before it
+/// counts, because an empty or torn read is what a process exiting under the
+/// read leaves: gone by then, it is gone; whole by then, it is the row. One
+/// that still does not parse is left out with a warning rather than failing
+/// the table. The kernel writes this file in a fixed format, so a live row
+/// that keeps failing is this parser's fault, not a process dux can know
+/// anything about either way, and failing the whole table on it would make
+/// every removal on the machine refuse until that process ended. Only a read
+/// the kernel refused for a reason other than the process being gone or
+/// hidden fails the table.
 #[cfg(target_os = "linux")]
 fn linux_stat_row(
     pid: u32,
     read: std::io::Result<Vec<u8>>,
+    reread: &mut dyn FnMut() -> std::io::Result<Vec<u8>>,
     ticks_per_second: u64,
 ) -> Result<Option<ProcRow>, String> {
     use rustix::io::Errno;
-    match read {
-        Ok(stat) => parse_linux_stat_with(pid, &String::from_utf8_lossy(&stat), ticks_per_second)
-            .map(Some)
-            .ok_or_else(|| format!("/proc/{pid}/stat could not be understood")),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                || [Errno::SRCH, Errno::ACCESS, Errno::PERM]
-                    .iter()
-                    .any(|errno| error.raw_os_error() == Some(errno.raw_os_error())) =>
-        {
-            Ok(None)
+    let unseen = |error: &std::io::Error| {
+        error.kind() == std::io::ErrorKind::NotFound
+            || [Errno::SRCH, Errno::ACCESS, Errno::PERM]
+                .iter()
+                .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()))
+    };
+    let parse =
+        |stat: &[u8]| parse_linux_stat_with(pid, &String::from_utf8_lossy(stat), ticks_per_second);
+    let stat = match read {
+        Ok(stat) => stat,
+        Err(error) if unseen(&error) => return Ok(None),
+        Err(error) => return Err(format!("/proc/{pid}/stat could not be read: {error}")),
+    };
+    if let Some(row) = parse(&stat) {
+        return Ok(Some(row));
+    }
+    match reread() {
+        Ok(again) => {
+            let row = parse(&again);
+            if row.is_none() {
+                crate::logger::warn(&format!(
+                    "left process {pid} out of the process list: its /proc/{pid}/stat could \
+                     not be understood ({:?})",
+                    String::from_utf8_lossy(&again)
+                ));
+            }
+            Ok(row)
         }
+        Err(error) if unseen(&error) => Ok(None),
         Err(error) => Err(format!("/proc/{pid}/stat could not be read: {error}")),
     }
 }
@@ -792,8 +820,11 @@ pub fn read_process_table_strict() -> Result<Vec<ProcRow>, String> {
             else {
                 continue;
             };
-            let read = std::fs::read(format!("/proc/{pid}/stat"));
-            if let Some(row) = linux_stat_row(pid, read, ticks_per_second)? {
+            let path = format!("/proc/{pid}/stat");
+            let read = std::fs::read(&path);
+            if let Some(row) =
+                linux_stat_row(pid, read, &mut || std::fs::read(&path), ticks_per_second)?
+            {
                 rows.push(row);
             }
         }
@@ -2730,16 +2761,56 @@ mod tests {
     fn the_strict_read_skips_a_hidden_process_and_keeps_an_odd_name() {
         for errno in [rustix::io::Errno::ACCESS, rustix::io::Errno::PERM] {
             let hidden = std::io::Error::from_raw_os_error(errno.raw_os_error());
-            assert_eq!(linux_stat_row(9, Err(hidden), 100), Ok(None));
+            assert_eq!(
+                linux_stat_row(9, Err(hidden), &mut no_reread, 100),
+                Ok(None)
+            );
         }
-        let mut stat = b"9 (name\xff) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0".to_vec();
-        let row = linux_stat_row(9, Ok(stat.clone()), 100).unwrap().unwrap();
+        let stat = b"9 (name\xff) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0".to_vec();
+        let row = linux_stat_row(9, Ok(stat), &mut no_reread, 100)
+            .unwrap()
+            .unwrap();
         assert_eq!((row.pid, row.ppid, row.sid), (9, Some(1), Some(9)));
         assert_eq!(row.name, "name\u{fffd}");
-        stat.truncate(12);
-        assert!(linux_stat_row(9, Ok(stat), 100).is_err());
-        let broken = std::io::Error::from_raw_os_error(rustix::io::Errno::IO.raw_os_error());
-        assert!(linux_stat_row(9, Err(broken), 100).is_err());
+        let broken = || std::io::Error::from_raw_os_error(rustix::io::Errno::IO.raw_os_error());
+        assert!(linux_stat_row(9, Err(broken()), &mut no_reread, 100).is_err());
+    }
+
+    /// A read that does not parse is looked at once more before it counts:
+    /// a process that exited mid-read is gone, one that was caught mid-write
+    /// reads whole the second time, and one that still does not parse is left
+    /// out rather than making the whole table, and so every removal on the
+    /// machine, unreadable.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stat_that_does_not_parse_is_read_again_before_it_counts() {
+        let whole = || Ok(b"9 (sh) S 1 9 9 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 0".to_vec());
+        let gone = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        for torn in [Vec::new(), b"9 (sh) S 1".to_vec()] {
+            assert_eq!(
+                linux_stat_row(9, Ok(torn.clone()), &mut || gone(), 100),
+                Ok(None)
+            );
+            let row = linux_stat_row(9, Ok(torn.clone()), &mut || whole(), 100).unwrap();
+            assert_eq!(row.map(|row| row.sid), Some(Some(9)));
+            assert_eq!(
+                linux_stat_row(9, Ok(torn.clone()), &mut || Ok(torn.clone()), 100),
+                Ok(None)
+            );
+        }
+        let broken = || {
+            Err(std::io::Error::from_raw_os_error(
+                rustix::io::Errno::IO.raw_os_error(),
+            ))
+        };
+        assert!(linux_stat_row(9, Ok(Vec::new()), &mut || broken(), 100).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    /// A second read that fails the table, standing in where a read that
+    /// parsed or failed outright must not be read again.
+    fn no_reread() -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::other("read again"))
     }
 
     /// A session's recorded start and the process table's are read off the
