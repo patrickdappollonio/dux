@@ -1375,15 +1375,21 @@ impl App {
                         dux_core::git::RemoveResult::default(),
                     ),
                 };
-                if let Err(error) =
-                    self.finish_delete_session(&session_id, removal, DeleteReport::Quiet)
-                {
-                    self.set_error(format!("Failed to delete agent: {error:#}"));
-                } else {
-                    let op = self.build_delete_status_op(&session_id, busy_message.to_string());
-                    let pending = self.engine.begin_status_op(&op);
-                    self.apply_reaction(EventReaction::Status(pending));
-                    self.pending_delete_ops.insert(session_id, op);
+                // Built while the agent is still here, so a final can name it.
+                let op = self.build_delete_status_op(&session_id, busy_message.to_string());
+                let cleanup = self.finish_delete_session(&session_id, removal, DeleteReport::Quiet);
+                // The worktree removal is running either way, so its busy is
+                // shown and its op kept: when it lands, the final says how the
+                // delete really ended, a later successful cleanup included.
+                let pending = self.engine.begin_status_op(&op);
+                self.apply_reaction(EventReaction::Status(pending));
+                self.pending_delete_ops.insert(session_id, op);
+                if let Err(error) = cleanup {
+                    self.set_error(format!(
+                        "Could not remove the agent from dux's records: {error:#}. Its worktree \
+                         is still being removed, and dux reports how the delete ended when that \
+                         finishes."
+                    ));
                 }
             }
             BeginDeleteSessionOutcome::Inline { removal } => {

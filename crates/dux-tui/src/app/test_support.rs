@@ -399,6 +399,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         tui_fallback_tabs: HashSet::default(),
         pending_background_server_start: None,
         pending_tailscale_mode_op: None,
+        tailscale_answer_from: crate::app::TailscaleAnswerFrom::Serve,
         reload_listener_changes: ReloadListenerChanges::default(),
         pending_persist_ops: std::collections::HashMap::new(),
         pending_worktree_ops: std::collections::HashMap::new(),

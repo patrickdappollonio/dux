@@ -13,9 +13,9 @@ use dux_core::engine::EventReaction;
 use dux_core::status_text::StatusText;
 
 use super::{
-    App, BackgroundServerOutcome, FocusPane, FullscreenOverlay, InputTarget,
-    PendingBackgroundServerStart, PromptState, SetTailscaleModeOption, SetTailscaleModePrompt,
-    preflight_server_listeners,
+    App, BackgroundBindSettings, BackgroundServerOutcome, FocusPane, FullscreenOverlay,
+    InputTarget, PendingBackgroundServerStart, PromptState, SetTailscaleModeOption,
+    SetTailscaleModePrompt, TailscaleAnswerFrom, preflight_server_listeners,
 };
 use crate::keybindings::Action;
 use crate::model::SessionSurface;
@@ -218,6 +218,13 @@ impl App {
         // nothing here has rebuilt: fold it in and clear it whether or not
         // anything is serving, so the flag never survives into a later iteration.
         let followup_ran = std::mem::take(&mut self.notes.companion_followup_ran);
+        // This iteration's drain has run, so an answer a retired serve sent
+        // before it went has had its chance to win.
+        if std::mem::replace(&mut self.tailscale_answer_from, TailscaleAnswerFrom::Serve)
+            == TailscaleAnswerFrom::RetiredServesLane
+        {
+            self.answer_tailscale_mode_request_nobody_will_carry();
+        }
         let outcome = match self.companion.as_mut() {
             Some(companion) if companion.has_core() => {
                 // Tell it what this surface did BEFORE it services, so a keystroke
@@ -245,6 +252,11 @@ impl App {
         // The serve retired itself: the status line last showed the address it
         // was serving on.
         if let Some(message) = outcome.retirement {
+            // Nothing serves any more, the same state a stop leaves.
+            self.serving.background_wanted = false;
+            if self.pending_tailscale_mode_op.is_some() {
+                self.tailscale_answer_from = TailscaleAnswerFrom::RetiredServesLane;
+            }
             self.status.set(
                 Instant::now(),
                 Some(BACKGROUND_SERVER_STATUS_KEY.to_string()),
@@ -367,10 +379,14 @@ impl App {
             )));
         }
         if self.serving.background_preflight_pending {
-            return Err(StartRefusal::warning(
-                "The background web server is already starting. Wait for it to report back."
-                    .to_string(),
-            ));
+            if self.serving.background_wanted {
+                return Err(StartRefusal::warning(
+                    "The background web server is already starting. Wait for it to report back."
+                        .to_string(),
+                ));
+            }
+            self.want_cancelled_start_again(trigger);
+            return Ok(());
         }
         if self.serving.flip_preflight_pending || self.pending_server_flip.is_some() {
             return Err(StartRefusal::warning(
@@ -441,11 +457,26 @@ impl App {
         });
         let pending = self.engine.begin_status_op(&op);
         self.apply_reaction(EventReaction::Status(pending));
-        self.pending_background_server_start = Some(PendingBackgroundServerStart { op, trigger });
-        self.serving.background_preflight_pending = true;
+        let bound_with = self.spawn_background_server_preflight();
+        self.pending_background_server_start = Some(PendingBackgroundServerStart {
+            op,
+            trigger,
+            bound_with,
+        });
         self.serving.background_wanted = true;
-        self.spawn_background_server_preflight();
         Ok(())
+    }
+
+    /// A cancelled start whose bind is still on its worker thread, asked for
+    /// again: it is wanted back, so the pre-flight that lands serves after all,
+    /// and its busy (written over by the cancel's line) shows again.
+    fn want_cancelled_start_again(&mut self, trigger: BackgroundServerStart) {
+        self.serving.background_wanted = true;
+        if let Some(pending) = self.pending_background_server_start.as_mut() {
+            pending.trigger = trigger;
+            let status = self.engine.begin_status_op(&pending.op);
+            self.apply_reaction(EventReaction::Status(status));
+        }
     }
 
     /// Run the bind pre-flight on a worker thread, reporting back through
@@ -455,9 +486,10 @@ impl App {
     /// same LOCAL MODE addresses (loopback plus the machine's Tailscale address),
     /// and neither ever reads the configurable `[server] host`, so neither can
     /// open a public listener.
-    pub(crate) fn spawn_background_server_preflight(&mut self) {
-        let port = self.engine.config.server.port;
-        let tailscale = self.engine.config.server.tailscale_mode();
+    pub(crate) fn spawn_background_server_preflight(&mut self) -> BackgroundBindSettings {
+        let bound_with = self.background_bind_settings();
+        let BackgroundBindSettings { port, tailscale } = bound_with;
+        self.serving.background_preflight_pending = true;
         let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
             let (tailscale_ip, detect_warning) = if tailscale.wants_tailscale() {
@@ -499,6 +531,15 @@ impl App {
             };
             let _ = tx.send(event);
         });
+        bound_with
+    }
+
+    /// The settings a bind pre-flight spawned now would read.
+    fn background_bind_settings(&self) -> BackgroundBindSettings {
+        BackgroundBindSettings {
+            port: self.engine.config.server.port,
+            tailscale: self.engine.config.server.tailscale_mode(),
+        }
     }
 
     /// Adopt the pre-flight's listeners and hand them to the companion. For a
@@ -526,6 +567,23 @@ impl App {
                     op.resolve(&BackgroundServerOutcome::Cancelled)
                         .into_reaction(),
                 );
+            }
+            return;
+        }
+        // The config moved past the settings this bind was made with (a reload
+        // that wanted the listener again having also changed the port or the
+        // Tailscale mode): serving it would ignore what the user just chose, so
+        // its listeners are let go and the bind runs again on what is current.
+        let current = self.background_bind_settings();
+        if self
+            .pending_background_server_start
+            .as_ref()
+            .is_some_and(|pending| pending.bound_with != current)
+        {
+            drop(result);
+            let bound_with = self.spawn_background_server_preflight();
+            if let Some(pending) = self.pending_background_server_start.as_mut() {
+                pending.bound_with = bound_with;
             }
             return;
         }
@@ -631,17 +689,11 @@ impl App {
         );
     }
 
-    /// Stop serving without saying anything and without touching config. The
-    /// shared half of the palette command, the config-reload transition and the
-    /// quit path.
-    pub(crate) fn stop_background_server_quietly(&mut self) {
-        // Runtime intent, not the saved setting: quitting stops the listener
-        // without deciding anything about next time, and that distinction lives in
-        // config, which this deliberately does not touch.
-        self.serving.background_wanted = false;
-        // A mode request queued on the runtime this stop tears down has nobody
-        // left to answer it, so answer it here rather than leaving its busy for
-        // the leak guard to expire.
+    /// A mode request queued on a serve runtime that is gone (stopped here, or
+    /// retired on its own) has nobody left to answer it, so answer it as not
+    /// serving rather than leaving its busy for the leak guard to expire and
+    /// the reload that made it holding every later one.
+    fn answer_tailscale_mode_request_nobody_will_carry(&mut self) {
         if let Some(pending) = self.pending_tailscale_mode_op.take() {
             self.apply_reaction(
                 pending
@@ -654,6 +706,17 @@ impl App {
                 dux_core::config::TailscaleModeOutcome::NotServing,
             );
         }
+    }
+
+    /// Stop serving without saying anything and without touching config. The
+    /// shared half of the palette command, the config-reload transition and the
+    /// quit path.
+    pub(crate) fn stop_background_server_quietly(&mut self) {
+        // Runtime intent, not the saved setting: quitting stops the listener
+        // without deciding anything about next time, and that distinction lives in
+        // config, which this deliberately does not touch.
+        self.serving.background_wanted = false;
+        self.answer_tailscale_mode_request_nobody_will_carry();
         // Let go of every pty this surface is driving FIRST, while the serve's
         // buses are still up to carry the news. After the stop there is nothing
         // left to announce on, and every browser watching one of those ptys would
@@ -764,6 +827,8 @@ impl App {
         // A request already in flight is superseded by this one, and the serve
         // loop answers it as such. Resolve the op it is holding now rather than
         // dropping it, or its busy would sit open until the leak guard expires it.
+        // That also settles a request a retired serve still owed an answer for.
+        self.tailscale_answer_from = TailscaleAnswerFrom::Serve;
         if let Some(previous) = self.pending_tailscale_mode_op.take() {
             self.apply_reaction(
                 previous
@@ -786,6 +851,15 @@ impl App {
         let pending = self.engine.begin_status_op(&op);
         self.apply_reaction(EventReaction::Status(pending));
         self.pending_tailscale_mode_op = Some(op);
+        // With nothing serving there is no serve to answer, so the answer is
+        // given here rather than leaving the busy for the leak guard.
+        if !self.background_server_is_serving() {
+            self.apply_tailscale_mode_outcome(
+                mode,
+                dux_core::config::TailscaleModeOutcome::NotServing,
+            );
+            return;
+        }
         if let Some(companion) = self.companion.as_mut() {
             companion.set_tailscale_mode(&self.engine, mode);
         }
@@ -879,10 +953,13 @@ impl App {
     /// flips it has to act rather than wait for the next start: a user who edits
     /// the file to turn the listener off has asked for the listener to go away.
     pub(crate) fn apply_serve_while_tui_setting(&mut self, wanted: ServeWanted) {
-        // A start still in its bind pre-flight counts as on: otherwise a reload
+        // A wanted start still in its bind pre-flight counts as on: otherwise a reload
         // that turns the setting off looks like it has nothing to do, and the
         // pre-flight lands afterwards and starts serving anyway.
-        let on = self.background_server_is_serving() || self.serving.background_preflight_pending;
+        // A cancelled one, still binding, counts as off, so turning the setting
+        // back on wants it again.
+        let on = self.background_server_is_serving()
+            || (self.serving.background_preflight_pending && self.serving.background_wanted);
         match (on, (wanted == ServeWanted::On)) {
             // A user request, not the startup autostart: a reload turning it on
             // is a live act and reports like the palette command.
@@ -2894,6 +2971,72 @@ pub(crate) mod tests {
         );
     }
 
+    /// Asking for the listener again while a cancelled start is still binding
+    /// wants it back: the landing pre-flight serves, by reload or by palette.
+    #[test]
+    fn wanting_it_again_during_a_cancelled_pre_flight_serves_after_all() {
+        for by_reload in [true, false] {
+            let mut app = test_app(default_bindings());
+            let (companion, _recorded) = FakeCompanion::serving();
+            app.companion = Some(companion);
+            app.stop_background_server_quietly();
+            app.engine.config.server.serve_while_tui = false;
+            app.start_background_server(BackgroundServerStart::UserRequest);
+            if by_reload {
+                app.apply_serve_while_tui_setting(ServeWanted::Off);
+                app.apply_serve_while_tui_setting(ServeWanted::On);
+            } else {
+                app.stop_background_server();
+                app.start_background_server(BackgroundServerStart::UserRequest);
+            }
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral bind");
+            app.apply_background_server_preflight(
+                Ok((vec![listener], vec!["http://127.0.0.1:0".to_string()])),
+                None,
+                dux_core::serve_log::StartupNotes::default(),
+            );
+
+            assert!(app.background_server_is_serving(), "by_reload={by_reload}");
+            assert!(
+                app.engine.config.server.serve_while_tui,
+                "by_reload={by_reload}"
+            );
+        }
+    }
+
+    /// A bind that lands after the settings it was made with changed (a
+    /// reload that turned the listener off, changed the Tailscale mode, and
+    /// turned it back on) is not what anyone now wants: it is dropped and the
+    /// bind runs again with the current settings, and that one serves.
+    #[test]
+    fn a_bind_made_with_settings_since_changed_binds_again() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.stop_background_server_quietly();
+        app.engine.config.server.serve_while_tui = false;
+        app.engine.config.server.port = 0;
+        app.engine.config.server.tailscale = "auto".to_string();
+        app.start_background_server(BackgroundServerStart::UserRequest);
+        app.apply_serve_while_tui_setting(ServeWanted::Off);
+        app.engine.config.server.tailscale = "no".to_string();
+        app.apply_serve_while_tui_setting(ServeWanted::On);
+
+        finish_a_start(&mut app, None);
+        assert!(
+            !app.background_server_is_serving(),
+            "the stale bind must not serve"
+        );
+        assert!(
+            app.serving.background_preflight_pending,
+            "the bind runs again"
+        );
+
+        finish_a_start(&mut app, None);
+        assert!(app.background_server_is_serving());
+    }
+
     fn render_text(app: &mut App) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).expect("terminal");
@@ -3421,6 +3564,81 @@ pub(crate) mod tests {
         assert!(
             recorded.lock().unwrap().tailscale_modes.is_empty(),
             "the same mode written differently is not a change"
+        );
+    }
+
+    /// A serve that retires while a reload's mode request is queued on it can
+    /// answer it no more. An answer it already sent wins; with none, the
+    /// request is answered as not serving once the queue has been drained, and
+    /// either way the reload ends rather than holding every later one.
+    #[test]
+    fn a_serve_that_retires_answers_a_queued_tailscale_mode_request() {
+        for answered_first in [true, false] {
+            let mut app = test_app(default_bindings());
+            let (companion, recorded) = FakeCompanion::serving();
+            app.companion = Some(companion);
+            let applied =
+                dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() };
+            ask_for_a_reload(&mut app, "ts-retired");
+            app.ask_companion_for_tailscale_mode_for_reload(dux_core::config::TailscaleMode::Yes);
+            app.engine.finish_config_reload_operations(&applied);
+            if answered_first {
+                app.engine
+                    .worker_tx
+                    .send(WorkerEvent::TailscaleModeApplied {
+                        mode: dux_core::config::TailscaleMode::Yes,
+                        outcome: dux_core::config::TailscaleModeOutcome::Applied {
+                            bound: Some("100.64.0.5:8080".parse().unwrap()),
+                        },
+                    })
+                    .expect("channel send");
+            }
+            recorded.lock().expect("not poisoned").retirement_next =
+                Some("The web UI stopped serving in the background.".to_string());
+
+            app.service_companion();
+            assert!(
+                app.pending_tailscale_mode_op.is_some(),
+                "answered_first={answered_first}: an answer may still be queued, so the \
+                 retirement waits for the queue before answering for the serve"
+            );
+            app.drain_events();
+            app.service_companion();
+
+            assert!(app.pending_tailscale_mode_op.is_none(), "{answered_first}");
+            assert_ne!(
+                record_state(&app, "ts-retired"),
+                dux_core::operations::OperationState::Running,
+                "answered_first={answered_first}: the reload is over"
+            );
+        }
+    }
+
+    /// Asking for a mode with nothing serving has no serve to answer it, so
+    /// the request is answered as not serving at once and leaves no busy open,
+    /// for a reload's request as much as a direct one.
+    #[test]
+    fn a_mode_request_with_nothing_serving_is_answered_at_once() {
+        let mut app = test_app(default_bindings());
+        assert!(!app.background_server_is_serving());
+        let applied =
+            dux_core::config_reload_status::ConfigReloadOutcome::Applied { notes: Vec::new() };
+        ask_for_a_reload(&mut app, "ts-idle");
+        app.ask_companion_for_tailscale_mode_for_reload(dux_core::config::TailscaleMode::Yes);
+        app.engine.finish_config_reload_operations(&applied);
+
+        assert!(app.pending_tailscale_mode_op.is_none());
+        assert!(
+            !app.status
+                .snapshot()
+                .iter()
+                .any(|s| s.tone == dux_core::statusline::StatusTone::Busy.as_wire()),
+            "no busy is left open"
+        );
+        assert_ne!(
+            record_state(&app, "ts-idle"),
+            dux_core::operations::OperationState::Running,
+            "the reload is over"
         );
     }
 

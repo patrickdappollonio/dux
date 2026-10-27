@@ -2211,9 +2211,15 @@ pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     }
 
     let rendered_text = render_config_documented(&config);
-    let mut rendered: DocumentMut = rendered_text
-        .parse()
-        .context("the canonical config template did not render valid TOML (this is a dux bug)")?;
+    // The rendered text carries every value, `[env]` secrets included, and a
+    // raw parser error quotes the offending line, so only the described form
+    // (position and kind of problem) may reach the message.
+    let mut rendered: DocumentMut = rendered_text.parse().map_err(|e: toml_edit::TomlError| {
+        anyhow::anyhow!(
+            "the canonical config template did not render valid TOML (this is a dux bug): {}",
+            dux_core::config::describe_toml_edit_error(&rendered_text, &e)
+        )
+    })?;
 
     let report = dux_core::config_write::merge_unmanaged_keys(&mut rendered, &original);
     let text = rendered.to_string();
@@ -2228,8 +2234,12 @@ pub(crate) fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
     // flag those and refuse every real restore. The fixed-point check tolerates
     // them and still catches an altered or lost value, which renders
     // differently.
-    let reparsed: Config = toml::from_str(&text)
-        .context("the restored config did not parse back as a dux config; refusing to write it")?;
+    let reparsed: Config = toml::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "the restored config did not parse back as a dux config; refusing to write it: {}",
+            dux_core::config::describe_toml_error(&text, &e)
+        )
+    })?;
     if render_config_documented(&reparsed) != rendered_text {
         anyhow::bail!(
             "restoring the documentation would have changed a setting's value; refusing to write. \
@@ -2501,7 +2511,12 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                let _ = write!(out, "{} = \"{}\"", key, escape_toml_string(value));
+                let _ = write!(
+                    out,
+                    "{} = \"{}\"",
+                    toml_edit::Key::new(key.as_str()),
+                    escape_toml_string(value)
+                );
             }
             out.push_str(" }\n");
         }
@@ -2530,7 +2545,12 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
         return;
     }
     for (name, value) in env {
-        let _ = writeln!(out, "{} = \"{}\"", name, escape_toml_string(value));
+        let _ = writeln!(
+            out,
+            "{} = \"{}\"",
+            toml_edit::Key::new(name.as_str()),
+            escape_toml_string(value)
+        );
     }
     out.push('\n');
 }
@@ -2573,8 +2593,12 @@ fn render_startup_command_terminal_config(
 }
 
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
-    let _ = writeln!(out, "[providers.{name}]");
-    let _ = writeln!(out, "# CLI command for {name} sessions.");
+    // A provider name is free text: the key form quotes it wherever a bare
+    // key would not parse, and it keeps a newline in the name out of the
+    // comment line too.
+    let key = toml_edit::Key::new(name);
+    let _ = writeln!(out, "[providers.{key}]");
+    let _ = writeln!(out, "# CLI command for {key} sessions.");
     let _ = writeln!(out, "command = \"{}\"", escape_toml_string(&config.command));
     out.push_str(
         "# Arguments passed to the provider command when launching an interactive PTY session.\n",
@@ -3084,6 +3108,20 @@ mod tests {
             message.contains("not as a dux config"),
             "the refusal must say why: {message}"
         );
+    }
+
+    #[test]
+    fn restore_docs_keeps_names_that_are_not_bare_keys() {
+        let raw = "[env]\n\"MY KEY\" = \"sk-live-123\"\n\"A.B\" = \"two\"\n\n\
+                   [providers.\"my cli\"]\ncommand = \"my-cli\"\n\n\
+                   [[projects]]\nid = \"p1\"\npath = \"/tmp/p\"\n\
+                   env = { \"TOKEN X\" = \"sk-proj-456\" }\n";
+        let restored = restore_documentation(raw).expect("restore");
+        let after: Config = toml::from_str(&restored.text).expect("restored parses");
+        assert_eq!(after.env["MY KEY"], "sk-live-123");
+        assert_eq!(after.env["A.B"], "two");
+        assert_eq!(after.providers.commands["my cli"].command, "my-cli");
+        assert_eq!(after.projects[0].env["TOKEN X"], "sk-proj-456");
     }
 
     #[test]

@@ -4281,6 +4281,7 @@ impl App {
         }
         pending.announce_at = None;
         let message = diff_read_busy(&pending.label);
+        self.engine.register_status_key(DIFF_STATUS_KEY);
         self.status.set(
             now,
             Some(DIFF_STATUS_KEY.to_string()),
@@ -5363,6 +5364,7 @@ mod tests {
             tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
+            tailscale_answer_from: crate::app::TailscaleAnswerFrom::Serve,
             reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
@@ -6969,6 +6971,13 @@ mod tests {
         app.announce_slow_changed_files_read(started + Duration::from_secs(1));
         let (tone, message) = app.status.most_recent_tui().expect("the wait is explained");
         assert_eq!(tone, dux_core::statusline::StatusTone::Busy);
+        let key = app
+            .pending_changed_files_refresh
+            .as_ref()
+            .expect("still pending")
+            .key
+            .clone();
+        assert!(app.engine.status_op_is_live(&key), "the shown busy is live");
         assert!(
             message.contains("Reading changed files"),
             "unexpected message: {message}"
@@ -8098,6 +8107,58 @@ mod tests {
         );
     }
 
+    /// A delete whose first cleanup fails while the worktree is still being
+    /// removed keeps its busy open, so the removal's own outcome is reported
+    /// when it lands instead of the agent changing with no word.
+    #[test]
+    fn a_delete_whose_first_cleanup_fails_reports_the_removal_outcome() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        app.engine.session_store.fail_session_deletes_for_tests();
+        app.apply_reaction(dux_core::engine::EventReaction::BeginDeleteSessionView(
+            Box::new(dux_core::engine::BeginDeleteSessionView {
+                session_id: "s1".to_string(),
+                outcome: dux_core::engine::BeginDeleteSessionOutcome::AsyncStarted {
+                    busy_message: "Removing worktree\u{2026}".to_string().into(),
+                },
+            }),
+        ));
+        let key = app
+            .pending_delete_ops
+            .get("s1")
+            .and_then(|op| op.pending_status().key)
+            .expect("the delete keeps its op");
+        assert_eq!(open_busy(&app, &key).len(), 1, "the removal's busy shows");
+
+        app.engine.pending_deletions.insert("s1".to_string());
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Err("git refused".to_string()),
+            })
+            .expect("channel send");
+        app.drain_events();
+        let finals: Vec<_> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .filter(|status| status.key.as_deref() == Some(key.as_str()))
+            .collect();
+        assert!(
+            finals.iter().any(|status| status.tone == "error"),
+            "the removal's failure is reported: {finals:?}"
+        );
+    }
+
     /// A diff whose worker stops without answering gives its busy a final.
     #[test]
     fn a_diff_whose_worker_stops_gives_its_busy_a_final() {
@@ -8122,6 +8183,10 @@ mod tests {
             open_busy(&app, DIFF_STATUS_KEY).len(),
             1,
             "the busy is showing"
+        );
+        assert!(
+            app.engine.status_op_is_live(DIFF_STATUS_KEY),
+            "a showing busy is live, so it is not called timed out"
         );
         app.drain_pending_diff();
         assert!(

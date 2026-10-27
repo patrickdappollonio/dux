@@ -270,6 +270,8 @@ struct ResetLeftover {
 #[derive(Debug, Default)]
 struct ResetRefused {
     running: Vec<ResetLeftover>,
+    /// The whole reason, way forward included, when the refusal is not about
+    /// a program found running.
     unknown: Option<String>,
 }
 
@@ -278,7 +280,29 @@ impl ResetRefused {
         Self {
             running: Vec::new(),
             unknown: Some(format!(
-                "could not check which programs are still running: {reason}"
+                "could not check which programs are still running: {reason}. Fix that and run \
+                 the reset again, or delete the files yourself."
+            )),
+        }
+    }
+
+    /// The session database could not answer which folders under the
+    /// worktrees root are the user's. Deleting it by hand is the way past,
+    /// once whatever of the user's lives in that root is out of it.
+    fn unreadable_records(
+        problem: impl std::fmt::Display,
+        paths: &DuxPaths,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        let db = paths.sessions_db_path.display();
+        let worktrees = paths.worktrees_root.display();
+        Self {
+            running: Vec::new(),
+            unknown: Some(format!(
+                "{problem}, so dux cannot tell which folders under {worktrees} are yours \
+                 ({error}). To reset anyway, quit dux and anything it started, move anything of \
+                 yours out of {worktrees} (a project kept inside it would be removed with it), \
+                 delete {db} yourself, and run the reset again."
             )),
         }
     }
@@ -287,11 +311,7 @@ impl ResetRefused {
 impl std::fmt::Display for ResetRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(reason) = &self.unknown {
-            return write!(
-                f,
-                "dux config reset --all deleted nothing: {reason}. Fix that and run the reset \
-                 again, or delete the files yourself."
-            );
+            return write!(f, "dux config reset --all deleted nothing: {reason}");
         }
         write!(
             f,
@@ -372,6 +392,17 @@ impl ResetReport {
     }
 }
 
+/// Says that a log the reset would otherwise remove was kept because it is
+/// not plainly inside the config folder.
+fn report_left_outside(path: &Path, root: &Path, report: &mut ResetReport) {
+    report.say(format_args!(
+        "left {} alone: it is outside the config folder {}, or reached through a \
+         symlinked folder, so dux does not delete it. Remove it yourself if you want it gone",
+        path.display(),
+        root.display()
+    ));
+}
+
 /// The reset itself. Reports what it removed as it goes.
 fn run_reset(paths: &DuxPaths, scope: ResetScope, report: &mut ResetReport) -> Result<()> {
     let (log_path, server_log_path) = resolve_reset_log_paths(paths);
@@ -380,12 +411,16 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope, report: &mut ResetReport) -> R
         reset_agent_data(paths, report)?;
     }
 
-    if let Err(error) = remove_file_with_message(&log_path, report) {
-        report.warn(format_args!("warning: {error}"));
-    }
-    prune_empty_ancestors(&log_path, &paths.root)?;
-    // Only from inside the config folder: a server log path that leaves it, by an
+    // Only from inside the config folder: a log path that leaves it, by an
     // absolute name, a `..` or a symlinked folder, is the user's to delete.
+    if is_plainly_inside(&log_path, &paths.root) {
+        if let Err(error) = remove_file_with_message(&log_path, report) {
+            report.warn(format_args!("warning: {error}"));
+        }
+        prune_empty_ancestors(&log_path, &paths.root)?;
+    } else {
+        report_left_outside(&log_path, &paths.root, report);
+    }
     if is_plainly_inside(&server_log_path, &paths.root) {
         // A log that will not go is a warning, as for dux.log, never a reason
         // to keep the config.
@@ -399,12 +434,7 @@ fn run_reset(paths: &DuxPaths, scope: ResetScope, report: &mut ResetReport) -> R
         }
         prune_empty_ancestors(&server_log_path, &paths.root)?;
     } else {
-        report.say(format_args!(
-            "left {} alone: it is outside the config folder {}, or reached through a \
-             symlinked folder, so dux does not delete it. Remove it yourself if you want it gone",
-            server_log_path.display(),
-            paths.root.display()
-        ));
+        report_left_outside(&server_log_path, &paths.root, report);
     }
     remove_file_with_message(&paths.root.join("remotes.toml"), report)?;
     remove_file_with_message(&paths.root.join("remotes.toml.lock"), report)?;
@@ -1067,15 +1097,20 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // is void.
     let mut recorded: Vec<dux_core::process_sessions::StoredSession> = Vec::new();
     if paths.sessions_db_path.exists() {
+        let db = paths.sessions_db_path.display();
         let store = SessionStore::open(&paths.sessions_db_path).map_err(|error| {
-            ResetRefused::unknown(format_args!(
-                "the session database could not be opened: {error}"
-            ))
+            ResetRefused::unreadable_records(
+                format_args!("the session database {db} could not be opened"),
+                paths,
+                error,
+            )
         })?;
         sessions = store.load_sessions().map_err(|error| {
-            ResetRefused::unknown(format_args!(
-                "the sessions could not be loaded from the database: {error}"
-            ))
+            ResetRefused::unreadable_records(
+                format_args!("the agents recorded in {db} could not be read"),
+                paths,
+                error,
+            )
         })?;
         // A standalone agent's folder is never removed. Filtered on the workspace (the
         // managed-root check passes one under that root) and collected before any removal.
@@ -1087,14 +1122,19 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
         // A project's repository is the user's too: a worktree that holds one
         // (a clone made inside it) is kept.
-        if let Ok(projects) = store.load_projects() {
-            occupied_folders.extend(
-                projects
-                    .iter()
-                    .map(|project| canonical_or_original(Path::new(&project.path))),
-            );
-            recorded_folders.extend(projects.iter().map(|project| PathBuf::from(&project.path)));
-        }
+        let projects = store.load_projects().map_err(|error| {
+            ResetRefused::unreadable_records(
+                format_args!("the projects recorded in {db} could not be read"),
+                paths,
+                error,
+            )
+        })?;
+        occupied_folders.extend(
+            projects
+                .iter()
+                .map(|project| canonical_or_original(Path::new(&project.path))),
+        );
+        recorded_folders.extend(projects.iter().map(|project| PathBuf::from(&project.path)));
         recorded = store
             .load_process_registry_strict()
             .map_err(|error| ResetRefused::unknown(format_args!("{error}")))?
@@ -1624,9 +1664,12 @@ trait WithContextPath<T> {
     fn with_context_path(self, path: &Path) -> Result<T>;
 }
 
+/// The whole cause chain is printed. Every error routed here is free of
+/// parser text: config parse failures are described by position and kind
+/// before they get this far, never by the line they quote.
 impl<T, E: std::fmt::Display> WithContextPath<T> for std::result::Result<T, E> {
     fn with_context_path(self, path: &Path) -> Result<T> {
-        self.map_err(|e| anyhow!("{}: {e}", path.display()))
+        self.map_err(|e| anyhow!("{}: {e:#}", path.display()))
     }
 }
 
@@ -2163,6 +2206,59 @@ mod tests {
             assert!(worktree.exists(), "{body}");
             assert!(harness.paths.config_path.exists(), "{body}");
             assert!(harness.paths.sessions_db_path.exists(), "{body}");
+        }
+    }
+
+    /// Without the project or agent records dux cannot tell which folders under
+    /// the worktrees root are a user's, so the reset deletes nothing and says
+    /// how to get past the unreadable record.
+    #[test]
+    fn a_factory_reset_deletes_nothing_when_its_records_cannot_be_read() {
+        // An unreadable agent row already stops the database from opening.
+        for (what, failed, corrupt) in [
+            (
+                "the projects recorded in",
+                "read",
+                "insert into projects (id, path, created_at, updated_at) \
+                 values ('p', x'ff', 'now', 'now')",
+            ),
+            (
+                "the session database",
+                "opened",
+                "update agent_sessions set created_at = x'ff'",
+            ),
+        ] {
+            let harness = ResetHarness::new();
+            harness.write_config_with_log_path("logs/custom.log");
+            let worktree = harness.create_session("agent-1");
+            let conn = rusqlite::Connection::open(&harness.paths.sessions_db_path).expect("raw");
+            conn.execute(corrupt, []).expect("an unreadable row");
+            drop(conn);
+
+            let refusal = run_reset(
+                &harness.paths,
+                ResetScope::Everything,
+                &mut ResetReport::discarding(),
+            )
+            .expect_err("the reset refuses");
+
+            let message = format!("{refusal:#}");
+            let db = harness.paths.sessions_db_path.display();
+            let worktrees = harness.paths.worktrees_root.display();
+            let head = format!(
+                "dux config reset --all deleted nothing: {what} {db} could not be {failed}, so \
+                 dux cannot tell which folders under {worktrees} are yours ("
+            );
+            let tail = format!(
+                "). To reset anyway, quit dux and anything it started, move anything of yours \
+                 out of {worktrees} (a project kept inside it would be removed with it), delete \
+                 {db} yourself, and run the reset again."
+            );
+            assert!(message.starts_with(&head), "{what}: {message}");
+            assert!(message.ends_with(&tail), "{what}: {message}");
+            assert!(worktree.exists(), "{what}");
+            assert!(harness.paths.config_path.exists(), "{what}");
+            assert!(harness.paths.sessions_db_path.exists(), "{what}");
         }
     }
 
@@ -3072,6 +3168,33 @@ mod tests {
     }
 
     #[test]
+    fn reset_leaves_a_dux_log_outside_the_config_folder_alone() {
+        let harness = ResetHarness::new();
+        let outside = harness.paths.root.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).expect("outside");
+        std::os::unix::fs::symlink(&outside, harness.paths.root.join("linked-dir"))
+            .expect("folder link");
+        for (configured, kept) in [
+            (
+                outside.join("abs.log").to_string_lossy().into_owned(),
+                "abs.log",
+            ),
+            ("../outside/dots.log".to_string(), "dots.log"),
+            ("linked-dir/through.log".to_string(), "through.log"),
+        ] {
+            harness.write_config_with_log_path(&configured);
+            fs::write(outside.join(kept), "not dux's to delete").expect("outside file");
+            run_reset(
+                &harness.paths,
+                ResetScope::ConfigOnly,
+                &mut ResetReport::discarding(),
+            )
+            .expect("reset");
+            assert!(outside.join(kept).exists(), "{configured}: {kept} survives");
+        }
+    }
+
+    #[test]
     fn reset_all_wipes_database_and_worktrees() {
         for seen in [None, Some("v0.6.0")] {
             let harness = ResetHarness::new();
@@ -3393,6 +3516,33 @@ mod tests {
             "a refused restore must leave the file byte-identical"
         );
         assert_eq!(backups(&harness), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn with_context_path_keeps_the_cause() {
+        let failed: Result<()> = Err(anyhow!("Permission denied").context("failed to write"));
+        let message = failed
+            .with_context_path(Path::new("/cfg/config.toml"))
+            .expect_err("still an error")
+            .to_string();
+        assert!(message.contains("Permission denied"), "{message}");
+    }
+
+    #[test]
+    fn restore_docs_refusal_never_prints_an_env_value() {
+        let harness = ResetHarness::new();
+        for malformed in [
+            "[env]\nAPI_KEY = \"sk-live-123\" trailing\n",
+            "[env]\nAPI_KEY = [\"sk-live-123\"]\n",
+        ] {
+            fs::write(&harness.paths.config_path, malformed).expect("seed");
+            for args in [vec!["restore-docs"], vec!["restore-docs", "--yes"]] {
+                let args: Vec<String> = args.into_iter().map(String::from).collect();
+                let err = run(&args, &harness.paths).expect_err("must refuse");
+                let message = format!("{err:#}");
+                assert!(!message.contains("sk-live-123"), "{message}");
+            }
+        }
     }
 
     #[test]

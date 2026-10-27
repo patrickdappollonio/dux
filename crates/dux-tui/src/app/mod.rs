@@ -875,6 +875,8 @@ pub(crate) struct App {
     /// request, and a superseded one resolves as such, so at most one is open.
     pub(crate) pending_tailscale_mode_op:
         Option<dux_core::engine::HandlerStatusOp<dux_core::config::TailscaleModeOutcome>>,
+    /// Where the answer to the open Tailscale mode request can still come from.
+    pub(crate) tailscale_answer_from: TailscaleAnswerFrom,
     /// Which listener changes a config reload set off are still running, so the
     /// reload is not reported over until they have ended.
     pub(crate) reload_listener_changes: background_server::ReloadListenerChanges,
@@ -1079,6 +1081,28 @@ pub(crate) enum TuiServerFlipOutcome {
 pub(crate) struct PendingBackgroundServerStart {
     pub(crate) op: dux_core::engine::HandlerStatusOp<BackgroundServerOutcome>,
     pub(crate) trigger: BackgroundServerStart,
+    /// The settings the bind in flight was made with, so a landing bind the
+    /// config has since moved past is made again rather than served.
+    pub(crate) bound_with: BackgroundBindSettings,
+}
+
+/// Where the answer to an open Tailscale mode request can still come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TailscaleAnswerFrom {
+    /// The serve it was asked of, which is still up.
+    Serve,
+    /// Only the worker lane: the serve retired on its own with the request
+    /// queued and its runtime is gone, so any answer it gave is already on
+    /// the lane. The next service, after the lane has drained, answers the
+    /// request for it if no answer came.
+    RetiredServesLane,
+}
+
+/// The settings a background-server bind pre-flight reads when it is spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BackgroundBindSettings {
+    pub(crate) port: u16,
+    pub(crate) tailscale: dux_core::config::TailscaleMode,
 }
 
 /// Handler-resolved outcome for a background-server start (see
@@ -4981,6 +5005,7 @@ impl App {
             tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
+            tailscale_answer_from: TailscaleAnswerFrom::Serve,
             reload_listener_changes: ReloadListenerChanges::default(),
             pending_persist_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
@@ -7344,6 +7369,7 @@ impl App {
             ChangedFilesReadVoice::QuietUnlessSlow => Some(now + SLOW_CHANGED_FILES_READ),
         };
         if announce_at.is_none() {
+            self.engine.register_status_key(&key);
             self.status.set(
                 now,
                 Some(key.clone()),
@@ -7377,6 +7403,7 @@ impl App {
         pending.announce_at = None;
         let key = pending.key.clone();
         let message = changed_files_read_busy(&pending.label);
+        self.engine.register_status_key(&key);
         self.status.set(now, Some(key), StatusTone::Busy, message);
     }
 
@@ -8659,6 +8686,34 @@ mod tests {
             .join()
             .expect("worker thread");
         assert!(!panic_takes_the_tui_down(worker));
+    }
+
+    /// A spoken changed-files read is live for as long as its busy shows, so a
+    /// slow `git status` keeps its spinner rather than being called timed out.
+    #[test]
+    fn a_spoken_changed_files_read_is_live_until_it_lands() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let worktree = tempfile::tempdir().expect("worktree");
+        let path = worktree.path().to_path_buf();
+        *app.engine.watched_worktree.lock().unwrap() = Some(path.clone());
+        let key = "refresh-changes:test".to_string();
+        app.begin_changed_files_refresh(
+            key.clone(),
+            "agent".to_string(),
+            path,
+            ChangedFilesReadVoice::Spoken,
+        );
+        assert!(app.engine.status_op_is_live(&key));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.pending_changed_files_refresh.is_some() && Instant::now() < deadline {
+            app.drain_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            app.pending_changed_files_refresh.is_none(),
+            "the read landed"
+        );
+        assert!(!app.engine.status_op_is_live(&key));
     }
 
     /// A changed-files read whose worker never starts still gets its keyed

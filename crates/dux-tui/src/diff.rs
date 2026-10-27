@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{Change, ChangeTag, TextDiff};
@@ -313,6 +313,62 @@ fn file_header_lines(rel_path: &str, theme: &AppTheme) -> [Line<'static>; 2] {
     ]
 }
 
+/// The working-tree side of a diff, read the way git sees the path.
+///
+/// Git does not follow symlinks: a path whose parent folder is now a file or
+/// a symlink, or that is now a folder itself, is deleted, and a symlink's
+/// content is its target text. Those all read as git reports them. A file
+/// that is there but cannot be read is an error, since diffing it as empty
+/// would show a deletion that never happened.
+fn working_tree_bytes(worktree_path: &Path, rel_path: &str) -> Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let abs_path = worktree_path.join(rel_path);
+    let mut parent = worktree_path.to_path_buf();
+    let components: Vec<_> = Path::new(rel_path).components().collect();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        parent.push(component);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(error) if is_absent(&error) => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not read {}", parent.display()));
+            }
+        }
+    }
+    let unreadable = |error: std::io::Error| {
+        Err(error).with_context(|| format!("could not read {}", abs_path.display()))
+    };
+    let meta = match std::fs::symlink_metadata(&abs_path) {
+        Ok(meta) => meta,
+        Err(error) if is_absent(&error) => return Ok(Vec::new()),
+        Err(error) => return unreadable(error),
+    };
+    if meta.is_dir() {
+        return Ok(Vec::new());
+    }
+    if meta.file_type().is_symlink() {
+        return match std::fs::read_link(&abs_path) {
+            Ok(target) => Ok(target.as_os_str().as_bytes().to_vec()),
+            Err(error) => unreadable(error),
+        };
+    }
+    match std::fs::read(&abs_path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if is_absent(&error) => Ok(Vec::new()),
+        Err(error) => unreadable(error),
+    }
+}
+
+/// A read that failed because nothing is at the path any more.
+fn is_absent(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 /// Compute a syntax-highlighted, unified diff for a single file.
 ///
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
@@ -331,8 +387,7 @@ fn diff_file(
     diff_tab_width: u16,
 ) -> Result<DiffOutput> {
     let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
-    let abs_path = worktree_path.join(rel_path);
-    let new_bytes = std::fs::read(&abs_path).unwrap_or_default();
+    let new_bytes = working_tree_bytes(worktree_path, rel_path)?;
 
     if old_bytes == new_bytes {
         return Ok(DiffOutput {
@@ -931,6 +986,9 @@ mod tests {
             .unwrap();
 
         let file = repo.join(filename);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(&file, initial).unwrap();
         dux_core::test_git::fixture_git()
             .args(["add", filename])
@@ -962,6 +1020,108 @@ mod tests {
 
         assert_eq!(output.lines, vec![Line::from("No changes.")]);
         assert_eq!(output.gutter_width, 0);
+    }
+
+    fn working_side(dir: &Path, rel_path: &str) -> Result<DiffOutput> {
+        diff_file(
+            dir,
+            rel_path,
+            &AppTheme::default_dark(),
+            &SyntaxCache::new(),
+            LineNumbers::Shown,
+            4,
+        )
+    }
+
+    fn shows_deletion_of_first(output: &DiffOutput) -> bool {
+        output
+            .lines
+            .iter()
+            .any(|line| line.to_string().contains("-first"))
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_folder_diffs_as_a_deletion() {
+        let dir = setup_text_repo("swapped.txt", "first\n", "first\n");
+        let path = dir.path().join("swapped.txt");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let output = working_side(dir.path(), "swapped.txt").expect("git says deleted");
+        assert!(shows_deletion_of_first(&output));
+    }
+
+    #[test]
+    fn a_file_under_a_folder_replaced_by_a_file_diffs_as_a_deletion() {
+        let dir = setup_text_repo("a/b.txt", "first\n", "first\n");
+        std::fs::remove_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(dir.path().join("a"), "now a file\n").unwrap();
+        let output = working_side(dir.path(), "a/b.txt").expect("git says deleted");
+        assert!(shows_deletion_of_first(&output));
+    }
+
+    #[test]
+    fn a_file_under_a_folder_replaced_by_a_symlink_diffs_as_a_deletion() {
+        let dir = setup_text_repo("a/b.txt", "first\n", "first\n");
+        let elsewhere = tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("b.txt"), "first\n").unwrap();
+        std::fs::remove_dir_all(dir.path().join("a")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("a")).unwrap();
+        let output = working_side(dir.path(), "a/b.txt").expect("git says deleted");
+        assert!(shows_deletion_of_first(&output));
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_symlink_diffs_against_the_link_target_text() {
+        let dir = setup_text_repo("y.txt", "first\n", "first\n");
+        let elsewhere = tempdir().unwrap();
+        let path = dir.path().join("y.txt");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &path).unwrap();
+        let output = working_side(dir.path(), "y.txt").expect("a typechange diffs");
+        let target = elsewhere.path().to_string_lossy().into_owned();
+        assert!(shows_deletion_of_first(&output));
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.to_string().contains(&format!("+{target}")))
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_error_not_a_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = setup_text_repo("locked.txt", "first\n", "second\n");
+        let path = dir.path().join("locked.txt");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user that reads past permissions (root) cannot produce the failure.
+        if std::fs::read(&path).is_ok() {
+            return;
+        }
+        let result = working_side(dir.path(), "locked.txt");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_working_file_still_diffs_as_a_deletion() {
+        let dir = setup_text_repo("removed.txt", "first\n", "first\n");
+        std::fs::remove_file(dir.path().join("removed.txt")).unwrap();
+        let output = diff_file(
+            dir.path(),
+            "removed.txt",
+            &AppTheme::default_dark(),
+            &SyntaxCache::new(),
+            LineNumbers::Shown,
+            4,
+        )
+        .unwrap();
+        assert!(
+            output
+                .lines
+                .iter()
+                .any(|line| line.to_string().contains("-first"))
+        );
     }
 
     #[test]
