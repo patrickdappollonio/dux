@@ -307,26 +307,7 @@ impl Engine {
             mode,
             git_env: self.clones.git_env.clone(),
         };
-        let worker_tx = self.worker_tx.clone();
-        let agent_name = prepared.agent_name;
-        std::thread::spawn(move || {
-            // The key and the op must end even if the job panics.
-            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::clone_project::run_clone_job(job, &worker_tx);
-            }))
-            .is_err();
-            if panicked {
-                let said = clone_panicked_message(mode, &destination);
-                let _ = worker_tx.send(crate::worker::WorkerEvent::RepositoryCloned {
-                    status_op_id: Some(op_id),
-                    path: destination,
-                    agent_name,
-                    repository_key,
-                    mode,
-                    result: Err(CloneOutcome::Failed(said)),
-                });
-            }
-        });
+        self.spawn_clone_worker(job, prepared.agent_name);
         Ok(pending)
     }
 
@@ -412,6 +393,61 @@ impl Engine {
     fn release_repository_key(&mut self, key: Option<&str>) {
         if let Some(key) = key {
             self.clear_in_flight(&InFlightKey::CloneRepository(key.to_string()));
+        }
+    }
+
+    /// Start the clone worker for `job`, whose in-flight key, hold and busy are
+    /// already taken. However the worker ends, or when it cannot start, the
+    /// clone answers through `RepositoryCloned`.
+    fn spawn_clone_worker(&self, job: CloneJob, agent_name: String) {
+        let worker_tx = self.worker_tx.clone();
+        let op_id = job.status_op_id.clone();
+        let destination = job.destination.clone();
+        let repository_key = job.repository_key.clone();
+        let mode = job.mode;
+        let unstarted = (
+            op_id.clone(),
+            destination.clone(),
+            agent_name.clone(),
+            repository_key.clone(),
+        );
+        let spawned = super::spawn_worker::spawn_engine_thread("dux-clone", move || {
+            // The key and the op must end even if the job panics.
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::clone_project::run_clone_job(job, &worker_tx);
+            }))
+            .is_err();
+            if panicked {
+                let said = clone_panicked_message(mode, &destination);
+                let _ = worker_tx.send(crate::worker::WorkerEvent::RepositoryCloned {
+                    status_op_id: Some(op_id),
+                    path: destination,
+                    agent_name,
+                    repository_key,
+                    mode,
+                    result: Err(CloneOutcome::Failed(said)),
+                });
+            }
+        });
+        if let Err(err) = spawned {
+            // The in-flight key, the hold and the busy are already taken, so
+            // the clone ends through the failure the worker would have sent,
+            // which lands behind the busy this returns.
+            crate::logger::error(&format!("Could not start the clone worker: {err}"));
+            let (op_id, path, agent_name, repository_key) = unstarted;
+            let _ = self
+                .worker_tx
+                .send(crate::worker::WorkerEvent::RepositoryCloned {
+                    status_op_id: Some(op_id),
+                    path,
+                    agent_name,
+                    repository_key,
+                    mode,
+                    result: Err(CloneOutcome::Failed(StatusText::from(format!(
+                        "Could not start background worker: {err}. Nothing was added to \
+                         the workspace."
+                    )))),
+                });
         }
     }
 
@@ -641,5 +677,60 @@ impl Engine {
                 .resolve(&not_created(format!("{error:#}").into()))
                 .into_reaction(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CloneAskedBy;
+    use crate::clone_project::{CloneRequest, UpfrontReviewCopy};
+    use crate::engine::events::EventReaction;
+    use crate::engine::test_support::test_engine;
+    use crate::engine::{InFlightKey, StatusUpdate};
+    use crate::statusline::StatusTone;
+
+    fn statuses(reaction: EventReaction, into: &mut Vec<StatusUpdate>) {
+        match reaction {
+            EventReaction::Status(status) => into.push(status),
+            EventReaction::Multi(reactions) => {
+                for reaction in reactions {
+                    statuses(reaction, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A clone whose worker thread cannot start ends its busy with the reason
+    /// and frees the folder for another try, instead of panicking the engine.
+    #[test]
+    fn a_clone_whose_worker_cannot_start_ends_with_the_reason() {
+        let (mut engine, tmp) = test_engine();
+        let destination = std::fs::canonicalize(tmp.path()).unwrap().join("dest");
+        let request = CloneRequest {
+            url: tmp.path().join("remote").to_string_lossy().into_owned(),
+            path: destination.to_string_lossy().into_owned(),
+            agent_name: Some("first".to_string()),
+            random_name: false,
+            pull_request: None,
+            add_existing: false,
+            review_copy: UpfrontReviewCopy::default(),
+        };
+        crate::engine::fail_next_worker_spawn();
+        let busy = engine
+            .begin_clone_project(&request, CloneAskedBy::OtherSurface)
+            .expect("the clone is dispatched");
+        let mut applied = Vec::new();
+        while let Ok(event) = engine.worker_rx.try_recv() {
+            statuses(engine.process_worker_event(event), &mut applied);
+        }
+        let last = applied
+            .iter()
+            .rev()
+            .find(|status| status.key == busy.key)
+            .expect("the busy gets a final");
+        assert_eq!(last.tone, StatusTone::Error, "{applied:?}");
+        assert!(last.message.contains("injected test failure"), "{last:?}");
+        assert!(engine.mark_in_flight(InFlightKey::Clone(destination)));
     }
 }

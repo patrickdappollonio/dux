@@ -1395,18 +1395,26 @@ impl Engine {
         let Some(sid) = owning else {
             return (None, tab_id.as_str().to_string());
         };
-        let branch = self.sessions.iter().find(|s| s.id == sid).map_or_else(
+        let session = self.sessions.iter().find(|s| s.id == sid);
+        let branch = session.map_or_else(
             || sid.to_string(),
             crate::model::AgentSession::display_label,
         );
         let label = if self.is_slot_tab_of(SessionIdRef::new(sid), tab_id) {
             branch
         } else {
-            let provider = self
-                .agent_tabs
-                .get(tab_id)
-                .map(|t| t.provider.as_str().to_string())
-                .unwrap_or_default();
+            // What ran, which a retarget since the launch does not change.
+            let provider = match session {
+                Some(session) => self
+                    .tab_running_provider(session, tab_id.as_ref_id())
+                    .as_str()
+                    .to_string(),
+                None => self
+                    .agent_tabs
+                    .get(tab_id)
+                    .map(|t| t.provider.as_str().to_string())
+                    .unwrap_or_default(),
+            };
             format!("{provider} on {branch}")
         };
         (Some(TerminalOwner::Session(sid.to_string())), label)
@@ -3964,6 +3972,24 @@ mod recreate_tests {
             status.message
         );
         assert!(engine.providers.contains_key(TabIdRef::new("tab-b")));
+    }
+
+    /// An extra tab's exit names the provider that ran in it, not the one it
+    /// was switched to for its next launch.
+    #[test]
+    fn an_extra_tabs_exit_is_labelled_with_the_provider_that_ran() {
+        let (mut engine, _tmp, _cwd) = agent_running("opencode", &[("tab-b", "codex")]);
+        engine
+            .agent_tabs
+            .get_mut(TabIdRef::new("tab-b"))
+            .expect("tab-b")
+            .provider = crate::model::ProviderKind::new("claude");
+        engine.running_provider_pins.insert(
+            TabId::new("tab-b"),
+            crate::model::ProviderKind::new("codex"),
+        );
+        let (_, label) = engine.exited_tab_owner_and_label(Some("s1"), &TabId::new("tab-b"));
+        assert!(label.starts_with("codex on "), "{label}");
     }
 
     /// A running tab keeps the provider it was started with until it exits,
@@ -7965,6 +7991,9 @@ mod tests {
         // doc claims it is cleared wherever `pty_activity` is, and a claim
         // nothing pins is a claim that quietly stops being true.
         engine.pty_activity.insert(tid.clone(), Instant::now());
+        engine
+            .terminal_activity_at
+            .insert(tid.clone(), chrono::Utc::now());
         engine.pty_input.insert(tid.clone(), Instant::now());
         engine.note_pty_pointer(&tid, crate::pty::PointerReport::Wheel);
         engine.pty_used.insert(tid.clone());
@@ -7975,6 +8004,10 @@ mod tests {
         assert!(
             !engine.pty_activity.contains_key(&tid),
             "teardown must clear the terminal's activity entry"
+        );
+        assert!(
+            !engine.terminal_activity_at.contains_key(&tid),
+            "teardown must clear the terminal's activity time"
         );
         assert!(
             !engine.pty_input.contains_key(&tid),

@@ -2214,14 +2214,32 @@ impl Engine {
     ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
         let session = request.session.clone();
         logger::error(&format!(
-            "session store upsert failed for {}: {err}",
+            "session store upsert failed for {}: {err:#}",
             session.id,
         ));
+        // Only what this create made is named: a working copy or a branch
+        // that was there before is not something it leaves behind.
+        let owns_worktree = matches!(
+            request.kind,
+            AgentLaunchKind::Create {
+                owns_worktree: true,
+                ..
+            }
+        );
+        let managed = session.workspace.as_managed();
+        let left_folder = managed.filter(|_| owns_worktree).map(|managed| {
+            crate::home_path::shorten_home(std::path::Path::new(&managed.worktree_path))
+        });
+        let left_branch = managed
+            .filter(|managed| managed.branch_provenance.dux_may_delete_branch())
+            .map(|managed| managed.branch_name.clone());
         let create_final = self.resolve_create_op(
             status_op_id,
             &CreateLaunchOutcome::PersistFailed {
-                error: err.to_string(),
+                error: format!("{err:#}"),
                 attempted_name: Some(session.display_label()),
+                left_folder,
+                left_branch,
             },
         );
         (
@@ -2233,7 +2251,7 @@ impl Engine {
                 wants_fullscreen: request.wants_fullscreen,
                 status_quiet: request.status_quiet,
                 view: AgentLaunchReadyView::CreatePersistFailed {
-                    error: err.to_string(),
+                    error: format!("{err:#}"),
                 },
             },
             create_final,
@@ -2500,6 +2518,7 @@ impl Engine {
     /// `companion_terminals`.
     pub fn clear_terminal_runtime(&mut self, terminal_id: &str) {
         self.pty_activity.remove(terminal_id);
+        self.terminal_activity_at.remove(terminal_id);
         self.pty_input.remove(terminal_id);
         self.pty_pointer.remove(terminal_id);
         self.pty_used.remove(terminal_id);
@@ -3101,7 +3120,8 @@ impl Engine {
         let live = self.process_registry.clone();
         let unwatch = self.process_registry.clone();
         let db_path = self.paths.sessions_db_path.clone();
-        let handle = std::thread::spawn(move || {
+        let unstarted = (session_id.clone(), db_path.clone());
+        let spawned = super::spawn_worker::spawn_engine_thread("dux-worktree-remove", move || {
             let result = perform_deferred_removal(
                 &session_id,
                 &project_path,
@@ -3126,7 +3146,26 @@ impl Engine {
                 tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted { session_id, result });
         });
         self.removal_workers.retain(|worker| !worker.is_finished());
-        self.removal_workers.push(handle);
+        match spawned {
+            Ok(handle) => self.removal_workers.push(handle),
+            Err(err) => {
+                // The claim went down with the closure and nothing ran, so the
+                // removal ends the way the worker ends a failed one: the pending
+                // row is forgotten and the failure lands behind the busy this
+                // returns, which keeps the agent so the user can retry.
+                let (session_id, db_path) = unstarted;
+                let message = format!("Could not start background worker: {err}");
+                crate::logger::error(&message);
+                forget_pending_removal_in(&db_path, &session_id);
+                self.process_registry.unwatch_pending(&session_id);
+                let _ = self
+                    .worker_tx
+                    .send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                        session_id,
+                        result: Err(message),
+                    });
+            }
+        }
         busy_message
     }
 
@@ -4190,10 +4229,10 @@ impl Engine {
         }
         self.pr_last_checked
             .insert(session_id.to_string(), checked_at);
-        if self.pr_suppressions.contains(session_id) && !self.pr_overrides.contains_key(session_id)
-        {
+        if !self.pr_autodetect_allowed(session_id) {
             logger::debug(&format!(
-                "[gh-integration] dropping PR result for detached session {session_id}",
+                "[gh-integration] dropping PR result for session {session_id}: it is detached, \
+                 or the detaches could not be read",
             ));
             return false;
         }

@@ -2007,6 +2007,32 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Pin a session's pull request and lift its suppression in one
+    /// transaction, so a failure leaves neither change behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either database write fails.
+    pub(crate) fn attach_pr_override(&self, pr: &StoredPr) -> Result<()> {
+        self.immediate(|store| {
+            store.upsert_pr_override(pr)?;
+            store.delete_pr_suppression(&pr.session_id)
+        })
+    }
+
+    /// Remove a session's pin and suppress its autodetection in one
+    /// transaction, so a failure leaves neither change behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either database write fails.
+    pub(crate) fn detach_pr_override(&self, session_id: &str) -> Result<()> {
+        self.immediate(|store| {
+            store.delete_pr_override(session_id)?;
+            store.set_pr_suppressed(session_id)
+        })
+    }
+
     /// Every session id whose pull-request autodetection is suppressed. Loaded
     /// once at boot into the engine's in-memory mirror.
     ///
@@ -2651,6 +2677,26 @@ impl SessionStore {
     pub(crate) fn break_sessions_table_for_test(&self) -> Result<()> {
         self.conn
             .execute_batch("drop table if exists agent_sessions;")?;
+        Ok(())
+    }
+
+    /// Test-only fault injection: drops the `session_pr_suppressions` table so
+    /// the next suppression read or write returns an error.
+    #[cfg(test)]
+    pub(crate) fn break_pr_suppressions_table_for_test(&self) -> Result<()> {
+        self.conn
+            .execute_batch("drop table if exists session_pr_suppressions;")?;
+        Ok(())
+    }
+
+    /// Test-only: puts back the table [`Self::break_pr_suppressions_table_for_test`]
+    /// dropped, empty.
+    #[cfg(test)]
+    pub(crate) fn restore_pr_suppressions_table_for_test(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "create table if not exists session_pr_suppressions \
+             (session_id text primary key references agent_sessions(id) on delete cascade);",
+        )?;
         Ok(())
     }
 }

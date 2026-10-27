@@ -837,7 +837,7 @@ pub struct TerminalView {
     pub created_at: String,
     /// Terminal last-activity time as an RFC 3339 / ISO 8601 string: the wall
     /// clock of the terminal's most recent PTY activity
-    /// ([`crate::engine::Engine::pty_activity`]), falling back to `created_at`
+    /// ([`crate::engine::Engine::terminal_activity_at`]), falling back to `created_at`
     /// when the terminal has not emitted or received anything yet. Backs the
     /// shared "recently updated" display sort; mirror of [`SessionView::updated_at`].
     pub updated_at: String,
@@ -1356,17 +1356,15 @@ impl Engine {
             foreground_cmd: t.foreground_cmd.clone(),
             sort_order: t.sort_order,
             created_at: t.created_at.to_rfc3339(),
-            // `pty_activity` records the last activity as a monotonic `Instant`;
-            // map it back onto wall clock (now minus how long ago it fired) to
-            // match `created_at`'s RFC 3339 representation. No activity yet →
+            // The wall-clock time of the last activity, recorded when it
+            // happened, so the same activity reads the same on every rebuild,
+            // in `created_at`'s RFC 3339 representation. No activity yet →
             // fall back to the spawn time.
-            updated_at: self.pty_activity.get(id).map_or_else(
-                || t.created_at.to_rfc3339(),
-                |last| {
-                    let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
-                    (chrono::Utc::now() - ago).to_rfc3339()
-                },
-            ),
+            updated_at: self
+                .terminal_activity_at
+                .get(id)
+                .unwrap_or(&t.created_at)
+                .to_rfc3339(),
         }
     }
 
@@ -2284,6 +2282,10 @@ mod tests {
         // Stamp fresh activity: updated_at now tracks the activity, at or after
         // the spawn time.
         engine.pty_activity.insert(tid.clone(), Instant::now());
+        engine.terminal_activity_at.insert(
+            tid.clone(),
+            chrono::Utc::now() + chrono::Duration::seconds(1),
+        );
         let after = engine.spine().terminals[0].clone();
         assert_ne!(
             after.updated_at, after.created_at,
@@ -2295,6 +2297,40 @@ mod tests {
             updated >= created,
             "updated_at ({updated}) must be at or after created_at ({created})"
         );
+    }
+
+    /// A terminal's activity time is the wall clock when its output arrived,
+    /// read from the poll that saw it, and reads the same on every rebuild.
+    #[test]
+    fn terminal_updated_at_is_the_wall_clock_of_its_activity() {
+        let (mut engine, _worktree) = engine_with_spawnable_terminals();
+        let (tid, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("term");
+        // Past the reader's post-resize quiet window, so the write below is
+        // the change the poll stamps.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        engine.poll_pty_activity();
+        engine.terminal_activity_at.remove(&tid);
+        let before = chrono::Utc::now();
+        engine.companion_terminals[&tid]
+            .client
+            .write_bytes(b"hello\n")
+            .expect("write to terminal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !engine.terminal_activity_at.contains_key(&tid) {
+            assert!(std::time::Instant::now() < deadline, "no activity stamped");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            engine.poll_pty_activity();
+        }
+        let after = chrono::Utc::now();
+        let first = engine.spine().terminals[0].updated_at.clone();
+        let stamped = chrono::DateTime::parse_from_rfc3339(&first).unwrap();
+        assert!(
+            before <= stamped && stamped <= after,
+            "{before} {stamped} {after}"
+        );
+        assert_eq!(engine.spine().terminals[0].updated_at, first);
     }
 
     #[test]

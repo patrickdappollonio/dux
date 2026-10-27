@@ -64,17 +64,44 @@ fn spawn_detached(launcher: &str, url: &str) -> Result<()> {
     }
 
     // Still running: it did its job. Reap it off to the side.
+    reap_off_to_the_side(child, launcher);
+    Ok(())
+}
+
+/// Start `command` detached from dux's terminal and reap it whenever it exits.
+///
+/// All three standard streams are `/dev/null`, for the reason [`spawn_detached`]
+/// gives, and the child is handed straight to a thread that waits for it, so a
+/// program that is opened and closed again never lingers as a zombie. Answers
+/// the child's process id.
+///
+/// # Errors
+///
+/// Fails when the program cannot be started.
+pub(crate) fn spawn_reaped(command: &mut Command, what: &str) -> std::io::Result<u32> {
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let pid = child.id();
+    reap_off_to_the_side(child, what);
+    Ok(pid)
+}
+
+/// Wait for `child` on a thread of its own, so it is reaped without anyone
+/// holding the caller up.
+fn reap_off_to_the_side(mut child: std::process::Child, what: &str) {
     if let Err(err) = std::thread::Builder::new()
-        .name("dux-browser-reaper".into())
+        .name("dux-reaper".into())
         .spawn(move || {
             let _ = child.wait();
         })
     {
         crate::logger::warn(&format!(
-            "could not start the browser reaper thread, so one launcher process may linger: {err}"
+            "could not start the reaper thread, so one {what} process may linger: {err}"
         ));
     }
-    Ok(())
 }
 
 /// The spawn itself: the launcher, the address, and three `/dev/null` streams.
@@ -145,6 +172,24 @@ mod tests {
                 "{launcher}: {err}"
             );
         }
+    }
+
+    /// A program started detached is reaped once it exits, rather than left
+    /// as a zombie under dux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_detached_program_is_reaped_when_it_exits() {
+        let pid = spawn_reaped(&mut Command::new("true"), "test").expect("spawn true");
+        let stat = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while stat.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let state = std::fs::read_to_string(&stat).unwrap_or_default();
+        assert!(
+            !stat.exists(),
+            "the child is still in the process table: {state}"
+        );
     }
 
     #[test]

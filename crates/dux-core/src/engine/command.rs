@@ -1317,7 +1317,9 @@ impl Engine {
         let wt = worktree_path.to_path_buf();
         self.spawn_status_op(op, move || {
             let _hold = hold;
-            crate::git::push(&wt).map(|_| ()).map_err(|e| e.to_string())
+            crate::git::push(&wt)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"))
         })
     }
 
@@ -1710,7 +1712,7 @@ impl Engine {
                         .map(|()| PullOutcome::Pulled {
                             current_branch: None,
                         })
-                        .map_err(|error| error.to_string()),
+                        .map_err(|error| format!("{error:#}")),
                 };
                 let status = op.resolve(&result).with_scope(origin.clone());
                 let _ = tx.send(WorkerEvent::PullCompleted {
@@ -2231,18 +2233,18 @@ fn run_project_refresh(
             .map(|opt_branch| {
                 crate::project_browser::leading_branch_for_project(repo_path, opt_branch.as_deref())
             })
-            .map_err(|e| e.to_string())?,
+            .map_err(|e| format!("{e:#}"))?,
     };
     crate::git::switch_branch_if_needed(repo_path, &leading_branch, guard)
-        .map_err(|e| e.to_string())?;
-    if !crate::git::has_origin_remote(repo_path).map_err(|e| e.to_string())? {
+        .map_err(|e| format!("{e:#}"))?;
+    if !crate::git::has_origin_remote(repo_path).map_err(|e| format!("{e:#}"))? {
         // Nothing to pull, and that is fine; still re-read the current branch
         // so the sidebar stays fresh.
         return Ok(PullOutcome::NoOrigin {
             current_branch: crate::git::current_branch(repo_path).ok(),
         });
     }
-    crate::git::pull_branch(repo_path, &leading_branch, guard).map_err(|e| e.to_string())?;
+    crate::git::pull_branch(repo_path, &leading_branch, guard).map_err(|e| format!("{e:#}"))?;
     Ok(PullOutcome::Pulled {
         current_branch: crate::git::current_branch(repo_path).ok(),
     })
@@ -2325,7 +2327,7 @@ fn wait_for_predecessors(
 /// The final a create-agent op ends on, worded once for both surfaces.
 /// `cloned` is set for a clone's first agent, so a create that fails also says
 /// what the clone already did, which is on disk and in the workspace.
-fn create_launch_final(
+pub(super) fn create_launch_final(
     outcome: &crate::engine::CreateLaunchOutcome,
     cloned: Option<&crate::clone_project::ClonedFor>,
 ) -> crate::engine::Final {
@@ -2383,15 +2385,34 @@ fn create_launch_final(
         CreateLaunchOutcome::PersistFailed {
             error,
             attempted_name,
+            left_folder,
+            left_branch,
         } => {
             // Sticky: the worktree exists but its session row
             // does not, so dux forgets it on restart and the
             // user is left the directory to clean up.
-            Final::error(after_clone(
-                format!("Failed to persist session: {error}").into(),
-                attempted_name.as_deref(),
-            ))
-            .sticky()
+            let failed = format!("Could not save the new agent: {error}.");
+            let message = match (left_folder, left_branch) {
+                (Some(folder), Some(branch)) => crate::status_text![
+                    format!("{failed} Its working copy "),
+                    n(folder),
+                    " and branch ",
+                    q(branch),
+                    " are left on disk."
+                ],
+                (Some(folder), None) => crate::status_text![
+                    format!("{failed} Its working copy "),
+                    n(folder),
+                    " is left on disk."
+                ],
+                (None, Some(branch)) => crate::status_text![
+                    format!("{failed} Its branch "),
+                    q(branch),
+                    " is left behind."
+                ],
+                (None, None) => failed.into(),
+            };
+            Final::error(after_clone(message, attempted_name.as_deref())).sticky()
         }
         CreateLaunchOutcome::Failed {
             message,

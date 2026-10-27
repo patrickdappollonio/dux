@@ -84,10 +84,10 @@ pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Resu
                 |bound| git::fetch_origin_bounded(repo, bound),
             ) {
                 Ok(()) => OriginFetch::Fetched,
-                Err(error) => OriginFetch::Failed(error.to_string()),
+                Err(error) => OriginFetch::Failed(format!("{error:#}")),
             }
         }
-        Err(error) => OriginFetch::Failed(error.to_string()),
+        Err(error) => OriginFetch::Failed(format!("{error:#}")),
     };
     let branches = git::list_branches(repo)?;
     Ok(BranchListing { branches, fetch })
@@ -303,7 +303,7 @@ pub(crate) fn switch_to_base_branch(
         return Err(BaseBranchChangeFailure::FolderMissing);
     }
     let choices = git::list_branches(repo)
-        .map_err(|error| BaseBranchChangeFailure::ListFailed(error.to_string()))?;
+        .map_err(|error| BaseBranchChangeFailure::ListFailed(format!("{error:#}")))?;
     let Some(choice) = choices.into_iter().find(|choice| choice.name == branch) else {
         return Err(BaseBranchChangeFailure::NotListed);
     };
@@ -323,7 +323,7 @@ pub(crate) fn switch_to_base_branch(
     // A branch only origin has is created by the switch itself, which also
     // removes it again when the switch is refused, by the move check or by git.
     git::switch_branch(repo, branch, guard)
-        .map_err(|error| BaseBranchChangeFailure::SwitchFailed(error.to_string()))?;
+        .map_err(|error| BaseBranchChangeFailure::SwitchFailed(format!("{error:#}")))?;
     Ok(BaseBranchSwitched {
         folder_was_on_it: false,
     })

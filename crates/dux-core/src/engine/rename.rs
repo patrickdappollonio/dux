@@ -289,7 +289,7 @@ impl Engine {
             move |tx| {
                 let result =
                     crate::git::rename_branch(Path::new(&worktree_path), &old_branch, &new_branch)
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| format!("{e:#}"));
                 let status = op.resolve(&result).with_scope(scope);
                 let _ = tx.send(WorkerEvent::BranchRenameCompleted {
                     session_id: job_sid,

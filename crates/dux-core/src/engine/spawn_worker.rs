@@ -79,8 +79,10 @@ impl Engine {
     /// - `EventReaction::Nothing` on the happy path, since status flows through
     ///   `worker_tx`.
     /// - `EventReaction::Status(error)` when `thread::Builder::spawn`
-    ///   returns `Err` (rare; PID / RLIMIT exhaustion). The in-flight key is
-    ///   cleared in this case so a retry can proceed.
+    ///   returns `Err` (rare; PID / RLIMIT exhaustion) and no busy was queued.
+    ///   With a keyed busy queued, the error follows it on `worker_tx` and the
+    ///   reaction is `Nothing`. The in-flight key is cleared in both cases so a
+    ///   retry can proceed.
     pub(crate) fn spawn_command_worker<F>(
         &mut self,
         spec: CommandWorkerSpec,
@@ -134,7 +136,14 @@ impl Engine {
         let label_for_thread = label.clone();
         let label_for_log = label.clone();
 
-        let spawn_result = thread::Builder::new()
+        #[cfg(any(test, feature = "test-support"))]
+        let injected = take_injected_spawn_failure();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let injected = false;
+        let spawn_result = if injected {
+            Err(std::io::Error::other("injected test failure"))
+        } else {
+            thread::Builder::new()
             .name(format!("dux-cmd-{label_for_thread}"))
             .spawn(move || {
                 // AssertUnwindSafe: the job's captured state is owned by this
@@ -157,10 +166,12 @@ impl Engine {
                         ));
                     }
                 }
-            });
+            })
+            .map(|_| ())
+        };
 
         match spawn_result {
-            Ok(_) => EventReaction::Nothing,
+            Ok(()) => EventReaction::Nothing,
             Err(err) => {
                 if let Some(key) = &spec.in_flight_key {
                     self.clear_in_flight(key);
@@ -173,9 +184,16 @@ impl Engine {
                 // The busy is already on the channel and no worker will answer
                 // it, so the error must land on its key and the op must be
                 // abandoned; otherwise liveness heartbeats that spinner for the
-                // life of the process.
+                // life of the process. The error rides the same channel, so it
+                // lands after that busy instead of being replaced by it.
                 self.abandon_status_op(&key);
-                EventReaction::Status(StatusUpdate::error(msg).with_key(key))
+                let error = StatusUpdate::error(msg)
+                    .with_key(key)
+                    .with_scope(self.current_origin.clone());
+                let _ = self
+                    .worker_tx
+                    .send(WorkerEvent::CommandWorkerStarted(error));
+                EventReaction::Nothing
             }
         }
     }
@@ -617,6 +635,21 @@ impl Engine {
     }
 }
 
+/// Start a named engine-side thread whose caller has already registered
+/// bookkeeping for it (in-flight keys, holds, a live busy), returning the spawn
+/// error rather than panicking so the caller can answer it through the failure
+/// path the thread would have taken.
+pub(crate) fn spawn_engine_thread<F>(name: &str, f: F) -> std::io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(any(test, feature = "test-support"))]
+    if take_injected_spawn_failure() {
+        return Err(std::io::Error::other("injected test failure"));
+    }
+    thread::Builder::new().name(name.to_string()).spawn(f)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_NEXT_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -634,6 +667,51 @@ pub fn fail_next_worker_spawn() {
 #[cfg(any(test, feature = "test-support"))]
 fn take_injected_spawn_failure() -> bool {
     FAIL_NEXT_SPAWN.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+mod spawn_command_worker_tests {
+    use super::CommandWorkerSpec;
+    use crate::engine::StatusUpdate;
+    use crate::engine::events::EventReaction;
+    use crate::engine::test_support::test_engine;
+    use crate::statusline::StatusTone;
+
+    /// The busy is queued on the worker channel before the spawn, so a failed
+    /// spawn's error has to reach the surfaces after it rather than ahead.
+    #[test]
+    fn a_failed_spawn_leaves_its_error_after_the_queued_busy() {
+        let (mut engine, _tmp) = test_engine();
+        let busy = StatusUpdate::busy("Doing the thing").with_key("op-key");
+        crate::engine::fail_next_worker_spawn();
+        let reaction = engine.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "thing".to_string(),
+                in_flight_key: None,
+                busy_status: Some(busy),
+                already_running_status: None,
+                panic_event: None,
+            },
+            |_tx| {},
+        );
+        let mut applied = Vec::new();
+        if let EventReaction::Status(status) = reaction {
+            applied.push(status);
+        }
+        while let Ok(event) = engine.worker_rx.try_recv() {
+            if let EventReaction::Status(status) = engine.process_worker_event(event) {
+                applied.push(status);
+            }
+        }
+        let last = applied
+            .iter()
+            .rev()
+            .find(|s| s.key.as_deref() == Some("op-key"))
+            .expect("a status on the key");
+        assert_eq!(last.tone, StatusTone::Error, "{applied:?}");
+        assert!(last.message.contains("injected test failure"), "{last:?}");
+        assert!(!engine.status_op_is_live("op-key"));
+    }
 }
 
 #[cfg(test)]

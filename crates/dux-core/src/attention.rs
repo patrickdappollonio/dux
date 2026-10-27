@@ -344,8 +344,13 @@ fn find_osc_terminator(s: &[u8], start: usize) -> TermScan {
 }
 
 /// Locate a String Terminator (`ESC \`) within `s`, used for the DCS/tmux
-/// envelope. Resumes from `start` like [`find_osc_terminator`].
+/// envelope. Resumes from `start` like [`find_osc_terminator`]. Inside a tmux
+/// passthrough every payload ESC is doubled, so there a doubled ESC is one
+/// escaped byte; in any other DCS it is not. A buffer that so far holds only
+/// part of the `tmux;` prefix holds no ESC, so deciding on what has arrived is
+/// safe.
 fn find_st(s: &[u8], start: usize) -> TermScan {
+    let tmux = s.starts_with(b"tmux;");
     let mut j = start.min(s.len());
     while j < s.len() {
         if s[j] == ESC {
@@ -356,6 +361,10 @@ fn find_st(s: &[u8], start: usize) -> TermScan {
                         term_len: 2,
                     };
                 }
+                // A doubled ESC is one escaped byte of a tmux payload, so
+                // the pair is stepped over whole: its second ESC cannot open
+                // the envelope's terminator.
+                Some(&ESC) if tmux => j += 2,
                 Some(_) => j += 1,
                 None => return TermScan::Incomplete { safe_offset: j },
             }
@@ -769,6 +778,22 @@ mod tests {
     fn tmux_wrapped_notify() {
         // ESC P tmux; <ESC doubled> ] 9 ; msg BEL ESC \
         let bytes = b"\x1bPtmux;\x1b\x1b]9;wrapped\x07\x1b\\";
+        assert_eq!(scan_once(bytes), vec![AttentionEvent::Notify]);
+    }
+
+    #[test]
+    fn tmux_wrapped_notify_ending_in_st() {
+        // The inner OSC ends in `ESC \`, doubled to `ESC ESC \` by tmux,
+        // before the envelope's own `ESC \`.
+        let bytes = b"\x1bPtmux;\x1b\x1b]9;wrapped\x1b\x1b\\\x1b\\";
+        assert_eq!(scan_once(bytes), vec![AttentionEvent::Notify]);
+    }
+
+    #[test]
+    fn a_plain_dcs_ends_at_its_first_st() {
+        // Outside a tmux envelope a doubled ESC is not an escaped byte, so the
+        // second ESC with the backslash ends the DCS and what follows is read.
+        let bytes = b"\x1bPq\x1b\x1b\\\x1b]9;after\x07";
         assert_eq!(scan_once(bytes), vec![AttentionEvent::Notify]);
     }
 

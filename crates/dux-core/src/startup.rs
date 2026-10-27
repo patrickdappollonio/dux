@@ -258,9 +258,7 @@ pub(crate) fn open_path(path: &Path) -> Result<()> {
     // Test builds only: never open a file on the developer's desktop.
     #[cfg(any(test, feature = "test-support"))]
     crate::test_provider::refuse_unlisted_launch("file opener", opener)?;
-    Command::new(opener)
-        .arg(path)
-        .spawn()
+    crate::browser::spawn_reaped(Command::new(opener).arg(path), opener)
         .with_context(|| format!("failed to run {opener} {}", path.display()))?;
     Ok(())
 }

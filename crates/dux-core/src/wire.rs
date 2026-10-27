@@ -9833,6 +9833,34 @@ mod tests {
         assert!(err.to_string().contains("gh CLI"), "got {err:#}");
     }
 
+    /// An attach whose lookup worker cannot start ends its busy with the
+    /// reason and lets the agent's pull-request actions run again.
+    #[test]
+    fn an_attach_whose_worker_cannot_start_ends_with_the_reason() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        crate::engine::fail_next_worker_spawn();
+        let (op_id, _pending) = engine
+            .dispatch_attach_pull_request("s1", "#42")
+            .expect("dispatch");
+        let event = engine.worker_rx.try_recv().expect("the failure is queued");
+        let reaction = engine.process_worker_event(event);
+        let crate::engine::EventReaction::Status(status) = reaction else {
+            panic!("expected a final, got {reaction:?}");
+        };
+        assert_eq!(status.key.as_deref(), Some(op_id.as_str()));
+        assert_eq!(status.tone, StatusTone::Error, "{status:?}");
+        assert!(
+            status.message.contains("injected test failure"),
+            "{status:?}"
+        );
+        assert!(!engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())));
+    }
+
     /// The headline of the mutual-blocking ruling: while an attach is
     /// resolving, a detach for the same agent is refused outright with an
     /// honest message instead of racing the attach's own write.

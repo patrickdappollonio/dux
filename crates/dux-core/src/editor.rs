@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -220,12 +220,7 @@ pub fn launch_editor(editor: &DetectedEditor, path: &Path) -> Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     crate::test_provider::refuse_unlisted_launch("editor", &editor.command)?;
 
-    Command::new(&editor.command)
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    crate::browser::spawn_reaped(Command::new(&editor.command).arg(path), editor.label)
         .with_context(|| format!("failed to launch {} via {}", editor.label, editor.command))?;
 
     Ok(())

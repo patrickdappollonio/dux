@@ -406,11 +406,23 @@ impl Engine {
             // launch-ready defence for a project that no longer exists.
             let tx = self.worker_tx.clone();
             let wait = self.removal_wait();
+            let continue_now = WorkerEvent::ProjectDeletionContinue {
+                project_id: project_id.to_string(),
+            };
             let project_id = project_id.to_string();
-            std::thread::spawn(move || {
+            let timer = super::spawn_worker::spawn_engine_thread("dux-deletion-wait", move || {
                 std::thread::sleep(wait);
                 let _ = tx.send(WorkerEvent::ProjectDeletionContinue { project_id });
             });
+            if let Err(err) = timer {
+                // Without the timer the deletion proceeds at once, which the
+                // launch-ready defence covers exactly as it covers a create
+                // that outlasts the wait.
+                crate::logger::error(&format!(
+                    "Could not start the project deletion's wait: {err}; proceeding now"
+                ));
+                let _ = self.worker_tx.send(continue_now);
+            }
             return EventReaction::Status(pending);
         }
         let mut reactions = vec![EventReaction::Status(pending)];
@@ -1346,6 +1358,107 @@ mod tests {
         let refused = statuses(&reaction);
         assert_eq!(refused[0].tone, StatusTone::Error);
         assert!(refused[0].message.contains("is being deleted"));
+    }
+
+    /// The final of a create whose session row cannot be saved, for an agent
+    /// whose branch came about as `provenance` and whose working copy is
+    /// `worktree`, with that working copy's folder.
+    fn unsaved_create_final(
+        provenance: crate::model::BranchProvenance,
+        worktree: crate::agent_job::WorktreeOwnership,
+    ) -> (StatusUpdate, String) {
+        let (mut engine, tmp) = test_engine();
+        let (repo, worktrees) = world(&mut engine, tmp.path(), &["unsaved"]);
+        let mut session = engine.sessions.pop().unwrap();
+        if let Some(managed) = session.workspace.as_managed_mut() {
+            managed.branch_provenance = provenance;
+        }
+        engine
+            .session_store
+            .break_sessions_table_for_test()
+            .unwrap();
+        let op = crate::engine::status_op("Creating\u{2026}").resolve_in_handler(
+            |o: &crate::engine::CreateLaunchOutcome| {
+                crate::engine::command::create_launch_final(o, None)
+            },
+        );
+        let op_id = op.id().to_string();
+        let _ = engine.begin_status_op(&op);
+        engine.pending_create_ops.insert(op_id.clone(), op);
+        let client =
+            crate::pty::PtyClient::spawn_with_env("cat", &[], &worktrees[0], 24, 80, 100, &[])
+                .unwrap();
+        let tab = session.slot_tab_id().to_owned();
+        let (_outcome, final_status) =
+            engine.process_agent_launch_ready(crate::worker::AgentLaunchReadyData {
+                spawn_ticket: None,
+                request: crate::worker::AgentLaunchRequest {
+                    tab_id: tab,
+                    provider: session.provider.clone(),
+                    session,
+                    provider_config: crate::config::ProviderCommandConfig::default(),
+                    env: Vec::new(),
+                    identity: crate::term_identity::TerminalIdentity::default(),
+                    resume: false,
+                    pty_size: (24, 80),
+                    scrollback_lines: 100,
+                    kind: crate::worker::AgentLaunchKind::Create {
+                        status_message: StatusText::default(),
+                        status_warns: false,
+                        status_notes: None,
+                        pull_request_pin: None,
+                        repo_path: repo.to_string_lossy().into_owned(),
+                        owns_worktree: worktree
+                            == crate::agent_job::WorktreeOwnership::CreatedByThisJob,
+                        startup_result: None,
+                        status_op_id: op_id,
+                    },
+                    wants_fullscreen: false,
+                    status_quiet: crate::statusline::QuietSurfaces::LOUD,
+                },
+                client,
+            });
+        let EventReaction::Status(status) =
+            final_status.expect("the create's final").into_reaction()
+        else {
+            panic!("the final is a message");
+        };
+        assert_eq!(status.tone, StatusTone::Error);
+        (status, crate::home_path::shorten_home(&worktrees[0]))
+    }
+
+    /// A create whose session row cannot be saved names the working copy and
+    /// branch it made, since no agent names them any more.
+    #[test]
+    fn a_create_that_cannot_be_saved_names_what_it_made() {
+        let (status, folder) = unsaved_create_final(
+            crate::model::BranchProvenance::CreatedByDux,
+            crate::agent_job::WorktreeOwnership::CreatedByThisJob,
+        );
+        assert!(status.message.contains(&folder), "{status:?}");
+        assert!(status.message.contains("branch \"unsaved\""), "{status:?}");
+    }
+
+    /// On a branch that already existed, only the working copy is dux's.
+    #[test]
+    fn a_create_that_cannot_be_saved_does_not_claim_an_existing_branch() {
+        let (status, folder) = unsaved_create_final(
+            crate::model::BranchProvenance::AttachedExisting,
+            crate::agent_job::WorktreeOwnership::CreatedByThisJob,
+        );
+        assert!(status.message.contains(&folder), "{status:?}");
+        assert!(!status.message.contains("branch"), "{status:?}");
+    }
+
+    /// An adopted working copy and its branch were both there before.
+    #[test]
+    fn a_create_that_cannot_be_saved_does_not_claim_an_adopted_worktree() {
+        let (status, folder) = unsaved_create_final(
+            crate::model::BranchProvenance::Adopted,
+            crate::agent_job::WorktreeOwnership::Preexisting,
+        );
+        assert!(!status.message.contains(&folder), "{status:?}");
+        assert!(!status.message.contains("left on disk"), "{status:?}");
     }
 
     /// Item 7's defence: a create that outlasted the wait lands for a project

@@ -511,6 +511,12 @@ pub struct Engine {
     /// `ResumePullRequestAutodetection`, and loaded at boot by
     /// [`Engine::seed_pr_statuses_from_store`].
     pub pr_suppressions: HashSet<String>,
+    /// `Some` while the detaches behind `pr_suppressions` could not be read,
+    /// holding when to try the read again. Until a read succeeds no
+    /// autodetection runs or applies for an unpinned agent, since any of them
+    /// may be one the user detached; a pin is the user's own answer and still
+    /// syncs.
+    pub pr_suppressions_retry_at: Option<Instant>,
     /// The agents the branch-sync poller checks, shared with it.
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     /// The agents the pull-request poller asks about, shared with it.
@@ -709,6 +715,11 @@ pub struct Engine {
     /// and the in-process flip carries this map across automatically with the
     /// engine.
     pub pty_activity: HashMap<String, Instant>,
+    /// The wall-clock time beside each companion terminal's `pty_activity`
+    /// stamp, taken at the same poll. A terminal's projected `updated_at` reads
+    /// it, because a monotonic `Instant` does not advance while the machine
+    /// sleeps and so cannot be mapped back onto the wall clock.
+    pub terminal_activity_at: HashMap<String, chrono::DateTime<Utc>>,
     /// When the user last forwarded keystrokes to each agent's PTY. The terminal
     /// echoes typing back as PTY output, which would otherwise read as the agent
     /// streaming ([`Engine::is_agent_streaming`]) and falsely light the working
@@ -997,6 +1008,11 @@ pub enum CreateLaunchOutcome {
         error: String,
         /// The name the create had settled on, when it had one.
         attempted_name: Option<String>,
+        /// The working copy's folder (home-shortened) when this create made
+        /// it, which stays on disk with no agent naming it.
+        left_folder: Option<String>,
+        /// The branch when dux created it for this agent, which stays too.
+        left_branch: Option<String>,
     },
     /// The launch (or the create worker) failed; `message` is the already-formatted
     /// error line. `attempted_name` is the name the create had settled on, when
@@ -2142,6 +2158,10 @@ pub const STANDALONE_ADD_AS_PROJECT_REMEDY: &str =
 /// concurrent `gh` calls for the same session.
 pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long after a failed read of the pull-request detaches dux reads them
+/// again, while autodetection waits on them.
+const PR_SUPPRESSIONS_RETRY: Duration = Duration::from_secs(60);
+
 /// Tighter debounce for foreground-focus PR checks (switching to / activating an
 /// agent in the TUI, opening its PTY on the web) so a freshly-focused agent shows
 /// current data even if no other trigger checked it recently, without letting
@@ -2452,6 +2472,7 @@ impl Engine {
     pub fn poll_pty_activity(&mut self) {
         self.prune_operations();
         let now = Instant::now();
+        let now_wall = Utc::now();
         // `providers` (and therefore `pty_activity`) is keyed by TAB id, not
         // session id. An agent's own key is whatever `AgentSession::slot_tab_id`
         // points at, never the session id read off the record.
@@ -2468,6 +2489,8 @@ impl Engine {
         for (terminal_id, terminal) in &self.companion_terminals {
             if terminal.client.take_received_data() {
                 self.pty_activity.insert(terminal_id.clone(), now);
+                self.terminal_activity_at
+                    .insert(terminal_id.clone(), now_wall);
             }
         }
     }
@@ -3619,6 +3642,7 @@ impl Engine {
     /// clock and spawns the worker, so nothing about `gh` is ever run on a UI
     /// thread and a wedged `gh` is bounded by the probe's own timeout.
     pub fn poll_gh_probe_schedule(&mut self) {
+        self.retry_unread_pr_suppressions();
         if !crate::gh::gh_reprobe_is_due(
             self.gh_status,
             if self.github_integration_enabled {
@@ -4746,6 +4770,53 @@ impl Engine {
         )
     }
 
+    /// Read the pull-request detaches into `pr_suppressions`. On failure the
+    /// set already in memory stands, autodetection is held off for unpinned
+    /// agents, and a retry is scheduled. Answers whether the read succeeded.
+    fn read_pr_suppressions(&mut self) -> bool {
+        match self.session_store.load_pr_suppressions() {
+            Ok(suppressions) => {
+                self.pr_suppressions = suppressions.into_iter().collect();
+                self.pr_suppressions_retry_at = None;
+                true
+            }
+            Err(err) => {
+                crate::logger::warn(&format!(
+                    "[gh-integration] could not load pull-request detaches, so no pull \
+                     request is autodetected until they load; retrying in {}s: {err:#}",
+                    PR_SUPPRESSIONS_RETRY.as_secs(),
+                ));
+                self.pr_suppressions_retry_at = Some(Instant::now() + PR_SUPPRESSIONS_RETRY);
+                false
+            }
+        }
+    }
+
+    /// Whether pull-request autodetection may run or apply for `session_id`:
+    /// a pin always syncs, anything else only once the detaches are known and
+    /// the session is not among them.
+    pub(crate) fn pr_autodetect_allowed(&self, session_id: &str) -> bool {
+        self.pr_overrides.contains_key(session_id)
+            || (self.pr_suppressions_retry_at.is_none()
+                && !self.pr_suppressions.contains(session_id))
+    }
+
+    /// Read the pull-request detaches again when a failed read's retry is due,
+    /// and on success seed the badges and rebuild the sync plan they held back.
+    /// Called once per tick with the `gh` re-probe schedule.
+    fn retry_unread_pr_suppressions(&mut self) {
+        if self
+            .pr_suppressions_retry_at
+            .is_none_or(|at| Instant::now() < at)
+        {
+            return;
+        }
+        if self.read_pr_suppressions() {
+            self.seed_pr_statuses_from_store();
+            self.update_pr_sync_sessions();
+        }
+    }
+
     /// Seed `pr_statuses` from the persisted `latest_prs` rows, so a startup
     /// shows pull-request badges immediately, before the first network poll and
     /// even when `gh` is unavailable. A no-op when GitHub integration is off.
@@ -4758,13 +4829,21 @@ impl Engine {
         // Load the durable detaches FIRST: a suppressed session's stored
         // `session_prs` row is history, not a badge, and re-badging it here
         // would make a restart quietly undo the user's detach.
-        self.pr_suppressions = self
-            .session_store
-            .load_pr_suppressions()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
+        // Unreadable, any stored row may be one the user detached, so the
+        // suppressions already in memory stand and no autodetected row is
+        // badged until the next seed reads them.
+        let stored = if self.read_pr_suppressions() {
+            self.session_store
+                .load_all_latest_prs()
+                .unwrap_or_else(|err| {
+                    crate::logger::warn(&format!(
+                        "[gh-integration] could not load stored pull requests: {err:#}"
+                    ));
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
         for pr in stored {
             if self.pr_suppressions.contains(&pr.session_id) {
                 continue;
@@ -4781,7 +4860,16 @@ impl Engine {
         // No suppression check here: a pin and a suppression cannot coexist
         // (attaching lifts the suppression, detaching removes the pin), and a
         // pin is a manual association the user asked for, not autodetection.
-        for pinned in self.session_store.load_pr_overrides().unwrap_or_default() {
+        let pins = self
+            .session_store
+            .load_pr_overrides()
+            .unwrap_or_else(|err| {
+                crate::logger::warn(&format!(
+                    "[gh-integration] could not load attached pull requests: {err:#}"
+                ));
+                Vec::new()
+            });
+        for pinned in pins {
             if let Some(info) = crate::gh::reconstruct_pr_from_stored(&pinned) {
                 self.pr_statuses.insert(pinned.session_id.clone(), info);
             }
@@ -4912,7 +5000,7 @@ impl Engine {
         // genuinely immediate check rather than one the skipped calls pushed
         // out. `update_pr_sync_sessions` drops the session from the batched
         // loop for the same reason; this is the one-shot half.
-        if self.pr_suppressions.contains(session_id) {
+        if !self.pr_autodetect_allowed(session_id) {
             return false;
         }
         // A standalone agent has no branch, so there is no pull request to
@@ -5450,7 +5538,8 @@ impl Engine {
                 // A detached session is left out of the plan entirely: dux was
                 // told there is no pull request here, so it neither asks
                 // GitHub nor has anything to answer with.
-                .filter(|s| !self.pr_suppressions.contains(&s.id))
+                // So is every unpinned one while the detaches cannot be read.
+                .filter(|s| self.pr_autodetect_allowed(&s.id))
                 // A working copy that is gone is not polled: every question the
                 // sync asks runs git in that directory.
                 .filter(|s| !self.working_copy_missing(&s.id))
@@ -5534,12 +5623,12 @@ impl Engine {
             title: title.to_string(),
             url,
         };
-        self.session_store.upsert_pr_override(&stored)?;
         // Plugging a pull request back in by hand lifts an earlier detach: the
         // user has said what this agent's PR is, so the session is tracked
         // again (against the pin, and against autodetection once unpinned).
+        // Both rows change in one transaction before memory does.
+        self.session_store.attach_pr_override(&stored)?;
         self.pr_suppressions.remove(session_id);
-        self.session_store.delete_pr_suppression(session_id)?;
         if let Some(info) = crate::gh::reconstruct_pr_from_stored(&stored) {
             self.pr_statuses.insert(session_id.to_string(), info);
         }
@@ -5600,12 +5689,12 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
             anyhow::bail!(pr_attach_in_flight_message(&agent_name));
         }
-        self.pr_overrides.remove(session_id);
-        self.session_store.delete_pr_override(session_id)?;
-        // Write the suppression BEFORE re-deriving the sync snapshot, so the
+        // Both rows change in one transaction before memory does, and the
+        // suppression is in place BEFORE re-deriving the sync snapshot, so the
         // snapshot this detach produces already excludes the session.
+        self.session_store.detach_pr_override(session_id)?;
+        self.pr_overrides.remove(session_id);
         self.pr_suppressions.insert(session_id.to_string());
-        self.session_store.set_pr_suppressed(session_id)?;
         // The badge goes now. Callers reach this through a wire command, and
         // every wire command is a spine mutation, so the cleared badge is
         // published to the web with this change rather than a cycle later; the
@@ -5768,7 +5857,8 @@ impl Engine {
         let raw = raw_input.to_string();
         let sid = session_id.to_string();
         let op_id_for_worker = op_id.clone();
-        std::thread::spawn(move || {
+        let unstarted = (session_id.to_string(), op_id.clone());
+        let spawned = spawn_worker::spawn_engine_thread("dux-pr-attach", move || {
             use std::panic::AssertUnwindSafe;
             // Keep a sender outside `catch_unwind` so a panicking job still
             // resolves the keyed op instead of stranding its busy.
@@ -5796,6 +5886,22 @@ impl Engine {
                 });
             }
         });
+        if let Err(err) = spawned {
+            // The in-flight key and the op are already taken, so the attach
+            // ends through the failure the worker would have sent, behind the
+            // busy this returns.
+            crate::logger::error(&format!(
+                "Could not start the pr-attach lookup worker: {err}"
+            ));
+            let (session_id, op_id) = unstarted;
+            let _ = self
+                .worker_tx
+                .send(crate::worker::WorkerEvent::PullRequestResolved {
+                    result: Err(format!("Could not start background worker: {err}").into()),
+                    purpose: crate::worker::PrLookupPurpose::Attach { session_id },
+                    status_op_id: Some(op_id),
+                });
+        }
         Ok((op_id, pending))
     }
 }
@@ -11634,6 +11740,123 @@ mod tests {
             vec!["s1".to_string()],
             "the detach is durable"
         );
+    }
+
+    /// An attach whose suppression cannot be lifted keeps neither the pin nor
+    /// the lifted suppression, in memory or on disk.
+    #[test]
+    fn an_attach_that_cannot_lift_the_suppression_changes_nothing() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.clear_pull_request_override("s1").expect("detach");
+        engine
+            .session_store
+            .break_pr_suppressions_table_for_test()
+            .unwrap();
+
+        engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+            .expect_err("the suppression write fails");
+
+        assert!(engine.pr_suppressions.contains("s1"));
+        assert!(engine.pr_overrides.is_empty());
+        assert_eq!(
+            engine.session_store.load_pr_overrides().unwrap(),
+            Vec::new()
+        );
+    }
+
+    /// A detach whose suppression cannot be written keeps the pin, in memory
+    /// and on disk.
+    #[test]
+    fn a_detach_that_cannot_write_the_suppression_keeps_the_pin() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+            .expect("attach");
+        engine
+            .session_store
+            .break_pr_suppressions_table_for_test()
+            .unwrap();
+
+        engine
+            .clear_pull_request_override("s1")
+            .expect_err("the suppression write fails");
+
+        assert!(engine.pr_overrides.contains_key("s1"));
+        assert_eq!(engine.session_store.load_pr_overrides().unwrap().len(), 1);
+    }
+
+    /// With the suppressions unreadable no autodetected pull request is badged,
+    /// from the store or from a sync, since any of them may be one the user
+    /// detached; once a retry reads them, autodetection applies again.
+    #[test]
+    fn unreadable_suppressions_hold_off_autodetection_until_they_read() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine
+            .session_store
+            .upsert_pr(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 7,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "Detected".to_string(),
+                url: String::new(),
+            })
+            .unwrap();
+        engine
+            .session_store
+            .break_pr_suppressions_table_for_test()
+            .unwrap();
+
+        engine.seed_pr_statuses_from_store();
+        assert!(!engine.pr_statuses.contains_key("s1"));
+
+        let pr = crate::model::PrInfo {
+            number: 8,
+            state: crate::model::PrState::Open,
+            title: "Synced".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://github.com/o/r/pull/8".into(),
+        };
+        let sync = |engine: &Engine| {
+            crate::worker::WorkerEvent::PrStatusReady(vec![crate::worker::PrStatusResult {
+                branch_generation: engine.pr_branch_generation("s1"),
+                session_id: "s1".to_string(),
+                pr: Some(pr.clone()),
+            }])
+        };
+        assert!(!engine.spawn_pr_check_for_session("s1", Duration::from_secs(0)));
+        engine.process_worker_event(sync(&engine));
+        assert!(
+            !engine.pr_statuses.contains_key("s1"),
+            "a sync result is dropped"
+        );
+
+        engine.retry_unread_pr_suppressions();
+        assert!(engine.pr_suppressions_retry_at.is_some(), "not due yet");
+        engine
+            .session_store
+            .restore_pr_suppressions_table_for_test()
+            .unwrap();
+        engine.pr_suppressions_retry_at = Some(Instant::now());
+        engine.retry_unread_pr_suppressions();
+        assert_eq!(engine.pr_suppressions_retry_at, None);
+        engine.process_worker_event(sync(&engine));
+        assert_eq!(engine.pr_statuses.get("s1").map(|pr| pr.number), Some(8));
     }
 
     /// Detach is no longer a no-op without a pin: an AUTODETECTED badge is
