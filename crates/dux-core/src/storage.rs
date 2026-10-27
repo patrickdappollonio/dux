@@ -2073,6 +2073,19 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The branch an explicit rename moved `session_id`'s minted branch to, if
+    /// one did.
+    pub(crate) fn load_minted_branch_rename(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "select branch_name from session_minted_branch_renames where session_id = ?1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// Every `(session_id, branch_name)` an explicit rename moved a minted
     /// branch to.
     pub(crate) fn load_minted_branch_renames(&self) -> Result<Vec<(String, String)>> {
@@ -4279,6 +4292,22 @@ mod tests {
         assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
         // Clearing an absent suppression is a harmless no-op.
         store.delete_pr_suppression("s1").unwrap();
+    }
+
+    #[test]
+    fn a_minted_branch_rename_is_read_for_its_own_session_only() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_session(&test_session("s2", now, now)).unwrap();
+        store.set_minted_branch_rename("s1", "renamed-1").unwrap();
+        store.set_minted_branch_rename("s2", "renamed-2").unwrap();
+
+        assert_eq!(
+            store.load_minted_branch_rename("s2").unwrap().as_deref(),
+            Some("renamed-2")
+        );
+        assert_eq!(store.load_minted_branch_rename("s3").unwrap(), None);
     }
 
     #[test]

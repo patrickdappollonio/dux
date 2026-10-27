@@ -112,6 +112,17 @@ pub(crate) fn default_url_opener() -> UrlOpener {
     Arc::new(|url: &str| dux_core::browser::open_url(url))
 }
 
+/// What a startup-command rerun runs: the project, its command, and the
+/// environment it runs with.
+pub(crate) struct StartupRerunInputs {
+    /// The project the command belongs to.
+    pub(crate) project: Project,
+    /// The command, trimmed and non-empty.
+    pub(crate) command: String,
+    /// The environment the command runs with.
+    pub(crate) env: Vec<(String, String)>,
+}
+
 /// A left press dux took an interest in because it landed on an OSC 8 link.
 ///
 /// One lifecycle shared by the windowed mouse path and the fullscreen raw-input
@@ -4777,6 +4788,7 @@ impl App {
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
+            unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
             pr_statuses: HashMap::new(),

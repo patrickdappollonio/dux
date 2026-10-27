@@ -1,9 +1,8 @@
-//! Shared text-macro helpers used by both surfaces.
+//! Shared text-macro helpers.
 //!
 //! The byte transform ([`macro_payload_bytes`]) and the surface-filter predicate
-//! ([`macro_matches_surface`]) live in core, not in the TUI, so a macro sent from
-//! the web and one sent from the TUI produce BYTE-IDENTICAL input to the same
-//! PTY. The macro DATA model ([`crate::config::MacroEntry`],
+//! ([`macro_matches_surface`]) live in core, beside the macro data they read.
+//! The web's macro picker mirrors both in its own client code. The macro DATA model ([`crate::config::MacroEntry`],
 //! [`crate::config::MacroSurface`]) stays in `config.rs` with the rest of the
 //! serde-persisted config.
 
@@ -39,9 +38,7 @@ pub fn macro_payload_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Whether a macro of `macro_surface` is available on a target of
-/// `target_surface`. The pure core of the TUI's `filtered_macros` surface gate
-/// (`entry.surface.matches(session_surface)`), extracted so the web's
-/// `RunMacro` enforces the SAME surface restriction the TUI's macro bar does.
+/// `target_surface`: the surface gate of the TUI's macro bar.
 pub fn macro_matches_surface(macro_surface: MacroSurface, target_surface: SessionSurface) -> bool {
     macro_surface.matches(target_surface)
 }

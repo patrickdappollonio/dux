@@ -190,6 +190,15 @@ fn a_worker_that_never_starts_is_answered_for() {
         engine.worker_rx.recv_timeout(Duration::from_secs(5)),
         Ok(crate::worker::WorkerEvent::ProjectWorktreesReady { result: Err(_), .. })
     ));
+    engine.force_worker_spawn_failure = true;
+    engine.spawn_browser_entries(tmp.path());
+    assert!(matches!(
+        engine.worker_rx.recv_timeout(Duration::from_secs(5)),
+        Ok(crate::worker::WorkerEvent::BrowserEntriesReady {
+            entries: Err(_),
+            ..
+        })
+    ));
 }
 
 /// A destructive claim on a link covers the link alone, under the same one

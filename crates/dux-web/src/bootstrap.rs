@@ -248,6 +248,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
+        unsaved_branch_drifts: std::collections::HashMap::new(),
         gh_status: GhStatus::Unknown,
         gh_probe: dux_core::engine::GhProbeState::default(),
         pr_statuses: HashMap::new(),

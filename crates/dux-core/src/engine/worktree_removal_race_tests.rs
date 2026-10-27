@@ -324,14 +324,43 @@ fn removal_waits_for_every_tab_and_terminal_of_the_agent() {
     assert_removed_cleanly(&fx, &result);
 }
 
+/// Puts a held directory's write permission back when dropped, so the scratch
+/// directory can be cleaned up whatever the test did.
+struct WritableAgain(PathBuf);
+
+impl Drop for WritableAgain {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// Something dux did not start and cannot see (a daemon in a session of its
 /// own) keeps writing into the worktree. Nothing dux knows of is left to stop,
 /// git removes what it can, and the final says what is left and how to finish
 /// rather than reporting a bare git error. The registration is gone, the
 /// branch the user asked to delete is deleted, and dux deletes nothing itself.
+///
+/// Whether the writer refills the folder before git's last `rmdir` is a race,
+/// so the unseen program also holds a directory git cannot empty (one with no
+/// write permission): git's removal fails on every run, not only on the runs
+/// the writer wins.
 #[test]
 fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!(
+            "SKIPPED: running as root, so git can empty a directory with no write permission"
+        );
+        return;
+    }
     let mut fx = fixture();
+    let held = fx.worktree.join(".astro-held");
+    std::fs::create_dir(&held).expect("create the held directory");
+    std::fs::write(held.join("lock"), "x").expect("seed the held directory");
+    std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o555))
+        .expect("take the held directory's write permission");
+    let _writable_again = WritableAgain(held);
     let script = writer_script(&fx.pidfile);
     let mut daemon = std::process::Command::new("sh");
     daemon.arg(&script).current_dir(&fx.worktree);

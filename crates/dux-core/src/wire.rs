@@ -725,22 +725,6 @@ pub enum WireCommand {
         #[serde(default)]
         ask_id: Option<String>,
     },
-    /// Run a configured text macro against a live PTY target, mirroring the TUI's
-    /// macro bar. `target_id` names EITHER an agent session (surface `Agent`) OR
-    /// a companion terminal (surface `Terminal`), resolved through the same
-    /// lookup the actor's `pty_for` uses. `name` is the macro's `[macros]` key.
-    ///
-    /// An unknown name and a macro whose surface does not match the resolved
-    /// target are both errors: the TUI bar simply omits mismatches, but an
-    /// explicit wire error is the right shape for a programmatic client. The text
-    /// is translated by the shared `dux_core::macros::macro_payload_bytes` before
-    /// the write, so parity with the TUI is by construction.
-    RunMacro {
-        /// The agent session or terminal the macro is sent to.
-        target_id: String,
-        /// The macro's name.
-        name: String,
-    },
     /// Wholesale-replace the `[macros]` config, mirroring the TUI macro editor's
     /// save semantics. `entries` is an ORDERED list of `(name, {text, surface})`
     /// and the order is preserved into the config map and the `ViewModel`'s
@@ -3513,13 +3497,20 @@ impl Engine {
                 )
             })?;
 
+        // Resolved before the claim, so a refusal leaves nothing claimed.
+        let env = crate::engine::resolve_env_or_refuse(
+            &self.config.env,
+            crate::engine::EnvOverlay::Project {
+                name: &project.name,
+                env: &project.env,
+            },
+            "rerun the startup command",
+        )?;
         let claim = self
             .claim_startup_rerun(session_id, &session.display_label(), &managed.worktree_path)
             .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
         let paths = self.paths.clone();
         let terminal = self.config.startup_command_terminal.clone();
-        let env =
-            crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
         let branch = managed.branch_name.clone();
         let success_name = project.name.clone();
         let failure_name = project.name.clone();
@@ -5534,7 +5525,6 @@ impl Engine {
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }
             }
-            WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
             WireCommand::UpdateMacros { entries, version } => {
                 let Command::UpdateMacros { macros } = Self::update_macros_command(entries)? else {
                     unreachable!("update_macros_command builds an UpdateMacros")
@@ -5669,7 +5659,6 @@ impl Engine {
             | WireCommand::PersistGlobalEnv { .. }
             | WireCommand::ReloadConfig {}
             | WireCommand::RecoverConfig {}
-            | WireCommand::RunMacro { .. }
             | WireCommand::UpdateMacros { .. }
             | WireCommand::SetMacro { .. }
             | WireCommand::RemoveMacro { .. }
@@ -6817,6 +6806,40 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         engine.apply_wire(rerun).expect("a later run starts");
+    }
+
+    /// A rerun whose environment cannot be resolved is refused before
+    /// anything is claimed or started.
+    #[test]
+    fn wire_rerun_startup_command_refuses_an_environment_it_cannot_resolve() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut project = sample_project("p1", "/repo");
+        project.startup_command = Some("touch started".to_string());
+        project.env.insert("BROKEN".to_string(), "x$".to_string());
+        engine.projects.push(project);
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        let err = engine
+            .apply_wire(WireCommand::RerunStartupCommand {
+                session_id: "s1".to_string(),
+            })
+            .map(|_| ())
+            .expect_err("the rerun is refused");
+
+        assert!(
+            err.to_string()
+                .starts_with("dux did not rerun the startup command: environment variable BROKEN"),
+            "{err}"
+        );
+        assert!(!engine.process_registry.startup_running("s1"));
+        assert!(!worktree.path().join("started").exists());
     }
 
     #[test]
@@ -15829,20 +15852,7 @@ mod tests {
         assert!(followup.statuses.is_empty() && followup.clear_keys.is_empty());
     }
 
-    // ── RunMacro / UpdateMacros wire mapping ────────────────────────────────
-
-    #[test]
-    fn wire_run_macro_deserializes() {
-        let json = r#"{"command":"run_macro","args":{"target_id":"sess-1","name":"greet"}}"#;
-        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(
-            cmd,
-            WireCommand::RunMacro {
-                target_id: "sess-1".to_string(),
-                name: "greet".to_string(),
-            }
-        );
-    }
+    // ── UpdateMacros wire mapping ───────────────────────────────────────────
 
     #[test]
     fn wire_update_macros_deserializes() {
@@ -16866,24 +16876,6 @@ mod tests {
         let raw = std::fs::read_to_string(&engine.paths.config_path).expect("read config");
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
         assert_disk_agrees_with_memory(&disk, after);
-    }
-
-    #[test]
-    fn wire_to_command_run_macro_passes_through() {
-        let (engine, _tmp) = test_engine();
-        let cmd = engine
-            .wire_to_command(WireCommand::RunMacro {
-                target_id: "sess-1".to_string(),
-                name: "greet".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::RunMacro { target_id, name } => {
-                assert_eq!(target_id, "sess-1");
-                assert_eq!(name, "greet");
-            }
-            _ => panic!("expected Command::RunMacro"),
-        }
     }
 
     #[test]

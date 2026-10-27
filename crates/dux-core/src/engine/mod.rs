@@ -470,6 +470,10 @@ pub struct Engine {
     /// `reap_terminating_ptys` drains the waits; `sweep_recreate_restarts`
     /// starts the tabs.
     pub pending_tab_restarts: Vec<lifecycle::PendingTabRestart>,
+    /// Agents whose branch drifted onto a branch dux could not save, by
+    /// session id, with that branch: the drift is reported once until it saves
+    /// or moves again, rather than on every branch check.
+    pub unsaved_branch_drifts: HashMap<String, String>,
     /// Whether `gh` is usable, as the last probe found.
     pub gh_status: GhStatus,
     /// Test-only injection point for the rare synchronous worker-spawn failure
@@ -3460,10 +3464,12 @@ impl Engine {
                 if !branch_sync_should_poll(secs) {
                     return LoopControl::Continue;
                 }
-                let snapshot = match sessions.lock() {
-                    Ok(guard) => guard.clone(),
-                    Err(_) => return LoopControl::Continue,
-                };
+                // The plan is replaced whole, so a writer that panicked left
+                // a whole one behind.
+                let snapshot = sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let mut updates = Vec::new();
                 for entry in &snapshot {
                     let worktree = Path::new(&entry.worktree_path);
@@ -3563,9 +3569,9 @@ fn report_missing_pr_sync_worktrees(
     sessions: &Mutex<Vec<PrSyncEntry>>,
     tx: &std::sync::mpsc::Sender<WorkerEvent>,
 ) {
-    let Ok(guard) = sessions.lock() else {
-        return;
-    };
+    let guard = sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let gone: Vec<(String, std::path::PathBuf)> = guard
         .iter()
         .map(|entry| {
@@ -3806,9 +3812,10 @@ impl Engine {
         });
         let worktree = resolved.as_ref().map(|(_, path)| path.clone());
         // Keep the background poller in sync with the watched worktree.
-        if let Ok(mut guard) = self.watched_worktree.lock() {
-            (*guard).clone_from(&worktree);
-        }
+        self.watched_worktree
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&worktree);
         // The WATCHED SESSION is whichever session the panel is showing, even
         // when there is no repository to poll in it. Dropping the id here
         // instead would leave the previous session's id in place and let its
@@ -4164,7 +4171,10 @@ impl Engine {
                     Duration::from_secs(10)
                 };
                 thread::sleep(changed_files_poll_delay(interval, last_sweep));
-                let path = watched.lock().ok().and_then(|guard| guard.clone());
+                let path = watched
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let started = Instant::now();
                 let swept = path
                     .as_ref()
@@ -4201,17 +4211,21 @@ impl Engine {
     pub fn spawn_browser_entries(&mut self, dir: &Path) {
         let dir = dir.to_path_buf();
         let dir_for_panic = dir.clone();
-        self.spawn_background_worker(
+        let dir_if_unspawned = dir.clone();
+        let spawned = self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("browser-entries:{}", dir.display()),
                 in_flight_key: None,
-                panic_event: Some(Box::new(move |_reason| {
-                    // Synthesise an empty entries list so the browser prompt
-                    // exits its loading state rather than spinning forever.
-                    WorkerEvent::BrowserEntriesReady {
-                        dir: dir_for_panic,
-                        entries: Vec::new(),
-                    }
+                // The browser leaves its loading state and says why it has
+                // nothing to show, rather than spinning forever or showing an
+                // empty folder.
+                panic_event: Some(Box::new(move |reason| WorkerEvent::BrowserEntriesReady {
+                    entries: Err(format!(
+                        "dux could not list {}: the worker listing it stopped \
+                             unexpectedly ({reason}). See dux.log.",
+                        crate::home_path::shorten_home(&dir_for_panic)
+                    )),
+                    dir: dir_for_panic,
                 })),
             },
             move |tx| {
@@ -4221,9 +4235,24 @@ impl Engine {
                     dir.display(),
                     entries.len()
                 ));
-                let _ = tx.send(WorkerEvent::BrowserEntriesReady { dir, entries });
+                let _ = tx.send(WorkerEvent::BrowserEntriesReady {
+                    dir,
+                    entries: Ok(entries),
+                });
             },
         );
+        // A worker that never started is answered too, so the browser leaves
+        // its loading state and says why.
+        if matches!(spawned, BackgroundSpawn::SpawnFailed) {
+            let _ = self.worker_tx.send(WorkerEvent::BrowserEntriesReady {
+                entries: Err(format!(
+                    "dux could not list {}: it could not start a worker thread to read it. \
+                     Try again in a moment.",
+                    crate::home_path::shorten_home(&dir_if_unspawned)
+                )),
+                dir: dir_if_unspawned,
+            });
+        }
     }
 
     /// List `project`'s worktrees for the adopt picker off the engine thread;
@@ -4945,11 +4974,13 @@ impl Engine {
     /// if one did. See [`crate::model::AgentSession::branch_minted_at`].
     pub(crate) fn minted_branch_rename(&self, session_id: &str) -> Option<String> {
         self.session_store
-            .load_minted_branch_renames()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|(id, _)| id == session_id)
-            .map(|(_, branch)| branch)
+            .load_minted_branch_rename(session_id)
+            .unwrap_or_else(|err| {
+                crate::logger::warn(&format!(
+                    "could not read the minted branch rename for {session_id}: {err:#}"
+                ));
+                None
+            })
     }
 
     /// Trigger a single-session pull-request check for a deliberate event (an
@@ -5202,7 +5233,11 @@ impl Engine {
     /// Refreshes the shared session snapshot used by the branch-sync background
     /// worker.
     pub fn update_branch_sync_sessions(&self) {
-        if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+        {
+            let mut guard = self
+                .branch_sync_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // A standalone agent has no branch to keep in step with, and
             // its folder may not be a repository at all, so it is never
             // enrolled: `filter_map` over the branch identity is the gate and
@@ -5531,7 +5566,11 @@ impl Engine {
             .into_iter()
             .collect();
 
-        if let Ok(mut guard) = self.pr_sync_sessions.lock() {
+        {
+            let mut guard = self
+                .pr_sync_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = self
                 .sessions
                 .iter()
@@ -6153,16 +6192,47 @@ impl Engine {
     /// hand a project-less agent an empty environment, which is a very different
     /// thing from the global one.
     pub(crate) fn session_env(&self, session: &AgentSession) -> Vec<(String, String)> {
-        let project_env = match &session.workspace {
+        let project_env = match self.session_env_overlay(session) {
+            EnvOverlay::Project { env, .. } => env.clone(),
+            EnvOverlay::GlobalOnly => std::collections::BTreeMap::new(),
+        };
+        // An environment that cannot be resolved never reaches a process: the
+        // launch chokepoint refuses it (see `launch_env_refusal`) and every
+        // terminal creator refuses it too.
+        crate::config::resolve_agent_env(&self.config.env, &project_env).unwrap_or_default()
+    }
+
+    /// Whose variables an agent's processes run with: its project's overlaid on
+    /// the global ones for a managed agent whose project is known, the global
+    /// ones alone otherwise (a standalone agent, or a project record that is
+    /// gone).
+    pub(crate) fn session_env_overlay<'a>(&'a self, session: &AgentSession) -> EnvOverlay<'a> {
+        let project = match &session.workspace {
             crate::model::AgentWorkspace::Managed(managed) => self
                 .projects
                 .iter()
-                .find(|project| project.id == managed.project_id)
-                .map(|project| project.env.clone())
-                .unwrap_or_default(),
-            crate::model::AgentWorkspace::Folder(_) => std::collections::BTreeMap::new(),
+                .find(|project| project.id == managed.project_id),
+            crate::model::AgentWorkspace::Folder(_) => None,
         };
-        crate::config::resolve_agent_env(&self.config.env, &project_env).unwrap_or_default()
+        match project {
+            Some(project) => EnvOverlay::Project {
+                name: &project.name,
+                env: &project.env,
+            },
+            None => EnvOverlay::GlobalOnly,
+        }
+    }
+
+    /// The refusal a launch of `session` gets when its environment cannot be
+    /// resolved, or `None` when it can.
+    pub(crate) fn launch_env_refusal(&self, session: &AgentSession) -> Option<String> {
+        resolve_env_or_refuse(
+            &self.config.env,
+            self.session_env_overlay(session),
+            &format!("start agent \"{}\"", session.display_label()),
+        )
+        .err()
+        .map(|refusal| refusal.to_string())
     }
 
     /// Where an agent lives, as a phrase a status line can drop into a
@@ -6979,9 +7049,6 @@ impl Engine {
         // entry carries it, so a delete or a relaunch moments later still finds
         // this process to wait for.
         let owner = self.terminating_owner_for_tab(session_id, TabIdRef::new(tab_id));
-        // A tab a working-copy recreate waits to start again is closed, not
-        // restarted.
-        self.stop_tab_restart(TabIdRef::new(tab_id));
         let promoted = if self.is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id))
         {
             Some(
@@ -7001,6 +7068,10 @@ impl Engine {
             self.session_store.delete_agent_tab(tab_id)?;
             None
         };
+        // A tab a working-copy recreate waits to start again is closed, not
+        // restarted. Only once the close is past its refusals: a refused close
+        // leaves the tab, and its restart, where they were.
+        self.stop_tab_restart(TabIdRef::new(tab_id));
 
         // Graceful PTY teardown (SIGTERM into the terminating set), then clear
         // every runtime map this tab keyed via the shared `clear_tab_runtime`
@@ -7263,6 +7334,114 @@ pub struct ChangeAgentProviderOutcome {
     /// Whether the newly-selected provider can resume a prior conversation on
     /// this worktree (it supports resume and has been launched here before).
     pub resume_available: bool,
+}
+
+/// Whose environment variables a process is started with: the global ones
+/// alone, or the global ones overlaid with a project's.
+#[derive(Clone, Copy, Debug)]
+pub enum EnvOverlay<'a> {
+    /// `[env]` in config.toml and nothing else.
+    GlobalOnly,
+    /// `[env]` overlaid with the named project's variables.
+    Project {
+        /// The project's name, for the refusal.
+        name: &'a str,
+        /// The project's variables.
+        env: &'a std::collections::BTreeMap<String, String>,
+    },
+}
+
+/// A start dux refused because its environment could not be resolved. Its
+/// text is a whole sentence, so a surface shows it as it is rather than behind
+/// a prefix of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvRefusal(String);
+
+impl std::fmt::Display for EnvRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EnvRefusal {}
+
+/// Why one variable cannot be passed on, or `None` when it can. Never names
+/// the value.
+fn env_variable_fault(name: &str, value: &str) -> Option<&'static str> {
+    if !crate::config::is_valid_env_name(name) {
+        return Some("its name is not a valid variable name");
+    }
+    match crate::config::expand_env_vars(value) {
+        None => Some("its value has invalid expansion syntax"),
+        Some(expanded) if expanded.contains('\0') => Some("its value contains a NUL byte"),
+        Some(_) => None,
+    }
+}
+
+/// The environment a process dux starts runs with, or a refusal rather than a
+/// start with no variables: the environment `overlay` resolves to, or an [`EnvRefusal`]
+/// saying that dux did not `act`, which variable could not be resolved, why,
+/// and where to fix it. A value is never named, and neither is a name that is
+/// not a variable name, which may be a token pasted where a name goes. The
+/// refusal is also written to dux.log.
+///
+/// # Errors
+///
+/// Returns the [`EnvRefusal`] when a variable cannot be resolved.
+pub fn resolve_env_or_refuse(
+    global_env: &std::collections::BTreeMap<String, String>,
+    overlay: EnvOverlay<'_>,
+    act: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let empty = std::collections::BTreeMap::new();
+    let project_env = match overlay {
+        EnvOverlay::GlobalOnly => &empty,
+        EnvOverlay::Project { env, .. } => env,
+    };
+    let err = match crate::config::resolve_agent_env(global_env, project_env) {
+        Ok(env) => return Ok(env),
+        Err(err) => err,
+    };
+    let mut merged = global_env.clone();
+    merged.extend(project_env.clone());
+    let culprit = merged
+        .iter()
+        .find_map(|(name, value)| env_variable_fault(name, value).map(|why| (name, why)));
+    let project_place =
+        |project: &str| format!("the environment variables of project \"{project}\"");
+    let (what, where_it_is) = match culprit {
+        Some((name, why)) => {
+            let place = match overlay {
+                EnvOverlay::Project { name: project, .. } if project_env.contains_key(name) => {
+                    project_place(project)
+                }
+                EnvOverlay::Project { .. } | EnvOverlay::GlobalOnly => {
+                    "[env] in config.toml".to_string()
+                }
+            };
+            let what = if crate::config::is_valid_env_name(name) {
+                format!("environment variable {name} could not be resolved, because {why}")
+            } else {
+                format!("an environment variable could not be resolved, because {why}")
+            };
+            (what, place)
+        }
+        // Every variable passes on its own, so name both places it can be
+        // fixed and give the resolver's own reason.
+        None => (
+            format!("the environment variables could not be resolved ({err:#})"),
+            match overlay {
+                EnvOverlay::Project { name: project, .. } => {
+                    format!("[env] in config.toml or {}", project_place(project))
+                }
+                EnvOverlay::GlobalOnly => "[env] in config.toml".to_string(),
+            },
+        ),
+    };
+    let refusal =
+        format!("dux did not {act}: {what}. Fix or remove it in {where_it_is}, then try again.");
+    crate::logger::warn(&refusal);
+    Err(anyhow::Error::new(EnvRefusal(refusal)))
 }
 
 #[cfg(test)]
@@ -7558,6 +7737,30 @@ mod tests {
         assert!(
             engine.branch_sync_sessions.lock().expect("lock").is_empty(),
             "and the next cycle has nothing to run git in"
+        );
+    }
+
+    /// A thread that panicked holding the branch-sync plan leaves a plan that
+    /// is still whole, so it keeps being rebuilt rather than freezing.
+    #[test]
+    fn a_poisoned_branch_sync_plan_is_still_rebuilt() {
+        let (engine, _tmp, _folder) = engine_with_a_standalone_agent();
+        let plan = Arc::clone(&engine.branch_sync_sessions);
+        let _ = std::thread::spawn(move || {
+            let _guard = plan.lock().expect("lock");
+            panic!("poison the plan");
+        })
+        .join();
+
+        engine.update_branch_sync_sessions();
+
+        assert_eq!(
+            engine
+                .branch_sync_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
         );
     }
 

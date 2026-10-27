@@ -24,7 +24,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error for an unknown session, a working copy whose directory
-    /// is gone, a folder a removal has claimed, or a shell that fails to spawn.
+    /// is gone, a folder a removal has claimed, an environment that cannot be
+    /// resolved, or a shell that fails to spawn.
     pub fn create_companion_terminal(
         &mut self,
         session_id: &str,
@@ -47,25 +48,14 @@ impl Engine {
             anyhow::bail!("{}", refused.sentence("open a terminal there"));
         }
 
-        // A standalone agent belongs to no project, so a terminal opened on it
-        // gets the global environment with no project overlay. Falling through
-        // to `unwrap_or_default` on a missing project id would hand it an empty
-        // environment instead, which is a different and much worse thing.
-        let env = match session.project_id() {
-            Some(project_id) => self
-                .projects
-                .iter()
-                .find(|project| project.id == project_id)
-                .and_then(|project| {
-                    crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
-                })
-                .unwrap_or_default(),
-            None => crate::config::resolve_agent_env(
-                &self.config.env,
-                &std::collections::BTreeMap::new(),
-            )
-            .unwrap_or_default(),
-        };
+        // An agent's terminal runs with its agent's environment: the project's
+        // overlaid on the global one, or the global one alone for a standalone
+        // agent or a project record that is gone, never an empty one.
+        let env = crate::engine::resolve_env_or_refuse(
+            &self.config.env,
+            self.session_env_overlay(&session),
+            "open the terminal",
+        )?;
 
         self.spawn_terminal(
             TerminalOwner::Session(session_id.to_string()),
@@ -87,8 +77,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error for an unknown project, a project path that is not a
-    /// directory on disk, a folder a removal has claimed, or a shell that fails
-    /// to spawn.
+    /// directory on disk, a folder a removal has claimed, an environment that
+    /// cannot be resolved, or a shell that fails to spawn.
     pub fn create_project_terminal(
         &mut self,
         project_id: &str,
@@ -109,8 +99,14 @@ impl Engine {
             );
         }
 
-        let env =
-            crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
+        let env = crate::engine::resolve_env_or_refuse(
+            &self.config.env,
+            crate::engine::EnvOverlay::Project {
+                name: &project.name,
+                env: &project.env,
+            },
+            "open the project terminal",
+        )?;
 
         self.spawn_terminal(
             TerminalOwner::Project(project_id.to_string()),
@@ -134,15 +130,17 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns an error when a removal has claimed the directory or the shell
-    /// fails to spawn.
+    /// Returns an error when a removal has claimed the directory, the
+    /// environment cannot be resolved, or the shell fails to spawn.
     pub fn create_standalone_terminal(&mut self, rows: u16, cols: u16) -> Result<(String, String)> {
         let dir = crate::home_path::standalone_terminal_dir();
         // The global half only. `resolve_agent_env` merges a project's env over
         // the global one; passing an empty map is exactly "there is no project".
-        let env =
-            crate::config::resolve_agent_env(&self.config.env, &std::collections::BTreeMap::new())
-                .unwrap_or_default();
+        let env = crate::engine::resolve_env_or_refuse(
+            &self.config.env,
+            crate::engine::EnvOverlay::GlobalOnly,
+            "open the standalone terminal",
+        )?;
 
         self.spawn_terminal(TerminalOwner::Standalone, &dir, &env, rows, cols)
     }
@@ -1149,6 +1147,62 @@ mod tests {
         assert!(terminal.foreground_cmd.is_none());
     }
 
+    /// A terminal whose environment cannot be resolved is refused, naming the
+    /// variable and where to fix it but never its value, and nothing opens.
+    #[test]
+    fn a_terminal_whose_environment_cannot_be_resolved_is_refused() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .config
+            .env
+            .insert("API_TOKEN".to_string(), "hunter2$".to_string());
+
+        let err = engine
+            .create_standalone_terminal(24, 80)
+            .expect_err("the terminal is refused")
+            .to_string();
+
+        assert!(
+            err.starts_with(
+                "dux did not open the standalone terminal: environment variable API_TOKEN"
+            ) && err.contains("Fix or remove it in [env] in config.toml"),
+            "{err}"
+        );
+        assert!(!err.contains("hunter2"), "the value is never named: {err}");
+        assert!(engine.companion_terminals.is_empty());
+    }
+
+    /// A broken variable in a project's own environment is pointed at there,
+    /// and a name that is no variable name is not repeated.
+    #[test]
+    fn a_project_terminal_refusal_points_at_the_project_and_hides_a_bad_name() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        project
+            .env
+            .insert("sk-pasted token".to_string(), "v".to_string());
+        let name = project.name.clone();
+        engine.projects.push(project);
+
+        let err = engine
+            .create_project_terminal("p1", 24, 80)
+            .expect_err("the terminal is refused")
+            .to_string();
+
+        assert!(
+            err.contains(&format!("the environment variables of project \"{name}\"")),
+            "{err}"
+        );
+        assert!(
+            !err.contains("sk-pasted"),
+            "the bad name is not repeated: {err}"
+        );
+        assert!(engine.companion_terminals.is_empty());
+    }
+
     #[test]
     fn create_standalone_terminal_opens_in_the_home_directory_owning_nothing() {
         // The journey: the user asks for a terminal that belongs to nothing. It
@@ -1215,6 +1269,37 @@ mod tests {
             output.contains("project=[]"),
             "no project's env overlays a terminal that belongs to no project; saw: {output}"
         );
+    }
+
+    /// A managed agent whose project record is gone still gets the global
+    /// environment in its terminal, never an empty one.
+    #[test]
+    fn an_agent_terminal_whose_project_is_gone_gets_the_global_env() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine
+            .config
+            .env
+            .insert("DUX_GLOBAL".to_string(), "global".to_string());
+        let mut session = sample_session("s1", "gone", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "sh".to_string();
+        engine.config.terminal.args = vec![
+            "-c".to_string(),
+            "echo \"global=[$DUX_GLOBAL]\"; sleep 5".to_string(),
+        ];
+
+        let (id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create the agent's terminal");
+
+        let output = read_until(&engine.companion_terminals[&id].client, "global=");
+        assert!(output.contains("global=[global]"), "saw: {output}");
     }
 
     /// Poll a PTY's visible text until `needle` appears, bounded. Terminal output

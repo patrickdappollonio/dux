@@ -202,6 +202,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
+        unsaved_branch_drifts: std::collections::HashMap::new(),
         gh_status: crate::model::GhStatus::Unknown,
         gh_probe: GhProbeState::default(),
         pr_statuses: std::collections::HashMap::new(),

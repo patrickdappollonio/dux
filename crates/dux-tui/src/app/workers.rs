@@ -1276,7 +1276,8 @@ impl App {
         });
     }
 
-    fn apply_browser_entries(&mut self, dir: &Path, entries: Vec<BrowserEntry>) {
+    fn apply_browser_entries(&mut self, dir: &Path, entries: Result<Vec<BrowserEntry>, String>) {
+        let mut failure = None;
         if let PromptState::BrowseProjects {
             current_dir,
             entries: current_entries,
@@ -1286,9 +1287,18 @@ impl App {
         } = &mut self.prompt
             && current_dir.as_path() == dir
         {
-            *current_entries = entries;
             *loading = false;
             *selected = 0;
+            match entries {
+                Ok(entries) => *current_entries = entries,
+                Err(why) => {
+                    current_entries.clear();
+                    failure = Some(why);
+                }
+            }
+        }
+        if let Some(why) = failure {
+            self.set_error(why);
         }
     }
 
@@ -3171,6 +3181,39 @@ mod tests {
         assert_eq!(message, "launched");
     }
 
+    /// A folder that could not be listed is said, not shown as an empty folder.
+    #[test]
+    fn a_listing_that_failed_leaves_loading_and_says_why() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let root = PathBuf::from(&app.engine.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            purpose: BrowsePurpose::AddProject,
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: true,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: false,
+            path_input: TextInput::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.apply_reaction(EventReaction::BrowserEntriesArrived {
+            dir: root,
+            entries: Err("dux could not list ~/code: it broke.".to_string()),
+        });
+
+        assert!(matches!(
+            &app.prompt,
+            PromptState::BrowseProjects { loading: false, .. }
+        ));
+        assert_eq!(app.status.tone(), StatusTone::Error);
+        assert_eq!(app.status.message(), "dux could not list ~/code: it broke.");
+    }
+
     #[test]
     fn browser_entries_update_only_the_matching_open_directory() {
         let mut app =
@@ -3198,7 +3241,7 @@ mod tests {
 
         app.apply_reaction(EventReaction::BrowserEntriesArrived {
             dir: root.join("stale"),
-            entries: vec![entry.clone()],
+            entries: Ok(vec![entry.clone()]),
         });
         match &app.prompt {
             PromptState::BrowseProjects {
@@ -3216,7 +3259,7 @@ mod tests {
 
         app.apply_reaction(EventReaction::BrowserEntriesArrived {
             dir: root,
-            entries: vec![entry],
+            entries: Ok(vec![entry]),
         });
         match &app.prompt {
             PromptState::BrowseProjects {

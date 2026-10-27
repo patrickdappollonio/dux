@@ -797,8 +797,8 @@ pub enum WorkerEvent {
     BrowserEntriesReady {
         /// The directory listed.
         dir: PathBuf,
-        /// Its rows.
-        entries: Vec<BrowserEntry>,
+        /// Its rows, or the sentence saying why it could not be listed.
+        entries: Result<Vec<BrowserEntry>, String>,
     },
     /// A project's worktrees were listed for the adopt picker.
     ProjectWorktreesReady {

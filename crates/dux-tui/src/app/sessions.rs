@@ -1982,7 +1982,7 @@ impl App {
         {
             Ok((id, _label)) => id,
             Err(e) => {
-                self.set_error(format!("Could not launch terminal: {e:#}"));
+                self.set_error(terminal_launch_failure("Could not launch terminal", &e));
                 return;
             }
         };
@@ -2016,7 +2016,10 @@ impl App {
         let terminal_id = match self.engine.create_project_terminal(&project.id, rows, cols) {
             Ok((id, _label)) => id,
             Err(e) => {
-                self.set_error(format!("Could not launch project terminal: {e:#}"));
+                self.set_error(terminal_launch_failure(
+                    "Could not launch project terminal",
+                    &e,
+                ));
                 return;
             }
         };
@@ -2043,7 +2046,10 @@ impl App {
         let terminal_id = match self.engine.create_standalone_terminal(rows, cols) {
             Ok((id, _label)) => id,
             Err(e) => {
-                self.set_error(format!("Could not launch standalone terminal: {e:#}"));
+                self.set_error(terminal_launch_failure(
+                    "Could not launch standalone terminal",
+                    &e,
+                ));
                 return;
             }
         };
@@ -2161,7 +2167,7 @@ impl App {
         {
             Ok((id, _label)) => id,
             Err(e) => {
-                self.set_error(format!("Could not launch terminal: {e:#}"));
+                self.set_error(terminal_launch_failure("Could not launch terminal", &e));
                 return;
             }
         };
@@ -3381,6 +3387,48 @@ impl App {
         Ok(())
     }
 
+    /// The project a startup-command rerun runs for, its command, and the
+    /// environment it runs with, or the sentence that refuses the rerun.
+    /// Resolved before anything is claimed, so a refusal leaves nothing held.
+    fn startup_rerun_inputs(
+        &self,
+        project_id: &str,
+    ) -> Result<crate::app::StartupRerunInputs, String> {
+        let project = self
+            .engine
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+            .ok_or_else(|| "Could not find the selected agent's project.".to_string())?;
+        let command = project
+            .startup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "Project \"{}\" does not have a startup command.",
+                    project.name
+                )
+            })?;
+        let env = dux_core::engine::resolve_env_or_refuse(
+            &self.engine.config.env,
+            dux_core::engine::EnvOverlay::Project {
+                name: &project.name,
+                env: &project.env,
+            },
+            "rerun the startup command",
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        Ok(crate::app::StartupRerunInputs {
+            project,
+            command,
+            env,
+        })
+    }
+
     pub(crate) fn rerun_startup_command_on_agent(&mut self) {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent first.");
@@ -3401,28 +3449,16 @@ impl App {
                 return;
             }
         };
-        let Some(project) = self
-            .engine
-            .projects
-            .iter()
-            .find(|project| project.id == managed.project_id)
-            .cloned()
-        else {
-            self.set_error("Could not find the selected agent's project.");
-            return;
-        };
-        let Some(command) = project
-            .startup_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|command| !command.is_empty())
-            .map(str::to_string)
-        else {
-            self.set_error(format!(
-                "Project \"{}\" does not have a startup command.",
-                project.name
-            ));
-            return;
+        let crate::app::StartupRerunInputs {
+            project,
+            command,
+            env,
+        } = match self.startup_rerun_inputs(&managed.project_id) {
+            Ok(inputs) => inputs,
+            Err(refusal) => {
+                self.set_error(refusal);
+                return;
+            }
         };
         // One run per agent at a time, and a hold on the worktree so a removal
         // waits for it; one sentence when either is refused.
@@ -3441,8 +3477,6 @@ impl App {
         let tx = self.engine.worker_tx.clone();
         let branch = managed.branch_name.clone();
         let terminal = self.engine.config.startup_command_terminal.clone();
-        let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
-            .unwrap_or_default();
         // Declare the loading→final states together. The success message needs
         // the palette keybinding label (render context only the main thread has);
         // resolve it HERE and bake it into the op's outcomes. The status rides a
@@ -5060,6 +5094,17 @@ pub(super) fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) 
     }
 }
 
+/// The status a terminal that did not launch leaves: an environment refusal is
+/// already a whole sentence and is shown as it is; anything else is said behind
+/// `prefix`.
+fn terminal_launch_failure(prefix: &str, err: &anyhow::Error) -> String {
+    if err.downcast_ref::<dux_core::engine::EnvRefusal>().is_some() {
+        err.to_string()
+    } else {
+        format!("{prefix}: {err:#}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5171,6 +5216,7 @@ mod tests {
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
+            unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
@@ -5569,6 +5615,7 @@ mod tests {
             pending_group_removals: Vec::new(),
             pending_detachments: Vec::new(),
             pending_tab_restarts: Vec::new(),
+            unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
             pr_statuses: std::collections::HashMap::new(),
@@ -6532,6 +6579,55 @@ mod tests {
         let binds = vec!["the Tailscale port is busy.".to_string()];
         let combined = combine_flip_warnings(None, binds).expect("warning present");
         assert_eq!(combined, "the Tailscale port is busy.");
+    }
+
+    /// A terminal refused for its environment shows the refusal as the whole
+    /// sentence it already is, not behind a second "could not launch".
+    #[test]
+    fn a_terminal_refused_for_its_environment_says_so_once() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine
+            .config
+            .env
+            .insert("BROKEN".to_string(), "x$".to_string());
+
+        app.show_standalone_terminal();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.message().starts_with(
+                "dux did not open the standalone terminal: environment variable BROKEN could \
+                 not be resolved, because its value has invalid expansion syntax."
+            ),
+            "{}",
+            app.status.message()
+        );
+    }
+
+    /// A rerun whose environment cannot be resolved is refused on the status
+    /// line before anything is claimed.
+    #[test]
+    fn rerun_startup_command_refuses_an_environment_it_cannot_resolve() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.selected_left = 1;
+        app.engine.projects[0].startup_command = Some("true".to_string());
+        app.engine.projects[0]
+            .env
+            .insert("BROKEN".to_string(), "x$".to_string());
+
+        app.rerun_startup_command_on_agent();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .message()
+                .starts_with("dux did not rerun the startup command: environment variable BROKEN"),
+            "{}",
+            app.status.message()
+        );
+        assert!(!app.engine.process_registry.startup_running("session-1"));
     }
 
     /// The way out of a working copy the agent deleted from under itself. It is

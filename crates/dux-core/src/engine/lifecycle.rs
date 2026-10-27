@@ -409,8 +409,9 @@ impl std::fmt::Debug for TerminatingPty {
 /// re-deriving it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KillTabRuntimeOutcome {
-    /// True when there was a live provider to kill; `false` is an idempotent
-    /// no-op (already gone).
+    /// True when there was a live provider to kill, or a working-copy recreate
+    /// was waiting to start the tab again (it now stays stopped); `false` is an
+    /// idempotent no-op (already gone).
     pub killed: bool,
     /// The session that owns the killed tab, resolved through the session's
     /// slot pointer for a first tab and through the tab's own row for an extra
@@ -4349,6 +4350,20 @@ mod recreate_tests {
         );
     }
 
+    /// A close that is refused leaves the tab where it was, so the restart
+    /// still starts it again.
+    #[test]
+    fn a_refused_close_during_the_restart_still_restarts_the_tab() {
+        let (mut engine, _tmp, _cwd) = agent_running("codex", &[]);
+        restart_under_way(&mut engine);
+        engine
+            .close_tab("s1", "s1-slot")
+            .expect_err("the only tab cannot be closed");
+
+        let sweep = restart_completes(&mut engine);
+        assert_eq!(sweep.launches.len(), 1, "the tab starts again");
+    }
+
     /// Deleting the agent while its tabs shut down starts nothing, and the
     /// final says the agent was deleted rather than telling the user to start
     /// its tabs.
@@ -5563,24 +5578,15 @@ mod tests {
     /// unused.
     #[test]
     fn prune_records_no_failure_when_a_macro_ended_a_rapid_run() {
-        use crate::config::{MacroEntry, MacroSurface};
-        use crate::engine::Command;
-
         let (mut engine, _tmp, _worktree, slot) = engine_with_slot_running(spawn_quit_on_line);
-        engine.config.macros.entries.insert(
-            "quit".to_string(),
-            MacroEntry {
-                text: "/exit\n".to_string(),
-                surface: MacroSurface::Agent,
-            },
-        );
-
+        let payload = crate::macros::macro_payload_bytes("/exit\n");
         engine
-            .apply(Command::RunMacro {
-                target_id: slot.as_str().to_string(),
-                name: "quit".to_string(),
-            })
-            .expect("the macro runs against the live tab");
+            .providers
+            .get(&slot)
+            .expect("the live tab")
+            .write_bytes(&payload)
+            .expect("the macro reaches the live tab");
+        engine.note_pty_used(slot.as_str(), &payload);
         assert!(
             !engine.pty_input.contains_key(slot.as_str()),
             "a macro marks the run as used without stamping the typing window"

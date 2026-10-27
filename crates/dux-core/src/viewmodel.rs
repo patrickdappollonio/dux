@@ -66,7 +66,7 @@ pub struct BootstrapView {
     pub provider_drop_paste: BTreeMap<String, DropPasteView>,
     /// Text macros from `[macros]` in `config.toml`, in config (`IndexMap`) order.
     /// The web surfaces these two ways: the terminal-pane quick-picker filters
-    /// by the focused target's surface and runs one via `RunMacro`, and the
+    /// by the focused target's surface and types one into that pane, and the
     /// macro-editor dialog lists/edits them (which is why `text` is exposed: the
     /// web session is authenticated). A config reload that changes `[macros]`
     /// rebuilds this, delivered by a `config.changed` refetch.

@@ -90,6 +90,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         pending_group_removals: Vec::new(),
         pending_detachments: Vec::new(),
         pending_tab_restarts: Vec::new(),
+        unsaved_branch_drifts: std::collections::HashMap::new(),
         gh_status: GhStatus::Unknown,
         force_worker_spawn_failure: false,
         force_loop_worker_spawn_failure: AtomicBool::new(false),

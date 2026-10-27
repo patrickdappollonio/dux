@@ -864,7 +864,9 @@ impl Engine {
         &self,
         target: &std::path::Path,
     ) -> crate::destructive::DestructiveCheck {
-        let occupant = if is_symlink(target) {
+        // Asked once, so every answer below is about the same kind of entry.
+        let link = is_symlink(target);
+        let occupant = if link {
             // A link: what is recorded AT the link's own path or through it,
             // never what its target holds (that stays where it is).
             let projects: Vec<(String, String)> = self
@@ -885,7 +887,6 @@ impl Engine {
         } else {
             self.folder_occupant(target, None, StoppingProcesses::Occupy)
         };
-        let link = is_symlink(target);
         let occupant = occupant.map(|occupant| occupant.reason()).or_else(|| {
             // Operations running in a link's target are not in a link
             // removal's way: the target stays.

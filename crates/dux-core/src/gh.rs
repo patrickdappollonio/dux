@@ -158,10 +158,12 @@ pub(crate) fn run_pr_sync_scoped(
     trigger: SyncTrigger,
     scope: SyncScope,
 ) -> PrSyncReport {
-    let snapshot = match sessions.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => return (Vec::new(), Vec::new()),
-    };
+    // The plan is replaced whole, so a writer that panicked left a whole one
+    // behind.
+    let snapshot = sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let entries = entries_for_scope(snapshot, scope);
     let (results, signals) = run_entries(&entries, backoff, policy, trigger);
     let results = results
@@ -4555,6 +4557,39 @@ mod tests {
         let pr = results[0].1.as_ref().expect("reconstructed");
         assert_eq!(pr.number, 42);
         assert_eq!(pr.state, PrState::Merged);
+    }
+
+    /// A thread that panicked holding the plan leaves a plan that is still
+    /// whole, so the sync keeps reading it rather than freezing every PR.
+    #[test]
+    fn a_poisoned_plan_is_still_synced() {
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/done".to_string(),
+            worktree_path: "/nonexistent/dux-test-path".to_string(),
+            known_pr: Some(stored(42, "MERGED")),
+            agent_exited: true,
+            pinned: None,
+            inactive: false,
+            branch_minted_at: None,
+            branch_generation: 0,
+        };
+        let plan = Arc::new(Mutex::new(vec![entry]));
+        let poisoner = Arc::clone(&plan);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("lock");
+            panic!("poison the plan");
+        })
+        .join();
+
+        let (results, _) = run_pr_sync(
+            &plan,
+            &std::collections::HashMap::new(),
+            &legacy_policy(),
+            SyncTrigger::BlindPoll,
+        );
+
+        assert_eq!(results.len(), 1);
     }
 
     #[test]

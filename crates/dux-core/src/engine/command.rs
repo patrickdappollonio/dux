@@ -12,7 +12,6 @@ use crate::engine::events::{
     WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
-use crate::ids::TabIdRef;
 use crate::model::Project;
 use crate::text::count_of;
 use crate::worker::{
@@ -100,8 +99,8 @@ pub enum Command {
     /// Remove a project and cascade-delete its agents' records and runtime,
     /// keeping their worktrees on disk. Tolerates a ghost project id that exists
     /// only through orphaned sessions: those are cleared and the project-record
-    /// delete is a no-op. The record and config removal run in the persistence
-    /// worker.
+    /// delete is a no-op. The record and config removal run synchronously on
+    /// the engine thread, before the status is returned.
     RemoveProject {
         /// The project to remove.
         project_id: String,
@@ -150,9 +149,9 @@ pub enum Command {
         request: Box<AgentLaunchRequest>,
     },
 
-    /// Stage a single file. Synchronous git call (microseconds for the
-    /// typical case). Returns `EventReaction::Nothing` on success; an `Err`
-    /// propagates to the App caller which surfaces it.
+    /// Stage a single file. A synchronous git call on the calling thread.
+    /// Returns `EventReaction::Nothing` on success; an `Err` propagates to the
+    /// App caller which surfaces it.
     StageFile {
         /// The worktree the file is in.
         worktree_path: PathBuf,
@@ -214,8 +213,8 @@ pub enum Command {
     },
 
     /// Spawn a `git push` worker. Returns `EventReaction::Status(Busy("Pushing
-    /// to remote\u{2026}"))` immediately; completion is reported via
-    /// `WorkerEvent::PushCompleted`.
+    /// to remote\u{2026}"))` immediately; the worker's keyed final replaces it
+    /// when the push ends.
     Push {
         /// The worktree whose branch is pushed.
         worktree_path: PathBuf,
@@ -240,9 +239,9 @@ pub enum Command {
         already_running_message: crate::status_text::StatusText,
     },
 
-    /// Open a filesystem path via the user's OS handler. Fire-and-forget
-    /// spawn; result posts back as `WorkerEvent::OpenPathCompleted` which the
-    /// existing reaction handler surfaces as a status message.
+    /// Open a filesystem path via the user's OS handler, off the engine
+    /// thread. Returns a keyed busy; the worker's keyed final replaces it with
+    /// the outcome.
     OpenPath {
         /// The path to open.
         path: PathBuf,
@@ -263,9 +262,10 @@ pub enum Command {
         new_enabled: bool,
     },
 
-    /// Remove a companion terminal from the engine (drops `PtyClient`, killing
-    /// the child). Returns a typed view carrying the terminal's label so the
-    /// App can format status + reconcile `active_terminal_id` (view field).
+    /// Remove a companion terminal from the engine: its child is sent SIGTERM
+    /// and moved to the terminating set, which force-kills it after the grace.
+    /// Returns a typed view carrying the terminal's label so the App can format
+    /// status + reconcile `active_terminal_id` (view field).
     DeleteTerminal {
         /// The terminal to close.
         terminal_id: String,
@@ -319,19 +319,6 @@ pub enum Command {
     ReorderTerminals {
         /// Every terminal, in the new order.
         terminal_ids: Vec<String>,
-    },
-
-    /// Run a configured text macro against a live PTY target. `target_id` names
-    /// either an agent session (surface `Agent`) or a companion terminal
-    /// (surface `Terminal`), resolved by a providers-then-terminals lookup. An
-    /// unknown macro name and a surface mismatch both return an error Status;
-    /// otherwise the text is transformed by
-    /// `dux_core::macros::macro_payload_bytes` and written to the target's PTY.
-    RunMacro {
-        /// The agent tab or terminal the macro types into.
-        target_id: String,
-        /// The macro to run.
-        name: String,
     },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
@@ -559,6 +546,15 @@ pub enum ConfigSetChange {
         /// The variable to remove.
         name: String,
     },
+}
+
+/// The whole set a [`ConfigSetChange`] resolves to, saved by the handler of the
+/// whole-set command it stands for.
+enum ConfigSetSave {
+    /// Saved as [`Command::UpdateMacros`] saves it.
+    Macros(crate::config::MacrosConfig),
+    /// Saved as [`Command::PersistGlobalEnv`] saves it.
+    Env(std::collections::BTreeMap<String, String>),
 }
 
 impl Engine {
@@ -790,8 +786,6 @@ impl Engine {
             Command::ReorderTerminals { terminal_ids } => self
                 .reorder_terminals(&terminal_ids)
                 .map(|()| EventReaction::Nothing),
-
-            Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
             Command::ChangeConfigSet(change) => self.apply_config_set_change(change),
 
@@ -1164,6 +1158,10 @@ impl Engine {
         // conversation with it. Read from what each terminating entry
         // recorded when it started, never from the tab table.
         let predecessors = self.terminating_predecessors(&session_id, &request.provider);
+        // An environment that cannot be resolved fails the launch the way a
+        // spawn that cannot start does, so the tab keeps its card with the
+        // reason rather than starting with no variables.
+        let env_refusal = self.launch_env_refusal(&request.session);
         // Clone for the panic event closure before the job closure
         // consumes `request`, so panic recovery can take the same path
         // as `process_agent_launch_failed`.
@@ -1183,6 +1181,15 @@ impl Engine {
                 })),
             },
             move |tx| {
+                if let Some(message) = env_refusal {
+                    let _ = tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                        AgentLaunchFailedData {
+                            request: *request,
+                            message,
+                        },
+                    )));
+                    return;
+                }
                 if let Err(message) = wait_for_predecessors(&predecessors, &request, &tx) {
                     let _ = tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
                         AgentLaunchFailedData {
@@ -1530,13 +1537,13 @@ impl Engine {
                 if read_at.is_some_and(|read| read != macros_version(&self.config.macros)) {
                     return Err(StaleSet::Macros.into());
                 }
-                (Command::UpdateMacros { macros }, None)
+                (ConfigSetSave::Macros(macros), None)
             }
             ConfigSetChange::ReplaceEnv { env, read_at } => {
                 if read_at.is_some_and(|read| read != global_env_version(&self.config.env)) {
                     return Err(StaleSet::GlobalEnv.into());
                 }
-                (Command::PersistGlobalEnv { env }, None)
+                (ConfigSetSave::Env(env), None)
             }
             ConfigSetChange::SetMacro { name, entry } => {
                 let mut macros = self.config.macros.clone();
@@ -1547,7 +1554,7 @@ impl Engine {
                     }
                 }
                 (
-                    Command::UpdateMacros { macros },
+                    ConfigSetSave::Macros(macros),
                     Some(crate::status_text!["Saved macro ", q(name), "."]),
                 )
             }
@@ -1557,7 +1564,7 @@ impl Engine {
                     anyhow::bail!("unknown macro \"{name}\"");
                 }
                 (
-                    Command::UpdateMacros { macros },
+                    ConfigSetSave::Macros(macros),
                     Some(crate::status_text!["Removed macro ", q(name), "."]),
                 )
             }
@@ -1565,7 +1572,7 @@ impl Engine {
                 let mut env = self.config.env.clone();
                 env.insert(name.clone(), value);
                 (
-                    Command::PersistGlobalEnv { env },
+                    ConfigSetSave::Env(env),
                     Some(crate::status_text![
                         "Saved global environment variable ",
                         q(name),
@@ -1588,10 +1595,15 @@ impl Engine {
                          name, so it is not shown."
                     ]
                 };
-                (Command::PersistGlobalEnv { env }, Some(done))
+                (ConfigSetSave::Env(env), Some(done))
             }
         };
-        let reaction = self.apply(save)?;
+        // The whole-set save's own handler, called directly: the change was
+        // admitted once already, as itself.
+        let reaction = match save {
+            ConfigSetSave::Macros(macros) => self.apply_update_macros(macros),
+            ConfigSetSave::Env(env) => self.apply_persist_global_env(env),
+        };
         Ok(match (done, reaction) {
             (Some(done), EventReaction::Status(status))
                 if status.tone == crate::statusline::StatusTone::Info =>
@@ -1909,70 +1921,6 @@ impl Engine {
         EventReaction::Status(StatusUpdate::error(format!(
             "Project add failed and was rolled back; config.toml could not be updated: \
              {config_error:#}"
-        )))
-    }
-
-    /// Run a configured text macro against a live PTY target: resolve the macro
-    /// by name, gate it by the target's surface, translate newlines through the
-    /// shared core transform and write to the PTY. See [`Command::RunMacro`].
-    fn run_macro(&mut self, target_id: &str, name: &str) -> anyhow::Result<EventReaction> {
-        // `target_id` is a PTY id of unknown kind: a macro target may be an
-        // agent tab or a companion terminal, and this probe decides which. It
-        // is named as a tab id only for the tab-keyed lookup.
-        let surface = if self.providers.contains_key(TabIdRef::new(target_id)) {
-            crate::model::SessionSurface::Agent
-        } else if self.companion_terminals.contains_key(target_id) {
-            crate::model::SessionSurface::Terminal
-        } else {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "No live agent or terminal for target ",
-                    q(target_id),
-                    ". Reconnect it and try again."
-                ],
-            )));
-        };
-
-        // Resolve the macro entry by name. Unknown → error naming it.
-        let Some(entry) = self.config.macros.entries.get(name) else {
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text!["Macro ", q(name), " does not exist."],
-            )));
-        };
-
-        // Surface gate: refuse a macro whose surface doesn't match the target.
-        // The TUI bar simply omits mismatches; the wire returns an explicit error.
-        if !crate::macros::macro_matches_surface(entry.surface, surface) {
-            let target_kind = match surface {
-                crate::model::SessionSurface::Agent => "agent",
-                crate::model::SessionSurface::Terminal => "terminal",
-            };
-            return Ok(EventReaction::Status(StatusUpdate::error(
-                crate::status_text![
-                    "Macro ",
-                    q(name),
-                    format!(
-                        " is not available on {} targets ({}).",
-                        target_kind,
-                        entry.surface.label()
-                    )
-                ],
-            )));
-        }
-
-        let payload = crate::macros::macro_payload_bytes(&entry.text);
-        // Unified PTY lookup: providers first, then companion terminals, the
-        // same order the web actor's `pty_for` uses.
-        let client = self
-            .providers
-            .get(TabIdRef::new(target_id))
-            .or_else(|| self.companion_terminals.get(target_id).map(|t| &t.client));
-        if let Some(client) = client {
-            client.write_bytes(&payload)?;
-            self.note_pty_used(target_id, &payload);
-        }
-        Ok(EventReaction::Status(StatusUpdate::info(
-            crate::status_text!["Sent macro ", q(name), "."],
         )))
     }
 
@@ -2985,6 +2933,56 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch(TabId::new("s1"))));
     }
 
+    /// A launch whose environment cannot be resolved fails the way a launch
+    /// that cannot spawn does: nothing runs, and the tab keeps a recorded
+    /// failure with the refusal as its reason.
+    #[test]
+    fn dispatch_agent_launch_fails_on_an_environment_it_cannot_resolve() {
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", "/tmp/p1");
+        project.env.insert("BROKEN".to_string(), "x$".to_string());
+        engine.projects.push(project);
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session.clone());
+
+        let request = engine.build_agent_launch_request(
+            session.clone(),
+            crate::model::ConversationStart::Fresh,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: crate::status_text::StatusText::default(),
+            },
+        );
+        engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply");
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the launch answers");
+        let reaction = engine.process_worker_event(event);
+
+        let message = match reaction {
+            EventReaction::AgentLaunchFailedView(outcome) => match *outcome {
+                crate::engine::AgentLaunchFailedOutcome::Reconnect { message, .. } => message,
+                other => panic!("expected a reconnect failure, got {other:?}"),
+            },
+            other => panic!("expected a failed launch, got {other:?}"),
+        };
+        assert!(
+            message.starts_with(
+                "dux did not start agent \"s1-title\": environment variable BROKEN could not be \
+                 resolved, because its value has invalid expansion syntax. Fix or remove it in \
+                 the environment variables of project \"p1-name\", then try again."
+            ),
+            "{message}"
+        );
+        assert!(engine.tab_last_run_failed(session.slot_tab_id().as_str()));
+        assert!(engine.providers.is_empty(), "nothing was started");
+    }
+
     /// A launch over a tab that already has a LIVE process is refused before
     /// anything is spawned. Letting it through would replace the entry in
     /// `providers`, and the displaced client's drop SIGKILLs the child it names,
@@ -3573,14 +3571,12 @@ mod tests {
         assert!(!untracked.exists(), "untracked file should be deleted");
     }
 
-    // ── Command::RunMacro ───────────────────────────────────────────────────
+    // ── Command::ReorderTerminals ───────────────────────────────────────────
 
     use crate::config::{MacroEntry, MacroSurface};
     use crate::pty::PtyClient;
 
-    /// Spawn a `cat -v` PTY in raw mode (control bytes render as caret notation:
-    /// ESC → `^[`, CR → `^M`), the same fixture the TUI macro-bar PTY test uses,
-    /// so a `RunMacro` write can be observed in the terminal snapshot.
+    /// Spawn a `cat -v` PTY in raw mode, a live client for a terminal entry.
     fn spawn_cat_v_pty() -> PtyClient {
         let client = PtyClient::spawn(
             "sh",
@@ -3593,25 +3589,6 @@ mod tests {
         .expect("spawn pty");
         std::thread::sleep(std::time::Duration::from_millis(250));
         client
-    }
-
-    fn rendered_snapshot(client: &PtyClient) -> String {
-        client
-            .snapshot()
-            .cells
-            .iter()
-            .map(|cell| cell.symbol.as_str())
-            .collect()
-    }
-
-    fn insert_macro(engine: &mut Engine, name: &str, text: &str, surface: MacroSurface) {
-        engine.config.macros.entries.insert(
-            name.to_string(),
-            MacroEntry {
-                text: text.to_string(),
-                surface,
-            },
-        );
     }
 
     /// Register a companion terminal directly in the map for reorder tests, with a
@@ -3672,158 +3649,6 @@ mod tests {
         // The rejected reorder left the stored order untouched.
         assert_eq!(engine.companion_terminals["term-1"].sort_order, 0);
         assert_eq!(engine.companion_terminals["term-2"].sort_order, 1);
-    }
-
-    #[test]
-    fn run_macro_writes_to_agent_provider_pty() {
-        let (mut engine, _tmp) = test_engine();
-        engine
-            .providers
-            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
-        insert_macro(&mut engine, "greet", "first\nsecond", MacroSurface::Agent);
-
-        let reaction = engine
-            .apply(Command::RunMacro {
-                target_id: "sess-1".to_string(),
-                name: "greet".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Info);
-                assert_eq!(update.message, "Sent macro \"greet\".");
-            }
-            _ => panic!("expected Info status reaction"),
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let rendered = rendered_snapshot(engine.providers.get(TabIdRef::new("sess-1")).unwrap());
-        assert!(
-            rendered.contains("first") && rendered.contains("second"),
-            "both halves should be visible; got: {rendered:?}"
-        );
-        // Newline translated to ESC+CR (Alt+Enter) by the shared core transform.
-        assert!(
-            rendered.contains("^[") && rendered.contains("^M"),
-            "newline should become ESC+CR; got: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn run_macro_writes_to_companion_terminal_pty() {
-        use crate::model::CompanionTerminal;
-        let (mut engine, _tmp) = test_engine();
-        engine.companion_terminals.insert(
-            "term-1".to_string(),
-            CompanionTerminal {
-                owner: crate::model::TerminalOwner::Session("sess-1".to_string()),
-                label: "term".to_string(),
-                foreground_cmd: None,
-                client: spawn_cat_v_pty(),
-                sort_order: 1,
-                created_at: chrono::Utc::now(),
-            },
-        );
-        insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);
-
-        let reaction = engine
-            .apply(Command::RunMacro {
-                target_id: "term-1".to_string(),
-                name: "ls".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Info);
-                assert_eq!(update.message, "Sent macro \"ls\".");
-            }
-            _ => panic!("expected Info status reaction"),
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let rendered = rendered_snapshot(&engine.companion_terminals.get("term-1").unwrap().client);
-        assert!(
-            rendered.contains("ls -la"),
-            "macro text should reach the terminal PTY; got: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn run_macro_unknown_name_errors() {
-        let (mut engine, _tmp) = test_engine();
-        engine
-            .providers
-            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
-
-        let reaction = engine
-            .apply(Command::RunMacro {
-                target_id: "sess-1".to_string(),
-                name: "nope".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Error);
-                assert!(
-                    update.message.contains("Macro \"nope\" does not exist"),
-                    "got: {}",
-                    update.message
-                );
-            }
-            _ => panic!("expected Error status reaction"),
-        }
-    }
-
-    #[test]
-    fn run_macro_wrong_surface_errors() {
-        let (mut engine, _tmp) = test_engine();
-        // Agent target, but the macro is terminal-only.
-        engine
-            .providers
-            .insert(TabId::new("sess-1"), spawn_cat_v_pty());
-        insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);
-
-        let reaction = engine
-            .apply(Command::RunMacro {
-                target_id: "sess-1".to_string(),
-                name: "ls".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Error);
-                assert!(
-                    update.message.contains("not available on agent targets"),
-                    "got: {}",
-                    update.message
-                );
-            }
-            _ => panic!("expected Error status reaction"),
-        }
-    }
-
-    #[test]
-    fn run_macro_unknown_target_errors() {
-        let (mut engine, _tmp) = test_engine();
-        insert_macro(&mut engine, "greet", "hi", MacroSurface::Both);
-
-        let reaction = engine
-            .apply(Command::RunMacro {
-                target_id: "ghost".to_string(),
-                name: "greet".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Error);
-                assert!(
-                    update.message.contains("No live agent or terminal"),
-                    "got: {}",
-                    update.message
-                );
-            }
-            _ => panic!("expected Error status reaction"),
-        }
     }
 
     // ── Command::UpdateMacros ───────────────────────────────────────────────

@@ -174,11 +174,19 @@ impl StatusUpdate {
         }
     }
 
-    /// Construct a keyed status update. Both the busy and the final
-    /// (info/error) for the same operation should carry the same key so
-    /// `WireStatus::from_update` can propagate it and the web layer can
-    /// dismiss the correct toast.
+    /// Construct a keyed status update in a FINAL tone (info, warning or
+    /// error). The key lets `WireStatus::from_update` propagate it so the web
+    /// layer replaces or dismisses the right toast. A busy is never built here:
+    /// like [`Self::busy`], it is born only from a [`StatusOp`], which declares
+    /// its outcomes and registers its key as running.
+    ///
+    /// [`StatusOp`]: crate::engine::StatusOp
     pub fn keyed(key: impl Into<String>, tone: StatusTone, message: impl Into<StatusText>) -> Self {
+        debug_assert_ne!(
+            tone,
+            StatusTone::Busy,
+            "a busy status comes from a StatusOp, never from StatusUpdate::keyed"
+        );
         let message = message.into();
         let ask = message.ask().cloned();
         let (message, segments) = message.into_parts();
@@ -271,8 +279,8 @@ pub enum EventReaction {
     BrowserEntriesArrived {
         /// The directory listed.
         dir: std::path::PathBuf,
-        /// Its rows.
-        entries: Vec<BrowserEntry>,
+        /// Its rows, or the sentence saying why it could not be listed.
+        entries: Result<Vec<BrowserEntry>, String>,
     },
     /// A project's worktrees arrived for the adopt picker.
     ProjectWorktreesArrived {
@@ -3694,6 +3702,7 @@ impl Engine {
 
     fn process_branch_sync_ready(&mut self, updates: Vec<(String, String)>) -> EventReaction {
         let mut moved: Vec<String> = Vec::new();
+        let mut unsaved: Vec<StatusUpdate> = Vec::new();
         for (session_id, actual_branch) in updates {
             // Rename completion owns the authoritative branch mutation while a rename is active.
             if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
@@ -3719,22 +3728,56 @@ impl Engine {
                 };
                 let previous = managed.branch_name.clone();
                 let original = managed.initial_branch.clone();
-                logger::warn(&branch_drift_log_line(
-                    &session.id,
-                    &label,
-                    &actual_branch,
-                    &previous,
-                    &original,
-                ));
-                managed.branch_name = actual_branch;
-                session.updated_at = Utc::now();
-                if let Err(err) = self.session_store.upsert_session(session) {
-                    logger::error(&format!(
-                        "failed to persist branch-sync update for {} (new branch: {:?}): {err}",
-                        session.id,
-                        session.branch_name(),
+                // A drift dux could not save is met again on every branch
+                // check; it is logged and reported once, until it saves or
+                // moves on.
+                let reported = self.unsaved_branch_drifts.get(&session_id) == Some(&actual_branch);
+                if !reported {
+                    logger::warn(&branch_drift_log_line(
+                        &session.id,
+                        &label,
+                        &actual_branch,
+                        &previous,
+                        &original,
                     ));
                 }
+                let previous_updated_at = session.updated_at;
+                managed.branch_name.clone_from(&actual_branch);
+                session.updated_at = Utc::now();
+                if let Err(err) = self.session_store.upsert_session(session) {
+                    // Memory keeps what the database holds, so the next branch
+                    // check sees the drift again and saves it once the
+                    // database takes writes again.
+                    if let Some(managed) = session.workspace.as_managed_mut() {
+                        managed.branch_name = previous;
+                    }
+                    session.updated_at = previous_updated_at;
+                    if !reported {
+                        logger::error(&format!(
+                            "failed to persist branch-sync update for {session_id} (new branch: \
+                             {actual_branch:?}): {err}",
+                        ));
+                        unsaved.push(
+                            StatusUpdate::warning(crate::status_text![
+                                "The branch of agent ",
+                                q(label),
+                                " changed to ",
+                                q(actual_branch.clone()),
+                                format!(
+                                    " outside dux, but dux could not save it: {err:#}. dux saves \
+                                     it the next time it checks the agent's branch, once its \
+                                     database can be written again; until then the agent shows \
+                                     its old branch. Check that the disk has room, and see dux.log."
+                                )
+                            ])
+                            .with_key(format!("branch-drift-save:{session_id}")),
+                        );
+                        self.unsaved_branch_drifts
+                            .insert(session_id.clone(), actual_branch);
+                    }
+                    continue;
+                }
+                self.unsaved_branch_drifts.remove(&session_id);
                 // Checks still in flight asked about the branch the agent left.
                 *self
                     .pr_branch_generations
@@ -3751,18 +3794,25 @@ impl Engine {
                 moved.push(session.id.clone());
             }
         }
-        if moved.is_empty() {
-            return EventReaction::Nothing;
+        let mut reactions: Vec<EventReaction> =
+            unsaved.into_iter().map(EventReaction::Status).collect();
+        if !moved.is_empty() {
+            self.update_branch_sync_sessions();
+            // The pull-request plan names the branch too, and would otherwise
+            // keep asking GitHub about the one the agent has left. The branch it
+            // moved to may already have a pull request, so it is asked about
+            // once now.
+            self.update_pr_sync_sessions();
+            for session_id in moved {
+                self.request_branch_pr_check(&session_id);
+            }
+            reactions.push(EventReaction::RebuildLeftItems);
         }
-        self.update_branch_sync_sessions();
-        // The pull-request plan names the branch too, and would otherwise keep
-        // asking GitHub about the one the agent has left. The branch it moved
-        // to may already have a pull request, so it is asked about once now.
-        self.update_pr_sync_sessions();
-        for session_id in moved {
-            self.request_branch_pr_check(&session_id);
+        match reactions.len() {
+            0 => EventReaction::Nothing,
+            1 => reactions.pop().unwrap_or(EventReaction::Nothing),
+            _ => EventReaction::Multi(reactions),
         }
-        EventReaction::RebuildLeftItems
     }
 
     fn process_worktree_remove_completed(
@@ -6648,6 +6698,50 @@ mod tests {
         // The session store was never upserted for s1 (no drift persisted).
         let loaded = engine.session_store.load_sessions().expect("load");
         assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    /// A drift dux could not save leaves the agent in memory as the database
+    /// holds it, so the next branch check meets the drift again and saves it
+    /// once the database takes writes. It is reported on a surface once, not
+    /// on every check.
+    #[test]
+    fn branch_sync_drift_that_cannot_be_saved_is_reported_once() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "server-mode");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        rusqlite::Connection::open(&engine.paths.sessions_db_path)
+            .unwrap()
+            .execute_batch(
+                "create trigger refuse_session_update before update on agent_sessions \
+                 begin select raise(abort, 'disk is full'); end",
+            )
+            .unwrap();
+
+        let drift =
+            || WorkerEvent::BranchSyncReady(vec![("s1".to_string(), "agent-tabs".to_string())]);
+
+        let first = engine.process_worker_event(drift());
+        let EventReaction::Status(status) = first else {
+            panic!("expected one warning, got {first:?}");
+        };
+        assert_eq!(status.tone, StatusTone::Warning);
+        assert!(
+            status
+                .message
+                .contains("changed to \"agent-tabs\" outside dux, but dux could not save it")
+                && status.message.contains("disk is full"),
+            "{}",
+            status.message
+        );
+        assert_eq!(engine.sessions[0].branch_name(), Some("server-mode"));
+
+        let again = engine.process_worker_event(drift());
+        assert!(
+            matches!(again, EventReaction::Nothing),
+            "the same unsaved drift is not reported on every check: {again:?}"
+        );
+        assert_eq!(engine.sessions[0].branch_name(), Some("server-mode"));
     }
 
     #[test]
@@ -11815,9 +11909,9 @@ mod tests {
 
     #[test]
     fn status_update_keyed_constructor() {
-        let s = StatusUpdate::keyed("op-key", StatusTone::Busy, "working…");
-        assert_eq!(s.tone, StatusTone::Busy);
-        assert_eq!(s.message, "working\u{2026}");
+        let s = StatusUpdate::keyed("op-key", StatusTone::Warning, "slow…");
+        assert_eq!(s.tone, StatusTone::Warning);
+        assert_eq!(s.message, "slow\u{2026}");
         assert_eq!(s.key.as_deref(), Some("op-key"));
     }
 
