@@ -8827,8 +8827,15 @@ mod tests {
         let entries = parse_worktree_list_porcelain_z(b"worktree /repo/caf\xe9 \0HEAD 1111\0\0");
         assert_eq!(entries[0].path, Path::new("/repo").join(name));
 
+        // APFS refuses a name that is not UTF-8, so on macOS the folder keeps
+        // only the trailing space.
+        let folder = if cfg!(target_os = "macos") {
+            std::ffi::OsStr::new("cafe ")
+        } else {
+            name
+        };
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().canonicalize().unwrap().join(name);
+        let repo = dir.path().canonicalize().unwrap().join(folder);
         fs::create_dir(&repo).unwrap();
         run_git(&repo, &["init", "-q"]);
         assert_eq!(repository_root(&repo).unwrap(), Some(repo));
