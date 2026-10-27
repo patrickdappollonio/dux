@@ -417,18 +417,24 @@ impl Client {
             .send(&Request::get("/api/v1/auth/status"))
             .map_err(|error| self.no_reply(&error))?;
         let status = read_auth_status(&self.target, &reply)?;
-        if let (Some(name), Some(known), Some(now)) =
-            (&self.remote, &remote.instance, &status.instance)
-            && known != now
-        {
-            return Err(CliError::new(
-                Exit::Failed,
-                format!(
-                    "{} is now a different dux than the one this remote signed in to\nRun \
-                     \"dux remote login {name}\" to use it.",
-                    self.target
+        if let (Some(name), Some(known)) = (&self.remote, &remote.instance) {
+            // An answer that names no dux is not taken for the pinned one.
+            let why = match &status.instance {
+                Some(now) if now == known => None,
+                Some(_) => Some("is now a different dux than the one this remote signed in to"),
+                None => Some(
+                    "does not say which dux it is, so it cannot be told apart from a different one",
                 ),
-            ));
+            };
+            if let Some(why) = why {
+                return Err(CliError::new(
+                    Exit::Failed,
+                    format!(
+                        "{} {why}\nRun \"dux remote login {name}\" to use it.",
+                        self.target
+                    ),
+                ));
+            }
         }
         match (&self.remote, status.required_here, &self.token) {
             (Some(name), true, None) => Err(login_needed(name)),
@@ -751,6 +757,42 @@ mod tests {
         assert_eq!(
             guarded.seen().last().unwrap().header("authorization"),
             Some("Bearer t0k")
+        );
+    }
+
+    #[test]
+    fn a_dux_that_does_not_say_which_it_is_is_not_taken_for_the_pinned_one() {
+        let (unnamed, addr) = FakeDux::tcp(|seen| match seen.path.as_str() {
+            "/api/v1/auth/status" => Reply::json(
+                200,
+                r#"{"password_set":true,"required_here":true,"signed_in":false}"#,
+            ),
+            "/api/v1/build" => Reply::json(200, BUILD),
+            _ => Reply::json(404, "{}"),
+        });
+        let dir = private_dir();
+        let target = Target::Remote {
+            name: "work".into(),
+            remote: Remote {
+                url: format!("http://{addr}"),
+                insecure: false,
+                token: Some("t0k".into()),
+                instance: Some("a".into()),
+            },
+        };
+        let error = connect(&target, &dir.path().join("dux.lock")).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "work (http://{addr}) does not say which dux it is, so it cannot be told apart \
+                 from a different one\nRun \"dux remote login work\" to use it."
+            )
+        );
+        assert!(
+            unnamed
+                .seen()
+                .iter()
+                .all(|seen| seen.header("authorization").is_none())
         );
     }
 

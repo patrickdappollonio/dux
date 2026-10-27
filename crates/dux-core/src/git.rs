@@ -976,6 +976,7 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
 }
 
 pub(crate) fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Vec<GitWorktree> {
+    use std::os::unix::ffi::OsStrExt;
     let mut worktrees = Vec::new();
     let mut current: Option<GitWorktree> = None;
 
@@ -986,18 +987,20 @@ pub(crate) fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Vec<GitWorktree> 
             }
             continue;
         }
-        let token = String::from_utf8_lossy(raw);
-        if let Some(path) = token.strip_prefix("worktree ") {
+        if let Some(path) = raw.strip_prefix(b"worktree ") {
             if let Some(entry) = current.take() {
                 worktrees.push(entry);
             }
             current = Some(GitWorktree {
-                path: PathBuf::from(path),
+                path: PathBuf::from(std::ffi::OsStr::from_bytes(path)),
                 head: None,
                 branch_name: None,
                 detached: false,
             });
-        } else if let Some(head) = token.strip_prefix("HEAD ") {
+            continue;
+        }
+        let token = String::from_utf8_lossy(raw);
+        if let Some(head) = token.strip_prefix("HEAD ") {
             if let Some(entry) = &mut current {
                 entry.head = Some(head.to_string());
             }
@@ -1273,31 +1276,17 @@ fn tracking_remote(repo_path: &Path, branch: &str) -> Result<String> {
     {
         return Ok("origin".to_string());
     }
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "for-each-ref",
-            "--format=%(refname)",
-            // A branch name cannot hold a glob character, so this matches
-            // `refs/remotes/<remote>/<branch>` and nothing else.
-            &format!("refs/remotes/*/{branch}"),
-        ])
-        .output()
-        .with_context(|| format!("failed to run git for-each-ref in {}", repo_path.display()))?;
-    if !output.status.success() {
-        return Err(git_failure("git for-each-ref", repo_path, &output));
+    // A remote's name may hold a slash, so each remote this clone has is
+    // asked for the branch rather than a ref split at a slash.
+    let names = run_git_capture(repo_path, &["remote"], "list the remotes")?;
+    let mut remotes = Vec::new();
+    for remote in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        if crate::checkout_move::commit_id(repo_path, &format!("refs/remotes/{remote}/{branch}"))?
+            .is_some()
+        {
+            remotes.push(remote.to_string());
+        }
     }
-    let suffix = format!("/{branch}");
-    let remotes: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|refname| {
-            refname
-                .strip_prefix("refs/remotes/")?
-                .strip_suffix(suffix.as_str())
-                .map(str::to_string)
-        })
-        .collect();
     match remotes.as_slice() {
         [only] => Ok(only.clone()),
         [] => Err(anyhow!(
@@ -2169,7 +2158,9 @@ pub(crate) fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()>
             worktree.display()
         ));
     }
-    let out = worktree_git(worktree, &["reset", "--keep", "--quiet", commit])
+    // `--` after the id: a file named like it would otherwise make the
+    // argument ambiguous, and git would refuse the move.
+    let out = worktree_git(worktree, &["reset", "--keep", "--quiet", commit, "--"])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to fast-forward {}", worktree.display()))?;
@@ -2200,7 +2191,7 @@ pub(crate) fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<(
             worktree.display()
         ));
     }
-    let out = worktree_git(worktree, &["reset", "--hard", "--quiet", to])
+    let out = worktree_git(worktree, &["reset", "--hard", "--quiet", to, "--"])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to rewind {}", worktree.display()))?;
@@ -5001,16 +4992,18 @@ fn index_blob_prefix(worktree_path: &Path, rel_path: &str) -> Option<Vec<u8>> {
         .spawn()
         .ok()?;
     let mut prefix = Vec::new();
-    if let Some(stdout) = child.stdout.as_mut() {
+    let read = child.stdout.as_mut().map_or(Ok(0), |stdout| {
         stdout
             .take(crate::numeric::usize_to_u64(BINARY_SNIFF_BYTES))
             .read_to_end(&mut prefix)
-            .ok()?;
-    }
+    });
     // Drop the pipe before waiting: a blob larger than the sniff gets EPIPE and
-    // exits instead of blocking on a reader that stopped.
+    // exits instead of blocking on a reader that stopped. The child is reaped
+    // before a failed read is answered.
     drop(child.stdout.take());
-    let status = child.wait().ok()?;
+    let status = child.wait();
+    read.ok()?;
+    let status = status.ok()?;
     // A blob that fit inside the sniff exits 0; a larger one is killed by
     // SIGPIPE, which is success as far as this read is concerned. Only an
     // absent path (a real non-zero exit with nothing read) answers None.
@@ -5325,22 +5318,22 @@ fn is_inside_work_tree(path: &Path) -> Result<bool> {
 /// non-zero exit (the ordinary "no repository here" answer) is `Ok(None)` and
 /// is tested; only the failure to spawn git at all is not.
 pub(crate) fn repository_root(dir: &Path) -> Result<Option<PathBuf>> {
+    use std::os::unix::ffi::OsStrExt;
     let output = Command::new("git")
-        .args([
-            "-C",
-            dir.to_string_lossy().as_ref(),
-            "rev-parse",
-            "--show-toplevel",
-        ])
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
         .output()?;
     if !output.status.success() {
         return Ok(None);
     }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // The path's own bytes, up to the one newline git ends the line with: a
+    // directory's name may end in a space, and need not be UTF-8.
+    let root = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
     if root.is_empty() {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(root)))
+    Ok(Some(PathBuf::from(std::ffi::OsStr::from_bytes(root))))
 }
 
 /// True when `rel_path` is ignored by `worktree`'s ignore rules.
@@ -6412,33 +6405,6 @@ pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
     }
 }
 
-/// Return the text of `git diff --cached` for the given worktree.
-/// Uses `-c color.diff=false` to strip ANSI escapes regardless of user config.
-///
-/// # Errors
-///
-/// Fails when git cannot be run or `git diff --cached` fails.
-pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
-    let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "-C",
-            wt.as_ref(),
-            "-c",
-            "color.diff=false",
-            "diff",
-            "--cached",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git diff --cached failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// The typed outcome of [`commit_preflight`]: the single decision both surfaces
 /// share for whether a commit may proceed. The refusal reasons are stable CODES,
 /// not user-facing strings, so each surface renders its own copy (the TUI status
@@ -6717,15 +6683,17 @@ pub(crate) fn file_prefix_at_head(
         .stderr(Stdio::null())
         .spawn()?;
     let mut prefix = Vec::new();
-    if let Some(stdout) = child.stdout.as_mut() {
+    let read = child.stdout.as_mut().map_or(Ok(0), |stdout| {
         stdout
             .take(crate::numeric::usize_to_u64(limit))
-            .read_to_end(&mut prefix)?;
-    }
+            .read_to_end(&mut prefix)
+    });
     // Drop the pipe so a blob larger than the limit gets EPIPE and exits
-    // instead of blocking forever on a reader that stopped.
+    // instead of blocking forever on a reader that stopped. The child is
+    // reaped before a failed read is answered.
     drop(child.stdout.take());
     let _ = child.wait();
+    read?;
     Ok(Some(prefix))
 }
 
@@ -8033,12 +8001,15 @@ fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             // Destination is a regular file that survived the cleanup pass
-            // above. Truncate it in place and realign permissions.
+            // above. Truncate it in place and realign permissions, through
+            // the handle, so a symlink swapped in since is refused rather
+            // than followed.
             let file = OpenOptions::new()
                 .write(true)
                 .truncate(true)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(destination)?;
-            fs::set_permissions(destination, metadata.permissions())?;
+            file.set_permissions(metadata.permissions())?;
             file
         }
         Err(err) => return Err(err.into()),
@@ -8314,8 +8285,8 @@ mod tests {
         assert!(worktree_is_dirty(repo.path()).unwrap());
     }
 
-    /// The views that only show (line counts, the file-info panel's status,
-    /// the staged diff) keep honouring the repository's own `ignore = all`,
+    /// The views that only show (line counts, the file-info panel's status)
+    /// keep honouring the repository's own `ignore = all`,
     /// as they did before the move check existed.
     #[test]
     fn the_display_views_honour_a_submodule_the_repository_says_to_ignore() {
@@ -8349,14 +8320,8 @@ mod tests {
             &["update-index", "--cacheinfo", &format!("160000,{id},sub")],
         );
         assert!(
-            !staged_diff_text(repo.path())
-                .unwrap()
-                .contains("Subproject"),
-            "the staged diff leaves it out"
-        );
-        assert!(
             !staged_numstat(&repo.path().to_string_lossy(), &[]).contains_key("sub"),
-            "and so do the staged line counts"
+            "and the staged line counts leave it out"
         );
     }
 
@@ -8853,6 +8818,20 @@ mod tests {
         assert_eq!(entries[2].branch_name, None);
         assert!(entries[2].detached);
         assert_eq!(entries[2].label(), "detached abcdef1");
+    }
+
+    #[test]
+    fn worktree_paths_and_a_repository_root_keep_their_exact_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"caf\xe9 ");
+        let entries = parse_worktree_list_porcelain_z(b"worktree /repo/caf\xe9 \0HEAD 1111\0\0");
+        assert_eq!(entries[0].path, Path::new("/repo").join(name));
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap().join(name);
+        fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+        assert_eq!(repository_root(&repo).unwrap(), Some(repo));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -9883,6 +9862,16 @@ mod tests {
         git(&["remote", "add", "origin", "/nowhere"]);
         git(&["update-ref", "refs/remotes/origin/a/feat", "HEAD"]);
         assert!(branch_is_pushed(repo.path(), "a/feat").unwrap());
+    }
+
+    #[test]
+    fn tracking_remote_finds_a_branch_on_a_remote_whose_name_holds_a_slash() {
+        let repo = init_test_repo();
+        let git = worktree_git(repo.path());
+        git(&["remote", "add", "team/a", "/nowhere"]);
+        git(&["update-ref", "refs/remotes/team/a/feat", "HEAD"]);
+        assert_eq!(tracking_remote(repo.path(), "feat").unwrap(), "team/a");
+        assert!(tracking_remote(repo.path(), "a/feat").is_err());
     }
 
     /// The probe asks git, which can stall on a wedged filesystem, so it is
@@ -11762,6 +11751,26 @@ mod tests {
         assert_eq!(rev_parse(repo.path(), "refs/heads/behind"), base);
     }
 
+    /// A file in the worktree named like the commit id does not make the
+    /// move ambiguous: the id is read as a revision.
+    #[test]
+    fn a_worktree_moves_to_a_commit_id_that_also_names_a_file_in_it() {
+        let repo = init_test_repo();
+        let (base, ahead, _) = behind_ahead_and_elsewhere(repo.path());
+        let root = tempfile::tempdir().unwrap();
+        let wt = root.path().canonicalize().unwrap().join("wt");
+        run_git(
+            repo.path(),
+            &["worktree", "add", wt.to_str().unwrap(), "behind"],
+        );
+        fs::create_dir(wt.join(&ahead)).unwrap();
+        fs::create_dir(wt.join(&base)).unwrap();
+        fast_forward_worktree(&wt, &ahead).unwrap();
+        assert_eq!(head_commit(&wt).unwrap(), ahead);
+        rewind_worktree(&wt, &ahead, &base).unwrap();
+        assert_eq!(head_commit(&wt).unwrap(), base);
+    }
+
     // ── commit_is_in_branch_history ──────────────────────────
 
     fn rev_parse(repo: &Path, rev: &str) -> String {
@@ -12566,43 +12575,6 @@ mod tests {
         // Within the read budget a folder row carries its files' lines, so the
         // recap still counts what was written into a new folder.
         assert_eq!((row.additions, row.deletions, row.binary), (3, 0, false));
-    }
-
-    #[test]
-    fn staged_diff_text_returns_diff_for_staged_changes() {
-        let repo = init_test_repo();
-        let wt = add_worktree(repo.path(), "staged-diff");
-        fs::write(wt.join("hello.txt"), "hello world\n").unwrap();
-        let run = |args: &[&str]| {
-            let out = test_support::git_command()
-                .args(args)
-                .current_dir(&wt)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        run(&["add", "hello.txt"]);
-        let diff = staged_diff_text(&wt).unwrap();
-        assert!(diff.contains("hello.txt"), "diff should mention the file");
-        assert!(
-            diff.contains("+hello world"),
-            "diff should contain the added line"
-        );
-    }
-
-    #[test]
-    fn staged_diff_text_empty_when_nothing_staged() {
-        let repo = init_test_repo();
-        let wt = add_worktree(repo.path(), "no-staged");
-        let diff = staged_diff_text(&wt).unwrap();
-        assert!(
-            diff.is_empty(),
-            "diff should be empty when nothing is staged"
-        );
     }
 
     /// An untracked symlink is counted the way git counts it once staged: the

@@ -325,6 +325,17 @@ other plain-HTTP address is refused, because your password would cross the netwo
 clear; add `--insecure` to `dux remote add` if you trust every network in between, and
 every login to it then says so.
 
+> [!IMPORTANT]
+> Tailscale's IPv4 addresses (`100.64.0.0/10`) are shared with ordinary carrier networks,
+> which do not encrypt anything. So plain HTTP to one, written as an address or reached
+> through a `.ts.net` name, goes out only while this machine has an address in that range
+> itself, which is what being on the tailnet looks like. Off the tailnet, adding the remote
+> and every command that uses it are refused; use `https://`, or `--insecure` if you trust
+> the networks in between.
+
+URLs carrying a user name or password, a query or a fragment are refused too. A remote is
+saved as its address alone, and its password is asked for at `dux remote login`.
+
 The remote has to accept the name you reach it by. A name it does not know is refused by
 that dux before anything else; add it to its `[server] allowed_hosts`.
 

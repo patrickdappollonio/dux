@@ -666,8 +666,10 @@ pub fn members(
                 || by_pid.get(&session.sid).is_some_and(|leader| {
                     leader.sid == Some(leader.pid)
                         && (leader.start_time == UNKNOWN_START
-                            || (leader.start_time + START_TIME_SLACK >= session.started_at
-                                && leader.start_time <= session.started_at + START_TIME_SLACK))
+                            || (leader.start_time.saturating_add(START_TIME_SLACK)
+                                >= session.started_at
+                                && leader.start_time
+                                    <= session.started_at.saturating_add(START_TIME_SLACK)))
                 })
         })
         .map(|session| {
@@ -2455,12 +2457,18 @@ impl AgentProcessRegistry {
         // started for it: it goes with the agent, whichever way it is
         // deleted. A run that registers its session only after this mark ends
         // it itself (see `StartupRunGuard::register_session`).
+        // A stop that could not be started is said once the lock is released.
+        let mut unstopped = None;
         if let Some(startup) = inner.startup_sessions.get(agent_id).copied() {
             let stop = inner.startup_stop.clone();
+            let notice = stop.as_ref().map(|(_, notice)| Arc::clone(notice));
             let registry = self.clone();
-            let _ = std::thread::Builder::new()
+            if let Err(err) = std::thread::Builder::new()
                 .name("startup-command-stop".to_string())
-                .spawn(move || registry.end_startup_session(startup, stop));
+                .spawn(move || registry.end_startup_session(startup, stop))
+            {
+                unstopped = Some((err, notice));
+            }
         }
         let mine = inner.sessions.remove(agent_id).unwrap_or_default();
         let mine: Vec<(ProcessSession, std::path::PathBuf)> = mine
@@ -2481,6 +2489,16 @@ impl AgentProcessRegistry {
         let folders: Vec<std::path::PathBuf> =
             mine.iter().map(|(_, folder)| folder.clone()).collect();
         drop(inner);
+        if let Some((err, notice)) = unstopped {
+            let sentence = format!(
+                "A deleted agent's startup command was not stopped, because dux could not start \
+                 the thread that stops it ({err}). Stop it yourself."
+            );
+            crate::logger::warn(&sentence);
+            if let Some(notice) = notice {
+                notice(sentence);
+            }
+        }
         for folder in folders {
             self.sync_pending(&folder);
         }
@@ -2721,6 +2739,16 @@ mod tests {
 
     fn pids(rows: &[ProcRow]) -> Vec<u32> {
         rows.iter().map(|r| r.pid).collect()
+    }
+
+    #[test]
+    fn a_corrupt_start_time_at_the_top_of_the_range_does_not_overflow() {
+        let mut leader = row(4200, 1, 4200);
+        leader.start_time = u64::MAX;
+        let mut recorded = session(4200);
+        recorded.started_at = u64::MAX;
+        let found = members(&[leader], &[recorded], &[], 1);
+        assert_eq!(pids(&found), vec![4200]);
     }
 
     #[test]

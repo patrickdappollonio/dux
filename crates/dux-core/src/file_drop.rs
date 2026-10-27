@@ -225,7 +225,12 @@ pub(crate) fn validate_tree_drop_dir(relative: &str) -> Result<(), TreeDirError>
 pub enum DropDirError {
     /// The folder could not be opened, or a live process could not be asked
     /// where it is.
-    Io(std::io::Error),
+    Io {
+        /// The folder, when the failure was about one dux could name.
+        folder: Option<PathBuf>,
+        /// What the system answered.
+        err: std::io::Error,
+    },
     /// The folder was pinned, but its path cannot be sent to a terminal without
     /// changing what it names. See [`UnreportablePath`].
     Unreportable(UnreportablePath),
@@ -285,7 +290,17 @@ pub enum DropDirError {
 impl std::fmt::Display for DropDirError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "could not open the destination folder: {e}"),
+            Self::Io {
+                folder: Some(folder),
+                err,
+            } => write!(
+                f,
+                "could not open the destination folder \"{}\": {err}",
+                folder.display()
+            ),
+            Self::Io { folder: None, err } => {
+                write!(f, "could not open the destination folder: {err}")
+            }
             Self::Unreportable(why) => write!(
                 f,
                 "the file was not saved, because {why}, so the path could not be \
@@ -329,9 +344,29 @@ impl std::fmt::Display for DropDirError {
 
 impl std::error::Error for DropDirError {}
 
-impl From<std::io::Error> for DropDirError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
+impl DropDirError {
+    /// An [`Self::Io`] failure about `folder`.
+    fn io(folder: &Path, err: impl Into<std::io::Error>) -> Self {
+        Self::Io {
+            folder: Some(folder.to_path_buf()),
+            err: err.into(),
+        }
+    }
+
+    /// An [`Self::Io`] failure about no folder dux could name.
+    fn io_unnamed(err: impl Into<std::io::Error>) -> Self {
+        Self::Io {
+            folder: None,
+            err: err.into(),
+        }
+    }
+
+    /// The system's answer, when this is an [`Self::Io`] failure.
+    fn io_error(&self) -> Option<&std::io::Error> {
+        match self {
+            Self::Io { err, .. } => Some(err),
+            _ => None,
+        }
     }
 }
 
@@ -551,11 +586,11 @@ pub fn slugify_drop_name(name: &str, name_max: usize) -> String {
     format!("{dot}{stem}{ext}")
 }
 
-/// Whether a newly made upload directory is seeded with its self-ignoring
-/// `.gitignore`.
+/// Whether the upload directory is seeded with its self-ignoring `.gitignore`,
+/// whether dux just created the directory or it was already there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UploadGitignore {
-    /// Write the `.gitignore` when dux creates it (none is there yet).
+    /// Write the `.gitignore` when the directory has none.
     Write,
     /// Write none.
     Skip,
@@ -601,14 +636,15 @@ impl DropDir {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| DropDirError::Io(e.into()))?;
+        .map_err(|e| DropDirError::io(dir, e))?;
         let path = reportable_path_of(&fd, dir)?;
         Ok(Self { fd, path })
     }
 
     /// Pin the AGENT UPLOAD DIRECTORY inside `worktree`, creating it (and every
     /// missing parent) if it is not there yet, and seeding its self-ignoring
-    /// `.gitignore` in the same step when `gitignore` says to.
+    /// `.gitignore` when `gitignore` says to and the directory, new or not,
+    /// has none (see [`seed_uploads_gitignore`]).
     ///
     /// This is the ONE place the upload directory comes into existence.
     ///
@@ -635,7 +671,7 @@ impl DropDir {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| DropDirError::Io(e.into()))?;
+        .map_err(|e| DropDirError::io(worktree, e))?;
 
         let mut opened_as = worktree.to_path_buf();
         for component in Path::new(relative).components() {
@@ -647,7 +683,7 @@ impl DropDir {
             // apply: this lives in the user's own worktree.
             match rustix::fs::mkdirat(&fd, name, Mode::from_bits_truncate(0o777)) {
                 Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(e) => return Err(DropDirError::Io(e.into())),
+                Err(e) => return Err(DropDirError::io(&opened_as.join(name), e)),
             }
             fd = match rustix::fs::openat(
                 &fd,
@@ -674,7 +710,7 @@ impl DropDir {
                         component: name.to_string_lossy().into_owned(),
                     });
                 }
-                Err(e) => return Err(DropDirError::Io(e.into())),
+                Err(e) => return Err(DropDirError::io(&opened_as.join(name), e)),
             };
             opened_as.push(name);
         }
@@ -714,7 +750,7 @@ impl DropDir {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|e| DropDirError::Io(e.into()))?;
+        .map_err(|e| DropDirError::io(worktree, e))?;
 
         let mut opened_as = worktree.to_path_buf();
         for segment in relative.split('/').filter(|s| !s.is_empty()) {
@@ -747,7 +783,7 @@ impl DropDir {
                         component: segment.to_string(),
                     });
                 }
-                Err(e) => return Err(DropDirError::Io(e.into())),
+                Err(e) => return Err(DropDirError::io(&opened_as.join(segment), e)),
             };
             opened_as.push(segment);
         }
@@ -932,11 +968,8 @@ fn reportable_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDir
 /// `open_tree_dir` relies on that when it rewords the second one.
 fn verified_path_of(fd: &OwnedFd, opened_as: &Path) -> Result<PathBuf, DropDirError> {
     #[cfg(target_os = "linux")]
-    let path = {
-        let _ = opened_as;
-        std::fs::read_link(format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd()))
-            .map_err(DropDirError::Io)?
-    };
+    let path = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd()))
+        .map_err(|e| DropDirError::io(opened_as, e))?;
     #[cfg(not(target_os = "linux"))]
     let path = opened_as.to_path_buf();
 
@@ -1291,8 +1324,12 @@ enum CwdProbe {
 fn probe_process_cwd(pid: u32) -> CwdProbe {
     match open_process_cwd(pid) {
         Ok(dir) => CwdProbe::Pinned(dir),
-        Err(DropDirError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            CwdProbe::Failed(DropDirError::Io(e))
+        Err(denied)
+            if denied
+                .io_error()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            CwdProbe::Failed(denied)
         }
         Err(e) => {
             if process_can_answer(pid) {
@@ -1652,7 +1689,8 @@ fn shares_our_mount_namespace(pid: u32) -> Result<bool, DropDirError> {
     // Theirs is NOT forgiven: an error here is the process being gone or dux not
     // being allowed to look, and both must reach the caller's classifier rather
     // than being read as agreement.
-    let theirs = std::fs::read_link(format!("/proc/{pid}/ns/mnt")).map_err(DropDirError::Io)?;
+    let theirs =
+        std::fs::read_link(format!("/proc/{pid}/ns/mnt")).map_err(DropDirError::io_unnamed)?;
     Ok(ours == theirs)
 }
 
@@ -1683,7 +1721,7 @@ pub(crate) fn open_process_cwd(pid: u32) -> Result<DropDir, DropDirError> {
     #[cfg(not(target_os = "linux"))]
     {
         let cwd = process_cwds(&[pid]).found.remove(&pid).ok_or_else(|| {
-            DropDirError::Io(std::io::Error::other(format!(
+            DropDirError::io_unnamed(std::io::Error::other(format!(
                 "the working directory of process {pid} could not be read"
             )))
         })?;
@@ -1779,6 +1817,17 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_is_named_in_the_error() {
+        let dir = tmp();
+        let missing = dir.path().join("not-here");
+        let err = DropDir::open(&missing).expect_err("a missing folder cannot be pinned");
+        assert!(
+            err.to_string().contains(&*missing.to_string_lossy()),
+            "got {err}"
+        );
     }
 
     /// A reader that cannot answer fails closed: a live process is unknown,
@@ -2659,7 +2708,7 @@ mod tests {
         let err = plan
             .open_with(
                 |_| {
-                    CwdProbe::Failed(DropDirError::Io(std::io::Error::from(
+                    CwdProbe::Failed(DropDirError::io_unnamed(std::io::Error::from(
                         std::io::ErrorKind::PermissionDenied,
                     )))
                 },
@@ -2667,7 +2716,8 @@ mod tests {
             )
             .expect_err("a process dux is not allowed to read must refuse the drop");
         assert!(
-            matches!(&err, DropDirError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            err.io_error()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
             "got {err:?}"
         );
         assert!(
@@ -2703,7 +2753,9 @@ mod tests {
         } else {
             let denied = open_process_cwd(1).expect_err("root's pid 1 must not be readable");
             assert!(
-                matches!(&denied, DropDirError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+                denied
+                    .io_error()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
                 "expected a permission failure for pid 1, got {denied:?}"
             );
             assert!(
@@ -3245,7 +3297,8 @@ mod tests {
 
         let err = shares_our_mount_namespace(0).expect_err("pid 0 has no namespace link");
         assert!(
-            matches!(&err, DropDirError::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
+            err.io_error()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound),
             "a missing process must surface as NotFound so the chain can continue, got {err:?}"
         );
     }

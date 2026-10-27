@@ -126,8 +126,9 @@ impl ResourceCollector {
         // Rows: each labeled target (agent tabs and companion terminals). The
         // target's identity is carried through verbatim so the caller can join
         // the row back to its spine entity by id.
+        let nodes = proc_nodes(sys);
         for target in targets {
-            let (cpu, rss, count, children) = aggregate_tree(sys, Pid::from_u32(target.pid));
+            let (cpu, rss, count, children) = aggregate_proc_tree(&nodes, target.pid);
             rows.push(ResourceStats {
                 id: Some(target.id.clone()),
                 kind: target.kind,
@@ -231,16 +232,11 @@ fn aggregate_proc_tree(nodes: &[ProcNode], root: u32) -> (f32, u64, usize, Vec<P
     (cpu, rss, count, children)
 }
 
-/// Aggregate CPU% and RSS across a root PID and all its descendants. Thin
-/// adapter that snapshots the fields [`aggregate_proc_tree`] needs out of the
-/// live `sysinfo` table, then delegates to the pure aggregation. The `sysinfo`
-/// side is the only nondeterministic part and carries no logic of its own.
-fn aggregate_tree(
-    sys: &sysinfo::System,
-    root: sysinfo::Pid,
-) -> (f32, u64, usize, Vec<ProcessInfo>) {
-    let nodes: Vec<ProcNode> = sys
-        .processes()
+/// The fields [`aggregate_proc_tree`] needs, snapshotted once per sample out
+/// of the live `sysinfo` table. The `sysinfo` side is the only
+/// nondeterministic part and carries no logic of its own.
+fn proc_nodes(sys: &sysinfo::System) -> Vec<ProcNode> {
+    sys.processes()
         .iter()
         .map(|(pid, proc_info)| ProcNode {
             pid: pid.as_u32(),
@@ -250,8 +246,7 @@ fn aggregate_tree(
             rss_bytes: proc_info.memory(),
             name: proc_info.name().to_string_lossy().into_owned(),
         })
-        .collect();
-    aggregate_proc_tree(&nodes, root.as_u32())
+        .collect()
 }
 
 #[cfg(test)]
@@ -260,6 +255,14 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    /// One root's aggregate over the live table, as a sample computes it.
+    fn aggregate_tree(
+        sys: &sysinfo::System,
+        root: sysinfo::Pid,
+    ) -> (f32, u64, usize, Vec<ProcessInfo>) {
+        aggregate_proc_tree(&proc_nodes(sys), root.as_u32())
+    }
 
     /// Spin a thread burning CPU until the returned flag is set. The join handle
     /// must be awaited by the caller so the thread never outlives the test.

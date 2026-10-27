@@ -198,6 +198,11 @@ pub(crate) fn log_follow(
             body: refusal,
         }));
     }
+    // The stream ended part-way through a line: it is still a line.
+    if !stopped && !line.is_empty() {
+        let text = String::from_utf8_lossy(&line).into_owned();
+        stopped = on_line(text.trim_end_matches('\r')).is_break();
+    }
     if stopped {
         return Ok(());
     }
@@ -461,7 +466,8 @@ mod tests {
     #[test]
     fn a_log_stream_that_ends_by_itself_or_is_refused_says_why() {
         let dir = private_dir();
-        let (_fake, _lock, client) = local_dux(dir.path(), |path| match path {
+        let (_fake, _lock, client) = local_dux(dir.path(), |path| {
+            match path {
             "/api/v1/server/log?follow=true&lines=1" => {
                 chunked(&["only"], std::time::Duration::ZERO, Ending::LastChunk)
             }
@@ -483,7 +489,12 @@ mod tests {
                 chunked(&["cut"], std::time::Duration::ZERO, Ending::Cut)
             }
             "/api/v1/server/log?follow=true&lines=2" => Reply::json(409, r#"{"error":"no log"}"#),
+            "/api/v1/server/log?follow=true&lines=8" => Reply::Raw(
+                "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\na\r\nfirst\nlast\r\n0\r\n\r\n"
+                    .to_string(),
+            ),
             _ => Reply::json(404, "{}"),
+        }
         });
         let mut seen = Vec::new();
         let ended = log_follow(&client, 1, &mut |line| {
@@ -494,6 +505,16 @@ mod tests {
         assert_eq!(seen, ["only"]);
         assert_eq!(ended.exit, Exit::NotRunning);
         assert!(ended.message.contains("ended the log stream"), "{ended}");
+
+        // A last line the stream ended without a newline is still a line.
+        let mut seen = Vec::new();
+        let ended = log_follow(&client, 8, &mut |line| {
+            seen.push(line.to_string());
+            ControlFlow::Continue(())
+        })
+        .unwrap_err();
+        assert_eq!(seen, ["first", "last"]);
+        assert_eq!(ended.exit, Exit::NotRunning);
 
         // Cut off rather than finished, it is the same to the person.
         let cut = log_follow(&client, 3, &mut |_| ControlFlow::Continue(())).unwrap_err();

@@ -312,12 +312,10 @@ pub(crate) fn open_regular_nofollow(
 ) -> anyhow::Result<std::fs::File> {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl, open as rustix_open};
     use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::io::{FromRawFd, IntoRawFd};
 
     let fd = rustix_open(abs_path, flags | OFlags::NOFOLLOW | OFlags::NONBLOCK, mode)
         .map_err(on_open_error)?;
-    // SAFETY: we own the fd returned by rustix_open; it is valid and open.
-    let f = unsafe { std::fs::File::from_raw_fd(fd.into_raw_fd()) };
+    let f = std::fs::File::from(fd);
     let kind = f.metadata()?.file_type();
     if !kind.is_file() {
         let what = if kind.is_fifo() {

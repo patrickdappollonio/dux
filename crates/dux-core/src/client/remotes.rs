@@ -222,6 +222,22 @@ impl Remotes {
     /// Fails when the name is not usable or already taken, or the address is not one dux may reach
     /// this way.
     pub fn add(&mut self, name: &str, url: &str, plain_http: PlainHttp) -> Result<(), CliError> {
+        self.add_from(
+            name,
+            url,
+            plain_http,
+            &crate::client::transport::local_addresses(),
+        )
+    }
+
+    /// [`Self::add`], judged against this machine's interface addresses `local`.
+    fn add_from(
+        &mut self,
+        name: &str,
+        url: &str,
+        plain_http: PlainHttp,
+        local: &[std::net::IpAddr],
+    ) -> Result<(), CliError> {
         if name.is_empty() || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(CliError::new(
                 Exit::Usage,
@@ -236,7 +252,7 @@ impl Remotes {
                 ),
             ));
         }
-        let url = checked_url(url, plain_http)?;
+        let url = checked_url(url, plain_http, local)?;
         self.remotes.insert(
             name.to_string(),
             Remote {
@@ -316,8 +332,33 @@ fn unknown(name: &str) -> CliError {
     )
 }
 
+/// Whether the authority of `url`, as written, holds an `@`: a user name or a
+/// password may sit before it. Read from the raw text, so it holds for a URL
+/// that does not parse too, and generous about where the authority ends.
+fn names_a_user(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
+}
+
 /// `url` as saved: http or https, with a host, without a trailing slash.
-fn checked_url(url: &str, plain_http: PlainHttp) -> Result<String, CliError> {
+/// `local` is this machine's interface addresses.
+fn checked_url(
+    url: &str,
+    plain_http: PlainHttp,
+    local: &[std::net::IpAddr],
+) -> Result<String, CliError> {
+    // First, and never echoed: what sits before the host may be a password,
+    // and every later refusal repeats the URL.
+    if names_a_user(url) {
+        return Err(CliError::new(
+            Exit::Usage,
+            "the URL carries a user name or password; a remote is saved as its address alone, \
+             and its password is asked for at \"dux remote login\"",
+        ));
+    }
     let parsed = url::Url::parse(url).map_err(|error| {
         CliError::new(
             Exit::Usage,
@@ -329,9 +370,30 @@ fn checked_url(url: &str, plain_http: PlainHttp) -> Result<String, CliError> {
     let Some(host) = parsed.host() else {
         return Err(CliError::new(Exit::Usage, format!("{url} names no host")));
     };
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(CliError::new(
+            Exit::Usage,
+            format!(
+                "{url} carries a query or a fragment; a remote is saved as its address alone, \
+                 like https://dux.example.com"
+            ),
+        ));
+    }
     match parsed.scheme() {
         "https" => {}
-        "http" if plain_http == PlainHttp::Anywhere || plain_http_allowed(&host) => {}
+        "http" if plain_http == PlainHttp::Anywhere || plain_http_allowed(&host, local) => {}
+        "http" if matches!(host, url::Host::Ipv4(ip) if crate::tailscale::is_tailscale_cgnat(ip)) =>
+        {
+            return Err(CliError::new(
+                Exit::Usage,
+                format!(
+                    "{url} is plain HTTP to {host}, which is in Tailscale's address range, but \
+                     this machine has no address in that range, so it is not on the tailnet and \
+                     your password could cross an ordinary carrier network unencrypted. Use \
+                     https://, or add --insecure if you trust every network between you and it"
+                ),
+            ));
+        }
         "http" => {
             return Err(CliError::new(
                 Exit::Usage,
@@ -353,15 +415,17 @@ fn checked_url(url: &str, plain_http: PlainHttp) -> Result<String, CliError> {
 }
 
 /// Whether plain HTTP to `host` keeps the password off an open network: loopback, or Tailscale
-/// addresses and names, whose traffic is encrypted in transit.
-fn plain_http_allowed(host: &url::Host<&str>) -> bool {
+/// addresses (see [`crate::client::transport::tailnet_address`]) and names, whose traffic is
+/// encrypted in transit. `local` is this machine's interface addresses.
+fn plain_http_allowed(host: &url::Host<&str>, local: &[std::net::IpAddr]) -> bool {
+    use crate::client::transport::tailnet_address;
     match host {
         url::Host::Domain(name) => {
             let name = name.to_ascii_lowercase();
             name == "localhost" || name.ends_with(".ts.net")
         }
-        url::Host::Ipv4(ip) => ip.is_loopback() || crate::tailscale::is_tailscale_cgnat(*ip),
-        url::Host::Ipv6(ip) => ip.is_loopback() || crate::tailscale::is_tailscale_ipv6(*ip),
+        url::Host::Ipv4(ip) => ip.is_loopback() || tailnet_address((*ip).into(), local),
+        url::Host::Ipv6(ip) => ip.is_loopback() || tailnet_address((*ip).into(), local),
     }
 }
 
@@ -409,7 +473,7 @@ mod tests {
             ("lan", "http://192.168.1.20:3890"),
         ] {
             remotes
-                .add(
+                .add_from(
                     name,
                     url,
                     if name == "lan" {
@@ -417,6 +481,7 @@ mod tests {
                     } else {
                         PlainHttp::SafeNetworksOnly
                     },
+                    ON_THE_TAILNET,
                 )
                 .unwrap_or_else(|e| panic!("{url}: {e}"));
         }
@@ -442,6 +507,72 @@ mod tests {
                 .is_err(),
             "100.128/10 is past Tailscale's range"
         );
+    }
+
+    /// This machine's addresses while it is on the tailnet.
+    const ON_THE_TAILNET: &[std::net::IpAddr] = &[std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+        100, 100, 1, 1,
+    ))];
+
+    /// 100.64.0.0/10 is carrier-grade NAT space too, so plain HTTP to it is
+    /// taken for the tailnet only while this machine holds an address there.
+    #[test]
+    fn plain_http_to_tailscales_ipv4_range_needs_this_machine_on_the_tailnet() {
+        let off: &[std::net::IpAddr] =
+            &["192.168.1.5".parse().unwrap(), "127.0.0.1".parse().unwrap()];
+        let mut remotes = Remotes::default();
+        let refused = remotes
+            .add_from(
+                "tail",
+                "http://100.101.2.3:3890",
+                PlainHttp::SafeNetworksOnly,
+                off,
+            )
+            .unwrap_err();
+        assert_eq!(refused.exit, Exit::Usage);
+        assert!(
+            refused.message.contains("https://") && refused.message.contains("--insecure"),
+            "{}",
+            refused.message
+        );
+        assert!(remotes.remotes.is_empty());
+        remotes
+            .add_from(
+                "tail",
+                "http://100.101.2.3:3890",
+                PlainHttp::SafeNetworksOnly,
+                ON_THE_TAILNET,
+            )
+            .unwrap();
+        remotes
+            .add_from(
+                "anyway",
+                "http://100.101.2.4:3890",
+                PlainHttp::Anywhere,
+                off,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_url_with_a_query_a_fragment_or_a_user_is_refused() {
+        let mut remotes = Remotes::default();
+        for url in [
+            "https://dux.example.com/?x=1",
+            "https://dux.example.com/#top",
+            "https://me@dux.example.com",
+            "https://me:secret@dux.example.com",
+            "https://me:secret@dux.example.com:99999",
+            "me:secret@dux.example.com",
+            "https://me:secret@",
+        ] {
+            let refused = remotes
+                .add("work", url, PlainHttp::SafeNetworksOnly)
+                .unwrap_err();
+            assert_eq!(refused.exit, Exit::Usage, "{url}");
+            assert!(!refused.message.contains("secret"), "{}", refused.message);
+        }
+        assert!(remotes.remotes.is_empty());
     }
 
     #[test]

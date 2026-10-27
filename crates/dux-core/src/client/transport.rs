@@ -746,7 +746,7 @@ impl HttpTransport {
         let resolve = |host: &str, port: u16| {
             std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map(Iterator::collect)
         };
-        let Some(addrs) = destinations(url, self.plain_http, resolve)? else {
+        let Some(addrs) = destinations(url, self.plain_http, &local_addresses(), resolve)? else {
             return attempt(&self.base, None);
         };
         let host = match url.port() {
@@ -776,11 +776,39 @@ pub(crate) fn uses_environment_proxy(url: &url::Url, plain_http: PlainHttp) -> b
     !loopback && (url.scheme() == "https" || plain_http == PlainHttp::Anywhere)
 }
 
+/// This machine's own interface addresses.
+pub(crate) fn local_addresses() -> Vec<std::net::IpAddr> {
+    crate::tailscale::interfaces()
+        .into_iter()
+        .map(|(_, address)| address)
+        .collect()
+}
+
+/// Whether plain HTTP may go to `ip` as a Tailscale address, given this
+/// machine's own interface addresses `local`. An address in Tailscale's IPv6
+/// range is one by its range alone. One in 100.64.0.0/10 is one only while
+/// this machine itself holds an address in that range: it is also the
+/// carrier-grade NAT space ordinary networks hand out, where nothing is
+/// encrypted.
+pub(crate) fn tailnet_address(ip: std::net::IpAddr, local: &[std::net::IpAddr]) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(ip) => crate::tailscale::is_tailscale_cgnat(ip)
+            && local.iter().any(
+                |own| matches!(own, IpAddr::V4(own) if crate::tailscale::is_tailscale_cgnat(*own)),
+            ),
+        IpAddr::V6(ip) => crate::tailscale::is_tailscale_ipv6(ip),
+    }
+}
+
 /// Where a plain-HTTP request to `url` must connect, or `None` to reach it as written. A
-/// Tailscale name must resolve to Tailscale addresses only: that is why plain HTTP is allowed.
+/// Tailscale name must resolve to Tailscale addresses only, and a Tailscale address must be one
+/// by [`tailnet_address`] with this machine's addresses `local`: that is why plain HTTP is
+/// allowed.
 pub(crate) fn destinations(
     url: &url::Url,
     plain_http: PlainHttp,
+    local: &[std::net::IpAddr],
     resolve: impl Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
 ) -> Result<Option<Vec<std::net::SocketAddr>>, TransportError> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -788,8 +816,15 @@ pub(crate) fn destinations(
         return Ok(None);
     }
     let port = url.port_or_known_default().unwrap_or(80);
-    let Some(url::Host::Domain(name)) = url.host() else {
-        return Ok(None);
+    let name = match url.host() {
+        Some(url::Host::Domain(name)) => name,
+        Some(url::Host::Ipv4(ip))
+            if crate::tailscale::is_tailscale_cgnat(ip)
+                && !tailnet_address(IpAddr::V4(ip), local) =>
+        {
+            return Err(TransportError::Refused(no_tailnet_here(ip)));
+        }
+        _ => return Ok(None),
     };
     let name = name.to_ascii_lowercase();
     if name == "localhost" {
@@ -809,11 +844,15 @@ pub(crate) fn destinations(
             "{name} did not resolve to any address"
         )));
     }
-    let tailnet = |ip: IpAddr| match ip {
-        IpAddr::V4(ip) => crate::tailscale::is_tailscale_cgnat(ip),
-        IpAddr::V6(ip) => crate::tailscale::is_tailscale_ipv6(ip),
-    };
-    if let Some(outside) = addrs.iter().find(|addr| !tailnet(addr.ip())) {
+    if let Some(IpAddr::V4(ip)) = addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|ip| matches!(ip, IpAddr::V4(v4) if crate::tailscale::is_tailscale_cgnat(*v4)))
+        && !tailnet_address(IpAddr::V4(ip), local)
+    {
+        return Err(TransportError::Refused(no_tailnet_here(ip)));
+    }
+    if let Some(outside) = addrs.iter().find(|addr| !tailnet_address(addr.ip(), local)) {
         return Err(TransportError::Refused(format!(
             "{name} resolved to {}, which is not a Tailscale address, so dux will not send to \
              it over plain HTTP. Use https://, or remove the remote and add it again with \
@@ -822,6 +861,17 @@ pub(crate) fn destinations(
         )));
     }
     Ok(Some(addrs))
+}
+
+/// The refusal for plain HTTP to `ip`, in Tailscale's IPv4 range, from a machine with no
+/// address in that range.
+fn no_tailnet_here(ip: std::net::Ipv4Addr) -> String {
+    format!(
+        "{ip} is in Tailscale's address range, but this machine has no address in that range, so \
+         it is not on the tailnet and dux will not send to it over plain HTTP: the same range is \
+         used by ordinary carrier networks. Use https://, or remove the remote and add it again \
+         with --insecure if you trust every network between you and it"
+    )
 }
 
 impl Transport for HttpTransport {
@@ -1086,11 +1136,13 @@ mod tests {
             }
         };
         let url = |text: &str| url::Url::parse(text).unwrap();
+        let tailnet: &[std::net::IpAddr] = &["100.100.1.1".parse().unwrap()];
 
         assert_eq!(
             destinations(
                 &url("http://localhost:3890"),
                 PlainHttp::SafeNetworksOnly,
+                tailnet,
                 never
             )
             .unwrap(),
@@ -1103,6 +1155,7 @@ mod tests {
             destinations(
                 &url("http://box.tail1234.ts.net:3890"),
                 PlainHttp::SafeNetworksOnly,
+                tailnet,
                 resolves_to(&["100.101.2.3", "fd7a:115c:a1e0::5"])
             )
             .unwrap(),
@@ -1114,6 +1167,7 @@ mod tests {
         let refused = destinations(
             &url("http://box.tail1234.ts.net:3890"),
             PlainHttp::SafeNetworksOnly,
+            tailnet,
             resolves_to(&["100.101.2.3", "203.0.113.9"]),
         )
         .unwrap_err();
@@ -1126,6 +1180,7 @@ mod tests {
             destinations(
                 &url("http://box.tail1234.ts.net:3890"),
                 PlainHttp::Anywhere,
+                tailnet,
                 never
             )
             .unwrap(),
@@ -1136,6 +1191,7 @@ mod tests {
             destinations(
                 &url("https://dux.example.com"),
                 PlainHttp::SafeNetworksOnly,
+                tailnet,
                 never
             )
             .unwrap(),
@@ -1145,11 +1201,44 @@ mod tests {
             destinations(
                 &url("http://100.101.2.3:3890"),
                 PlainHttp::SafeNetworksOnly,
+                tailnet,
                 never
             )
             .unwrap(),
             None
         );
+    }
+
+    /// Plain HTTP to 100.64.0.0/10, written as an address or reached through a
+    /// Tailscale name, goes out only while this machine holds an address in
+    /// that range itself.
+    #[test]
+    fn a_tailscale_ipv4_address_is_refused_from_a_machine_off_the_tailnet() {
+        let off: &[std::net::IpAddr] = &["192.168.1.5".parse().unwrap(), "::1".parse().unwrap()];
+        let on: &[std::net::IpAddr] = &["100.100.1.1".parse().unwrap()];
+        let resolves = |_: &str, port: u16| -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(vec![std::net::SocketAddr::new(
+                "100.101.2.3".parse().unwrap(),
+                port,
+            )])
+        };
+        for text in ["http://100.101.2.3:3890", "http://box.tail1234.ts.net:3890"] {
+            let url = url::Url::parse(text).unwrap();
+            let refused =
+                destinations(&url, PlainHttp::SafeNetworksOnly, off, resolves).unwrap_err();
+            let TransportError::Refused(why) = refused else {
+                panic!("{text}: {refused:?}")
+            };
+            assert!(
+                why.contains("https://") && why.contains("--insecure"),
+                "{why}"
+            );
+            assert!(destinations(&url, PlainHttp::SafeNetworksOnly, on, resolves).is_ok());
+            assert_eq!(
+                destinations(&url, PlainHttp::Anywhere, off, resolves).unwrap(),
+                None
+            );
+        }
     }
 
     #[test]

@@ -4377,32 +4377,23 @@ impl AttachmentGuard {
     ) -> Option<Self> {
         let attachments = engine.attachments().clone();
         let PtyAttach { target, client } = attach;
-        let linked = client.link.clone().filter(|events| {
-            attachments.linkable(events, client.address, std::time::Instant::now())
-        });
-        let own_connection = if linked.is_some() {
-            None
-        } else {
-            attachments.register(registry_id, client.pty_facts(device), Some(heard.clone()));
-            Some(registry_id.to_string())
-        };
-        let connection = linked.unwrap_or_else(|| registry_id.to_string());
-        if let Ok(token) =
-            attachments.attach(&connection, target, Some(heard.clone()), Some(conn_id))
-        {
-            Some(Self {
-                attachments,
-                token,
-                own_connection,
-                live_limits,
-                deliberate: std::sync::atomic::AtomicBool::new(false),
-            })
-        } else {
-            if let Some(own) = own_connection {
-                attachments.deregister(&own, dux_core::attachments::Ending::Deliberate);
-            }
-            None
-        }
+        let (token, own_connection) = attachments
+            .attach_terminal(
+                client.link.as_deref(),
+                registry_id,
+                client.pty_facts(device),
+                target,
+                heard.clone(),
+                conn_id,
+            )
+            .ok()?;
+        Some(Self {
+            attachments,
+            token,
+            own_connection,
+            live_limits,
+            deliberate: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     fn note_viewed(&self) {

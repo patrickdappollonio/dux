@@ -98,8 +98,7 @@ pub struct Target {
 /// Untrusted and DISPLAY-ONLY: it feeds the browser counts and the listing's
 /// grouping and nothing else. No ownership, exemption, auth, presence-grace or
 /// destructive-change decision reads it, because any client can claim any id.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrowserId(String);
 
 impl BrowserId {
@@ -122,7 +121,7 @@ impl BrowserId {
     /// The first eight characters, enough to tell a handful of browsers apart
     /// in a listing.
     pub fn short(&self) -> &str {
-        &self.0[..8]
+        self.0.get(..8).unwrap_or(&self.0)
     }
 }
 
@@ -481,13 +480,7 @@ impl Attachments {
     /// Whether a terminal socket from `address` may count as part of the live
     /// events connection `id` from the same address.
     pub fn linkable(&self, id: &str, address: Option<IpAddr>, now: Instant) -> bool {
-        self.with(|state| {
-            state.connections.get(id).is_some_and(|connection| {
-                connection.facts.events
-                    && connection.facts.address == address
-                    && connection_live(connection, now)
-            })
-        })
+        self.with(|state| state.linkable(id, address, now))
     }
 
     /// Attach `connection` to `target`, refused while a change that covers it
@@ -503,34 +496,53 @@ impl Attachments {
         heard: Option<Heard>,
         pty_conn: Option<u64>,
     ) -> Result<u64, Reserved> {
+        self.with(|state| state.attach(connection, target, heard, pty_conn))
+    }
+
+    /// Attach a terminal socket to `target`: as part of the events connection
+    /// `link` names when that one is live now from the socket's own
+    /// address in `own_facts` (see [`Self::linkable`]), otherwise as a
+    /// connection of its own, registered here under `own_id` with `own_facts`. Judged and attached in one step,
+    /// so the events connection cannot go in between and leave an attachment
+    /// with no facts, which no count would ever see. The connection registered
+    /// for the socket comes back with the token, for the caller to deregister
+    /// when the socket ends.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`Reserved`] when a change that covers `target` holds a
+    /// reservation; nothing is registered then.
+    pub fn attach_terminal(
+        &self,
+        link: Option<&str>,
+        own_id: &str,
+        own_facts: ConnectionFacts,
+        target: Target,
+        heard: Heard,
+        pty_conn: u64,
+    ) -> Result<(u64, Option<String>), Reserved> {
         self.with(|state| {
             state.prune_reservations();
             if state.reserved(&target) {
                 return Err(Reserved);
             }
-            // The tab is attached somewhere again: whatever it was still
-            // counted as attached to after losing a socket is over.
-            state
-                .presences
-                .retain(|presence| presence.connection != connection);
-            state.next += 1;
-            let token = state.next;
-            let facts = state
-                .connections
-                .get(connection)
-                .map(|known| known.facts.clone());
-            state.attachments.insert(
-                token,
-                Attachment {
-                    connection: connection.to_string(),
-                    facts,
-                    target,
-                    heard,
-                    pty_conn,
-                    viewed_at: None,
-                },
-            );
-            Ok(token)
+            let now = Instant::now();
+            let linked = link.filter(|events| state.linkable(events, own_facts.address, now));
+            let (connection, own) = if let Some(events) = linked {
+                (events.to_string(), None)
+            } else {
+                state.connections.insert(
+                    own_id.to_string(),
+                    Connection {
+                        facts: own_facts,
+                        heard: Some(heard.clone()),
+                        since: chrono::Utc::now(),
+                    },
+                );
+                (own_id.to_string(), Some(own_id.to_string()))
+            };
+            let token = state.attach(&connection, target, Some(heard), Some(pty_conn))?;
+            Ok((token, own))
         })
     }
 
@@ -757,6 +769,51 @@ fn connection_live(connection: &Connection, now: Instant) -> bool {
 }
 
 impl State {
+    /// See [`Attachments::linkable`].
+    fn linkable(&self, id: &str, address: Option<IpAddr>, now: Instant) -> bool {
+        self.connections.get(id).is_some_and(|connection| {
+            connection.facts.events
+                && connection.facts.address == address
+                && connection_live(connection, now)
+        })
+    }
+
+    /// See [`Attachments::attach`].
+    fn attach(
+        &mut self,
+        connection: &str,
+        target: Target,
+        heard: Option<Heard>,
+        pty_conn: Option<u64>,
+    ) -> Result<u64, Reserved> {
+        self.prune_reservations();
+        if self.reserved(&target) {
+            return Err(Reserved);
+        }
+        // The tab is attached somewhere again: whatever it was still
+        // counted as attached to after losing a socket is over.
+        self.presences
+            .retain(|presence| presence.connection != connection);
+        self.next += 1;
+        let token = self.next;
+        let facts = self
+            .connections
+            .get(connection)
+            .map(|known| known.facts.clone());
+        self.attachments.insert(
+            token,
+            Attachment {
+                connection: connection.to_string(),
+                facts,
+                target,
+                heard,
+                pty_conn,
+                viewed_at: None,
+            },
+        );
+        Ok(token)
+    }
+
     /// Install a reservation, answering its id.
     fn install(&mut self, scope: Scope, life: Life) -> u64 {
         self.prune_reservations();
@@ -1309,6 +1366,41 @@ mod tests {
             .unwrap();
         assert_eq!(attachments.remote_viewers(&agent_scope("s1"), now), 2);
         assert_eq!(attachments.remote_viewers(&agent_scope("s9"), now), 0);
+    }
+
+    /// A terminal socket counts under the live events connection it links to,
+    /// and on its own when the link names one that has gone.
+    #[test]
+    fn a_terminal_socket_counts_whether_or_not_its_link_is_still_there() {
+        let attachments = Attachments::default();
+        let now = Instant::now();
+        let socket = ConnectionFacts {
+            events: false,
+            ..browser("10.0.0.2", "Chrome")
+        };
+        attachments.register("e1", browser("10.0.0.2", "Chrome"), Some(Heard::at(now)));
+        let (_, own) = attachments
+            .attach_terminal(
+                Some("e1"),
+                "p1",
+                socket.clone(),
+                tab("t1", "s1"),
+                Heard::at(now),
+                1,
+            )
+            .unwrap();
+        assert_eq!(own, None);
+        assert_eq!(
+            attachments.blockers(&agent_scope("s1"), Some("e1"), now),
+            []
+        );
+
+        attachments.deregister("e1", Ending::Deliberate);
+        let (_, own) = attachments
+            .attach_terminal(Some("e1"), "p2", socket, tab("t2", "s2"), Heard::at(now), 2)
+            .unwrap();
+        assert_eq!(own.as_deref(), Some("p2"));
+        assert_eq!(attachments.blockers(&agent_scope("s2"), None, now).len(), 1);
     }
 
     fn from_browser(facts: ConnectionFacts, id: &str) -> ConnectionFacts {

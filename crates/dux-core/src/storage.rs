@@ -1057,18 +1057,13 @@ impl SessionStore {
     /// Run `f` inside one `BEGIN IMMEDIATE` transaction: a read-modify-write
     /// of a pending row that another connection (the snapshot thread, a
     /// leader-exit hook) may be updating at the same moment.
+    /// The transaction rolls back when it is dropped uncommitted, so an
+    /// error, a panic in `f` or a failed COMMIT leaves no transaction open.
     fn immediate<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match f(self) {
-            Ok(value) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(value)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        let tx = immediate_tx(&self.conn)?;
+        let value = f(self)?;
+        tx.commit()?;
+        Ok(value)
     }
 
     /// Merge `snapshot` into the registry slice of pending removal `session_id`.
@@ -2762,6 +2757,16 @@ mod tests {
     use super::*;
     use crate::model::{AgentWorkspace, FolderWorkspace};
     use chrono::Duration;
+
+    #[test]
+    fn a_panic_inside_an_immediate_transaction_leaves_no_transaction_open() {
+        let store = test_store();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<()> = store.immediate(|_| panic!("the closure panicked"));
+        }));
+        assert!(outcome.is_err());
+        assert!(store.conn.is_autocommit());
+    }
 
     #[test]
     fn a_pending_worktree_removal_round_trips_until_it_is_cleared() {
