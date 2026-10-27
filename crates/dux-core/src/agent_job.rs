@@ -985,6 +985,9 @@ struct CreatePlanContext<'a> {
     creation_notes: &'a mut Vec<crate::status_text::StatusText>,
     worktrees: &'a crate::worktree_ops::WorktreeOps,
     moves: &'a crate::checkout_move::CheckoutMoveGuard,
+    /// The bound on the pull and the pull request fetches the create runs
+    /// (`[git] network_timeout_seconds`), `None` for no limit.
+    network_timeout: Option<std::time::Duration>,
     /// The name the create has settled on, once it has one, so a failure from
     /// there on can say which agent it was about.
     attempted_name: Option<String>,
@@ -1228,14 +1231,21 @@ impl CreatePlanContext<'_> {
             // has nothing to pull; that is steady state, not a failure. Only
             // origin's own "no" skips: if origin cannot be asked, the pull
             // runs and reports the failure itself.
-            Ok(true) if matches!(git::origin_has_branch(repo_path, leading_branch), Ok(false)) => {
+            Ok(true)
+                if matches!(
+                    git::origin_has_branch(repo_path, leading_branch, self.network_timeout),
+                    Ok(false)
+                ) =>
+            {
                 logger::info(&format!(
                     "skipping pre-create pull for {}: origin has no branch \"{leading_branch}\"",
                     project.path
                 ));
             }
             Ok(true) => {
-                if let Err(err) = git::pull_branch(repo_path, leading_branch, self.moves) {
+                if let Err(err) =
+                    git::pull_branch(repo_path, leading_branch, self.moves, self.network_timeout)
+                {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -1693,6 +1703,10 @@ impl CreatePlanContext<'_> {
     /// branch that appeared after the "no such branch" answer is held to the
     /// same test as one that was there first: it must contain the pull
     /// request's head.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the reuse check's every input, handed over once by its one caller"
+    )]
     fn confirm_reused_branch(
         repo_path: &Path,
         worktree: &Path,
@@ -1701,6 +1715,7 @@ impl CreatePlanContext<'_> {
         head_commit: Option<&str>,
         validated_tip: Option<&str>,
         fast_forward: Option<&(String, String)>,
+        network_timeout: Option<std::time::Duration>,
     ) -> Result<Option<MovedForward>, crate::status_text::StatusText> {
         let pr = format!("#{number}");
         let changed = || {
@@ -1745,9 +1760,10 @@ impl CreatePlanContext<'_> {
         }
         let commit = match head_commit {
             Some(commit) => commit.to_string(),
-            None => git::fetch_pull_request_head_commit(repo_path, number).map_err(|err| {
-                crate::status_text!["Failed to fetch PR ", n(pr.clone()), format!(": {err}")]
-            })?,
+            None => git::fetch_pull_request_head_commit(repo_path, number, network_timeout)
+                .map_err(|err| {
+                    crate::status_text!["Failed to fetch PR ", n(pr.clone()), format!(": {err}")]
+                })?,
         };
         match git::worktree_head_contains(worktree, &commit) {
             Ok(true) => Ok(None),
@@ -1981,22 +1997,23 @@ impl CreatePlanContext<'_> {
             owner_repo,
             number,
         } = fetch;
-        let commit = match git::fetch_pull_request_head_commit(repo_path, number) {
-            Ok(commit) => commit,
-            Err(err) => {
-                logger::error(&format!(
-                    "PR head fetch failed for {owner_repo} #{number}: {err}"
-                ));
-                self.send_failure(crate::status_text![
-                    "Failed to fetch PR ",
-                    n(format!("#{}", number)),
-                    " from ",
-                    n(owner_repo),
-                    format!(": {}", err)
-                ]);
-                return None;
-            }
-        };
+        let commit =
+            match git::fetch_pull_request_head_commit(repo_path, number, self.network_timeout) {
+                Ok(commit) => commit,
+                Err(err) => {
+                    logger::error(&format!(
+                        "PR head fetch failed for {owner_repo} #{number}: {err}"
+                    ));
+                    self.send_failure(crate::status_text![
+                        "Failed to fetch PR ",
+                        n(format!("#{}", number)),
+                        " from ",
+                        n(owner_repo),
+                        format!(": {}", err)
+                    ]);
+                    return None;
+                }
+            };
         let Some(resolved_name) = local_name else {
             return Some((commit, HeadContainment::NotLocal));
         };
@@ -2056,7 +2073,9 @@ impl CreatePlanContext<'_> {
                 "..."
             ],
         });
-        if let Err(err) = git::fetch_pull_request_head(repo_path, number, resolved_name) {
+        if let Err(err) =
+            git::fetch_pull_request_head(repo_path, number, resolved_name, self.network_timeout)
+        {
             logger::error(&format!(
                 "PR worktree fetch failed for {owner_repo} #{number}: {err}"
             ));
@@ -2152,6 +2171,7 @@ impl CreatePlanContext<'_> {
             head_commit,
             validated_tip,
             fast_forward,
+            self.network_timeout,
         ) {
             Ok(moved) => {
                 if moved.is_some() {
@@ -3438,6 +3458,7 @@ pub fn run_create_agent_job(
             creation_notes: &mut creation_notes,
             worktrees: &worktrees,
             moves: &moves,
+            network_timeout: config.git.network_timeout(),
             attempted_name: None,
         };
         let Some(plan) = context.plan(request) else {

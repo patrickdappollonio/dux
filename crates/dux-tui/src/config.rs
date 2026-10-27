@@ -1007,6 +1007,18 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::U64(c.git.clone_stall_seconds),
         },
+        ConfigEntry::Field {
+            key: "network_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long a push, a pull's fetch, a pull request fetch or an ls-remote that\n\
+                 # dux runs for you may take, in seconds, before dux stops the whole command\n\
+                 # and says so. None of them can ask anything on a terminal, so this catches a\n\
+                 # remote or a credential helper that stopped answering. Raise it for a long\n\
+                 # pre-push hook or a large Git LFS upload; 0 means no limit at all. Takes\n\
+                 # effect for the next command. Default 600 (10 minutes).",
+            )),
+            value_fn: |c| FieldValue::U64(c.git.network_timeout_seconds),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(

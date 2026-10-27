@@ -277,6 +277,10 @@ fn diff_head_command(worktree: &Path, rel_path: &str, against: DiffAgainst) -> C
     // than shows, so the child is pinned to the C locale: a translated build
     // would otherwise print a sentence no prefix check recognises.
     command.env("LC_ALL", "C").env("LANG", "C");
+    // The path is a file name, never a pathspec: without this a `[` or `*` in
+    // it is a glob that pulls other files' patches in, and a leading `:` is
+    // pathspec magic.
+    command.env("GIT_LITERAL_PATHSPECS", "1");
     command
 }
 
@@ -1142,6 +1146,21 @@ mod tests {
             head.text
         );
         assert!(head.text.contains("+after"));
+    }
+
+    /// The path is a name, never a glob: `big[1].txt` must not pull in the
+    /// patch of `big1.txt`, which the bracket would match as a pattern.
+    #[test]
+    fn a_path_with_glob_characters_diffs_that_file_alone() {
+        let repo = init_repo();
+        commit_file(repo.path(), "big[1].txt", "before\n");
+        commit_file(repo.path(), "big1.txt", "other\n");
+        std::fs::write(repo.path().join("big[1].txt"), "after\n").expect("overwrite");
+        std::fs::write(repo.path().join("big1.txt"), "leaked\n").expect("overwrite");
+
+        let head = diff_head_via_git(repo.path(), "big[1].txt").expect("head");
+        assert!(head.text.contains("+after"), "{}", head.text);
+        assert!(!head.text.contains("leaked"), "{}", head.text);
     }
 
     /// A file the repository marks `-diff` is one git refuses to diff: it

@@ -287,6 +287,10 @@ impl Default for CliConfig {
 /// Default for `[git] clone_stall_seconds`.
 pub(crate) const DEFAULT_CLONE_STALL_SECONDS: u64 = 300;
 
+/// Default for `[git] network_timeout_seconds`: generous, because a large
+/// push over a slow link is slow rather than stuck.
+pub(crate) const DEFAULT_NETWORK_TIMEOUT_SECONDS: u64 = 600;
+
 /// `[git]`: how dux runs git for you.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -295,12 +299,25 @@ pub struct GitConfig {
     /// progress before dux stops it. There is no limit on the clone's total
     /// time, because a big repository is slow rather than stuck.
     pub clone_stall_seconds: u64,
+    /// Seconds a push, a pull's fetch, a pull request fetch or an `ls-remote`
+    /// dux runs for you may take in all before dux stops it. `0` is no limit.
+    pub network_timeout_seconds: u64,
+}
+
+impl GitConfig {
+    /// The bound on a network git command, or `None` for no limit.
+    #[must_use]
+    pub fn network_timeout(&self) -> Option<std::time::Duration> {
+        (self.network_timeout_seconds > 0)
+            .then(|| std::time::Duration::from_secs(self.network_timeout_seconds))
+    }
 }
 
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
             clone_stall_seconds: DEFAULT_CLONE_STALL_SECONDS,
+            network_timeout_seconds: DEFAULT_NETWORK_TIMEOUT_SECONDS,
         }
     }
 }
@@ -6591,6 +6608,23 @@ mod resolve_plan_tests {
 
 #[cfg(test)]
 mod tests {
+    /// `[git] network_timeout_seconds` bounds the network git commands by the
+    /// configured seconds, and `0` takes the bound away.
+    #[test]
+    fn the_network_timeout_reads_seconds_and_zero_is_no_limit() {
+        let read = |text: &str| {
+            super::validate_config_str(text)
+                .unwrap()
+                .git
+                .network_timeout()
+        };
+        assert_eq!(
+            read("[git]\nnetwork_timeout_seconds = 42\n"),
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert_eq!(read("[git]\nnetwork_timeout_seconds = 0\n"), None);
+    }
+
     /// Every plaintext password the start check finds, with its whole path
     /// as the walk saw it and the lines it spans, in every shape: through an
     /// array of tables, a `[projects]` table, a quoted dotted key, over

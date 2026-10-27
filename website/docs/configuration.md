@@ -525,6 +525,22 @@ instead is git's progress. A clone that prints nothing for `clone_stall_seconds`
 is stopped, and the message says so. Raise it for a remote that takes a long time
 to start sending. Values below 1 count as 1. It takes effect for the next clone.
 
+## How long a push or a fetch may take (`[git]`)
+
+```toml
+[git]
+network_timeout_seconds = 600  # 10 minutes
+```
+
+A push, a pull's fetch, a pull request fetch and an `ls-remote` that dux runs for you
+are stopped once they have run for `network_timeout_seconds` in all, and the message
+says so. None of them can ask for anything on a terminal, so this catches a remote or a
+credential helper that stopped answering. An askpass program you configured
+(`GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`) still answers for them.
+
+- **Set it to `0` for no limit**, for a long pre-push hook or a large Git LFS upload.
+- **It takes effect for the next command.**
+
 ## How long messages stay (`[ui]`)
 
 ```toml

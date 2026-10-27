@@ -2247,6 +2247,12 @@ fn patch_capabilities_editor_cli_and_git(doc: &mut DocumentMut, config: &Config)
         "clone_stall_seconds",
         config.git.clone_stall_seconds,
     );
+    patch_table_u64(
+        doc,
+        "git",
+        "network_timeout_seconds",
+        config.git.network_timeout_seconds,
+    );
 }
 
 /// `[server]`'s listener, log viewer, background serving and control socket.

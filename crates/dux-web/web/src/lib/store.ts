@@ -2630,8 +2630,8 @@ function clearPendingOrders(): Partial<DuxState> {
 // paths where an in-flight create can no longer be trusted to resolve: a
 // surviving create-focus token would mis-identify a later session as ours, and
 // a surviving pane override would strand the pane until reload. Deliberately
-// not folded into `clearPendingOrders`, which user actions like sorting also
-// call and which must not cancel an in-flight create-focus.
+// not folded into `clearPendingOrders`, which must not cancel an in-flight
+// create-focus.
 function clearPendingClientIntent(): Partial<DuxState> {
   return {
     ...clearPendingOrders(),
@@ -7613,8 +7613,9 @@ export function reorderAgents(orderedIds: string[]): void {
   sessionsApi.reorderGlobal(orderedIds).catch((e) => {
     // A rejected reorder is never reconciled by a spine, so the overlay would
     // linger forever. Clear it so the UI snaps back to the authoritative order,
-    // then surface the failure.
-    setState({ pendingAgentOrder: null })
+    // then surface the failure. Only this request's own overlay: a later
+    // reorder or sort that replaced it is still waiting on its own answer.
+    if (state.pendingAgentOrder === orderedIds) setState({ pendingAgentOrder: null })
     notifyError(e instanceof Error ? e.message : "Could not reorder the agents.")
   })
 }
@@ -7634,33 +7635,15 @@ export function reorderTerminals(orderedIds: string[]): void {
   })
 }
 
-// One-shot reorder of every project's sessions, distinct from `setAgentSort`,
-// which sets the shared display mode. It persists through `reorder_sessions`,
-// so the manual order the terminal UI shows stays in step by construction.
-//
-// No optimistic overlay: a sort touches every project's sessions at once, so
-// nothing local could cover them all and the rows snap on the next spine.
+// One-shot reorder of every agent, distinct from `setAgentSort`, which sets the
+// shared display mode. Agents are one global list, so the sort persists one
+// global order through `reorderAgents`, which the terminal UI's manual order
+// shows too, and the optimistic overlay covers every row at once.
 export function sortAgents(by: SortKey): void {
   const sessions = state.spine?.sessions ?? []
-  const projects = state.spine?.projects ?? []
-  // A sort supersedes any in-flight drag: drop its overlay up front, or a
-  // superseded drag order would linger on screen until something else clears
-  // it (the overlay only retires on match/error/disconnect).
-  setState(clearPendingOrders())
-  for (const project of projects) {
-    const projectSessions = sessions.filter(
-      (s) => workspaceProjectId(s.workspace) === project.id,
-    )
-    if (projectSessions.length < 2) continue
-    const orderedIds = sortedSessionIds(projectSessions, by)
-    sessionsApi
-      .reorder(project.id, orderedIds)
-      .catch((e) =>
-        notifyError(
-          e instanceof Error ? e.message : "Could not reorder the sessions.",
-        ),
-      )
-  }
+  if (sessions.length < 2) return
+  // The sort's order replaces any in-flight drag's overlay.
+  reorderAgents(sortedSessionIds(sessions, by))
 }
 
 

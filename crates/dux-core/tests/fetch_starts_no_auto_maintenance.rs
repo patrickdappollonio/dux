@@ -66,7 +66,13 @@ fn a_pull_request_fetch_starts_no_auto_maintenance_even_where_the_repository_wan
     git(&repo, &["config", "maintenance.auto", "true"]);
     std::fs::write(&trace, "").unwrap();
 
-    dux_core::git::fetch_pull_request_head(&repo, 7, "pr-7").unwrap();
+    dux_core::git::fetch_pull_request_head(
+        &repo,
+        7,
+        "pr-7",
+        Some(std::time::Duration::from_secs(60)),
+    )
+    .unwrap();
 
     let events = std::fs::read_to_string(&trace).unwrap();
     assert!(

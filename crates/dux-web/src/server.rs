@@ -5335,14 +5335,14 @@ mod tests {
         let handle = seeded_engine_handle(tmp.path());
         let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
-        // `/reorder` is its own route, not `:id`. The seeded project p1 has exactly
-        // session s1, so reordering to [s1] is accepted (200).
+        // `/reorder-global` is its own route, not `:id`. The seeded workspace has
+        // exactly session s1, so reordering to [s1] is accepted (200).
         assert_eq!(
             oneshot_status(
                 &app,
                 "POST",
-                "/api/v1/sessions/reorder",
-                Some(r#"{"project_id":"p1","session_ids":["s1"]}"#)
+                "/api/v1/sessions/reorder-global",
+                Some(r#"{"session_ids":["s1"]}"#)
             )
             .await,
             StatusCode::OK,

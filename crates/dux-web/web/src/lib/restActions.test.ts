@@ -158,12 +158,12 @@ describe("sessionsApi", () => {
     expect(lastCall(fetchMock).body).toEqual({ force: false })
   })
 
-  it("reorder POSTs /sessions/reorder with project + ordered ids", async () => {
+  it("reorderGlobal POSTs /sessions/reorder-global with the ordered ids", async () => {
     const fetchMock = stubOkFetch(200)
-    await sessionsApi.reorder("p1", ["s2", "s1"])
+    await sessionsApi.reorderGlobal(["s2", "s1"])
     const c = lastCall(fetchMock)
-    expect(c.url).toBe("/api/v1/sessions/reorder")
-    expect(c.body).toEqual({ project_id: "p1", session_ids: ["s2", "s1"] })
+    expect(c.url).toBe("/api/v1/sessions/reorder-global")
+    expect(c.body).toEqual({ session_ids: ["s2", "s1"] })
   })
 
   it("rerunStartupCommand POSTs /rerun-startup-command", async () => {

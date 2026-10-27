@@ -418,22 +418,20 @@ impl SessionStore {
         // exactly across the upgrade, and it runs inside its own transaction (see
         // `backfill_session_sort_order`).
         //
-        // Retryable: run the backfill when the column was just added, OR when a
-        // prior crash stranded the table in the gap between the (autocommitted)
-        // ALTER and the backfill, detected by `session_sort_order_needs_backfill`
-        // as "some project has 2+ sessions all still at the default 0". Gating on
-        // `ensure_column` alone would pin a crash-stranded table at sort_order=0
-        // forever, since the next boot sees the column present and skips the
-        // backfill.
-        let sort_order_added = ensure_column(
+        // Retryable: the backfill runs whenever two or more sessions share a
+        // position (`session_sort_order_needs_backfill`), which covers a column
+        // just added to a table of several sessions and one a prior crash
+        // stranded in the gap between the (autocommitted) ALTER and the
+        // backfill. Gating on `ensure_column` alone would pin a crash-stranded
+        // table at sort_order=0 forever, since the next boot sees the column
+        // present and skips the backfill.
+        ensure_column(
             &self.conn,
             "agent_sessions",
             "sort_order",
             "integer not null default 0",
         )?;
-        if sort_order_added || self.session_sort_order_needs_backfill()? {
-            self.backfill_session_sort_order()?;
-        }
+        self.backfill_session_sort_order()?;
         // Per-agent remembered focused tab (derived runtime/UI state, never config).
         // Additive, NULL default = "no memory" = falls back to the session-slot tab.
         // Deliberately OMITTED from `upsert_session`'s SET/INSERT lists (same rationale
@@ -695,8 +693,12 @@ impl SessionStore {
     ///
     /// Idempotent: a session with a pointer is not touched.
     fn backfill_slot_tabs(&self) -> Result<()> {
+        // The work list is read inside the write transaction: another
+        // connection opening the same file may be migrating it right now, and
+        // a list read before its commit would mint a second first tab.
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab migration")?;
         let pending: Vec<(String, String, String)> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = tx.prepare(
                 "select id, provider, created_at from agent_sessions \
                  where slot_tab_id is null or trim(slot_tab_id) = ''",
             )?;
@@ -713,7 +715,6 @@ impl SessionStore {
             return Ok(());
         }
         let count = pending.len();
-        let tx = immediate_tx(&self.conn).context("failed to start the slot tab migration")?;
         for (session_id, provider, created_at) in pending {
             let tab_id = uuid::Uuid::new_v4().to_string();
             // One below whatever the session's existing tabs start at, so the
@@ -757,8 +758,10 @@ impl SessionStore {
     /// and the honest repair is the session's oldest surviving tab, which the
     /// user is already looking at. Only a session with no tabs left mints.
     fn heal_slot_tab_pointers(&self) -> Result<()> {
+        // Read inside the write transaction, as the backfill's list is.
+        let tx = immediate_tx(&self.conn).context("failed to start the slot tab repair")?;
         let dangling: Vec<(String, String, String, String)> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = tx.prepare(
                 "select s.id, s.slot_tab_id, s.provider, s.created_at from agent_sessions s \
                  where s.slot_tab_id is not null and trim(s.slot_tab_id) <> '' \
                    and not exists (select 1 from agent_tabs t \
@@ -776,7 +779,6 @@ impl SessionStore {
         if dangling.is_empty() {
             return Ok(());
         }
-        let tx = immediate_tx(&self.conn).context("failed to start the slot tab repair")?;
         for (session_id, stale, provider, created_at) in dangling {
             let oldest: Option<(String, String)> = tx
                 .query_row(
@@ -2252,23 +2254,15 @@ impl SessionStore {
         if updated > 0 {
             return Ok(());
         }
-        // A brand-new session lands at the TOP of its project's order: one
-        // position above the current minimum (negative values are fine;
-        // positions are relative, only their ordering matters). The engine is
+        // A brand-new session lands at the TOP of the one global order (agents
+        // are a single flat list, whatever project each belongs to): one
+        // position above the current minimum over EVERY row. Negative values
+        // are fine; positions are relative, only their ordering matters. The
+        // minimum over the session's own project would share a position with
+        // another project's agent and land mid-list. The engine is
         // single-threaded over this connection, so the UPDATE-miss → INSERT
         // sequence cannot race.
-        // A standalone agent belongs to no project, so "the top of its
-        // project's order" is not a question with an answer for it. Its row
-        // stores an empty project id, and taking the minimum over that group
-        // would only put it above the other standalone agents, landing it in the
-        // middle of a flat list ordered globally. The minimum over EVERY row is
-        // the honest reading of "the top" for an agent whose group is the whole
-        // list.
-        let new_sort_order = if workspace_kind == "folder" {
-            min_session_sort_order_overall_in(conn)?.unwrap_or(1) - 1
-        } else {
-            min_session_sort_order_in(conn, project_id)?.unwrap_or(1) - 1
-        };
+        let new_sort_order = min_session_sort_order_overall_in(conn)?.unwrap_or(1) - 1;
         conn.execute(
             r"
             insert into agent_sessions
@@ -2303,8 +2297,7 @@ impl SessionStore {
     }
 
     /// The smallest `sort_order` assigned to ANY session, or `None` when there
-    /// are none. The placement rule for a standalone agent, which has no project
-    /// whose top it could be placed at.
+    /// are none: the top of the one global list, where a new agent is placed.
     ///
     /// # Errors
     ///
@@ -2313,50 +2306,11 @@ impl SessionStore {
         min_session_sort_order_overall_in(&self.conn)
     }
 
-    /// The smallest `sort_order` currently assigned to any session in
-    /// `project_id`, or `None` when the project has no sessions yet. Used to
-    /// place a new session one position above the current top.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the database read fails.
-    pub fn min_session_sort_order(&self, project_id: &str) -> Result<Option<i64>> {
-        min_session_sort_order_in(&self.conn, project_id)
-    }
-
-    /// Assign positions `0..n` to exactly `ordered_ids`, in that order, scoped
-    /// to `project_id`. Runs in a single transaction. The storage layer is
-    /// intentionally "dumb": it does not validate that `ordered_ids` is the
-    /// complete set of the project's sessions. That strict validation lives in
-    /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
-    /// so would corrupt the "sort by most recently updated" semantics.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the transaction fails; no position changes then.
-    pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
-        let tx = immediate_tx(&self.conn)?;
-        {
-            let mut stmt = tx.prepare(
-                "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
-            )?;
-            for (position, id) in ordered_ids.iter().enumerate() {
-                stmt.execute(params![
-                    crate::numeric::usize_to_i64_wrapping(position),
-                    id,
-                    project_id
-                ])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Assign a GLOBAL `sort_order` of `0..n` to `ordered_ids`, in that order,
     /// across every session regardless of project. This is the flat-model ordering:
     /// agents are one independent list, so a drag persists a single global
     /// permutation (not a per-project one). Not project-scoped, so it can move an
-    /// agent anywhere in the list. Like [`reorder_sessions`] it is "dumb": strict
+    /// agent anywhere in the list. It is "dumb": strict
     /// validation that `ordered_ids` is the complete session set lives in the
     /// engine. `updated_at` is deliberately untouched (preserves recency sorting).
     pub(crate) fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
@@ -2373,7 +2327,7 @@ impl SessionStore {
 
     /// Assign positions `0..n` to exactly `ordered_ids`, in that order, over the
     /// `projects.sort_order` column. Single transaction. Like
-    /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
+    /// [`Self::set_global_session_order`], validation that `ordered_ids` is the complete set
     /// of known projects lives in `Engine::apply`, not here.
     ///
     /// # Errors
@@ -2391,26 +2345,16 @@ impl SessionStore {
         Ok(())
     }
 
-    /// True when some project has more than one session and ALL of that
-    /// project's sessions are still at `sort_order = 0`, the fingerprint of a
-    /// `sort_order` backfill that never ran (stranded by a crash between the
-    /// autocommitted ALTER and the backfill). Used to make the one-time
-    /// backfill retryable.
-    ///
-    /// This is deliberately narrower than "every row is 0": a project with a
-    /// single session legitimately sits at `sort_order = 0` (position 0), so
-    /// that state must NOT trigger a re-run on every open. Two-or-more sessions
-    /// in one project all pinned at 0 is impossible in steady state, because
-    /// inserts land at `min-1` (negative) and reorders assign distinct `0..n`, so it
-    /// only ever indicates a stranded half-migration. `count(nullif(sort_order,
-    /// 0))` counts only rows whose value is neither 0 nor NULL.
-    fn session_sort_order_needs_backfill(&self) -> Result<bool> {
-        // The flat model orders agents by a GLOBAL `sort_order`, so it must be a
-        // total order (globally distinct). Re-run the backfill whenever two or more
-        // sessions share a value: that means either a fresh (all-zero) table or a
-        // legacy PER-PROJECT numbering (each project restarted at 0) that must be
-        // globalized. Once globally distinct, this returns false and never re-runs.
-        let has_duplicates: bool = self.conn.query_row(
+    /// True when two or more sessions share a `sort_order`, which the flat
+    /// model's one global order never produces in steady state: an insert
+    /// lands one below the overall minimum and a reorder assigns distinct
+    /// `0..n` over every session. A shared value is therefore the fingerprint
+    /// of a fresh (all-zero) column whose backfill a crash stranded between the
+    /// autocommitted ALTER and the backfill, or of a legacy per-project
+    /// numbering that must be globalized. Used to make the one-time backfill
+    /// retryable; once positions are globally distinct it never re-runs.
+    fn session_sort_order_needs_backfill(conn: &Connection) -> Result<bool> {
+        let has_duplicates: bool = conn.query_row(
             "select exists( \
                  select 1 from agent_sessions \
                  group by sort_order \
@@ -2422,25 +2366,31 @@ impl SessionStore {
         Ok(has_duplicates)
     }
 
-    /// One-time backfill run when the `sort_order` column is first added to an
-    /// existing `agent_sessions` table. Numbers ALL sessions `0,1,2,…` in one
-    /// global sequence (agents are a single flat list) following the legacy
+    /// One-time backfill run when sessions share a `sort_order` (the column
+    /// first added to an existing `agent_sessions` table, or a stranded
+    /// half-migration); a no-op otherwise. Numbers ALL sessions `0,1,2,…` in
+    /// one global sequence (agents are a single flat list) following the legacy
     /// `updated_at DESC` order, so the visible order is preserved exactly after
     /// the upgrade.
+    ///
+    /// The check and the read happen inside the write transaction: another
+    /// connection opening the same file may reorder or backfill meanwhile, and
+    /// an order read before its commit would overwrite what it wrote.
     fn backfill_session_sort_order(&self) -> Result<()> {
+        let tx = immediate_tx(&self.conn)?;
+        if !Self::session_sort_order_needs_backfill(&tx)? {
+            return Ok(());
+        }
         // Assign a GLOBAL 0..n order (flat model: agents are one independent list).
         // Order by the CURRENT effective order (`sort_order asc, updated_at desc`,
         // the same order `load_sessions` uses) so this is non-destructive: a legacy
         // per-project arrangement is frozen into a sensible global sequence rather
         // than reshuffled, and a fresh (all-zero) table falls back to most-recent
         // first. Runs once; afterwards the values are globally distinct.
-        let ids: Vec<String> = self
-            .conn
+        let ids: Vec<String> = tx
             .prepare("select id from agent_sessions order by sort_order asc, updated_at desc")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-
-        let tx = immediate_tx(&self.conn)?;
         {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
@@ -3098,6 +3048,45 @@ mod tests {
         assert!(
             placed < top_before,
             "a new standalone agent goes above every other agent, got {placed} against {top_before}"
+        );
+    }
+
+    /// A new managed agent lands at the top of the one global list too, never
+    /// merely the top of its own project, which would share a position with
+    /// another project's agent.
+    #[test]
+    fn a_new_managed_agent_lands_above_every_other_agent() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("a", "p1", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "p2", now, now))
+            .unwrap();
+        store
+            .set_global_session_order(&["b".into(), "a".into()])
+            .unwrap();
+
+        store
+            .upsert_session(&test_session_in("c", "p1", now, now))
+            .unwrap();
+
+        let positions: Vec<(String, i64)> = store
+            .conn
+            .prepare("select id, sort_order from agent_sessions order by sort_order")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            positions,
+            vec![
+                ("c".to_string(), -1),
+                ("b".to_string(), 0),
+                ("a".to_string(), 1)
+            ]
         );
     }
 
@@ -3812,6 +3801,50 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].id, pointer);
         assert_eq!(tabs[0].provider.as_str(), "codex");
+    }
+
+    /// Two connections opening the same database on the first boot after an
+    /// upgrade: the second holds the write lock having already given `s1` its
+    /// first tab, and commits only after the first had time to look. The one
+    /// that waited must see what the other wrote rather than mint a second
+    /// first tab.
+    #[test]
+    fn a_slot_tab_backfill_waiting_on_another_connection_mints_nothing_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let store = SessionStore::open(&path).unwrap();
+        pre_pivot_session(&store, "s1", "claude");
+        let other = Connection::open(&path).unwrap();
+        let tx = immediate_tx(&other).unwrap();
+        tx.execute(
+            "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+             values ('other-tab', 's1', 'claude', 0, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "update agent_sessions set slot_tab_id = 'other-tab' where id = 's1'",
+            [],
+        )
+        .unwrap();
+
+        let waiting = std::thread::spawn(move || {
+            store.backfill_slot_tabs().unwrap();
+            store
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tx.commit().unwrap();
+        let store = waiting.join().unwrap();
+
+        let tabs: i64 = store
+            .conn
+            .query_row(
+                "select count(*) from agent_tabs where session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tabs, 1);
     }
 
     #[test]
@@ -4960,7 +4993,7 @@ mod tests {
             .execute("update agent_sessions set sort_order = 0", [])
             .unwrap();
         assert!(
-            store.session_sort_order_needs_backfill().unwrap(),
+            SessionStore::session_sort_order_needs_backfill(&store.conn).unwrap(),
             "two same-project sessions both at 0 must read as stranded"
         );
 
@@ -4986,7 +5019,57 @@ mod tests {
             .unwrap();
         assert_eq!((so_new, so_old), (0, 1), "updated_at DESC → new=0, old=1");
         // And once healed, the fingerprint no longer trips (no destructive re-run).
-        assert!(!store.session_sort_order_needs_backfill().unwrap());
+        assert!(!SessionStore::session_sort_order_needs_backfill(&store.conn).unwrap());
+    }
+
+    /// A second connection reorders the agents and commits while this one is
+    /// waiting to backfill a stranded all-zero table. The backfill must judge
+    /// the table as it is once it holds the lock, and leave that reorder alone.
+    #[test]
+    fn a_position_backfill_waiting_on_another_connection_keeps_its_reorder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let store = SessionStore::open(&path).unwrap();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("old", "p1", now, now - Duration::hours(2)))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("new", "p1", now, now - Duration::hours(1)))
+            .unwrap();
+        store
+            .conn
+            .execute("update agent_sessions set sort_order = 0", [])
+            .unwrap();
+        // Backfilled on its own, this table would be new=0, old=1.
+        let other = Connection::open(&path).unwrap();
+        let tx = immediate_tx(&other).unwrap();
+        tx.execute(
+            "update agent_sessions set sort_order = 0 where id = 'old'",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "update agent_sessions set sort_order = 1 where id = 'new'",
+            [],
+        )
+        .unwrap();
+
+        let waiting = std::thread::spawn(move || {
+            store.backfill_session_sort_order().unwrap();
+            store
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tx.commit().unwrap();
+        let store = waiting.join().unwrap();
+
+        let ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["old", "new"]);
     }
 
     #[test]
@@ -5008,13 +5091,13 @@ mod tests {
             .execute("update agent_sessions set sort_order = 0", [])
             .unwrap();
         assert!(
-            store.session_sort_order_needs_backfill().unwrap(),
+            SessionStore::session_sort_order_needs_backfill(&store.conn).unwrap(),
             "a shared sort_order is not a global total order"
         );
 
         store.backfill_session_sort_order().unwrap();
         assert!(
-            !store.session_sort_order_needs_backfill().unwrap(),
+            !SessionStore::session_sort_order_needs_backfill(&store.conn).unwrap(),
             "a globalized order is distinct and never re-runs"
         );
         let distinct: i64 = store
@@ -5151,7 +5234,7 @@ mod tests {
     }
 
     #[test]
-    fn reorder_sessions_assigns_zero_to_n_positions() {
+    fn set_global_session_order_assigns_zero_to_n_positions() {
         let store = test_store();
         let now = Utc::now();
         store
@@ -5166,7 +5249,7 @@ mod tests {
 
         // Reorder to a, b, c (explicitly) and confirm load order matches.
         store
-            .reorder_sessions("proj", &["a".into(), "b".into(), "c".into()])
+            .set_global_session_order(&["a".into(), "b".into(), "c".into()])
             .unwrap();
         let ids: Vec<String> = store
             .load_sessions()
@@ -5178,7 +5261,7 @@ mod tests {
 
         // Reorder again to a different order; positions are reassigned 0..n.
         store
-            .reorder_sessions("proj", &["c".into(), "a".into(), "b".into()])
+            .set_global_session_order(&["c".into(), "a".into(), "b".into()])
             .unwrap();
         let ids: Vec<String> = store
             .load_sessions()
@@ -5190,7 +5273,7 @@ mod tests {
     }
 
     #[test]
-    fn reorder_sessions_does_not_touch_updated_at() {
+    fn set_global_session_order_does_not_touch_updated_at() {
         let store = test_store();
         let original = Utc::now() - chrono::Duration::hours(5);
         store
@@ -5201,7 +5284,7 @@ mod tests {
             .unwrap();
 
         store
-            .reorder_sessions("proj", &["a".into(), "b".into()])
+            .set_global_session_order(&["a".into(), "b".into()])
             .unwrap();
 
         let loaded = store.load_sessions().unwrap();
@@ -5213,32 +5296,6 @@ mod tests {
                 session.id
             );
         }
-    }
-
-    #[test]
-    fn reorder_sessions_is_scoped_to_project() {
-        let store = test_store();
-        let now = Utc::now();
-        store
-            .upsert_session(&test_session_in("a", "p1", now, now))
-            .unwrap();
-        store
-            .upsert_session(&test_session_in("b", "p2", now, now))
-            .unwrap();
-
-        // Passing a foreign id in the wrong project is a silent no-op at the
-        // storage layer (the WHERE project_id guard matches nothing). Engine
-        // validation is what rejects such input; storage stays dumb.
-        store.reorder_sessions("p1", &["b".into()]).unwrap();
-        // b's sort_order in p2 is unchanged: it still loads.
-        let p2_ids: Vec<String> = store
-            .load_sessions()
-            .unwrap()
-            .into_iter()
-            .filter(|s| s.project_id().expect("managed test session") == "p2")
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(p2_ids, vec!["b"]);
     }
 
     #[test]
@@ -5307,17 +5364,17 @@ mod tests {
     }
 
     #[test]
-    fn min_session_sort_order_reports_top_position() {
+    fn min_session_sort_order_overall_reports_top_position() {
         let store = test_store();
         let now = Utc::now();
-        assert_eq!(store.min_session_sort_order("proj").unwrap(), None);
+        assert_eq!(store.min_session_sort_order_overall().unwrap(), None);
         store
             .upsert_session(&test_session_in("a", "proj", now, now))
             .unwrap(); // sort_order 0
         store
             .upsert_session(&test_session_in("b", "proj", now, now))
             .unwrap(); // sort_order -1
-        assert_eq!(store.min_session_sort_order("proj").unwrap(), Some(-1));
+        assert_eq!(store.min_session_sort_order_overall().unwrap(), Some(-1));
     }
 
     #[test]
@@ -5547,17 +5604,6 @@ fn min_session_sort_order_overall_in(conn: &Connection) -> Result<Option<i64>> {
         row.get::<_, Option<i64>>(0)
     })
     .context("failed to compute the overall min session sort order")
-}
-
-/// See [`SessionStore::min_session_sort_order`]. Parameterized over the
-/// connection for the same reason as its sibling above.
-fn min_session_sort_order_in(conn: &Connection, project_id: &str) -> Result<Option<i64>> {
-    conn.query_row(
-        "select min(sort_order) from agent_sessions where project_id = ?1",
-        params![project_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .context("failed to compute min session sort order")
 }
 
 /// Adds `column` to `table` if it is missing. Returns `true` when the column

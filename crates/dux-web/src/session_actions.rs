@@ -57,10 +57,10 @@ use crate::rest_common::{
 };
 use crate::server::AppState;
 
-/// The session-action routes. The literal `/reorder` segment is registered
-/// alongside the parameterized `:id` routes; axum's matcher prefers static
-/// segments over `:id`, so `POST /api/v1/sessions/reorder` never resolves to the
-/// `:id` handlers. (The `GET /api/v1/sessions/:id` read lives in `workspace_routes`;
+/// The session-action routes. The literal `/reorder-global` segment is
+/// registered alongside the parameterized `:id` routes; axum's matcher prefers
+/// static segments over `:id`, so `POST /api/v1/sessions/reorder-global` never
+/// resolves to the `:id` handlers. (The `GET /api/v1/sessions/:id` read lives in `workspace_routes`;
 /// axum merges the per-path method routers, so the verbs here coexist with it.)
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -73,7 +73,6 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/pull-requests/clone-destination",
             post(check_pull_request_clone_destination),
         )
-        .route("/api/v1/sessions/reorder", post(reorder_sessions))
         .route("/api/v1/sessions/reorder-global", post(reorder_agents))
         .route(
             "/api/v1/sessions/{id}",
@@ -1153,33 +1152,6 @@ async fn resume_pull_request_autodetection(
 }
 
 // ── Reorder ──────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct ReorderBody {
-    project_id: String,
-    session_ids: Vec<String>,
-}
-
-async fn reorder_sessions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<ReorderBody>,
-) -> Response {
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::ReorderSessions {
-                project_id: body.project_id,
-                session_ids: body.session_ids,
-            },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
-}
 
 #[derive(Deserialize)]
 struct ReorderGlobalBody {

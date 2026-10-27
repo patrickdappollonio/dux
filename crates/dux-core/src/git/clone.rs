@@ -91,16 +91,22 @@ fn kill_group(group: i32) {
     }
 }
 
-/// A `git` command that can never ask for an answer, whatever the inherited
-/// environment says: no terminal prompt, an askpass for git and for ssh that
-/// fails at once, and no interactive credential helper. A helper that answers
-/// without asking (a stored token, a keychain) still works. It runs in a
-/// session of its own: with no controlling terminal ssh cannot open `/dev/tty`
-/// to ask for a passphrase or a host key, and it is a process group of its
-/// own, so a clone can be stopped at once. Null stdin; the caller sets the rest.
+/// A `git` command that can never ask for an answer on dux's terminal: no
+/// terminal prompt, no interactive Git Credential Manager, and a session of its
+/// own, so with no controlling terminal ssh cannot open `/dev/tty` to ask for a
+/// passphrase or a host key. It is a process group of its own too, so a clone
+/// can be stopped at once. Null stdin; the caller sets the rest.
 ///
-/// `env` is extra variables for git's environment, set first so that none of
-/// them can undo the above (a test hands git a stand-in transport this way).
+/// An askpass the user configured (`GIT_ASKPASS` or `SSH_ASKPASS` in the
+/// environment, or `core.askPass`) is theirs and is left alone: it is how a
+/// stored token reaches git without anyone being asked. Only where none is
+/// configured does git get an askpass that fails at once. That one rides on
+/// `SSH_ASKPASS`, the last place git looks, so `core.askPass` still wins over
+/// it without dux having to read the user's git configuration.
+///
+/// `env` is extra variables for git's environment, set first (a test hands git
+/// a stand-in transport or askpass this way); an askpass named there counts as
+/// configured.
 pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Command {
     use std::os::unix::process::CommandExt as _;
 
@@ -109,13 +115,18 @@ pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Comma
         command.env(key, value);
     }
     command
-        .args(["-c", "credential.interactive=false"])
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "false")
-        .env("SSH_ASKPASS", "false")
-        .env("SSH_ASKPASS_REQUIRE", "never")
         .env("GCM_INTERACTIVE", "never")
         .stdin(std::process::Stdio::null());
+    let configured = |key: &str| match env.iter().find(|(name, _)| *name == key) {
+        Some((_, value)) => !value.is_empty(),
+        None => std::env::var_os(key).is_some_and(|value| !value.is_empty()),
+    };
+    if !configured("SSH_ASKPASS") {
+        command
+            .env("SSH_ASKPASS", "false")
+            .env("SSH_ASKPASS_REQUIRE", "never");
+    }
     // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
     unsafe {
         command.pre_exec(|| {
@@ -165,9 +176,10 @@ pub(crate) fn remote_default_branch_from_remote(
 }
 
 /// Clone `url` into `dest` with the user's own git configuration and
-/// credentials, never asking for anything: git runs in a session of its own
-/// with no terminal, so neither git nor ssh has anywhere to prompt, and one
-/// that would have to prompt fails at once with its own message. There is no
+/// credentials, never asking on dux's terminal: git runs in a session of its
+/// own with no terminal, so neither git nor ssh has anywhere to prompt, and
+/// unless the user configured an askpass, one that would have to prompt fails
+/// at once with its own message. There is no
 /// time limit, because a big repository is slow rather than stuck; a clone
 /// that prints nothing for `stall` (its progress keeps stderr moving) is
 /// stopped. `processes` records it, so quitting dux stops it too.
@@ -476,16 +488,11 @@ mod tests {
         );
     }
 
-    /// A credential prompt is never launched: git's own and ssh's askpass fail
-    /// at once, and git does not ask interactively, even when the environment
-    /// dux inherited names askpass programs that would wait for an answer.
+    /// With no askpass configured, git's own and ssh's askpass fail at once,
+    /// so nothing is waited on and the transport's own words come back.
     #[test]
-    fn no_askpass_program_is_ever_waited_on() {
+    fn with_no_askpass_configured_nothing_is_waited_on() {
         let tmp = tempfile::tempdir().unwrap();
-        let hang = tmp.path().join("hang");
-        std::fs::write(&hang, "#!/bin/sh\nexec sleep 60\n").unwrap();
-        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let hang = hang.to_string_lossy().into_owned();
         let ssh = fake_ssh(
             tmp.path(),
             "printf 'protocol=https\\nhost=example.invalid\\n\\n' \
@@ -501,11 +508,7 @@ mod tests {
             &tmp.path().join("clone"),
             Duration::from_secs(30),
             &CloneProcesses::default(),
-            &[
-                ("GIT_SSH_COMMAND", &ssh),
-                ("GIT_ASKPASS", &hang),
-                ("SSH_ASKPASS", &hang),
-            ],
+            &[("GIT_SSH_COMMAND", &ssh)],
         );
 
         assert!(
@@ -516,6 +519,52 @@ mod tests {
             panic!("expected a failure, got {result:?}");
         };
         assert!(message.contains("nothing to ask with"), "{message}");
+    }
+
+    /// Ask the no-prompt command for a credential, the way a push or a fetch
+    /// asks when the remote wants one. `config` is git configuration for the
+    /// call; no credential helper answers, so only an askpass can.
+    fn credential_answer(env: &[(&str, &str)], config: &[&str]) -> String {
+        use std::io::Write as _;
+
+        let mut command = no_prompt_git_command(env);
+        command
+            .args(["-c", "credential.helper="])
+            .args(config)
+            .args(["credential", "fill"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"protocol=https\nhost=example.invalid\n\n")
+            .unwrap();
+        String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+    }
+
+    /// An askpass that answers from a store without asking is the user's own
+    /// way of handing git a credential, so it is used, whether the environment
+    /// or `core.askPass` names it.
+    #[test]
+    fn a_configured_askpass_that_answers_is_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("askpass");
+        std::fs::write(&script, "#!/bin/sh\necho stored-secret\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = script.to_string_lossy().into_owned();
+
+        let from_env = credential_answer(&[("GIT_ASKPASS", &script)], &[]);
+        assert!(from_env.contains("password=stored-secret"), "{from_env}");
+
+        let core_askpass = format!("core.askPass={script}");
+        let from_config = credential_answer(&[], &["-c", &core_askpass]);
+        assert!(
+            from_config.contains("password=stored-secret"),
+            "{from_config}"
+        );
     }
 
     #[test]

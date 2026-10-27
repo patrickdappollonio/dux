@@ -1024,25 +1024,32 @@ pub(crate) fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Vec<GitWorktree> 
     worktrees
 }
 
+/// Fast-forwards the checked-out branch from `origin`; see
+/// [`pull_origin_branch`]. The fetch is stopped at `timeout`, or never when it
+/// is `None` (`[git] network_timeout_seconds`).
 pub(crate) fn pull_current_branch(
     repo_path: &Path,
     guard: &crate::checkout_move::CheckoutMoveGuard,
+    timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     let Some(branch) = current_branch_opt(repo_path)? else {
         return Err(anyhow!(
             "HEAD is detached; check out a branch before pulling"
         ));
     };
-    pull_origin_branch(repo_path, &branch, guard)
+    pull_origin_branch(repo_path, &branch, guard, timeout)
 }
 
+/// Switches to `branch` and fast-forwards it from `origin`, the fetch stopped
+/// at `timeout` as [`pull_current_branch`]'s is.
 pub(crate) fn pull_branch(
     repo_path: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
+    timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     switch_branch_if_needed(repo_path, branch, guard)?;
-    pull_origin_branch(repo_path, branch, guard)
+    pull_origin_branch(repo_path, branch, guard, timeout)
 }
 
 pub(crate) fn switch_branch_if_needed(
@@ -1112,6 +1119,48 @@ fn git_without_auto_maintenance() -> Command {
     command
 }
 
+/// Run `git <args>` in `repo` against a remote: it has no terminal to ask on
+/// and only an askpass the user configured can answer for it
+/// ([`clone::no_prompt_git_command`]),
+/// it starts no auto-maintenance, and it is stopped, its process group with
+/// it, at `timeout` (`[git] network_timeout_seconds`), or never when that is
+/// `None`. `label` names the command in failure text.
+fn network_git(
+    repo: &Path,
+    args: &[&str],
+    label: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<std::process::Output> {
+    let mut command = clone::no_prompt_git_command(&[]);
+    command
+        .args(["-c", "maintenance.auto=false", "-C"])
+        .arg(repo)
+        .args(args);
+    let Some(timeout) = timeout else {
+        return command
+            .output()
+            .with_context(|| format!("failed to run {label} in {}", repo.display()));
+    };
+    match crate::bounded_command::run_command_with_timeout(
+        command,
+        timeout,
+        crate::bounded_command::DEFAULT_READER_DRAIN,
+        label,
+    ) {
+        crate::bounded_command::CommandOutcome::Completed(output) => Ok(output),
+        crate::bounded_command::CommandOutcome::TimedOut => Err(anyhow!(
+            "{label} in {} timed out after {}s and was stopped",
+            repo.display(),
+            crate::duration_text::whole_seconds(timeout)
+        )),
+        crate::bounded_command::CommandOutcome::Failed(err)
+        | crate::bounded_command::CommandOutcome::NotFound(err) => Err(anyhow!(
+            "failed to run {label} in {}: {err}",
+            repo.display()
+        )),
+    }
+}
+
 /// `git <subcommand>` in `repo` for a [`TreeMove`], never recursing into
 /// submodules whatever `submodule.recurse` the user has set: the move check
 /// ([`crate::checkout_move`]) looks at this repository's own tree only, so git
@@ -1153,18 +1202,15 @@ fn pull_origin_branch(
     repo_path: &Path,
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
+    timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     let refspec = format!("refs/heads/{branch}");
-    let output = git_without_auto_maintenance()
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "fetch",
-            "origin",
-            "--",
-            &refspec,
-        ])
-        .output()?;
+    let output = network_git(
+        repo_path,
+        &["fetch", "origin", "--", &refspec],
+        "git fetch",
+        timeout,
+    )?;
     if !output.status.success() {
         return Err(git_failure("git fetch", repo_path, &output));
     }
@@ -1520,24 +1566,21 @@ fn run_git_capture_bounded(
 ///
 /// `ls-remote` patterns match a ref's tail, so the answer is the exact ref in
 /// its output, not the exit status alone. The refspec is fully qualified, so
-/// a dash-leading branch name cannot be read as an option.
-pub(crate) fn origin_has_branch(repo_path: &Path, name: &str) -> Result<bool> {
+/// a dash-leading branch name cannot be read as an option. Stopped at
+/// `timeout`, or never when it is `None` (`[git] network_timeout_seconds`).
+pub(crate) fn origin_has_branch(
+    repo_path: &Path,
+    name: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<bool> {
     let full_ref = format!("refs/heads/{name}");
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "ls-remote",
-            "--exit-code",
-            "origin",
-            "--",
-            &full_ref,
-        ])
-        // Never stop to ask for credentials: this is a question, not a login.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("failed to run git ls-remote in {}", repo_path.display()))?;
+    // Never stop to ask for credentials: this is a question, not a login.
+    let output = network_git(
+        repo_path,
+        &["ls-remote", "--exit-code", "origin", "--", &full_ref],
+        "git ls-remote",
+        timeout,
+    )?;
     match output.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -1699,28 +1742,27 @@ impl std::error::Error for FetchTimedOut {}
 
 /// Run one `git fetch origin` in `repo_path`, stopped at `timeout`.
 ///
-/// The fetch runs in a process group of its own and the whole group is killed
-/// at the bound, so a transport helper (`ssh`, a credential helper, a stand-in
-/// `upload-pack`) cannot outlive it. It never prompts for credentials. A
+/// The fetch runs in a session (and so a process group) of its own and the
+/// whole group is killed at the bound, so a transport helper (`ssh`, a
+/// credential helper, a stand-in `upload-pack`) cannot outlive it. It never
+/// prompts on dux's terminal ([`clone::no_prompt_git_command`]). A
 /// failure or a timeout is an `Err` naming what happened; callers report it
 /// and carry on from the refs they already have.
 pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> Result<()> {
     use std::io::Read as _;
-    use std::os::unix::process::CommandExt as _;
 
-    let mut child = git_without_auto_maintenance()
+    let mut child = clone::no_prompt_git_command(&[])
         .args([
+            "-c",
+            "maintenance.auto=false",
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "fetch",
             "--quiet",
             "origin",
         ])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .process_group(0)
         .spawn()
         .with_context(|| format!("failed to run git fetch in {}", repo_path.display()))?;
     // Drained on its own thread so a chatty stderr cannot fill the pipe and
@@ -2636,17 +2678,25 @@ fn same_worktree_path(registered: &Path, target: &Path) -> bool {
     }
 }
 
-/// Fetches pull request `pr_number`'s head from `origin` into the local branch `branch_name`.
+/// Fetches pull request `pr_number`'s head from `origin` into the local branch `branch_name`,
+/// stopped at `timeout` (`[git] network_timeout_seconds`; `None` is no limit).
 ///
 /// # Errors
 ///
-/// Fails when git cannot be run or the fetch fails.
-pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &str) -> Result<()> {
-    let repo = repo_path.to_string_lossy();
+/// Fails when git cannot be run, the fetch fails, or it outlives `timeout`.
+pub fn fetch_pull_request_head(
+    repo_path: &Path,
+    pr_number: u64,
+    branch_name: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<()> {
     let refspec = format!("pull/{pr_number}/head:refs/heads/{branch_name}");
-    let output = git_without_auto_maintenance()
-        .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
-        .output()?;
+    let output = network_git(
+        repo_path,
+        &["fetch", "origin", &refspec],
+        "git fetch",
+        timeout,
+    )?;
     if !output.status.success() {
         return Err(anyhow!(
             "git fetch failed: {}",
@@ -2663,16 +2713,24 @@ pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &s
 /// The ref (`refs/dux/pull-request-check/<N>`) is deleted again before this
 /// returns; a failed delete is logged and does not fail the call. One create
 /// runs at a time, so two calls never share the ref. It shells out to git and
-/// talks to the network, so callers run it in a background worker.
-pub(crate) fn fetch_pull_request_head_commit(repo_path: &Path, pr_number: u64) -> Result<String> {
+/// talks to the network, so callers run it in a background worker. The fetch
+/// is stopped at `timeout`, or never when it is `None`.
+pub(crate) fn fetch_pull_request_head_commit(
+    repo_path: &Path,
+    pr_number: u64,
+    timeout: Option<std::time::Duration>,
+) -> Result<String> {
     let repo = repo_path.to_string_lossy();
     let check_ref = format!("refs/dux/pull-request-check/{pr_number}");
     let refspec = format!("+pull/{pr_number}/head:{check_ref}");
-    let fetched = git_without_auto_maintenance()
-        .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
-        .output();
+    let fetched = network_git(
+        repo_path,
+        &["fetch", "origin", &refspec],
+        "git fetch",
+        timeout,
+    );
     let commit = match fetched {
-        Err(err) => Err(err.into()),
+        Err(err) => Err(err),
         Ok(output) if !output.status.success() => Err(anyhow!(
             "git fetch failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -5751,15 +5809,22 @@ fn run_pathspecs_output<P: AsRef<[u8]>>(
         payload.extend_from_slice(path.as_ref());
         payload.push(0);
     }
-    std::io::Write::write_all(&mut stdin, &payload)?;
-    drop(stdin);
+    // Written on a thread of its own: git may answer on stdout before it has
+    // read the whole list, or exit early (the worktree is gone), and a write
+    // ahead of the wait would then block on a full pipe or fail with a broken
+    // pipe, hiding git's own reason and leaving the child unreaped.
+    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &payload));
     let output = child.wait_with_output()?;
+    let written = writer
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("the writer thread panicked")));
     if !output.status.success() {
         return Err(anyhow!(
             "{what} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    written.map_err(|err| anyhow!("{what} failed: could not write the file list to git: {err}"))?;
     Ok(output.stdout)
 }
 
@@ -6541,9 +6606,9 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Fails when HEAD is detached, git cannot be run, or the push fails, with git's own reason.
-pub fn push(worktree_path: &Path) -> Result<String> {
-    let wt = worktree_path.to_string_lossy();
+/// Fails when HEAD is detached, git cannot be run, the push fails (with git's own reason), or it
+/// does not finish within `timeout` (`[git] network_timeout_seconds`; `None` is no limit).
+pub fn push(worktree_path: &Path, timeout: Option<std::time::Duration>) -> Result<String> {
     let Some(branch) = current_branch_opt(worktree_path)? else {
         return Err(anyhow!(
             "HEAD is detached; check out a branch before pushing"
@@ -6555,9 +6620,12 @@ pub fn push(worktree_path: &Path) -> Result<String> {
     // because a refspec's leading `+` means force and a branch may be called
     // `+feature`: as a bare refspec that force-pushes `feature` instead.
     let refspec = format!("refs/heads/{branch}");
-    let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "push", "-u", "origin", "--", &refspec])
-        .output()?;
+    let output = network_git(
+        worktree_path,
+        &["push", "-u", "origin", "--", &refspec],
+        "git push",
+        timeout,
+    )?;
     if !output.status.success() {
         return Err(git_failure("git push", worktree_path, &output));
     }
@@ -8007,6 +8075,11 @@ fn remove_path(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The bound the network commands get in tests: long enough never to
+    /// matter, so a test that hangs still ends.
+    const TEST_NETWORK_TIMEOUT: Option<std::time::Duration> =
+        Some(std::time::Duration::from_secs(60));
+
     #[test]
     fn display_path_relative_strips_the_base_dir() {
         let base = Some("/home/patrick");
@@ -8824,11 +8897,11 @@ mod tests {
         run_git(repo.path(), &["branch", "feature"]);
 
         assert!(
-            origin_has_branch(repo.path(), "main").unwrap(),
+            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT).unwrap(),
             "exit 0: origin has it, fetched or not"
         );
         assert!(
-            !origin_has_branch(repo.path(), "feature").unwrap(),
+            !origin_has_branch(repo.path(), "feature", TEST_NETWORK_TIMEOUT).unwrap(),
             "exit 2: origin answered and has no such branch"
         );
 
@@ -8837,7 +8910,7 @@ mod tests {
             &["remote", "set-url", "origin", "/nonexistent/dux-origin.git"],
         );
         assert!(
-            origin_has_branch(repo.path(), "main").is_err(),
+            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT).is_err(),
             "an origin that cannot be asked is not a no"
         );
     }
@@ -10628,6 +10701,132 @@ mod tests {
         );
     }
 
+    /// git's own reason reaches the caller when it exits before reading a list
+    /// bigger than the pipe holds, not the broken pipe the write then hits.
+    #[test]
+    fn a_pathspec_command_that_exits_early_reports_gits_reason() {
+        let gone = tempfile::tempdir().unwrap().path().join("gone");
+        let paths: Vec<String> = (0..20_000)
+            .map(|i| format!("some/long/path/{i}.txt"))
+            .collect();
+
+        let error = run_pathspecs_output(
+            &gone,
+            &["add"],
+            &paths,
+            PathspecMagic::AllLiteral,
+            "git add",
+        )
+        .expect_err("the worktree is gone");
+        let message = error.to_string();
+        assert!(message.contains("gone"), "{message}");
+        assert!(!message.contains("Broken pipe"), "{message}");
+    }
+
+    /// A push runs in a session of its own and is told never to ask, so its
+    /// transport has no terminal to prompt on. The stand-in `receive-pack`
+    /// records what it was handed and then serves the push.
+    #[test]
+    fn push_runs_detached_from_the_terminal_and_never_prompts() {
+        let (_origin, repo) = clone_of_local_origin();
+        run_git(repo.path(), &["switch", "-q", "-c", "feature"]);
+        let seen = repo.path().join(".git").join("seen");
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "remote.origin.receivepack",
+                &format!(
+                    "echo \"$GIT_TERMINAL_PROMPT $(ps -o sid= -p $$)\" > '{}'; git receive-pack",
+                    seen.display()
+                ),
+            ],
+        );
+
+        push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap();
+
+        let seen = std::fs::read_to_string(&seen).unwrap();
+        let mut fields = seen.split_whitespace();
+        assert_eq!(fields.next(), Some("0"), "{seen}");
+        let own_session = rustix::process::getsid(None)
+            .unwrap()
+            .as_raw_nonzero()
+            .get();
+        assert_ne!(
+            fields.next().and_then(|sid| sid.parse::<i32>().ok()),
+            Some(own_session),
+            "the push shares dux's session, so it can reach its terminal: {seen}"
+        );
+    }
+
+    /// A push whose remote does not answer is stopped at the bound.
+    #[test]
+    fn push_stops_a_push_that_outlives_its_bound() {
+        let (_origin, repo) = clone_of_local_origin();
+        run_git(repo.path(), &["switch", "-q", "-c", "feature"]);
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "remote.origin.receivepack",
+                "sleep 20; git receive-pack",
+            ],
+        );
+
+        let started = std::time::Instant::now();
+        let error = push(repo.path(), Some(std::time::Duration::from_millis(300)))
+            .expect_err("the push outlives its bound");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the bound must stop the push, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// With no bound (`[git] network_timeout_seconds = 0`) a slow push is
+    /// waited out rather than stopped.
+    #[test]
+    fn push_with_no_bound_waits_for_a_slow_remote() {
+        let (_origin, repo) = clone_of_local_origin();
+        run_git(repo.path(), &["switch", "-q", "-c", "feature"]);
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "remote.origin.receivepack",
+                "sleep 1; git receive-pack",
+            ],
+        );
+
+        push(repo.path(), None).unwrap();
+
+        assert!(ref_exists(repo.path(), "refs/remotes/origin/feature"));
+    }
+
+    /// The pull request fetch is told never to ask either.
+    #[test]
+    fn a_pull_request_fetch_never_prompts() {
+        let (origin, repo) = clone_of_local_origin();
+        run_git(origin.path(), &["update-ref", "refs/pull/7/head", "HEAD"]);
+        let seen = repo.path().join(".git").join("seen");
+        run_git(
+            repo.path(),
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!(
+                    "echo \"$GIT_TERMINAL_PROMPT\" > '{}'; git upload-pack",
+                    seen.display()
+                ),
+            ],
+        );
+
+        fetch_pull_request_head(repo.path(), 7, "pr-7", TEST_NETWORK_TIMEOUT).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&seen).unwrap().trim(), "0");
+    }
+
     /// The web worktree manager offers "Delete worktree", and the user asked to
     /// remove a WORKTREE and nothing else. `remove_worktree` additionally runs
     /// `git branch -D`, which force-deletes the branch even when it holds
@@ -12182,6 +12381,7 @@ mod tests {
                 repo.path(),
                 name,
                 &crate::checkout_move::CheckoutMoveGuard::default(),
+                TEST_NETWORK_TIMEOUT,
             );
 
             assert!(
@@ -12223,6 +12423,7 @@ mod tests {
             repo.path(),
             "main",
             &crate::checkout_move::CheckoutMoveGuard::default(),
+            TEST_NETWORK_TIMEOUT,
         )
         .unwrap();
         assert_eq!(head_commit(repo.path()).unwrap(), ahead);
@@ -12246,7 +12447,7 @@ mod tests {
         run_git(repo.path(), &["update-ref", "refs/heads/--all", "HEAD"]);
         run_git(repo.path(), &["symbolic-ref", "HEAD", "refs/heads/--all"]);
 
-        let _ = push(repo.path());
+        let _ = push(repo.path(), TEST_NETWORK_TIMEOUT);
 
         let heads = std::process::Command::new("git")
             .args([
@@ -12296,7 +12497,7 @@ mod tests {
         );
         let mine = head_commit(repo.path()).unwrap();
 
-        push(repo.path()).unwrap();
+        push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap();
 
         let remote_tip = |name: &str| {
             let out = test_support::git_command()
@@ -15601,6 +15802,7 @@ mod tests {
             clone,
             "main",
             &crate::checkout_move::CheckoutMoveGuard::default(),
+            TEST_NETWORK_TIMEOUT,
         )
         .unwrap();
 
@@ -15619,6 +15821,7 @@ mod tests {
         let err = pull_current_branch(
             repo.path(),
             &crate::checkout_move::CheckoutMoveGuard::default(),
+            TEST_NETWORK_TIMEOUT,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -15641,7 +15844,7 @@ mod tests {
         run_git(repo.path(), &["commit", "-m", "second commit"]);
         run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
 
-        let err = push(repo.path()).unwrap_err();
+        let err = push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("detached"),

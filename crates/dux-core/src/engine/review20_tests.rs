@@ -338,7 +338,8 @@ fn global_recurse_pull() {
     let guard = engine.checkout_move_guard();
     let r = repo.clone();
     let result = std::thread::spawn(move || {
-        crate::git::pull_current_branch(&r, &guard).map_err(|e| format!("{e:#}"))
+        crate::git::pull_current_branch(&r, &guard, Some(std::time::Duration::from_secs(60)))
+            .map_err(|e| format!("{e:#}"))
     })
     .join()
     .unwrap();

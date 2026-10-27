@@ -202,7 +202,8 @@ fn guarded_pull(engine: &crate::engine::Engine, repo: &Path) -> Result<(), Strin
     let guard = engine.checkout_move_guard();
     let r = repo.to_path_buf();
     std::thread::spawn(move || {
-        crate::git::pull_current_branch(&r, &guard).map_err(|e| format!("{e:#}"))
+        crate::git::pull_current_branch(&r, &guard, Some(std::time::Duration::from_secs(60)))
+            .map_err(|e| format!("{e:#}"))
     })
     .join()
     .unwrap()

@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1114,6 +1113,7 @@ pub(crate) fn decide_gh_probe(
                 GH_CALL_TIMEOUT.as_secs()
             ));
         }
+        GhCallOutcome::NotFound(_) => return GhProbe::NotInstalled,
         GhCallOutcome::Failed(msg) => {
             return GhProbe::Transient(format!("could not run gh auth status --json: {msg}"));
         }
@@ -1175,6 +1175,7 @@ pub(crate) fn decide_gh_probe(
             "gh auth status timed out after {}s",
             GH_CALL_TIMEOUT.as_secs()
         )),
+        GhCallOutcome::NotFound(_) => GhProbe::NotInstalled,
         GhCallOutcome::Failed(msg) => GhProbe::Transient(format!("could not run gh: {msg}")),
         GhCallOutcome::Completed(output) => {
             // A non-zero exit decides against the user only when `gh` is talking
@@ -1251,25 +1252,12 @@ pub(crate) fn gh_reprobe_is_due(
 /// `program` is `gh` in production. It is named rather than hardcoded so the
 /// wiring can be tested against a stand-in whose answers are controlled, without
 /// a network call, a real login, or mutating the test process's `PATH`.
+///
+/// A `program` that is not there is [`GhProbe::NotInstalled`], told by the
+/// launch itself: without that, "a failure to launch preserves the last known
+/// good value" would quietly cover `gh` having been uninstalled, and dux would
+/// go on believing in hosts it can no longer reach.
 pub(crate) fn probe_github_hosts(program: &OsStr) -> GhProbe {
-    // Kept deliberately: without it, "a failure to launch preserves the last
-    // known good value" would quietly cover `gh` having been uninstalled, and
-    // dux would go on believing in hosts it can no longer reach.
-    let on_path = std::process::Command::new("which")
-        .arg(program)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !on_path {
-        return GhProbe::NotInstalled;
-    }
-    probe_github_hosts_with(program)
-}
-
-/// [`probe_github_hosts`] without the PATH check, against a named program, so
-/// the two-mode protocol can be tested against a stand-in `gh`.
-pub(crate) fn probe_github_hosts_with(program: &OsStr) -> GhProbe {
     let json = run_program_with_timeout(
         program,
         &["auth", "status", "--active", "--json", "hosts"],
@@ -1288,6 +1276,8 @@ pub(crate) enum GhCallOutcome {
     Completed(std::process::Output),
     TimedOut,
     Failed(String),
+    /// The program is not there; the text is the launch error.
+    NotFound(String),
 }
 
 /// Run `gh <args>` with piped stdout/stderr drained on threads and a hard
@@ -1319,8 +1309,8 @@ fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> Gh
             GhCallOutcome::Completed(output)
         }
         crate::bounded_command::CommandOutcome::TimedOut => GhCallOutcome::TimedOut,
-        crate::bounded_command::CommandOutcome::Failed(msg)
-        | crate::bounded_command::CommandOutcome::NotFound(msg) => GhCallOutcome::Failed(msg),
+        crate::bounded_command::CommandOutcome::Failed(msg) => GhCallOutcome::Failed(msg),
+        crate::bounded_command::CommandOutcome::NotFound(msg) => GhCallOutcome::NotFound(msg),
     }
 }
 
@@ -1358,7 +1348,9 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
                 GH_CALL_TIMEOUT.as_secs()
             ),
         ),
-        GhCallOutcome::Failed(msg) => (None, format!("failed to run gh: {msg}")),
+        GhCallOutcome::Failed(msg) | GhCallOutcome::NotFound(msg) => {
+            (None, format!("failed to run gh: {msg}"))
+        }
     };
     // Collapse both an absent `data` key and an explicit `data: null` (a real
     // GraphQL execution-failure shape) to "no data", so both drive the
@@ -2305,7 +2297,9 @@ pub(crate) fn look_up_pull_request(
             lookup.number,
             lookup.owner_repo,
         )),
-        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
+        GhCallOutcome::Failed(msg) | GhCallOutcome::NotFound(msg) => {
+            Err(format!("Failed to run gh pr view: {msg}"))
+        }
     }
 }
 
@@ -2398,7 +2392,9 @@ pub(crate) fn look_up_default_branch(
             "gh repo view timed out after {}s looking up the default branch of {owner_repo}.",
             GH_CALL_TIMEOUT.as_secs()
         )),
-        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh repo view: {msg}")),
+        GhCallOutcome::Failed(msg) | GhCallOutcome::NotFound(msg) => {
+            Err(format!("Failed to run gh repo view: {msg}"))
+        }
     }
 }
 
@@ -3041,7 +3037,7 @@ mod host_policy_tests {
             ),
         );
 
-        let probe = probe_github_hosts_with(gh.as_os_str());
+        let probe = probe_github_hosts(gh.as_os_str());
         assert!(
             matches!(
                 probe,
@@ -3064,7 +3060,7 @@ mod host_policy_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let gh = stand_in_gh(dir.path(), "printf '%s' '{\"hosts\":{}}'");
         assert_eq!(
-            probe_github_hosts_with(gh.as_os_str()),
+            probe_github_hosts(gh.as_os_str()),
             GhProbe::Decided {
                 available: false,
                 policy: GithubHostPolicy::Hosts(BTreeSet::new()),
@@ -3085,7 +3081,7 @@ mod host_policy_tests {
             ),
         );
 
-        let probe = probe_github_hosts_with(gh.as_os_str());
+        let probe = probe_github_hosts(gh.as_os_str());
         assert_eq!(
             probe,
             GhProbe::Decided {
@@ -3202,8 +3198,8 @@ mod host_policy_tests {
 
     #[test]
     fn a_missing_gh_is_reported_as_not_installed() {
-        // `probe_github_hosts` (unlike the `_with` variant) is the one that
-        // consults PATH, and a name nothing on PATH resolves is the case.
+        // Told by the launch itself, so no other program has to be on PATH to
+        // ask where `gh` is.
         assert_eq!(
             probe_github_hosts(OsStr::new("dux-no-such-gh-binary")),
             GhProbe::NotInstalled,
@@ -4701,12 +4697,12 @@ mod tests {
             GhCallOutcome::Completed(o) => assert_eq!(&o.stdout, b"hello"),
             _ => panic!("expected Completed with captured stdout"),
         }
-        // A binary that doesn't exist → Failed (spawn error), not TimedOut.
+        // A binary that doesn't exist → NotFound, not TimedOut.
         let missing = run_command_with_timeout(
             std::process::Command::new("dux-nonexistent-binary-xyz"),
             Duration::from_secs(5),
         );
-        assert!(matches!(missing, GhCallOutcome::Failed(_)));
+        assert!(matches!(missing, GhCallOutcome::NotFound(_)));
     }
 
     #[test]

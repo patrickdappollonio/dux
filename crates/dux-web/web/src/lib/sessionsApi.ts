@@ -316,11 +316,6 @@ export const sessionsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(id)}/pull-request/autodetect`,
     ),
-  reorder: (projectId: string, sessionIds: string[]) =>
-    request<void>("POST", "/api/v1/sessions/reorder", {
-      project_id: projectId,
-      session_ids: sessionIds,
-    }),
   // Flat model: reorder every agent as one global list. `sessionIds` must be the
   // complete session set, in the desired order (the server validates strictly).
   reorderGlobal: (sessionIds: string[]) =>
