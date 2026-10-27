@@ -1297,6 +1297,41 @@ async fn the_first_password_is_set_only_from_this_machine_or_the_tailnet() {
     changing_it_needs_the_current_one(&dux).await;
 }
 
+/// A password the file stops (here, a password setting written where dux
+/// does not read it) is refused with the sentence that says what to fix,
+/// never as a server error, and nothing is written.
+#[tokio::test]
+async fn a_password_the_file_stops_is_refused_in_a_sentence() {
+    let dux = Dux::start("");
+    let path = dux.tmp.path().join("config.toml");
+    let misplaced = format!(
+        "{}\n[server.authentication]\nminimum_password_length = 40\n",
+        dux.config()
+    );
+    std::fs::write(&path, &misplaced).unwrap();
+    let refused = dux
+        .send(
+            THIS_MACHINE,
+            Req::new(Method::POST, "/api/v1/auth/password").json(json!({ "new": PASSWORD })),
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(
+        refused.error().as_deref(),
+        Some("password_refused_by_config"),
+        "{}",
+        refused.body
+    );
+    assert!(
+        refused.json()["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("belong in [server.auth]")),
+        "{}",
+        refused.body
+    );
+    assert_eq!(dux.config(), misplaced);
+}
+
 /// Wrong current passwords are guesses too: they count toward the block like
 /// failed logins do, so a stolen session cannot be used to guess the password.
 #[tokio::test]

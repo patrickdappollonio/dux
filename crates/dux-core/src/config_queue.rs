@@ -1,9 +1,8 @@
 //! One ordered, off-thread, atomic config writer per process.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -14,17 +13,23 @@ use crate::worker::WorkerEvent;
 const QUIET_WINDOW: Duration = Duration::from_millis(250);
 const EAGER_TIMEOUT: Duration = Duration::from_secs(2);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
-const LAZY_INFLIGHT_CAP: usize = 128;
 
 enum WriteMsg {
-    Lazy(Config),
+    /// A lazy save is waiting in the [`LazySlot`].
+    Lazy,
     Eager {
-        config: Config,
+        /// Its place among every save, lazy ones included.
+        seq: u64,
+        config: Box<Config>,
         reply: SyncSender<Result<(), String>>,
     },
     Flush(SyncSender<()>),
     Pause(SyncSender<()>),
-    Resume,
+    /// End a barrier. A lazy save no newer than `discard_through` was made
+    /// during a barrier that held and is discarded; 0 keeps every one.
+    Resume {
+        discard_through: u64,
+    },
     /// The config dux just adopted (a reload), carrying the exact text it was
     /// read from: the base every following save is a three-way patch against.
     SetBase(Box<Config>),
@@ -41,8 +46,73 @@ enum WriteMsg {
 pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,
-    lazy_inflight: Arc<AtomicUsize>,
+    lazy: Arc<LazySlot>,
     last_written: LastWritten,
+}
+
+/// The order of every save, and the newest lazy save the writer has not taken
+/// yet. Lazy saves are coalesced, so only the newest matters: keeping it here
+/// rather than in the channel bounds what a stalled writer holds to one config,
+/// and the newest is never the one let go.
+///
+/// A save takes its place in the order and reaches the channel under the one
+/// lock, so the order of places is the order the writer receives saves in.
+#[derive(Debug, Default)]
+struct LazySlot {
+    state: Mutex<SlotState>,
+}
+
+#[derive(Debug, Default)]
+struct SlotState {
+    /// The place of the newest save, eager ones included, counted from 1.
+    seq: u64,
+    latest: Option<(u64, Config)>,
+}
+
+impl LazySlot {
+    fn lock(&self) -> MutexGuard<'_, SlotState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keep `config` as the newest lazy save, telling the writer when the
+    /// slot was empty (a writer that has not taken it yet already has a
+    /// notice waiting, and takes this newer config with it).
+    fn save_lazy(&self, tx: &Sender<WriteMsg>, config: Config) {
+        let mut state = self.lock();
+        state.seq += 1;
+        let seq = state.seq;
+        if state.latest.replace((seq, config)).is_none() {
+            let _ = tx.send(WriteMsg::Lazy);
+        }
+    }
+
+    /// Send an eager save in its place in the order. `false` when the
+    /// writer is gone.
+    fn send_eager(
+        &self,
+        tx: &Sender<WriteMsg>,
+        config: Config,
+        reply: SyncSender<Result<(), String>>,
+    ) -> bool {
+        let mut state = self.lock();
+        state.seq += 1;
+        let seq = state.seq;
+        tx.send(WriteMsg::Eager {
+            seq,
+            config: Box::new(config),
+            reply,
+        })
+        .is_ok()
+    }
+
+    /// The place of the newest save made so far.
+    fn newest(&self) -> u64 {
+        self.lock().seq
+    }
+
+    fn take(&self) -> Option<(u64, Config)> {
+        self.lock().latest.take()
+    }
 }
 
 /// The writer's base after its most recent SUCCESSFUL write (the config it
@@ -56,6 +126,7 @@ type LastWritten = Arc<std::sync::Mutex<(u64, Option<crate::config::SourceText>)
 #[derive(Debug)]
 pub struct QuiesceGuard {
     tx: Sender<WriteMsg>,
+    lazy: Arc<LazySlot>,
     /// `true` when the writer explicitly acknowledged the `Pause` message (the
     /// happy path); `false` on timeout or a dead writer. The guard ALWAYS sends
     /// `Resume` on drop regardless of this flag: callers MUST NOT suppress it
@@ -78,8 +149,15 @@ impl Drop for QuiesceGuard {
     fn drop(&mut self) {
         // Resume is sent in ALL cases, even when `acknowledged` is false: a
         // slow-but-alive writer will eventually process the Pause and would
-        // block forever waiting for the Resume if we skipped it here.
-        let _ = self.tx.send(WriteMsg::Resume);
+        // block forever waiting for the Resume if we skipped it here. A
+        // barrier that never held had no reload behind it, so the lazy saves
+        // made while it waited are kept.
+        let discard_through = if self.acknowledged {
+            self.lazy.newest()
+        } else {
+            0
+        };
+        let _ = self.tx.send(WriteMsg::Resume { discard_through });
     }
 }
 
@@ -120,19 +198,19 @@ impl ConfigWriteQueue {
         base: Option<Base>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
-        let lazy_inflight = Arc::new(AtomicUsize::new(0));
+        let lazy: Arc<LazySlot> = Arc::default();
         let last_written: LastWritten = Arc::default();
         let writer = thread::Builder::new()
             .name("config-writer".into())
             .spawn({
-                let lazy_inflight = std::sync::Arc::clone(&lazy_inflight);
+                let lazy = Arc::clone(&lazy);
                 let last_written = std::sync::Arc::clone(&last_written);
                 move || {
                     writer_loop(
                         rx,
                         &config_path,
                         base,
-                        &lazy_inflight,
+                        &lazy,
                         status_lane.as_ref(),
                         last_written,
                     );
@@ -142,7 +220,7 @@ impl ConfigWriteQueue {
         ConfigWriteQueue {
             tx,
             writer: Some(writer),
-            lazy_inflight,
+            lazy,
             last_written,
         }
     }
@@ -162,23 +240,7 @@ impl ConfigWriteQueue {
     /// Deferred, coalesced, fire-and-forget. A dead writer is surfaced lazily via
     /// the next eager/flush; lazy itself never blocks.
     pub fn save_lazy(&self, config: Config) {
-        // Bound in-flight lazy snapshots so a stalled or paused writer cannot let
-        // the channel grow without limit. Lazy writes are coalesced anyway, so
-        // dropping a snapshot at the cap is acceptable: the fixed deadline still
-        // lands a write. The reservation is a single atomic update (not a separate
-        // load-then-add) so concurrent callers cannot overshoot the cap.
-        if self
-            .lazy_inflight
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                (n < LAZY_INFLIGHT_CAP).then_some(n + 1)
-            })
-            .is_err()
-        {
-            return;
-        }
-        if self.tx.send(WriteMsg::Lazy(config)).is_err() {
-            decr_inflight(&self.lazy_inflight);
-        }
+        self.lazy.save_lazy(&self.tx, config);
     }
 
     /// Awaited write: blocks (a few ms) for the result, ~2 s timeout. On a dead
@@ -190,7 +252,7 @@ impl ConfigWriteQueue {
     /// fails.
     pub fn save_eager(&self, config: Config) -> Result<(), String> {
         let (reply, rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriteMsg::Eager { config, reply }).is_err() {
+        if !self.lazy.send_eager(&self.tx, config, reply) {
             return Err("config writer thread is gone; config was not saved".into());
         }
         match rx.recv_timeout(EAGER_TIMEOUT) {
@@ -273,6 +335,7 @@ impl ConfigWriteQueue {
         };
         QuiesceGuard {
             tx: self.tx.clone(),
+            lazy: Arc::clone(&self.lazy),
             acknowledged,
         }
     }
@@ -287,7 +350,7 @@ impl ConfigWriteQueue {
         ConfigWriteQueue {
             tx,
             writer: None,
-            lazy_inflight: Arc::new(AtomicUsize::new(0)),
+            lazy: Arc::default(),
             last_written: Arc::default(),
         }
     }
@@ -340,26 +403,17 @@ impl Drop for ConfigWriteQueue {
     }
 }
 
-/// Decrement the in-flight counter without ever wrapping past zero. A concurrent
-/// panic-reset (`store(0)`) could otherwise race a send-failure rollback and wrap
-/// the counter to `usize::MAX`, latching the cap gate shut forever.
-fn decr_inflight(counter: &AtomicUsize) {
-    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-        Some(n.saturating_sub(1))
-    });
-}
-
 fn writer_loop(
     rx: Receiver<WriteMsg>,
     path: &std::path::Path,
     base: Option<Base>,
-    lazy_inflight: &Arc<AtomicUsize>,
+    lazy: &LazySlot,
     status_lane: Option<&Sender<WorkerEvent>>,
     last_written: LastWritten,
 ) {
     // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        writer_loop_inner(rx, path, base, lazy_inflight, status_lane, last_written);
+        writer_loop_inner(rx, path, base, lazy, status_lane, last_written);
     })) {
         let msg = panic
             .downcast_ref::<&str>()
@@ -367,11 +421,9 @@ fn writer_loop(
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic".to_string());
         crate::logger::error(&format!("config-writer thread panicked: {msg}"));
-        // A panic can leave received-but-not-decremented Lazy messages counted.
-        // Reset so save_lazy's cap gate can't latch shut and silently drop every
-        // future lazy write: with the writer gone, save_lazy will then reach the
-        // (failing) send and surface the dead-writer state like the other ops do.
-        lazy_inflight.store(0, Ordering::Relaxed);
+        // Emptied so the next lazy save reaches the (failing) send rather than
+        // waiting on a notice nobody will read.
+        let _ = lazy.take();
     }
 }
 
@@ -390,13 +442,14 @@ fn writer_loop_inner(
     rx: Receiver<WriteMsg>,
     path: &std::path::Path,
     base: Option<Base>,
-    lazy_inflight: &AtomicUsize,
+    lazy: &LazySlot,
     status_lane: Option<&Sender<WorkerEvent>>,
     last_written: LastWritten,
 ) {
     let mut state = WriterState {
         base,
         pending: None,
+        written_seq: 0,
         deadline: None,
         last_written,
     };
@@ -404,7 +457,7 @@ fn writer_loop_inner(
     loop {
         let input = receive_writer_input(&rx, state.deadline);
         if matches!(
-            handle_writer_input(input, &rx, path, lazy_inflight, &mut state, status_lane,),
+            handle_writer_input(input, &rx, path, lazy, &mut state, status_lane),
             WriterControl::Stop
         ) {
             break;
@@ -417,6 +470,9 @@ fn receive_writer_input(
     deadline: Option<Instant>,
 ) -> Result<Option<WriteMsg>, WriterDisconnected> {
     match deadline {
+        // A deadline that has passed is kept before anything else is read, so
+        // a steady stream of messages cannot hold a pending save back.
+        Some(deadline) if Instant::now() >= deadline => Ok(None),
         Some(deadline) => {
             let wait = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(wait) {
@@ -562,12 +618,35 @@ fn base_adopted(path: &std::path::Path, config: Config) -> Base {
 /// saves patch against, and the coalesced lazy save waiting for its deadline.
 struct WriterState {
     base: Option<Base>,
-    pending: Option<Config>,
+    /// The coalesced lazy save, with its place among every save.
+    pending: Option<(u64, Config)>,
+    /// The place of the newest save written, lazy or eager: nothing older
+    /// is ever written over it.
+    written_seq: u64,
     deadline: Option<Instant>,
     last_written: LastWritten,
 }
 
 impl WriterState {
+    /// Take the slot's lazy save as the pending one, unless something newer
+    /// is pending or already written.
+    fn take_lazy(&mut self, lazy: &LazySlot) {
+        let Some((seq, config)) = lazy.take() else {
+            return;
+        };
+        let newer = seq > self.written_seq
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|(pending, _)| seq > *pending);
+        if newer {
+            self.pending = Some((seq, config));
+            if self.deadline.is_none() {
+                self.deadline = Some(Instant::now() + QUIET_WINDOW);
+            }
+        }
+    }
+
     /// A save wrote `config` as `written`: the next base, and the text the
     /// engine can ask for.
     fn record_write(&mut self, config: Config, written: &str) {
@@ -589,46 +668,74 @@ fn handle_writer_input(
     input: Result<Option<WriteMsg>, WriterDisconnected>,
     rx: &Receiver<WriteMsg>,
     path: &std::path::Path,
-    lazy_inflight: &AtomicUsize,
+    lazy: &LazySlot,
     state: &mut WriterState,
     status_lane: Option<&Sender<WorkerEvent>>,
 ) -> WriterControl {
     match input {
         Ok(None) => flush_pending(path, state, status_lane),
         Err(WriterDisconnected) => return WriterControl::Stop,
-        Ok(Some(WriteMsg::Lazy(config))) => {
-            decr_inflight(lazy_inflight);
-            state.pending = Some(config);
-            if state.deadline.is_none() {
-                state.deadline = Some(Instant::now() + QUIET_WINDOW);
+        Ok(Some(WriteMsg::Lazy)) => state.take_lazy(lazy),
+        Ok(Some(WriteMsg::Eager { seq, config, reply })) => {
+            // A lazy save newer than this one stays pending: it was taken
+            // from the slot ahead of this eager message, after being made.
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending < seq)
+            {
+                state.pending = None;
+                state.deadline = None;
             }
-        }
-        Ok(Some(WriteMsg::Eager { config, reply })) => {
-            state.pending = None;
-            state.deadline = None;
+            // A newer save is already on disk; this older snapshot would
+            // undo it.
+            if seq < state.written_seq {
+                let _ = reply.send(Ok(()));
+                return WriterControl::Continue;
+            }
             let result = save_against_base(path, state.base.as_ref(), &config, Durability::Fsync)
                 .map_err(|e| format!("{e:#}"));
             match &result {
-                Ok(text) => state.record_write(config, text),
+                Ok(text) => {
+                    state.record_write(*config, text);
+                    state.written_seq = seq;
+                }
                 Err(error) => crate::logger::error(&format!("eager config write failed: {error}")),
             }
             let _ = reply.send(result.map(|_| ()));
         }
+        // Each of these writes every lazy save made before it, so it takes
+        // the slot itself: the notice of the save in it may still be on its
+        // way, or may have come for an older save.
         Ok(Some(WriteMsg::Flush(ack))) => {
+            state.take_lazy(lazy);
             flush_pending(path, state, status_lane);
             let _ = ack.send(());
         }
         Ok(Some(WriteMsg::Pause(ack))) => {
+            state.take_lazy(lazy);
             flush_pending(path, state, status_lane);
             let _ = ack.send(());
             debug_assert!(state.pending.is_none());
-            if !run_paused_writer(rx, lazy_inflight, path, &mut state.base) {
+            let Some(discard_through) = run_paused_writer(rx, path, &mut state.base) else {
                 return WriterControl::Stop;
+            };
+            // The slot holds the newest lazy save; one made during a barrier
+            // that held is a stale snapshot, and any other waits as usual.
+            if lazy
+                .lock()
+                .latest
+                .as_ref()
+                .is_some_and(|(seq, _)| *seq <= discard_through)
+            {
+                let _ = lazy.take();
             }
+            state.take_lazy(lazy);
         }
-        Ok(Some(WriteMsg::Resume)) => {}
+        Ok(Some(WriteMsg::Resume { .. })) => {}
         Ok(Some(WriteMsg::SetBase(config))) => adopt_base(path, &mut state.base, *config),
         Ok(Some(WriteMsg::Shutdown)) => {
+            state.take_lazy(lazy);
             flush_pending(path, state, status_lane);
             return WriterControl::Stop;
         }
@@ -652,23 +759,28 @@ fn adopt_base(path: &std::path::Path, base: &mut Option<Base>, config: Config) {
     *base = Some(adopted);
 }
 
+/// Wait out a barrier, nested ones included. Returns the newest place any
+/// `Resume` asked to discard through, or `None` when the writer must stop.
+/// Lazy saves stay in their slot meanwhile, so the one made right after the
+/// barrier is not taken for one made during it.
 fn run_paused_writer(
     rx: &Receiver<WriteMsg>,
-    lazy_inflight: &AtomicUsize,
     path: &std::path::Path,
     base: &mut Option<Base>,
-) -> bool {
+) -> Option<u64> {
     let mut depth = 1usize;
+    let mut discard = 0;
     loop {
         match rx.recv() {
-            Ok(WriteMsg::Resume) => {
+            Ok(WriteMsg::Resume { discard_through }) => {
+                discard = discard.max(discard_through);
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return true;
+                    return Some(discard);
                 }
             }
-            Ok(WriteMsg::Shutdown) | Err(_) => return false,
-            Ok(WriteMsg::Lazy(_)) => decr_inflight(lazy_inflight),
+            Ok(WriteMsg::Shutdown) | Err(_) => return None,
+            Ok(WriteMsg::Lazy) => {}
             Ok(WriteMsg::Eager { reply, .. }) => {
                 let _ = reply.send(Err("config busy (reload in progress); retry".into()));
             }
@@ -714,13 +826,17 @@ fn flush_pending(
     status_lane: Option<&Sender<WorkerEvent>>,
 ) {
     state.deadline = None;
-    let Some(cfg) = state.pending.take() else {
+    let Some((seq, cfg)) = state.pending.take() else {
         return;
     };
+    if seq < state.written_seq {
+        return;
+    }
     let result = save_against_base(path, state.base.as_ref(), &cfg, Durability::NoFsync);
     let result = match result {
         Ok(text) => {
             state.record_write(cfg, &text);
+            state.written_seq = seq;
             Ok(())
         }
         Err(error) => Err(error),
@@ -1253,11 +1369,133 @@ mod tests {
         );
     }
 
-    /// Lazies sent during an open barrier are discarded by the paused writer, and
-    /// their in-flight count must be decremented so the cap gate re-opens: a
-    /// post-barrier lazy must still land.
+    fn with_env(name: &str, value: &str) -> Config {
+        let mut cfg = Config::default();
+        cfg.env.insert(name.into(), value.into());
+        cfg
+    }
+
+    /// A lazy save stored in the slot whose notice has not reached the writer:
+    /// another caller between storing and sending, or one whose save replaced
+    /// a slot that already had a notice out.
+    fn store_without_notice(q: &ConfigWriteQueue, config: Config) {
+        let mut slot = q.lazy.lock();
+        slot.seq += 1;
+        let seq = slot.seq;
+        slot.latest = Some((seq, config));
+    }
+
+    /// A flush writes every lazy save made before it, its notice still on the
+    /// way or not.
     #[test]
-    fn inflight_counter_drains_during_barrier_and_gate_reopens() {
+    fn a_flush_writes_a_lazy_whose_notice_has_not_arrived() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        store_without_notice(&q, with_env("C", "2"));
+        q.flush();
+        assert!(read(&path).contains("C = \"2\""), "{}", read(&path));
+    }
+
+    /// A barrier writes every lazy save made before it, its notice still on
+    /// the way or not, rather than discarding it at the resume.
+    #[test]
+    fn a_barrier_writes_a_lazy_made_before_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        store_without_notice(&q, with_env("C", "2"));
+        drop(q.quiesce());
+        q.flush();
+        assert!(read(&path).contains("C = \"2\""), "{}", read(&path));
+    }
+
+    /// An eager save that reaches the writer after a newer one never writes
+    /// its older snapshot over it.
+    #[test]
+    fn an_older_eager_save_never_overwrites_a_newer_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        for (seq, value) in [(5, "newer"), (3, "older")] {
+            let (reply, answer) = mpsc::sync_channel(1);
+            q.tx.send(WriteMsg::Eager {
+                seq,
+                config: Box::new(with_env("V", value)),
+                reply,
+            })
+            .unwrap();
+            answer.recv().unwrap().unwrap();
+        }
+        assert!(read(&path).contains("V = \"newer\""), "{}", read(&path));
+    }
+
+    /// A passed deadline is answered before a message waiting in the channel,
+    /// so a steady stream cannot hold a pending save back.
+    #[test]
+    fn a_passed_deadline_comes_before_a_waiting_message() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(WriteMsg::Lazy).unwrap();
+        let passed = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert!(matches!(receive_writer_input(&rx, Some(passed)), Ok(None)));
+    }
+
+    /// A barrier that never held (the writer was stalled, so no reload ran)
+    /// keeps the lazy saves made while it waited.
+    #[test]
+    fn a_barrier_that_never_held_keeps_its_lazy_saves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let held = crate::config_write::ConfigFileLock::acquire(&path).unwrap();
+        let (reply, answer) = mpsc::sync_channel(1);
+        assert!(q.lazy.send_eager(&q.tx, Config::default(), reply));
+        let guard = q.quiesce();
+        assert!(!guard.is_acknowledged());
+        drop(held);
+        answer.recv().unwrap().unwrap();
+        // Answered by the paused writer, so the save below is made during
+        // the pause.
+        q.flush();
+        q.save_lazy(with_env("C", "kept"));
+        drop(guard);
+        q.flush();
+        assert!(read(&path).contains("C = \"kept\""), "{}", read(&path));
+    }
+
+    /// A burst of lazy saves while the writer is stuck on the disk still ends
+    /// with the newest one written.
+    #[test]
+    fn the_newest_lazy_lands_after_a_stalled_burst() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let held = crate::config_write::ConfigFileLock::acquire(&path).unwrap();
+        // An eager save the writer takes first and then waits on the lock in.
+        let (reply, answer) = mpsc::sync_channel(1);
+        assert!(q.lazy.send_eager(&q.tx, Config::default(), reply));
+        for i in 0..300 {
+            let mut cfg = Config::default();
+            cfg.env.insert("N".into(), i.to_string());
+            q.save_lazy(cfg);
+        }
+        drop(held);
+        answer.recv().unwrap().unwrap();
+        q.flush();
+        assert!(read(&path).contains("N = \"299\""), "{}", read(&path));
+    }
+
+    /// Lazies sent during an open barrier are discarded by the paused writer,
+    /// and a lazy sent after it still lands.
+    #[test]
+    fn a_lazy_after_a_barrier_still_lands() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[env]\n").unwrap();
@@ -1266,32 +1504,19 @@ mod tests {
         {
             let _guard = q.quiesce(); // writer drained + paused
             // Send a burst during the barrier; all are discarded by the paused writer.
-            for i in 0..(LAZY_INFLIGHT_CAP * 2) {
+            for i in 0..300 {
                 let mut cfg = Config::default();
                 cfg.env.insert("N".into(), i.to_string());
                 q.save_lazy(cfg);
             }
         } // guard drops → resume
 
-        // The writer drains the discarded burst asynchronously after resuming, so
-        // the counter returns below the cap without a fixed timing guarantee. Poll
-        // (bounded) until a fresh lazy lands, proving the gate re-opens once the
-        // backlog drains, without depending on drain timing.
-        let mut landed = false;
-        for _ in 0..200 {
-            let mut cfg = Config::default();
-            cfg.env.insert("AFTER".into(), "barrier".into());
-            q.save_lazy(cfg);
-            q.flush();
-            if std::fs::read_to_string(&path)
-                .unwrap_or_default()
-                .contains("AFTER = \"barrier\"")
-            {
-                landed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(landed, "cap gate did not re-open after the barrier drained");
+        let mut cfg = Config::default();
+        cfg.env.insert("AFTER".into(), "barrier".into());
+        q.save_lazy(cfg);
+        q.flush();
+        let saved = read(&path);
+        assert!(saved.contains("AFTER = \"barrier\""), "{saved}");
+        assert!(!saved.contains("N = "), "{saved}");
     }
 }

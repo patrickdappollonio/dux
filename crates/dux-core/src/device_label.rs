@@ -98,7 +98,7 @@ pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
 /// The short label for a recorded driver identity, or `None` when there is
 /// nothing to name at all.
 ///
-///   - Nothing, or only whitespace and control bytes, gives `None`; the caller
+///   - Nothing, or only whitespace and control characters, gives `None`; the caller
 ///     says "another device", which is the honest answer for a connection that
 ///     presented no `User-Agent`.
 ///   - The terminal UI's own fixed label passes through verbatim. It parses as
@@ -111,8 +111,12 @@ pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
 pub fn short_device_label(raw: &str) -> Option<String> {
     // Control bytes first, before anything measures or matches: this is rendered
     // into a frame, and an escape sequence smuggled through a `User-Agent` would
-    // move the cursor rather than print.
-    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    // move the cursor rather than print. Bidirectional controls go too, or the
+    // words around the label could be drawn in another order.
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && !crate::bidi::is_bidi_control(*c))
+        .collect();
     let ua = cleaned.trim();
     if ua.is_empty() {
         return None;
@@ -277,5 +281,13 @@ mod tests {
             "no control byte may survive into the frame: {label:?}"
         );
         assert_eq!(label, "lab[31mtop");
+    }
+
+    /// A reordering control would make the words around the label read as
+    /// something else, so it goes the way control bytes do.
+    #[test]
+    fn bidi_controls_are_stripped() {
+        let label = short_device_label("lab\u{202E}pot\u{2066}").expect("something was said");
+        assert_eq!(label, "labpot");
     }
 }

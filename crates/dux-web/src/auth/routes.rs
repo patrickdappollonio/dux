@@ -667,6 +667,19 @@ async fn change_password(
                 }),
             )
         }
+        // What the file holds stops the change; the sentence says what to
+        // fix, so it is the answer rather than a server error.
+        Ok(PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::Refused(sentence))) => {
+            refusal(
+                StatusCode::CONFLICT,
+                json!({
+                    "error": "password_refused_by_config",
+                    "message": format!(
+                        "The password was not changed: {sentence}"
+                    ),
+                }),
+            )
+        }
         Ok(PasswordWrite::Refused(dux_core::config_keys::SetPasswordError::Failed(error))) => {
             server_error(&format!("Could not write the password: {error:#}"))
         }

@@ -35,6 +35,21 @@ pub fn apply_load_migrations(doc: &mut DocumentMut) -> Result<bool> {
     Ok(deprecations_changed || retired_changed)
 }
 
+/// Log `message` once per process. The migrations run on every read of the
+/// file (each load, each save's record of what it has seen), and a deprecated
+/// key the user has not touched says the same thing every time.
+fn warn_once(message: &str) {
+    static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(message.to_string());
+    if first {
+        crate::logger::warn(message);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DeprecatedConfigKey {
     section: &'static str,
@@ -332,7 +347,8 @@ fn migrate_server_bind(
         crate::config_keys::ValueForm::Line,
     )
     .unwrap_or_else(|| crate::config_keys::NOT_SHOWN.to_string());
-    crate::logger::warn(&format!(
+    // backtick-ok: written to dux.log only.
+    warn_once(&format!(
         "[server] migrated the deprecated `bind = {bind}` to host = \"{}\" and port = {}. \
          This server listens on a non-loopback address; only run it on a network you trust.",
         addr.ip(),
@@ -371,7 +387,7 @@ fn migrate_tailscale_enabled(
     };
     let table = ensure_table(doc, "server");
     if table.contains_key("tailscale") {
-        crate::logger::warn(&format!(
+        warn_once(&format!(
             "[server] tailscale_enabled = {enabled} is the retired boolean form of this \
              setting and your file also sets [server] tailscale, so the tailscale value is \
              what dux uses and the boolean is being dropped. Nothing else to do."
@@ -379,7 +395,7 @@ fn migrate_tailscale_enabled(
         return Ok(());
     }
     table["tailscale"] = toml_edit::value(mode.as_str());
-    crate::logger::warn(&format!(
+    warn_once(&format!(
         "[server] tailscale_enabled = {enabled} has been replaced by the tri-state \
          tailscale = \"auto\" | \"yes\" | \"no\", and is being read as \"{}\" for this run. \
          Set [server] tailscale yourself to choose: \"auto\" binds your Tailscale address \
@@ -492,6 +508,18 @@ mod tests {
         assert_eq!(d["server"]["host"].as_str(), Some("0.0.0.0"));
         assert_eq!(d["server"]["port"].as_integer(), Some(9000));
         assert!(d.get("server").and_then(|s| s.get("bind")).is_none());
+    }
+
+    #[test]
+    fn a_migration_warns_once_however_often_it_runs() {
+        let ((), lines) = crate::logger::capture_for_test(|| {
+            for _ in 0..3 {
+                let mut d = doc("[server]\nbind = \"0.0.0.0:9417\"\n");
+                apply_load_migrations(&mut d).expect("migrate");
+            }
+        });
+        let warned = lines.iter().filter(|line| line.contains("9417")).count();
+        assert_eq!(warned, 1, "{lines:?}");
     }
 
     #[test]

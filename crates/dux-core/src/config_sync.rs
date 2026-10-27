@@ -57,6 +57,9 @@ where
     let mut changed_config = false;
     let mut changed_store = false;
     let mut merged = config.projects.clone();
+    // Every write waits until the whole list has been judged, so a conflict
+    // found on a later entry leaves the store as it was.
+    let mut upserts: Vec<(ProjectConfig, i64)> = Vec::new();
 
     for (index, cfg_project) in config.projects.iter().enumerate() {
         if let Some(stored_index) = stored.iter().position(|stored_project| {
@@ -82,19 +85,25 @@ where
                 changed_config = true;
             }
             if &merged_stored_project != stored_project {
-                session_store.upsert_project_at(
-                    &merged_stored_project,
+                upserts.push((
+                    merged_stored_project.clone(),
                     crate::numeric::usize_to_i64_wrapping(stored_index),
-                )?;
+                ));
                 stored[stored_index] = merged_stored_project;
                 changed_store = true;
             }
         } else {
-            session_store
-                .upsert_project_at(cfg_project, crate::numeric::usize_to_i64_wrapping(index))?;
+            upserts.push((
+                cfg_project.clone(),
+                crate::numeric::usize_to_i64_wrapping(index),
+            ));
             changed_store = true;
             stored.push(cfg_project.clone());
         }
+    }
+
+    for (project, position) in &upserts {
+        session_store.upsert_project_at(project, *position)?;
     }
 
     for stored_project in stored {
@@ -466,6 +475,33 @@ mod tests {
         for private in ["p1", "/tmp/here", "/tmp/there"] {
             assert!(!err.contains(private), "{err}");
         }
+    }
+
+    /// A conflict found late in the list leaves the store as it was, even when
+    /// earlier entries would have been adopted or updated.
+    #[test]
+    fn a_conflict_anywhere_writes_nothing() {
+        let store = store();
+        let mut in_store = project("p1", "/tmp/p1");
+        in_store.name = Some("old".to_string());
+        store.upsert_project_at(&in_store, 0).unwrap();
+        store
+            .upsert_project_at(&project("p3", "/tmp/here"), 1)
+            .unwrap();
+        let before = store.load_projects().unwrap();
+
+        let mut renamed = project("p1", "/tmp/p1");
+        renamed.name = Some("new".to_string());
+        let mut config = Config {
+            projects: vec![
+                renamed,
+                project("p2", "/tmp/p2"),
+                project("p3", "/tmp/there"),
+            ],
+            ..Config::default()
+        };
+        reconcile_config_projects(&mut config, &store, |_| Ok(())).unwrap_err();
+        assert_eq!(store.load_projects().unwrap(), before);
     }
 
     #[test]

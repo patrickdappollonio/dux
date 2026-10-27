@@ -1,5 +1,6 @@
-//! A password set while the file's minimum is written in a spelling dux
-//! does not read is checked against the defaults, not refused.
+//! A password set while the file's minimum is written in a spelling or place
+//! dux does not read is refused, never checked against the defaults, which
+//! could let through a password the user's own minimum would refuse.
 use dux_core::auth::Password;
 
 fn try_set(body: &str) -> Result<(), String> {

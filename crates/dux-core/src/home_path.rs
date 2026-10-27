@@ -76,7 +76,7 @@ pub fn standalone_terminal_dir() -> PathBuf {
 /// `path` written for a human, with the home directory collapsed to `~`, given
 /// the resolved home. The home directory itself is exactly `~`; a path beneath
 /// it is `~/code`; anything else (including every path when home cannot be
-/// resolved) is returned verbatim.
+/// resolved, or is `/`) is returned verbatim.
 ///
 /// This is the standalone terminal's second sidebar line, so it is also what the
 /// sidebar search matches. It ellipsizes from the right like every other left
@@ -87,7 +87,8 @@ pub fn standalone_terminal_dir() -> PathBuf {
 /// desired state that gets expanded again on load; this one is display text
 /// nothing ever parses back.
 pub(crate) fn shorten_home_from(path: &Path, home: Option<&Path>) -> String {
-    let Some(home) = home else {
+    // A home of `/` holds every path, so collapsing it says nothing.
+    let Some(home) = home.filter(|home| home.parent().is_some()) else {
         return path.to_string_lossy().into_owned();
     };
     match path.strip_prefix(home) {
@@ -285,5 +286,15 @@ mod tests {
     fn an_unresolvable_home_leaves_the_path_alone() {
         assert_eq!(shorten_home_from(Path::new("/"), None), "/");
         assert_eq!(shorten_home_from(Path::new("/home/ada"), None), "/home/ada");
+    }
+
+    /// A home of `/` would turn every absolute path into one under `~`.
+    #[test]
+    fn a_root_home_leaves_the_path_alone() {
+        assert_eq!(
+            shorten_home_from(Path::new("/usr/lib"), Some(Path::new("/"))),
+            "/usr/lib"
+        );
+        assert_eq!(shorten_home_from(Path::new("/"), Some(Path::new("/"))), "/");
     }
 }

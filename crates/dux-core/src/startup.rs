@@ -326,7 +326,7 @@ fn execute_startup_command(
     // came after the delete that refuses the spawn here.
     let worktree = std::path::Path::new(&run.managed.worktree_path);
     let Some(spawning) = guard.begin_spawn(worktree) else {
-        anyhow::bail!(NOT_STARTED_DELETED);
+        return Err(anyhow::Error::new(NotStartedDeleted));
     };
     let mut child = command
         .spawn()
@@ -482,7 +482,7 @@ pub fn run_claimed_startup_command(
                 format_exit_code(outcome.code)
             ),
             Ok(_) => "dux stopped the command".to_string(),
-            Err(err) if err.to_string() == NOT_STARTED_DELETED => {
+            Err(err) if err.is::<NotStartedDeleted>() => {
                 "the command was never started".to_string()
             }
             Err(err) => format!("dux could not follow the command to its end ({err:#})"),
@@ -561,7 +561,16 @@ fn wait_for_exit_unreaped(pid: u32) {
 
 /// The error a run gives itself when its agent was deleted before the command
 /// could start.
-const NOT_STARTED_DELETED: &str = "the agent was deleted before the command started";
+#[derive(Debug)]
+struct NotStartedDeleted;
+
+impl std::fmt::Display for NotStartedDeleted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the agent was deleted before the command started")
+    }
+}
+
+impl std::error::Error for NotStartedDeleted {}
 
 /// Test-only hooks into the run.
 #[cfg(test)]

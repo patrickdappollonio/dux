@@ -1,7 +1,7 @@
 //! A token pasted where a name goes in `[env]` (a name that breaks the
 //! variable-name rule) is never printed by the start checks, which place it
-//! by its line. `dux server`'s load still writes it to dux.log verbatim when
-//! it resets the entry ("config [env] <name> is invalid").
+//! by its line, and `dux server`'s load, which resets the entry, never writes
+//! it to dux.log either.
 
 #[test]
 fn a_token_pasted_as_an_env_name_is_not_written_to_dux_log() {

@@ -1300,7 +1300,7 @@ impl KeyedStatusController {
                     // entry was in it: on the line, the line moves on.
                     self.remove_queued(key);
                 } else {
-                    self.entries.swap_remove(key);
+                    self.entries.shift_remove(key);
                 }
                 return true;
             }
@@ -1371,36 +1371,23 @@ impl KeyedStatusController {
         changes: &mut StatusTickChanges,
     ) {
         if self.anonymous_final_expired(now) {
+            // Leaving the replay snapshot, not anybody's screen: nothing to
+            // report but the count.
             self.anon = None;
-            self.record_anonymous_expiry(changes);
+            changes.purged += 1;
         }
         if self.anonymous_busy_timed_out(now, busy_timeout) {
             self.upgrade_anonymous_busy(now, changes);
         }
     }
 
+    /// Whether the anonymous slot's final has left the replay window. The slot
+    /// is used under [`StatusRetention::Emit`] alone; `Retain` queues an
+    /// unkeyed message in `entries` like any other.
     fn anonymous_final_expired(&self, now: Instant) -> bool {
-        let Some(entry) = self.anon.as_ref() else {
-            return false;
-        };
-        if self.retention == StatusRetention::Emit {
-            return entry.tone != StatusTone::Busy
-                && now.duration_since(entry.since) >= FINAL_REPLAY_WINDOW;
-        }
-        !self.anon_pinned
-            && !entry.sticky
-            && !self.clear_after.is_zero()
-            && entry.tone.clear_windows().is_some_and(|windows| {
-                now.duration_since(entry.since) >= self.clear_after * windows
-            })
-    }
-
-    fn record_anonymous_expiry(&self, changes: &mut StatusTickChanges) {
-        if self.retention == StatusRetention::Emit {
-            changes.purged += 1;
-        } else {
-            changes.cleared_keys.push(None);
-        }
+        self.anon.as_ref().is_some_and(|entry| {
+            entry.tone != StatusTone::Busy && now.duration_since(entry.since) >= FINAL_REPLAY_WINDOW
+        })
     }
 
     fn anonymous_busy_timed_out(&self, now: Instant, busy_timeout: Duration) -> bool {
@@ -1675,8 +1662,14 @@ impl KeyedStatusController {
         // ceiling would fire again on every tick for the rest of the process.
         self.live.retire(key);
         let entry = self.entries.get_mut(key)?;
+        // Named by the producer's key, never the storage key: an unkeyed
+        // message queued under `Retain` is stored under a synthetic id.
+        let named = entry.key.as_deref().map_or_else(
+            || "anonymous status".to_string(),
+            |key| format!("status key \"{key}\""),
+        );
         crate::logger::warn(&format!(
-            "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a {} warning",
+            "{named} left Busy with no final (\"{}\"); upgrading to a {} warning",
             entry.message,
             reason.log_word()
         ));
@@ -3104,6 +3097,19 @@ mod tests {
             3,
             "every open status must appear in the snapshot"
         );
+    }
+
+    /// A clear leaves the other open statuses in the order they were raised.
+    #[test]
+    fn a_clear_keeps_the_snapshot_in_order() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::emitting_finals();
+        for key in ["a", "b", "c"] {
+            c.set(t0, Some(key.into()), StatusTone::Busy, "Working…");
+        }
+        assert!(c.clear("a", None));
+        let keys: Vec<Option<String>> = c.snapshot().into_iter().map(|s| s.key).collect();
+        assert_eq!(keys, vec![Some("b".to_string()), Some("c".to_string())]);
     }
 
     // -----------------------------------------------------------------------

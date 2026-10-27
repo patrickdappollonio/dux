@@ -1,6 +1,6 @@
-//! Attribution of a start problem to the setting a `set` changes is made
-//! on dotted strings, so a name holding a dot makes a problem that is about
-//! another entry look like the set's own, and the set is refused.
+//! Attribution of a start problem to the setting a `set` changes is made by
+//! path segments, so a name holding a dot never makes a problem about another
+//! entry look like the set's own, and the set goes ahead.
 use dux_core::auth::Password;
 use dux_core::config_keys;
 
@@ -13,7 +13,7 @@ fn seed(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 
 /// `[env]` holds an entry whose name is not a variable name and contains a
 /// dot (`FOO.BAR`), which stops the terminal UI. Setting `env.FOO`, a
-/// different, valid variable, adds no problem, yet it is refused.
+/// different, valid variable, adds no problem, so it is not refused.
 #[test]
 fn an_unrelated_env_set_is_not_blocked_by_a_dotted_name() {
     let (_d, path) = seed("[env]\n\"FOO.BAR\" = \"x\"\n");
@@ -30,7 +30,7 @@ fn an_unrelated_env_set_is_not_blocked_by_a_dotted_name() {
 }
 
 /// The same with a provider named `a.command` whose `args` is the wrong
-/// type: setting `providers.a.command` (a different provider) is refused.
+/// type: setting `providers.a.command` (a different provider) is not refused.
 #[test]
 fn an_unrelated_provider_set_is_not_blocked_by_a_dotted_name() {
     let (_d, path) = seed("[providers.\"a.command\"]\ncommand = \"x\"\nargs = 5\n");

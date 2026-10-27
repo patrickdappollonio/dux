@@ -130,8 +130,9 @@ pub(crate) fn seed_gitignore(repo: &Path) -> Result<bool> {
     // No-follow write discipline (measured hazard): an append-open FOLLOWS a
     // .gitignore symlink and writes outside the repo, even through a dangling
     // link. Probe with symlink_metadata first and refuse anything that is not
-    // a regular file or absent. The remaining probe-to-open TOCTOU window is
-    // acceptable in this single-tenant trust model.
+    // a regular file or absent; the opens themselves refuse a link that
+    // appears after the probe (`create_new` never follows one, and the append
+    // open is `O_NOFOLLOW`, read through its own handle).
     let mut file = match std::fs::symlink_metadata(&gitignore) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let mut opts = std::fs::OpenOptions::new();
@@ -144,13 +145,16 @@ pub(crate) fn seed_gitignore(repo: &Path) -> Result<bool> {
             // that predates dux. If the existing bytes do not end in a
             // newline, write one first so the block never merges into the
             // user's last pattern.
-            let existing = std::fs::read(&gitignore)
-                .with_context(|| format!("failed to read {}", gitignore.display()))?;
+            use std::io::Read;
+            use std::os::unix::fs::OpenOptionsExt;
             let mut opts = std::fs::OpenOptions::new();
-            opts.append(true);
+            opts.read(true).append(true).custom_flags(libc::O_NOFOLLOW);
             let mut file = opts
                 .open(&gitignore)
                 .with_context(|| format!("failed to open {}", gitignore.display()))?;
+            let mut existing = Vec::new();
+            file.read_to_end(&mut existing)
+                .with_context(|| format!("failed to read {}", gitignore.display()))?;
             if !existing.is_empty() && !existing.ends_with(b"\n") {
                 file.write_all(b"\n")
                     .with_context(|| format!("failed to write {}", gitignore.display()))?;

@@ -15,6 +15,7 @@
 //! Only what dux knows about is protected: git can still replace any other
 //! ignored file or folder, and the docs say so.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -105,9 +106,10 @@ impl CheckoutMoveGuard {
         let tracked = tracked_at_head(checkout, &candidate_paths(checkout, entries))?;
         let mut locations =
             locations_git_would_replace(checkout, entries, &|path| tracked.contains(path));
+        let mut known: HashSet<PathBuf> = locations.iter().map(|at| at.path.clone()).collect();
         for deleted in &changes.deleted {
             let at = checkout.join(deleted);
-            if crate::engine::is_symlink(&at) && !locations.iter().any(|known| known.path == at) {
+            if crate::engine::is_symlink(&at) && known.insert(at.clone()) {
                 locations.push(Location {
                     path: at,
                     kind: LocationKind::LinkRemoved,
@@ -115,7 +117,7 @@ impl CheckoutMoveGuard {
             }
         }
         for folder in folders_left_empty(checkout, &changes) {
-            if !locations.iter().any(|known| known.path == folder) {
+            if known.insert(folder.clone()) {
                 locations.push(Location {
                     path: folder,
                     kind: LocationKind::FolderEmptied,
@@ -610,6 +612,7 @@ struct Location {
 /// ask HEAD about: each incoming path and each folder on the way to it.
 fn candidate_paths(checkout: &Path, entries: &[IncomingEntry]) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for entry in entries {
         let mut at = PathBuf::new();
         for component in entry.path.components() {
@@ -617,7 +620,7 @@ fn candidate_paths(checkout: &Path, entries: &[IncomingEntry]) -> Vec<PathBuf> {
             if std::fs::symlink_metadata(checkout.join(&at)).is_err() {
                 break;
             }
-            if !paths.contains(&at) {
+            if seen.insert(at.clone()) {
                 paths.push(at.clone());
             }
         }
@@ -694,6 +697,7 @@ fn locations_git_would_replace(
     tracked: &dyn Fn(&Path) -> bool,
 ) -> Vec<Location> {
     let mut found: Vec<Location> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for entry in entries {
         let components: Vec<_> = entry.path.components().collect();
         let mut relative = PathBuf::new();
@@ -722,7 +726,7 @@ fn locations_git_would_replace(
                 Some(LocationKind::Overwritten)
             };
             if let Some(kind) = kind
-                && !found.iter().any(|known| known.path == at)
+                && seen.insert(at.clone())
             {
                 found.push(Location { path: at, kind });
             }

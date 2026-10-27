@@ -141,6 +141,7 @@ pub fn diff_head_via_git_as(
     let mut command = diff_head_command(worktree, rel_path, against);
 
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

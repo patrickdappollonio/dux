@@ -32,12 +32,13 @@ use toml_edit::{Array, Decor, DocumentMut, Formatted, InlineTable, Item, Key, Ta
 /// and the log get the same answer rather than three separate decisions.
 use crate::file_modes::PRIVATE_FILE_MODE as CONFIG_FILE_MODE;
 
-/// Whether an atomic write fsyncs the file before the rename. Eager (critical)
-/// writes use `Fsync` for power-loss durability of the file's data; lazy writes
-/// use `NoFsync` (crash-safe via rename, but not power-loss-durable).
+/// Whether an atomic write fsyncs the file before the rename and its directory
+/// after it. Eager (critical) writes use `Fsync` for power-loss durability;
+/// lazy writes use `NoFsync` (crash-safe via rename, but not power-loss-durable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durability {
-    /// Fsync the file before the rename, for power-loss durability.
+    /// Fsync the file before the rename and the directory after it, for
+    /// power-loss durability.
     Fsync,
     /// Rename without an fsync: crash-safe, but not power-loss-durable.
     NoFsync,
@@ -304,6 +305,20 @@ fn write_config_atomic_unlocked(path: &Path, contents: &str, durability: Durabil
     tmp.persist(path)
         .map_err(|e| e.error)
         .with_context(|| format!("failed to rename temp config over {}", path.display()))?;
+
+    if durability == Durability::Fsync {
+        // The rename is durable only once the directory entry is. The file
+        // is already in place, so a directory that cannot be synced is a
+        // warning rather than a failed save.
+        if let Err(error) = fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+            crate::logger::warn(&format!(
+                "saved {} but could not sync its directory {}, so a power loss right now could \
+                 undo the save: {error}",
+                path.display(),
+                dir.display()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -436,16 +451,28 @@ pub(crate) fn patch_config_file_three_way(
     let _lock = ConfigFileLock::acquire(config_path)?;
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
+    patch_text_three_way_unlocked(config_path, &raw, base, ours, durability)
+}
+
+/// [`patch_config_file_three_way`] for a caller holding the lock that has
+/// read the file's text, `raw`, under it.
+fn patch_text_three_way_unlocked(
+    config_path: &Path,
+    raw: &str,
+    base: Option<SaveBase<'_>>,
+    ours: &Config,
+    durability: Durability,
+) -> Result<String> {
     let mut doc: DocumentMut = raw.parse().map_err(|e: toml_edit::TomlError| {
         anyhow::anyhow!(
             "failed to parse {}: {}",
             config_path.display(),
-            crate::config::describe_toml_edit_error(&raw, &e)
+            crate::config::describe_toml_edit_error(raw, &e)
         )
     })?;
     apply_patches_three_way(&mut doc, base, ours);
     let text = doc.to_string();
-    check_auth_added_by(config_path, Some(&raw), &text, "write")?;
+    check_auth_added_by(config_path, Some(raw), &text, "write")?;
     write_config_atomic_unlocked(config_path, &text, durability)?;
     Ok(text)
 }
@@ -464,12 +491,21 @@ pub fn save_config_three_way(
     ours: &Config,
     durability: Durability,
 ) -> Result<String> {
-    if config_path.exists() {
-        patch_config_file_three_way(config_path, base, ours, durability)
-    } else {
-        let text = render_config_documented(ours);
-        write_config_atomic(config_path, &text, durability)?;
-        Ok(text)
+    // Whether the file exists is decided under the lock that the write holds,
+    // so a file another writer creates meanwhile is patched, never replaced
+    // by the template.
+    let _lock = ConfigFileLock::acquire(config_path)?;
+    match fs::read_to_string(config_path) {
+        Ok(raw) => patch_text_three_way_unlocked(config_path, &raw, base, ours, durability),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let text = render_config_documented(ours);
+            check_auth_added_by(config_path, None, &text, "write")?;
+            write_config_atomic_unlocked(config_path, &text, durability)?;
+            Ok(text)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read {}", config_path.display()))
+        }
     }
 }
 
@@ -1763,10 +1799,22 @@ fn render_auth_section(doc: &mut DocumentMut, auth: &crate::config::ServerAuthCo
     else {
         return;
     };
-    let Ok(rendered) = toml::to_string(auth) else {
-        return;
-    };
-    let Ok(rendered) = rendered.parse::<DocumentMut>() else {
+    // An error is not quoted: a parse error shows the rendered line, which
+    // can be the password hash.
+    let rendered = toml::to_string(auth)
+        .ok()
+        .and_then(|text| text.parse::<DocumentMut>().ok());
+    let Some(rendered) = rendered else {
+        // The password is never the part that goes missing: a fresh file
+        // without it would quietly turn the login off.
+        crate::logger::error(
+            "could not render the [server.auth] settings, so only the password was written and \
+             the other settings there take their defaults",
+        );
+        table.insert(
+            "password_hash",
+            toml_edit::value(auth.password_hash.as_str()),
+        );
         return;
     };
     for (key, item) in rendered.iter() {
@@ -1796,16 +1844,12 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 ///
 /// Fails when an existing file cannot be read or parsed as TOML, or the write fails.
 pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
-    if config_path.exists() {
-        patch_config_file_three_way(config_path, None, config, durability).map(|_| ())
-    } else {
-        // FIRST CREATION. This must emit the fully-commented template, not the
-        // plain one: "the config file is the documentation" (CLAUDE.md), and the
-        // patch path that runs on every later save preserves comments but never
-        // ADDS them, so a config born bare stays bare forever. See
-        // [`render_config_documented`].
-        write_config_atomic(config_path, &render_config_documented(config), durability)
-    }
+    // FIRST CREATION (the file is missing) must emit the fully-commented
+    // template, not the plain one: "the config file is the documentation"
+    // (CLAUDE.md), and the patch path that runs on every later save preserves
+    // comments but never ADDS them, so a config born bare stays bare forever.
+    // See [`render_config_documented`].
+    save_config_three_way(config_path, None, config, durability).map(|_| ())
 }
 
 /// The canonical fully-commented renderer, installed by the TUI at startup.

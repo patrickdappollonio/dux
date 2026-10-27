@@ -1053,8 +1053,9 @@ pub struct ServerConfig {
     /// replaces the TUI with the server and is unaffected by this setting).
     ///
     /// Off by default, because turning it on means a network listener exists for
-    /// as long as dux does, and there is no login gate: the same trust model the
-    /// rest of `[server]` documents, now in effect whenever the TUI is open. The
+    /// as long as dux does, guarded only by the optional `[server.auth]`
+    /// password: the same trust model the rest of `[server]` documents, now in
+    /// effect whenever the TUI is open. The
     /// mode is toggleable at runtime through the `start-background-server` and
     /// `stop-background-server` palette commands, and this setting decides only
     /// whether it comes up serving at startup.
@@ -2711,7 +2712,8 @@ pub(crate) fn process_env_var(name: &str) -> Option<String> {
 }
 
 /// Expand environment variables (`$VAR`, `${VAR}`) in a config string.
-/// Returns `None` when variable syntax is invalid.
+/// Returns `None` when variable syntax is invalid, a `${` with no closing
+/// brace included.
 pub(crate) fn expand_env_vars(raw: &str) -> Option<String> {
     expand_env_vars_with(raw, &process_env_var)
 }
@@ -2731,10 +2733,12 @@ pub(crate) fn expand_env_vars_with(
                 chars.next();
             }
             let mut var_name = String::new();
+            let mut closed = false;
             while let Some(&c) = chars.peek() {
                 if braced {
                     if c == '}' {
                         chars.next();
+                        closed = true;
                         break;
                     }
                 } else if !c.is_ascii_alphanumeric() && c != '_' {
@@ -2743,7 +2747,7 @@ pub(crate) fn expand_env_vars_with(
                 var_name.push(c);
                 chars.next();
             }
-            if var_name.is_empty() || !is_valid_var_name(&var_name) {
+            if (braced && !closed) || var_name.is_empty() || !is_valid_var_name(&var_name) {
                 return None;
             }
             if let Some(value) = var(&var_name) {
@@ -2905,8 +2909,8 @@ fn expand_leading_tilde(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 
 /// The text the `$VAR`/`${VAR}` reference starting at `chars` expands to, or
 /// the literal reference itself when the variable is unset, so the user can see
-/// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`.
-/// The variable is read through `var`.
+/// which one failed. `None` rejects a name that is not `[A-Za-z_][A-Za-z0-9_]*`,
+/// and a `${` with no closing brace. The variable is read through `var`.
 fn expand_variable(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     var: &dyn Fn(&str) -> Option<String>,
@@ -2916,10 +2920,12 @@ fn expand_variable(
         chars.next();
     }
     let mut var_name = String::new();
+    let mut closed = false;
     while let Some(&c) = chars.peek() {
         if braced {
             if c == '}' {
                 chars.next();
+                closed = true;
                 break;
             }
         } else if !c.is_ascii_alphanumeric() && c != '_' {
@@ -2928,7 +2934,7 @@ fn expand_variable(
         var_name.push(c);
         chars.next();
     }
-    if var_name.is_empty() || !is_valid_var_name(&var_name) {
+    if (braced && !closed) || var_name.is_empty() || !is_valid_var_name(&var_name) {
         return None;
     }
     match var(&var_name) {
@@ -4083,8 +4089,10 @@ pub enum Surface {
 pub struct StartProblem {
     /// What it is about; two problems are the same when their ids are.
     pub id: String,
-    /// The sentence shown: which surfaces will not start, and why. Never a
-    /// value from the file.
+    /// The sentence shown: which surfaces will not start, and why. It quotes
+    /// no value from the file except `[server] host`, which a sentence about
+    /// an address it cannot bind has to name; a value that may be a secret,
+    /// and a name that may be a value pasted in the wrong place, never.
     pub message: String,
     /// Why, without which surfaces it stops: what a caller that words the
     /// surfaces itself lists.
@@ -6331,10 +6339,10 @@ fn port_zero_problem(host: &str, port: u16) -> Option<String> {
 /// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
 ///
 /// dux is trusted-local: the primary listener is always the configured
-/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
-/// gate and no public-bind refusal; the operator chooses the host directly and
-/// the host guard (config `allowed_hosts`) governs which `Host` headers are
-/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
+/// `host:port` (loopback by default) or an explicit `--bind`. There is no
+/// public-bind refusal; the operator chooses the host directly, the optional
+/// `[server.auth]` password decides who may sign in, and the host guard (config
+/// `allowed_hosts`) governs which `Host` headers are accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
 ///
@@ -7591,6 +7599,12 @@ mod tests {
     #[test]
     fn expand_path_rejects_empty_braced_var_name() {
         assert!(expand_path("${}/foo").is_none());
+    }
+
+    #[test]
+    fn an_unterminated_braced_reference_is_rejected() {
+        assert!(expand_path("${HOME").is_none());
+        assert!(parse_project_env_lines("GOOD=${HOME").is_err());
     }
 
     /// What the docs promise for `log_viewer_lines`: 0 is read as 1 (by the

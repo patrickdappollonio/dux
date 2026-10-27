@@ -15,8 +15,9 @@ fn paths(dir: &std::path::Path) -> dux_core::config::DuxPaths {
 }
 
 /// A token pasted as a key inside an `[env]` value written as a table: the
-/// start checks name the entry by it, so it reaches the terminal UI's start
-/// error and every `dux config set`/`get` that lists the problem.
+/// start checks never name the entry by it, so it reaches neither the
+/// terminal UI's start error nor any `dux config set`/`get` that lists the
+/// problem.
 #[test]
 fn a_token_pasted_as_a_key_inside_an_env_value_is_not_quoted_by_the_start_checks() {
     let raw = format!("[env]\nA = {{ \"{TOKEN} x\" = 1 }}\n");
@@ -35,7 +36,7 @@ fn a_token_pasted_as_a_key_inside_an_env_value_is_not_quoted_by_the_start_checks
 }
 
 /// A token pasted as a key under `[defaults]`, holding a misplaced password
-/// hash: the refusal both surfaces start with quotes it.
+/// hash: neither the start checks nor `dux server`'s start error quote it.
 #[test]
 fn a_token_pasted_as_a_key_holding_a_misplaced_hash_is_not_quoted_by_the_start_checks() {
     let raw = format!("[defaults]\n\"{TOKEN}\" = {{ password_hash = \"x\" }}\n");

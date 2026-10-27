@@ -667,7 +667,7 @@ fn write_value_checked(
                 && let Some(refusal) =
                     misplaced_auth_refusal(&before, "which web UI password settings you meant")
             {
-                anyhow::bail!("{refusal}");
+                return Err(anyhow::Error::new(FileRefused(refusal)));
             }
             let previous = value_in_doc(doc, path);
             let had = provider_command_in(doc, path);
@@ -675,7 +675,8 @@ fn write_value_checked(
             set_in_doc(doc, path, value)?;
             check_provider_command(doc, path, had)?;
             let held_back =
-                refuse_a_set_dux_would_undo(&before, &doc.to_string(), path, config_path.parent())?;
+                refuse_a_set_dux_would_undo(&before, &doc.to_string(), path, config_path.parent())
+                    .map_err(file_refused)?;
             Ok((previous, held_back))
         })?;
     Ok(SetReport {
@@ -934,6 +935,11 @@ pub enum SetPasswordError {
     /// The file's password hash is no longer the one the caller checked: the
     /// password was set or changed meanwhile by someone else. Nothing written.
     ChangedMeanwhile,
+    /// What the file holds stops the change until it is fixed (its minimums
+    /// cannot be read, a password setting sits where dux does not read it, or
+    /// dux would undo the change when it loads the file), in a sentence that
+    /// says so. Nothing written.
+    Refused(String),
 }
 
 impl fmt::Display for SetPasswordError {
@@ -961,6 +967,7 @@ impl fmt::Display for SetPasswordError {
                 Ok(())
             }
             Self::Failed(error) => write!(f, "{error:#}"),
+            Self::Refused(sentence) => f.write_str(sentence),
             Self::ChangedMeanwhile => f.write_str(
                 "the password was changed by someone else while this change was being made, \
                  so nothing was written; try again",
@@ -1108,18 +1115,84 @@ pub fn set_password_with(
     password: &Password,
     user_inputs: &[&str],
 ) -> Result<PasswordSet, SetPasswordError> {
-    let policy = current_password_policy(config_path).map_err(SetPasswordError::Failed)?;
+    set_password_over(config_path, missing, None, password, user_inputs)
+}
+
+/// [`set_password`], but only over the hash the caller checked: `expected` is
+/// the `password_hash` the caller verified the current password against (empty
+/// when it found none, for a first password). The comparison, the minimums and
+/// the write all happen under the config write lock, so a change that lands
+/// between the caller's check and this write makes this one fail with
+/// [`SetPasswordError::ChangedMeanwhile`] rather than silently replacing it,
+/// and minimums raised meanwhile refuse it.
+///
+/// Otherwise it is [`set_password`]: the locked, repairing, start-checked
+/// mutation, so it adds no problem the file did not have and reports the ones
+/// left.
+///
+/// # Errors
+///
+/// Fails as [`set_password`] does, and with [`SetPasswordError::ChangedMeanwhile`] when the stored
+/// hash is no longer `expected`.
+pub fn set_password_if_current(
+    config_path: &Path,
+    expected: &str,
+    password: &Password,
+    user_inputs: &[&str],
+) -> Result<PasswordSet, SetPasswordError> {
+    set_password_over(
+        config_path,
+        MissingConfig::CreateDocumented,
+        Some(expected),
+        password,
+        user_inputs,
+    )
+}
+
+/// The one password write: [`set_password_with`], and, with `expected`, only
+/// while the stored hash is still that one.
+fn set_password_over(
+    config_path: &Path,
+    missing: MissingConfig<'_>,
+    expected: Option<&str>,
+    password: &Password,
+    user_inputs: &[&str],
+) -> Result<PasswordSet, SetPasswordError> {
+    let policy = match std::fs::read_to_string(config_path) {
+        Ok(raw) => password_policy_of(&raw)
+            .map_err(|error| SetPasswordError::Refused(format!("{error:#}")))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::config::ServerAuthConfig::default().password_policy()
+        }
+        Err(error) => {
+            return Err(SetPasswordError::Failed(
+                anyhow::Error::new(error)
+                    .context(format!("failed to read {}", config_path.display())),
+            ));
+        }
+    };
     let check = crate::auth::check_minimums(password, &policy, user_inputs);
     if !check.passes() {
         return Err(SetPasswordError::BelowMinimums(check));
     }
     let hash = crate::auth::hash_password(password)
         .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
+    #[cfg(test)]
+    AFTER_HASH.with(|hook| hook.take().map(|run| run()));
     let path: Vec<String> = password_hash_path();
     // The check that decides is the one under the lock.
     let mut decided: Option<crate::auth::MinimumCheck> = None;
     let written = write_value_checked(config_path, missing, &path, Value::from(hash), |doc| {
-        let policy = password_policy_of(&doc.to_string())?;
+        if let Some(expected) = expected {
+            let current = value_in_doc(doc, &path)
+                .and_then(|text| text.parse::<toml::Value>().ok())
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default();
+            if current != expected {
+                return Err(anyhow::Error::new(Unchanged));
+            }
+        }
+        let policy = password_policy_of(&doc.to_string()).map_err(file_refused)?;
         let check = crate::auth::check_minimums(password, &policy, user_inputs);
         let passes = check.passes();
         decided = Some(check);
@@ -1134,6 +1207,10 @@ pub fn set_password_with(
             strength: check.strength,
             remaining_problems: report.remaining_problems,
         }),
+        (Err(error), _) if error.is::<Unchanged>() => Err(SetPasswordError::ChangedMeanwhile),
+        (Err(error), _) if error.is::<FileRefused>() => {
+            Err(SetPasswordError::Refused(format!("{error:#}")))
+        }
         (Err(_), Some(check)) if !check.passes() => Err(SetPasswordError::BelowMinimums(check)),
         (Err(error), _) => Err(SetPasswordError::Failed(error)),
         (Ok(_), None) => Err(SetPasswordError::Failed(anyhow::anyhow!(
@@ -1142,58 +1219,33 @@ pub fn set_password_with(
     }
 }
 
-/// [`set_password`], but only over the hash the caller checked: `expected` is
-/// the `password_hash` the caller verified the current password against (empty
-/// when it found none, for a first password). The comparison and the write
-/// happen under the config write lock, so a change that lands between the
-/// caller's check and this write makes this one fail with
-/// [`SetPasswordError::ChangedMeanwhile`] rather than silently replacing it.
-///
-/// The write is [`set_password`]'s own: the locked, repairing, start-checked
-/// mutation, so it adds no problem the file did not have and reports the ones
-/// left.
-///
-/// # Errors
-///
-/// Fails as [`set_password`] does, and with [`SetPasswordError::ChangedMeanwhile`] when the stored
-/// hash is no longer `expected`.
-pub fn set_password_if_current(
-    config_path: &Path,
-    expected: &str,
-    password: &Password,
-    user_inputs: &[&str],
-) -> Result<PasswordSet, SetPasswordError> {
-    let policy = current_password_policy(config_path).map_err(SetPasswordError::Failed)?;
-    let check = crate::auth::check_minimums(password, &policy, user_inputs);
-    if !check.passes() {
-        return Err(SetPasswordError::BelowMinimums(check));
+#[cfg(test)]
+thread_local! {
+    /// Run on this thread once a password write has hashed and before it
+    /// takes the lock: the moment another writer can change the file.
+    static AFTER_HASH: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A write refused because of what the file holds, in a sentence for the
+/// person who asked: nothing failed, and fixing the file lets it through.
+#[derive(Debug)]
+struct FileRefused(String);
+
+impl fmt::Display for FileRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
-    let hash = crate::auth::hash_password(password)
-        .map_err(|e| SetPasswordError::Failed(anyhow::Error::msg(e.to_string())))?;
-    let path = password_hash_path();
-    let written = crate::config_write::mutate_config_file_repairing(
-        config_path,
-        MissingConfig::CreateDocumented,
-        &path,
-        |doc| {
-            let current = value_in_doc(doc, &path)
-                .and_then(|text| text.parse::<toml::Value>().ok())
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_default();
-            if current != expected {
-                return Err(anyhow::Error::new(Unchanged));
-            }
-            set_in_doc(doc, &path, Value::from(hash))
-        },
-    );
-    match written {
-        Ok(((), remaining_problems)) => Ok(PasswordSet {
-            strength: check.strength,
-            remaining_problems,
-        }),
-        Err(error) if error.is::<Unchanged>() => Err(SetPasswordError::ChangedMeanwhile),
-        Err(error) => Err(SetPasswordError::Failed(error)),
-    }
+}
+
+impl std::error::Error for FileRefused {}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "a map_err adapter, which takes the error by value"
+)]
+fn file_refused(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(FileRefused(format!("{error:#}")))
 }
 
 /// A mutation that decided to write nothing; it never reaches a caller.
@@ -4087,6 +4139,28 @@ port = 3890
         )
         .expect("over the hash it checked");
         assert_ne!(hash_in(&path), hash);
+    }
+
+    /// Minimums raised while the new password is being hashed still refuse it:
+    /// they are read again under the write's lock.
+    #[test]
+    fn a_compare_and_set_password_meets_minimums_raised_meanwhile() {
+        let (_dir, path) = temp_config(COMMENTED);
+        let raised = path.clone();
+        AFTER_HASH.with(|hook| {
+            hook.set(Some(Box::new(move || {
+                let text = format!("{COMMENTED}\n[server.auth]\nminimum_password_length = 60\n");
+                std::fs::write(&raised, text).unwrap();
+            })));
+        });
+        let err = set_password_if_current(&path, "", &Password::new(STRONG.to_string()), &[])
+            .unwrap_err();
+        assert!(
+            AFTER_HASH.with(|hook| hook.take().is_none()),
+            "the write never reached the point after hashing"
+        );
+        assert!(matches!(err, SetPasswordError::BelowMinimums(_)), "{err}");
+        assert_eq!(hash_in(&path), "");
     }
 
     /// A problem the file already had elsewhere never refuses a ban: a ban that

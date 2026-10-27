@@ -1,5 +1,6 @@
 //! While any auth setting sits where dux does not read it, no password can
-//! be set. `server.auth.password` refuses; does `server.auth.password_hash`?
+//! be set: `server.auth.password_hash` is refused just as
+//! `server.auth.password` is.
 
 use dux_core::config_keys::{lookup, set_plain};
 

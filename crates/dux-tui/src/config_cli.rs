@@ -644,9 +644,11 @@ fn set_secret(
             Err(anyhow!("{}", SetPasswordError::BelowMinimums(check)))
         }
         Err(SetPasswordError::Failed(error)) => Err(error),
-        // Only the compare-and-set write can answer this, and `set` replaces
-        // whatever the file holds.
-        Err(error @ SetPasswordError::ChangedMeanwhile) => Err(anyhow!("{error}")),
+        // Only the compare-and-set write can answer ChangedMeanwhile, and
+        // `set` replaces whatever the file holds.
+        Err(error @ (SetPasswordError::Refused(_) | SetPasswordError::ChangedMeanwhile)) => {
+            Err(anyhow!("{error}"))
+        }
     }
 }
 

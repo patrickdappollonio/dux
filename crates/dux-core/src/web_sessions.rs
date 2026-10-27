@@ -146,11 +146,18 @@ impl WebSessionStore {
     pub fn open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .with_context(|| format!("failed to set a busy timeout on {}", path.display()))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .with_context(|| format!("failed to turn on WAL for {}", path.display()))?;
         crate::file_modes::restrict_to_owner_best_effort(path, "session database");
         let store = Self { conn };
-        store.migrate()?;
+        store.migrate().with_context(|| {
+            format!(
+                "failed to create the web sessions table in {}",
+                path.display()
+            )
+        })?;
         Ok(store)
     }
 
