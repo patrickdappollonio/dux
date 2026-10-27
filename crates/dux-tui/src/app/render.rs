@@ -6257,7 +6257,7 @@ impl App {
                 spans.extend(owned_key_badge(&self.theme, key));
                 spans.push(Span::raw(" ".repeat(padding)));
                 spans.push(Span::styled(
-                    desc.to_string(),
+                    desc.clone(),
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 lines.push(Line::from(spans));
@@ -19188,9 +19188,10 @@ mod tests {
     /// Every pill leads with its strip ordinal, the visible
     /// address the tab switch keys count against, and the ordinal is a
     /// POSITION, never a stable id: closing a tab renumbers every pill after
-    /// it. Position 4 renders like any other (its Ctrl-4 default is absent
-    /// because legacy terminals send the same byte as the macro bar's Ctrl-\,
-    /// but the address itself stays visible and rebindable).
+    /// it. Every position renders the same whether or not its tab number has
+    /// a key bound: most ship with none, since legacy terminals send most
+    /// Ctrl-digit chords as another key, but the address stays visible and
+    /// rebindable.
     #[test]
     fn tab_strip_ordinals_renumber_when_a_tab_closes() {
         use ratatui::Terminal;

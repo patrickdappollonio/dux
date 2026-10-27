@@ -83,24 +83,31 @@ pub enum Action {
     CloseTab,
     /// Stop the focused tab of the selected agent; the tab stays, ready to start again.
     StopTab,
-    /// Focus tab 1 of the selected agent.
+    /// Focus tab 1 of the selected agent. Ships with no default key: most terminals send Ctrl-1 as
+    /// a plain 1, so bind your own key here for direct access.
     SelectTab1,
-    /// Focus tab 2 of the selected agent.
+    /// Focus tab 2 of the selected agent. Ships with no default key: most terminals send Ctrl-2 as
+    /// Ctrl-Space, so bind your own key here for direct access.
     SelectTab2,
-    /// Focus tab 3 of the selected agent.
+    /// Focus tab 3 of the selected agent. Ships with no default key: most terminals send Ctrl-3 as
+    /// Escape, so bind your own key here for direct access.
     SelectTab3,
     /// Focus tab 4 of the selected agent. Ships with no default key: most terminals send the same
     /// byte for Ctrl-4 and Ctrl-\ (the macro bar), so bind your own key here for direct access.
     SelectTab4,
-    /// Focus tab 5 of the selected agent.
+    /// Focus tab 5 of the selected agent. Ships with no default key: most terminals send the same
+    /// byte for Ctrl-5 and Ctrl-] (remove the git pane), so bind your own key here for direct
+    /// access.
     SelectTab5,
     /// Focus tab 6 of the selected agent.
     SelectTab6,
     /// Focus tab 7 of the selected agent.
     SelectTab7,
-    /// Focus tab 8 of the selected agent.
+    /// Focus tab 8 of the selected agent. Ships with no default key: most terminals send Ctrl-8 as
+    /// Backspace, so bind your own key here for direct access.
     SelectTab8,
-    /// Focus tab 9 of the selected agent.
+    /// Focus tab 9 of the selected agent. Ships with no default key: most terminals send Ctrl-9 as
+    /// a plain 9, so bind your own key here for direct access.
     SelectTab9,
     /// Open the macro command bar to send text macros. Works over the windowed agent pane and in
     /// fullscreen.
@@ -580,17 +587,29 @@ impl Action {
             Action::StopTab => {
                 "Stop the focused tab of the selected agent; the tab stays, ready to start again."
             }
-            Action::SelectTab1 => "Focus tab 1 of the selected agent.",
-            Action::SelectTab2 => "Focus tab 2 of the selected agent.",
-            Action::SelectTab3 => "Focus tab 3 of the selected agent.",
+            Action::SelectTab1 => {
+                "Focus tab 1 of the selected agent. Ships with no default key: most terminals send Ctrl-1 as a plain 1, so bind your own key here for direct access."
+            }
+            Action::SelectTab2 => {
+                "Focus tab 2 of the selected agent. Ships with no default key: most terminals send Ctrl-2 as Ctrl-Space, so bind your own key here for direct access."
+            }
+            Action::SelectTab3 => {
+                "Focus tab 3 of the selected agent. Ships with no default key: most terminals send Ctrl-3 as Escape, so bind your own key here for direct access."
+            }
             Action::SelectTab4 => {
                 "Focus tab 4 of the selected agent. Ships with no default key: most terminals send the same byte for Ctrl-4 and Ctrl-\\ (the macro bar), so bind your own key here for direct access."
             }
-            Action::SelectTab5 => "Focus tab 5 of the selected agent.",
+            Action::SelectTab5 => {
+                "Focus tab 5 of the selected agent. Ships with no default key: most terminals send the same byte for Ctrl-5 and Ctrl-] (remove the git pane), so bind your own key here for direct access."
+            }
             Action::SelectTab6 => "Focus tab 6 of the selected agent.",
             Action::SelectTab7 => "Focus tab 7 of the selected agent.",
-            Action::SelectTab8 => "Focus tab 8 of the selected agent.",
-            Action::SelectTab9 => "Focus tab 9 of the selected agent.",
+            Action::SelectTab8 => {
+                "Focus tab 8 of the selected agent. Ships with no default key: most terminals send Ctrl-8 as Backspace, so bind your own key here for direct access."
+            }
+            Action::SelectTab9 => {
+                "Focus tab 9 of the selected agent. Ships with no default key: most terminals send Ctrl-9 as a plain 9, so bind your own key here for direct access."
+            }
             Action::NewTerminal => {
                 "Spawn a new companion terminal in the selected agent's directory."
             }

@@ -143,6 +143,11 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     {
         anyhow::bail!("{}: {refusal}", paths.config_path.display());
     }
+    // A binding that loads but never runs is said once per read, like the
+    // load corrections below.
+    for warning in key_binding_warnings(&config.keys) {
+        dux_core::logger::warn(&format!("{}: {warning}", paths.config_path.display()));
+    }
     // The load's in-memory corrections, the same every surface makes (an
     // out-of-range `gh` re-check interval among them, whose read path is the
     // engine tick, run tens of times a second on the thread that draws), each
@@ -2307,10 +2312,8 @@ fn render_keys_config(
         // palette and stay out of the template. A key-scoped action that ships
         // unbound is a commented-out row rather than an omission: the config
         // file is the documentation. A user who bound it gets a real row.
-        let user_bound = keys
-            .bindings
-            .get(config_name)
-            .is_some_and(|combos| !combos.is_empty());
+        let user_bound =
+            keybindings::configured_keys(keys, def.action).is_some_and(|combos| !combos.is_empty());
         if def.default_keys.is_empty() && !user_bound {
             if !def.scopes.is_empty() {
                 let section = def.action.help_section().unwrap_or("Other");
@@ -2352,12 +2355,14 @@ fn render_keys_config(
         let _ = writeln!(out, "# {desc}");
 
         // Value from config (or defaults if missing).
-        let key_strs = keys.bindings.get(config_name).cloned().unwrap_or_else(|| {
-            def.default_keys
-                .iter()
-                .map(|k| keybindings::format_key_for_config(*k))
-                .collect()
-        });
+        let key_strs = keybindings::configured_keys(keys, def.action)
+            .cloned()
+            .unwrap_or_else(|| {
+                def.default_keys
+                    .iter()
+                    .map(|k| keybindings::format_key_for_config(*k))
+                    .collect()
+            });
         let _ = writeln!(out, "{config_name} = {}", render_string_list(&key_strs));
     }
     out.push('\n');
@@ -2692,7 +2697,9 @@ fn not_a_key_sentence(action: &str, at: Option<usize>) -> String {
 /// 2. Every key string parses successfully after normalization
 ///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`); a
 ///    binding that does not is named by its action, never repeated.
-/// 3. No two actions bind the same normalized key in overlapping scopes.
+/// 3. No two actions bind the same normalized key in one lookup (a global
+///    binding shadowing a pane's is a warning instead, see
+///    [`key_binding_warnings`]).
 pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
     let problems = key_binding_problems(keys, &|_| None);
     if problems.is_empty() {
@@ -2708,6 +2715,26 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// actions binding the same key in a shared scope, each named by its action.
 /// `line_of` places an action's binding by its line where the file's text is
 /// at hand; an action the file leaves out binds its default key.
+/// Every binding in `keys` that loads but never runs on its key: a pane
+/// action whose key a global action also holds, which the main key handler
+/// answers first. Each is named by both actions and never by the key. These
+/// warn rather than refuse, because a file holding one used to load.
+pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
+    keybindings::detect_conflicts(keys)
+        .into_iter()
+        .filter(|conflict| conflict.kind == keybindings::ConflictKind::Shadowed)
+        .map(|conflict| {
+            format!(
+                "[keys] {pane} never runs on its key in the {scope}: the global {global} binds \
+                 the same key and is answered first; give one of them a different key in [keys]",
+                pane = conflict.action_b,
+                global = conflict.action_a,
+                scope = conflict.scope.display_name(),
+            )
+        })
+        .collect()
+}
+
 fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usize>) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, key_strs) in &keys.bindings {
@@ -2737,7 +2764,10 @@ fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usiz
             format!("{action} (its default key)")
         }
     };
-    for conflict in keybindings::detect_conflicts(keys) {
+    for conflict in keybindings::detect_conflicts(keys)
+        .into_iter()
+        .filter(|conflict| conflict.kind == keybindings::ConflictKind::Collision)
+    {
         problems.push(format!(
             "[keys] two actions bind the same key: {} and {} in the {}; give one of them a \
              different key in [keys]",
@@ -4328,6 +4358,64 @@ oneshot_output = "stdout"
             msg,
             "[keys] two actions bind the same key: toggle_project and new_agent in the \
              Projects pane; give one of them a different key in [keys]"
+        );
+    }
+
+    /// A file written before the tab-number defaults were dropped carries
+    /// them as live rows, beside the global remove-git-pane key that Ctrl-5
+    /// collides with. It must still start, quietly, with those tabs unbound.
+    #[test]
+    fn old_tab_number_default_rows_load_unbound_and_quietly() {
+        let raw = "[keys]\nselect_tab_1 = [\"ctrl-1\"]\nselect_tab_2 = [\"ctrl-2\"]\n\
+                   select_tab_3 = [\"ctrl-3\"]\nselect_tab_5 = [\"ctrl-5\"]\n\
+                   select_tab_6 = [\"ctrl-6\"]\nselect_tab_8 = [\"ctrl-8\"]\n\
+                   select_tab_9 = [\"ctrl-9\"]\nremove_git_pane = [\"ctrl-]\"]\n";
+        assert_eq!(keys_start_problems(raw), Vec::<String>::new());
+        let keys = toml::from_str::<Config>(raw).expect("parses").keys;
+        assert_eq!(key_binding_warnings(&keys), Vec::<String>::new());
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&keys);
+        for action in [
+            keybindings::Action::SelectTab1,
+            keybindings::Action::SelectTab2,
+            keybindings::Action::SelectTab3,
+            keybindings::Action::SelectTab5,
+            keybindings::Action::SelectTab8,
+            keybindings::Action::SelectTab9,
+        ] {
+            assert_eq!(bindings.labels_for(action), "", "{action:?}");
+        }
+        assert_eq!(
+            bindings.labels_for(keybindings::Action::SelectTab6),
+            "Ctrl-6",
+            "a tab whose default still ships keeps its row"
+        );
+    }
+
+    /// A user's own key on one of those tabs is kept.
+    #[test]
+    fn a_user_key_on_a_dropped_tab_number_is_kept() {
+        let mut keys = KeysConfig::default();
+        keys.bindings
+            .insert("select_tab_5".to_string(), vec!["alt-5".to_string()]);
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&keys);
+        assert_eq!(
+            bindings.labels_for(keybindings::Action::SelectTab5),
+            "Alt-5"
+        );
+    }
+
+    /// A pane binding a global action shadows is a warning naming both
+    /// actions, never a reason to refuse the file.
+    #[test]
+    fn a_pane_key_a_global_binding_shadows_starts_with_a_warning() {
+        let raw = "[keys]\nselect_tab_6 = [\"ctrl-]\"]\n";
+        assert_eq!(keys_start_problems(raw), Vec::<String>::new());
+        let keys = toml::from_str::<Config>(raw).expect("parses").keys;
+        let warnings = key_binding_warnings(&keys);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("select_tab_6") && warnings[0].contains("remove_git_pane"),
+            "{warnings:?}"
         );
     }
 

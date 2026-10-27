@@ -513,7 +513,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     // ── Agent tabs (Center-scope; never in fullscreen) ────────────
-    // Only the Ctrl arrows and Ctrl-1..9 are tab keys: the focused center pane
+    // Only Ctrl chords are tab keys: the focused center pane
     // types into a live agent, so a plain arrow must reach it as a caret move
     // ([`center_typing_owns_key`]) rather than switch tabs.
     BindingDef {
@@ -536,35 +536,39 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[],
     },
+    // Tab numbers ship with a default key only where the chord reaches dux as
+    // itself. dux asks the terminal for no keyboard protocol, so Ctrl-digit
+    // arrives in the legacy encoding: Ctrl-1 and Ctrl-9 as the bare digit,
+    // Ctrl-2 as NUL (Ctrl-Space), Ctrl-3 as ESC, Ctrl-4 and Ctrl-5 as the bytes
+    // of Ctrl-\ and Ctrl-] (`normalize_ctrl_punct` folds them, and the macro
+    // bar and remove-git-pane hold those), Ctrl-8 as DEL (Backspace). Ctrl-6
+    // and Ctrl-7 arrive as themselves. The rest stay reachable through
+    // NextTab/PrevTab or a rebind.
     BindingDef {
         action: Action::SelectTab1,
-        default_keys: &[key!(ctrl - 1)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Focus tab by number (tab 4 ships with no default key)",
+            description: "Focus tab by number",
         }),
         hint_contexts: &[],
     },
     BindingDef {
         action: Action::SelectTab2,
-        default_keys: &[key!(ctrl - 2)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
     },
     BindingDef {
         action: Action::SelectTab3,
-        default_keys: &[key!(ctrl - 3)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
     },
     BindingDef {
-        // No default key: under the legacy terminal protocol Ctrl-4 arrives as
-        // byte 0x1c, the same as Ctrl-\ (`normalize_ctrl_punct` folds them),
-        // which `OpenMacroBar` holds in the Center scope. Tab 4 stays reachable
-        // via NextTab/PrevTab or a rebind.
         action: Action::SelectTab4,
         default_keys: &[],
         scopes: &[BindingScope::Center],
@@ -573,7 +577,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::SelectTab5,
-        default_keys: &[key!(ctrl - 5)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
@@ -594,14 +598,14 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::SelectTab8,
-        default_keys: &[key!(ctrl - 8)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
     },
     BindingDef {
         action: Action::SelectTab9,
-        default_keys: &[key!(ctrl - 9)],
+        default_keys: &[],
         scopes: &[BindingScope::Center],
         help: None,
         hint_contexts: &[],
@@ -1663,6 +1667,69 @@ fn normalize_backtab(kc: KeyCombination) -> KeyCombination {
     }
 }
 
+/// The tab-number actions, tab 1 first.
+const SELECT_TAB_ACTIONS: [Action; 9] = [
+    Action::SelectTab1,
+    Action::SelectTab2,
+    Action::SelectTab3,
+    Action::SelectTab4,
+    Action::SelectTab5,
+    Action::SelectTab6,
+    Action::SelectTab7,
+    Action::SelectTab8,
+    Action::SelectTab9,
+];
+
+/// The tab-number defaults an older dux shipped, which every config file it
+/// wrote carries as live rows. None of them reached its tab on the legacy key
+/// encoding (see the tab-number `BindingDef`s), so a row that still says
+/// exactly that is read as the unbound default it would be today.
+const DROPPED_TAB_DEFAULTS: [(Action, &str); 6] = [
+    (Action::SelectTab1, "ctrl-1"),
+    (Action::SelectTab2, "ctrl-2"),
+    (Action::SelectTab3, "ctrl-3"),
+    (Action::SelectTab5, "ctrl-5"),
+    (Action::SelectTab8, "ctrl-8"),
+    (Action::SelectTab9, "ctrl-9"),
+];
+
+/// The keys `[keys]` gives `action`, or `None` where it takes the default:
+/// no row, or a row that is exactly one of the [`DROPPED_TAB_DEFAULTS`].
+pub(crate) fn configured_keys(
+    keys: &crate::config::KeysConfig,
+    action: Action,
+) -> Option<&Vec<String>> {
+    let configured = keys.bindings.get(action.config_name())?;
+    let parse = |text: &str| crokey::parse(&normalize_key_string(text)).ok();
+    let is_dropped_default = DROPPED_TAB_DEFAULTS.iter().any(|(dropped, old)| {
+        *dropped == action
+            && matches!(configured.as_slice(), [only] if parse(only).is_some() && parse(only) == parse(old))
+    });
+    (!is_dropped_default).then_some(configured)
+}
+
+/// Ascending numbers written with consecutive runs of three or more collapsed
+/// to a range: `[1, 2, 3, 5, 8, 9]` is `1-3, 5, 8, 9`.
+fn number_runs(numbers: &[u32]) -> String {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &n in numbers {
+        match runs.last_mut() {
+            Some((_, end)) if end.checked_add(1) == Some(n) => *end = n,
+            _ => runs.push((n, n)),
+        }
+    }
+    runs.into_iter()
+        .flat_map(|(start, end)| {
+            if end - start >= 2 {
+                vec![format!("{start}-{end}")]
+            } else {
+                (start..=end).map(|n| n.to_string()).collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Crossterm maps Ctrl+punctuation bytes 0x1C..0x1F to Ctrl+'4'..'7' instead
 /// of the actual characters `\`, `]`, `^`, `_`. Normalize the digit back to
 /// the real punctuation so that `key!(ctrl - ']')` matches what the terminal
@@ -1747,19 +1814,16 @@ impl RuntimeBindings {
     /// Parses key strings from the config, falling back to defaults for
     /// missing or unparseable entries.
     pub(crate) fn from_keys_config(keys: &crate::config::KeysConfig) -> Self {
-        Self::new(|action| {
-            let config_name = action.config_name();
-            match keys.bindings.get(config_name) {
-                Some(key_strs) => key_strs
-                    .iter()
-                    .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
-                    .collect(),
-                None => BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
-            }
+        Self::new(|action| match configured_keys(keys, action) {
+            Some(key_strs) => key_strs
+                .iter()
+                .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
+                .collect(),
+            None => BINDING_DEFS
+                .iter()
+                .find(|d| d.action == action)
+                .map(|d| d.default_keys.to_vec())
+                .unwrap_or_default(),
         })
     }
 
@@ -2030,18 +2094,21 @@ impl RuntimeBindings {
     }
 
     /// Help overlay sections grouped by section name, in display order.
-    pub(crate) fn help_sections(&self) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
-        let mut sections: Vec<(&str, Vec<(String, &str)>)> = HELP_SECTION_ORDER
+    pub(crate) fn help_sections(&self) -> Vec<(&'static str, Vec<(String, String)>)> {
+        let mut sections: Vec<(&str, Vec<(String, String)>)> = HELP_SECTION_ORDER
             .iter()
             .map(|&s| (s, Vec::new()))
             .collect();
         for b in &self.bindings {
             if let (Some(section), Some(description)) = (b.help_section, b.help_description) {
-                // For MoveDown, show combined "j/k" label
-                let label = if b.action == Action::MoveDown {
-                    self.combined_label(Action::MoveDown, Action::MoveUp)
-                } else {
-                    self.labels_for(b.action)
+                let (label, description) = match b.action {
+                    // For MoveDown, show combined "j/k" label
+                    Action::MoveDown => (
+                        self.combined_label(Action::MoveDown, Action::MoveUp),
+                        description.to_string(),
+                    ),
+                    Action::SelectTab1 => self.tab_number_help(description),
+                    _ => (self.labels_for(b.action), description.to_string()),
                 };
                 if label.is_empty() {
                     continue;
@@ -2054,9 +2121,46 @@ impl RuntimeBindings {
                 }
             }
         }
-        sections.push((SERVER_SCREEN_HELP_SECTION, self.server_screen_help()));
+        sections.push((
+            SERVER_SCREEN_HELP_SECTION,
+            self.server_screen_help()
+                .into_iter()
+                .map(|(label, description)| (label, description.to_string()))
+                .collect(),
+        ));
         sections.retain(|(_, entries)| !entries.is_empty());
         sections
+    }
+
+    /// The one help row for the nine tab-number actions: every key bound to any
+    /// of them, and which tab numbers have none and how to give them one.
+    fn tab_number_help(&self, description: &str) -> (String, String) {
+        let mut labels = Vec::new();
+        let mut unbound = Vec::new();
+        for (number, action) in (1..).zip(SELECT_TAB_ACTIONS) {
+            let label = self.labels_for(action);
+            if label.is_empty() {
+                unbound.push(number);
+            } else {
+                labels.push(label);
+            }
+        }
+        let description = if unbound.is_empty() {
+            description.to_string()
+        } else {
+            format!(
+                "{description} (no key for {}: bind select_tab_N in config)",
+                number_runs(&unbound)
+            )
+        };
+        // A row needs a key badge, and with no tab key bound the hint about
+        // binding one is the whole point of the row.
+        let label = if labels.is_empty() {
+            "unbound".to_string()
+        } else {
+            labels.join("/")
+        };
+        (label, description)
     }
 
     /// All palette-visible bindings matching a filter string, in two tiers.
@@ -2172,6 +2276,17 @@ fn normalize_palette_match(s: &str) -> String {
 // Conflict detection: reject configs with duplicate keys in the same scope.
 // ---------------------------------------------------------------------------
 
+/// How two bindings of one key meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConflictKind {
+    /// One lookup holds both, so which runs depends on declaration order.
+    Collision,
+    /// A global binding is answered before the pane's own: `action_a` is the
+    /// global action and `action_b` the pane action that never runs on that
+    /// key.
+    Shadowed,
+}
+
 /// A detected conflict: the same key is bound to two actions in a shared scope.
 #[derive(Debug, Clone)]
 pub(crate) struct KeyConflict {
@@ -2181,6 +2296,7 @@ pub(crate) struct KeyConflict {
     #[cfg(test)]
     pub key_label: String,
     pub scope: BindingScope,
+    pub kind: ConflictKind,
     pub action_a: &'static str,
     pub action_b: &'static str,
 }
@@ -2211,7 +2327,7 @@ fn resolve_keys(
     BINDING_DEFS
         .iter()
         .map(|def| {
-            let resolved = match keys.bindings.get(def.action.config_name()) {
+            let resolved = match configured_keys(keys, def.action) {
                 Some(key_strs) => key_strs
                     .iter()
                     .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
@@ -2235,21 +2351,61 @@ fn resolve_keys(
 /// then `Palette` (`app::input`). So is a dialog whose body scrolls (a Confirm
 /// dialog too tall for the screen, an error dialog's message): its own
 /// `Dialog` keys win and the `Help` scope's scroll keys are the fallback, so a
-/// key bound in both reports under `Dialog`. Add a rule here whenever a handler
-/// grows another fallback, or the shadowing goes unreported.
-fn conflict_scope(a: BindingScope, b: BindingScope) -> Option<BindingScope> {
+/// key bound in both reports under `Dialog`. So is the main key handler, which
+/// asks `Global` before the focused pane or resize mode (see
+/// [`global_shadows`]), so a global action on a pane's key reports under the
+/// pane. Add a rule here whenever a handler grows another fallback, or the
+/// shadowing goes unreported.
+///
+/// The answer also says how the two meet: a collision inside one lookup, or a
+/// global binding shadowing a pane's, and for a shadow whether `b` is the
+/// global side (`true`), so the report can name the global action first.
+fn conflict_scope(
+    (action_a, a): (Action, BindingScope),
+    (action_b, b): (Action, BindingScope),
+) -> Option<(BindingScope, ConflictKind, bool)> {
     if a == b {
-        return Some(a);
+        return Some((a, ConflictKind::Collision, false));
     }
     match (a, b) {
+        (BindingScope::Global, pane) if global_shadows(action_a, pane) => {
+            Some((pane, ConflictKind::Shadowed, false))
+        }
+        (pane, BindingScope::Global) if global_shadows(action_b, pane) => {
+            Some((pane, ConflictKind::Shadowed, true))
+        }
         (BindingScope::ProjectChooser, BindingScope::Palette)
         | (BindingScope::Palette, BindingScope::ProjectChooser) => {
-            Some(BindingScope::ProjectChooser)
+            Some((BindingScope::ProjectChooser, ConflictKind::Collision, false))
         }
         (BindingScope::Dialog, BindingScope::Help) | (BindingScope::Help, BindingScope::Dialog) => {
-            Some(BindingScope::Dialog)
+            Some((BindingScope::Dialog, ConflictKind::Collision, false))
         }
         _ => None,
+    }
+}
+
+/// Whether a `Global` binding of `action` is answered before `scope`'s own
+/// bindings on the same key. The main key handler (`app::input`) asks `Global`
+/// before the focused pane and before resize mode, except that `Quit` gives way
+/// to the agent and files panes when they bind its key. Every other scope is
+/// answered by a handler that runs before `Global` is consulted.
+fn global_shadows(action: Action, scope: BindingScope) -> bool {
+    match scope {
+        BindingScope::Left | BindingScope::Resize => true,
+        BindingScope::Center | BindingScope::Files => action != Action::Quit,
+        BindingScope::Global
+        | BindingScope::Interactive
+        | BindingScope::Palette
+        | BindingScope::Browser
+        | BindingScope::RuntimeKill
+        | BindingScope::StartupCommandLogs
+        | BindingScope::MacroList
+        | BindingScope::ProjectChooser
+        | BindingScope::Dialog
+        | BindingScope::CommitInput
+        | BindingScope::Help
+        | BindingScope::ServerScreen => false,
     }
 }
 
@@ -2273,13 +2429,13 @@ pub(crate) fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConfl
 
             // Find the scopes a keystroke could reach both bindings through,
             // each named the way it will be reported.
-            let mut shared_scopes: Vec<BindingScope> = Vec::new();
+            let mut shared_scopes: Vec<(BindingScope, ConflictKind, bool)> = Vec::new();
             for sa in *scopes_a {
                 for sb in *scopes_b {
-                    if let Some(scope) = conflict_scope(*sa, *sb)
-                        && !shared_scopes.contains(&scope)
+                    if let Some(meeting) = conflict_scope((*action_a, *sa), (*action_b, *sb))
+                        && !shared_scopes.iter().any(|(scope, ..)| *scope == meeting.0)
                     {
-                        shared_scopes.push(scope);
+                        shared_scopes.push(meeting);
                     }
                 }
             }
@@ -2293,13 +2449,19 @@ pub(crate) fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConfl
                     if keys_conflict(ka, kb) {
                         #[cfg(test)]
                         let label = format.to_string(ka.normalized()).to_lowercase();
-                        for &scope in &shared_scopes {
+                        for &(scope, kind, b_first) in &shared_scopes {
+                            let (first, second) = if b_first {
+                                (action_b, action_a)
+                            } else {
+                                (action_a, action_b)
+                            };
                             conflicts.push(KeyConflict {
                                 #[cfg(test)]
                                 key_label: label.clone(),
                                 scope,
-                                action_a: action_a.config_name(),
-                                action_b: action_b.config_name(),
+                                kind,
+                                action_a: first.config_name(),
+                                action_b: second.config_name(),
                             });
                         }
                     }
@@ -2789,7 +2951,7 @@ mod tests {
             .expect("the Projects pane section exists");
         assert!(
             entries.iter().any(|(label, desc)| label == "s/Ctrl-s"
-                && *desc == "Start a standalone agent in a folder you choose"),
+                && desc == "Start a standalone agent in a folder you choose"),
             "got {entries:?}"
         );
     }
@@ -2874,7 +3036,7 @@ mod tests {
     fn help_sections_produces_valid_sections() {
         let bindings = default_bindings();
         let sections = bindings.help_sections();
-        assert_ne!(sections, Vec::<(&str, Vec<(String, &str)>)>::new());
+        assert_ne!(sections, Vec::<(&str, Vec<(String, String)>)>::new());
         let section_names: Vec<_> = sections.iter().map(|(n, _)| *n).collect();
         assert!(section_names.contains(&"Global"));
         assert!(section_names.contains(&"Projects pane"));
@@ -2899,6 +3061,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn tab_number_row(bindings: &RuntimeBindings) -> (String, String) {
+        bindings
+            .help_sections()
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .find(|(_, desc)| desc.starts_with("Focus tab by number"))
+            .expect("the agent pane help carries a tab-number row")
+    }
+
+    /// The tab-number row names the keys the bindings hold and the tab
+    /// numbers that have none, so it stays true after a rebind.
+    #[test]
+    fn help_tab_number_row_names_the_unbound_tabs_and_follows_a_rebind() {
+        let defaults = default_bindings();
+        let (label, desc) = tab_number_row(&defaults);
+        let bound: Vec<Action> = SELECT_TAB_ACTIONS
+            .into_iter()
+            .filter(|a| !defaults.labels_for(*a).is_empty())
+            .collect();
+        assert_eq!(
+            label,
+            bound
+                .iter()
+                .map(|a| defaults.labels_for(*a))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        assert!(desc.contains("select_tab_N"), "{desc}");
+
+        let all_bound = RuntimeBindings::new(|action| {
+            SELECT_TAB_ACTIONS
+                .iter()
+                .position(|a| *a == action)
+                .map(|i| vec![crokey::parse(&format!("alt-{}", i + 1)).unwrap()])
+                .unwrap_or_default()
+        });
+        let (label, desc) = tab_number_row(&all_bound);
+        assert_eq!(
+            label,
+            "Alt-1/Alt-2/Alt-3/Alt-4/Alt-5/Alt-6/Alt-7/Alt-8/Alt-9"
+        );
+        assert_eq!(desc, "Focus tab by number");
+    }
+
+    /// With no tab key bound at all the row still says how to bind one.
+    #[test]
+    fn help_tab_number_row_stays_when_no_tab_key_is_bound() {
+        let none_bound = RuntimeBindings::new(|action| {
+            if SELECT_TAB_ACTIONS.contains(&action) {
+                Vec::new()
+            } else {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            }
+        });
+        let (label, desc) = tab_number_row(&none_bound);
+        assert_ne!(label, "");
+        assert!(
+            desc.contains("1-9") && desc.contains("select_tab_N"),
+            "{desc}"
+        );
+    }
+
+    #[test]
+    fn number_runs_collapses_runs_of_three_or_more() {
+        assert_eq!(number_runs(&[1, 2, 3, 4, 5, 8, 9]), "1-5, 8, 9");
+        assert_eq!(number_runs(&[2, 4, 5]), "2, 4, 5");
     }
 
     fn palette_names<'a>(bindings: &[&'a RuntimeBinding]) -> Vec<&'a str> {
@@ -3775,6 +4009,51 @@ mod tests {
             "expected close_overlay and scroll_to_bottom to collide on q in the \
              dialog scope, got: {conflicts:?}"
         );
+    }
+
+    /// Global bindings are looked up before the focused pane's, so a pane
+    /// binding on a key a global action also holds never fires. A user who
+    /// gives a tab-switch key the global remove-git-pane chord must hear
+    /// about it at startup.
+    #[test]
+    fn detect_conflicts_reports_a_pane_key_a_global_binding_shadows() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("select_tab_5".to_string(), vec!["ctrl-]".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        assert!(
+            conflicts.iter().any(|c| c.scope == BindingScope::Center
+                && [c.action_a, c.action_b].contains(&"select_tab_5")
+                && [c.action_a, c.action_b].contains(&"remove_git_pane")),
+            "expected select_tab_5 to be reported as shadowed by remove_git_pane \
+             in the agent pane, got: {conflicts:?}"
+        );
+    }
+
+    /// Quit gives way to the agent and files panes when they bind its key, so
+    /// it shadows nothing there, but the projects pane has no such deferral.
+    #[test]
+    fn detect_conflicts_reports_quit_only_where_it_does_not_defer() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("toggle_project".to_string(), vec!["q".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        let quit_scopes: Vec<BindingScope> = conflicts
+            .iter()
+            .filter(|c| [c.action_a, c.action_b].contains(&"quit"))
+            .map(|c| c.scope)
+            .collect();
+        assert_eq!(quit_scopes, vec![BindingScope::Left], "got: {conflicts:?}");
+    }
+
+    /// Legacy terminals send Ctrl-5 as the Ctrl-] byte, which the global
+    /// remove-git-pane binding holds, so the agent pane must not advertise it
+    /// as a tab switch.
+    #[test]
+    fn ctrl_5_is_not_a_tab_switch_in_the_agent_pane() {
+        let bindings = default_bindings();
+        let ctrl_5 = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert_eq!(bindings.lookup(&ctrl_5, BindingScope::Center), None);
     }
 
     #[test]

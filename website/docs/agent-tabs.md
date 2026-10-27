@@ -133,9 +133,17 @@ screen.
 > Fullscreen gives every key to the agent verbatim and does not draw the strip at all.
 > Minimize first to hop between tabs.
 
-Switch-to-tab-4 ships with no default key, because most terminals cannot tell `Ctrl-4`
-from `Ctrl-\`. Step to it with the next and previous tab keys, or bind your own key to
-`select_tab_4`, which the config file carries as a commented-out row ready to fill in.
+Only tabs 6 and 7 ship with a switch-by-number key. Most terminals send the other
+`Ctrl`-digit chords as something else: `Ctrl-1` and `Ctrl-9` as a plain digit, `Ctrl-2`
+as `Ctrl-Space`, `Ctrl-3` as Escape, `Ctrl-8` as Backspace, and `Ctrl-4` and `Ctrl-5` as
+`Ctrl-\` and `Ctrl-]`, which dux already uses for other actions. Step to those tabs with
+the next and previous tab keys, or bind your own key to `select_tab_1` through
+`select_tab_9`. A new config file carries each unbound one as a commented-out row ready to
+fill in, and the help overlay names the tab numbers that still have no key.
+
+An older config file may still hold rows such as `select_tab_5 = ["ctrl-5"]`, written when
+those were the defaults. dux reads a row that is exactly its old default as unbound and
+says nothing about it; a key you chose yourself is kept.
 
 ## Closing tabs
 

@@ -639,6 +639,11 @@ Modifier and control-key parsing is case-insensitive: `Ctrl-g`, `ctrl-g`, and `C
 mean the same thing. Letter keys are lowercased, so bind an uppercase letter as its
 shifted form, such as `shift-p`.
 
+Two actions bound to one key in the same place stop dux from starting, and the message
+names both. A pane action given a key that a global action already holds is not refused,
+because global keys are answered first: dux starts, the pane action never runs on that
+key, and `dux.log` gets a warning naming both actions.
+
 > [!IMPORTANT]
 > While you type into an agent in the windowed pane, any chord bound here belongs to dux
 > and never reaches the agent. Rebinding dux's side is how you free a chord the agent
