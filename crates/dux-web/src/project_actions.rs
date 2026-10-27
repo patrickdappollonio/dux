@@ -181,11 +181,76 @@ fn add_project_command(body: AddProjectBody) -> WireCommand {
     } else if init_repo {
         WireCommand::AddProjectInitRepo { path, name }
     } else if create_initial_commit {
-        WireCommand::AddProjectCreateInitialCommit { path, name }
+        WireCommand::AddProjectCreateInitialCommit {
+            path,
+            name,
+            checked: None,
+        }
     } else if checkout_default {
-        WireCommand::AddProjectCheckoutDefault { path, name }
+        WireCommand::AddProjectCheckoutDefault {
+            path,
+            name,
+            checked: None,
+        }
     } else {
-        WireCommand::AddProject { path, name }
+        WireCommand::AddProject {
+            path,
+            name,
+            checked: None,
+        }
+    }
+}
+
+/// Make an add's checks (git, the filesystem) on the blocking pool and attach
+/// what they read, so the engine thread runs none of them. A refusal is the
+/// same 400 with the same sentence the engine would have answered.
+async fn check_add_command(
+    cmd: WireCommand,
+    registered: Vec<String>,
+) -> Result<WireCommand, crate::rest_common::RouteRejection> {
+    let checked = tokio::task::spawn_blocking(move || -> anyhow::Result<WireCommand> {
+        use dux_core::route_checks as checks;
+        Ok(match cmd {
+            WireCommand::AddProject { path, name, .. } => WireCommand::AddProject {
+                checked: Some(checks::check_add_project(&path, &registered)?),
+                path,
+                name,
+            },
+            WireCommand::AddProjectCheckoutDefault { path, name, .. } => {
+                WireCommand::AddProjectCheckoutDefault {
+                    checked: Some(checks::check_add_project_checkout_default(
+                        &path,
+                        &registered,
+                    )?),
+                    path,
+                    name,
+                }
+            }
+            WireCommand::AddProjectCreateInitialCommit { path, name, .. } => {
+                WireCommand::AddProjectCreateInitialCommit {
+                    checked: Some(checks::check_add_project_create_initial_commit(
+                        &path,
+                        &registered,
+                    )?),
+                    path,
+                    name,
+                }
+            }
+            other => other,
+        })
+    })
+    .await;
+    match checked {
+        Ok(Ok(cmd)) => Ok(cmd),
+        Ok(Err(refused)) => Err((StatusCode::BAD_REQUEST, refused.to_string())
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("add-project check failed: {e}"),
+        )
+            .into_response()
+            .into()),
     }
 }
 
@@ -220,12 +285,16 @@ async fn add_project(
         return (StatusCode::OK, Json(project)).into_response();
     }
 
-    let pre: std::collections::HashSet<String> = match state.engine.spine().await {
-        Some(spine) => spine.projects.into_iter().map(|p| p.id).collect(),
-        None => return engine_unavailable(),
-    };
+    let (pre, registered): (std::collections::HashSet<String>, Vec<String>) =
+        match state.engine.spine().await {
+            Some(spine) => spine.projects.into_iter().map(|p| (p.id, p.path)).unzip(),
+            None => return engine_unavailable(),
+        };
 
-    let cmd = add_project_command(body);
+    let cmd = match check_add_command(add_project_command(body), registered).await {
+        Ok(cmd) => cmd,
+        Err(response) => return response.into_response(),
+    };
 
     // A clone can take far longer than the create wait, so it answers as soon
     // as it has started, with the operation to follow; a check that refused it
@@ -1147,6 +1216,37 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap()
+    }
+
+    /// The add's checks run in the route, and a refusal is still the
+    /// synchronous 400 with the engine's own sentence, for each add flow and
+    /// whether or not the client follows the change.
+    #[tokio::test]
+    async fn an_add_of_a_folder_that_is_no_repository_is_refused_at_once() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().to_string_lossy().into_owned();
+        let canonical = std::fs::canonicalize(folder.path()).unwrap();
+        let expected = format!("\"{}\" is not a git repository.", canonical.display());
+        for (uri, flags) in [
+            ("/api/v1/projects", ""),
+            ("/api/v1/projects?operation=1", ""),
+            ("/api/v1/projects", r#","checkout_default":true"#),
+            ("/api/v1/projects", r#","create_initial_commit":true"#),
+        ] {
+            let (_tmp, app) = router_no_auth();
+            let mut request = post_add_flags(&path, flags);
+            *request.uri_mut() = uri.parse().unwrap();
+            let resp = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{uri}{flags}"
+            );
+            let sentence = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&sentence), expected, "{uri}{flags}");
+        }
     }
 
     #[tokio::test]

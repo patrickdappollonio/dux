@@ -804,10 +804,14 @@ impl App {
         // here; the blocking part of the answer is read on the worker.
         let destructive = self.engine.destructive_check(&target);
         let confirmed = confirmed_entry(folder);
+        // In line with every other git change to this worktree, from either
+        // surface: it runs after the ones asked for before it.
+        let ticket = dux_core::changes_lane::ticket(&worktree);
         let _ = thread::Builder::new()
             .name("dux-changes-folder-op".into())
             .spawn(move || {
                 let _hold = hold;
+                let _turn = ticket.wait();
                 let outcome =
                     run_folder_op(op, &worktree, path, confirmed, &destructive, claim.as_ref());
                 let _ = tx.send(outcome.map_err(|err| format!("{err:#}")));
@@ -857,7 +861,7 @@ impl App {
                     format!(
                         "Staged \"{label}\" without the repositories inside it: left out {}, \
                          which staging would record as links to repositories, not as files.",
-                        left_out_words(&done.report)
+                        done.report.left_out_words()
                     ),
                 ),
                 (FolderOp::Stage, Ok(_)) => (
@@ -1018,27 +1022,6 @@ fn delete_untracked_folder(
     )
 }
 
-/// What a stage left out, in words: "1 nested repository and 2 worktrees of
-/// this repository".
-fn left_out_words(report: &git::StageReport) -> String {
-    let mut parts = Vec::new();
-    if report.left_out_repositories > 0 {
-        parts.push(plural(
-            report.left_out_repositories,
-            "nested repository",
-            "nested repositories",
-        ));
-    }
-    if report.left_out_worktrees > 0 {
-        parts.push(plural(
-            report.left_out_worktrees,
-            "worktree of this repository",
-            "worktrees of this repository",
-        ));
-    }
-    dux_core::model::join_words(&parts)
-}
-
 fn plural(count: usize, one: &str, many: &str) -> String {
     let noun = if count == 1 { one } else { many };
     format!("{} {noun}", dux_core::model::group_thousands(count))
@@ -1165,6 +1148,31 @@ mod tests {
                 ChangesRow::Failed { depth, .. } => format!("{}failed", "  ".repeat(depth)),
             })
             .collect()
+    }
+
+    /// A folder stage waits its turn behind a change to the same worktree
+    /// still running from anywhere (the engine, a browser), so changes asked
+    /// one after the other never land the other way round.
+    #[test]
+    fn a_folder_stage_waits_for_an_earlier_change_to_its_worktree() {
+        let (mut app, worktree) = repo_app();
+        load_lists(&mut app, &worktree);
+        app.files_index = 0;
+        let running = dux_core::changes_lane::ticket(&worktree).wait();
+
+        app.handle_key(space()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        app.drain_changes_tree_work();
+        assert_eq!(
+            app.changes_tree.pending_ops.len(),
+            1,
+            "the stage ran past the earlier change"
+        );
+
+        drop(running);
+        settle(&mut app, idle);
+        let index = crate::app::test_support::run_git_output(&worktree, &["ls-files", "--stage"]);
+        assert!(index.contains("node_modules/top.js"), "{index}");
     }
 
     /// A folder stage holds the worktree like every other operation in it:
@@ -2065,6 +2073,13 @@ mod tests {
         );
 
         app.handle_key(space()).unwrap();
+        // The stage runs on a worker; its busy retires when it is done.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.status.tone() == StatusTone::Busy {
+            assert!(Instant::now() < deadline, "the stage never finished");
+            app.drain_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         // Only that file is staged, and it is its own row: the folder is not
         // staged whole, so no folder row may claim it.

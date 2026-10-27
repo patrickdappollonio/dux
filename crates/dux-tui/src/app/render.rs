@@ -76,6 +76,10 @@ use std::time::Instant;
 /// defines a provider, which it always does, but a list is never a silent blank.
 const NO_PROVIDERS: &str = "No providers are configured.";
 
+/// Up to this many diff lines are wrapped inside the frame, which costs well
+/// under a frame; a larger diff is wrapped on a worker.
+const DIFF_WRAP_INLINE_LINES: usize = 5_000;
+
 /// The width a pane card's button paints at. One rule, read by the planner (to
 /// refuse a layout too narrow for it) and by the painter (to place it), so the
 /// two can never disagree about whether the label fits.
@@ -3614,6 +3618,9 @@ impl App {
         // ten sites that leave diff mode: a new one of those cannot forget.
         if !matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.diff_rows = None;
+            // A wrap still out is for a diff no longer shown; its answer must
+            // not fill the cache again.
+            self.diff_wrap_ask = None;
         }
 
         match &self.center_mode {
@@ -3640,6 +3647,54 @@ impl App {
                 self.session_surface = saved;
             }
         }
+    }
+
+    /// Wrap `lines` for `width` and `gutter_width` on a worker, unless that
+    /// wrap is already out. The rows land in `diff_rows` only if the diff,
+    /// width and gutter are still the ones asked for.
+    fn ask_for_diff_wrap(
+        &mut self,
+        lines: &Arc<Vec<Line<'static>>>,
+        width: usize,
+        gutter_width: usize,
+    ) {
+        let asked = self.diff_wrap_ask.as_ref().is_some_and(|ask| {
+            Arc::ptr_eq(&ask.lines, lines) && ask.width == width && ask.gutter_width == gutter_width
+        });
+        if asked {
+            return;
+        }
+        self.diff_wrap_ask = Some(crate::app::DiffWrapAsk {
+            lines: Arc::clone(lines),
+            width,
+            gutter_width,
+        });
+        let wrap = Arc::clone(lines);
+        let mine = Arc::clone(lines);
+        self.spawn_quiet_ui_job(
+            move || crate::diff::wrap_diff_lines(&wrap, width, gutter_width),
+            move |app: &mut App, rows: Option<Vec<Line<'static>>>| {
+                // An answer for a wrap since replaced (another width, another
+                // diff) is dropped; the newer one answers for itself.
+                let still_asked = app.diff_wrap_ask.as_ref().is_some_and(|ask| {
+                    Arc::ptr_eq(&ask.lines, &mine)
+                        && ask.width == width
+                        && ask.gutter_width == gutter_width
+                });
+                if !still_asked {
+                    return;
+                }
+                app.diff_wrap_ask = None;
+                if let Some(rows) = rows {
+                    app.diff_rows = Some(DiffRowCache {
+                        lines: mine,
+                        width,
+                        gutter_width,
+                        rows,
+                    });
+                }
+            },
+        );
     }
 
     fn render_diff(&mut self, frame: &mut Frame<'_>, area: Rect, focused: FocusState) {
@@ -3685,13 +3740,28 @@ impl App {
             None => true,
         };
         if stale {
-            let rows = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
-            self.diff_rows = Some(DiffRowCache {
-                lines: Arc::clone(&lines),
-                width: w,
-                gutter_width,
-                rows,
-            });
+            if lines.len() <= DIFF_WRAP_INLINE_LINES {
+                let rows = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
+                self.diff_rows = Some(DiffRowCache {
+                    lines: Arc::clone(&lines),
+                    width: w,
+                    gutter_width,
+                    rows,
+                });
+            } else {
+                // A large diff is wrapped on a worker, so a resize does not
+                // stall the frame: the rows of this same diff, wrapped for the
+                // old width, show until the new ones land and redraw. Another
+                // file's rows are not this diff's, so nothing shows instead.
+                if self
+                    .diff_rows
+                    .as_ref()
+                    .is_some_and(|cache| !Arc::ptr_eq(&cache.lines, &lines))
+                {
+                    self.diff_rows = None;
+                }
+                self.ask_for_diff_wrap(&lines, w, gutter_width);
+            }
         }
         let total_rows = self.diff_rows.as_ref().map_or(0, |cache| cache.rows.len());
         self.last_diff_visual_lines = total_rows;
@@ -24460,8 +24530,96 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
+        // A large diff is wrapped on a worker; the frame after it lands is the
+        // one that shows it.
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
         let buf = terminal.backend().buffer().clone();
         (app, buf)
+    }
+
+    /// Switching to another large diff shows nothing until its rows are
+    /// wrapped, never the previous file's rows.
+    #[test]
+    fn a_newly_selected_large_diff_never_shows_the_previous_files_rows() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _) = diff_frame((120, 40), DIFF_WRAP_INLINE_LINES + 1, 0, 0);
+        assert!(app.diff_rows.is_some());
+        let next: Vec<Line<'static>> = (0..=DIFF_WRAP_INLINE_LINES)
+            .map(|i| Line::from(format!("other {i}")))
+            .collect();
+        let next = Arc::new(next);
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::clone(&next),
+            scroll: 0,
+            gutter_width: 0,
+            worktree_path: "/tmp/does-not-matter".to_string(),
+            rel_path: "src/other.rs".to_string(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert!(
+            app.diff_rows.is_none(),
+            "the previous file's rows were kept"
+        );
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        let cache = app.diff_rows.as_ref().expect("wrapped");
+        assert!(Arc::ptr_eq(&cache.lines, &next));
+    }
+
+    /// A wrap answer that lands after the diff has left the screen does not
+    /// fill the cache again.
+    #[test]
+    fn a_wrap_that_lands_after_the_diff_closed_is_dropped() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _) = diff_frame((120, 40), DIFF_WRAP_INLINE_LINES + 1, 0, 0);
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert!(app.diff_wrap_ask.is_some());
+
+        app.center_mode = CenterMode::Agent;
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(app.diff_rows.is_none());
+    }
+
+    /// A large diff is re-wrapped on a worker when the pane's width changes:
+    /// the frame keeps the rows it has, and the new ones replace them when
+    /// they land.
+    #[test]
+    fn a_large_diff_is_rewrapped_off_the_frame() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _) = diff_frame((120, 40), DIFF_WRAP_INLINE_LINES + 1, 6, 0);
+        let wide = app.diff_rows.as_ref().expect("wrapped").width;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert_eq!(app.diff_rows.as_ref().expect("kept").width, wide);
+        assert!(
+            app.diff_wrap_ask.is_some(),
+            "the new width is being wrapped"
+        );
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        assert_ne!(app.diff_rows.as_ref().expect("rewrapped").width, wide);
     }
 
     /// The diff pane's content rect (which is also the text-selection surface)

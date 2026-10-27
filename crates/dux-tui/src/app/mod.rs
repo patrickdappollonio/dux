@@ -540,6 +540,17 @@ pub(crate) struct App {
     /// The pull-request clone form's pending folder check. One-shot: set when
     /// a check starts, cleared when its answer lands or the form is gone.
     pub(crate) pr_clone_check_rx: Option<mpsc::Receiver<PrCloneFolderAnswer>>,
+    /// Blocking work a key asked for, running on workers.
+    pub(crate) ui_jobs: ui_jobs::UiJobs,
+    /// The folder browser's path-completion lookup still out.
+    pub(crate) path_completion: PathCompletion,
+    /// Which folder browser is open, and the add-project check it has out.
+    pub(crate) browser_add: BrowserAdd,
+    /// The themes the open theme picker previews, read when it opened.
+    pub(crate) theme_previews: Option<ThemePreviews>,
+    /// The diff wrap a worker is doing, for the diff, width and gutter it was
+    /// asked for (see `DIFF_WRAP_INLINE_LINES`).
+    pub(crate) diff_wrap_ask: Option<DiffWrapAsk>,
     /// The pull request clone this surface last started, until a question
     /// about it arrives or a bound passes.
     pub(crate) pr_clone_awaiting: Option<PrCloneAwaiting>,
@@ -1617,6 +1628,13 @@ pub(crate) enum CenterMode {
 /// only while a diff is actually on screen, and the center pane's render
 /// releases it the first frame one is not.
 #[derive(Clone, Debug)]
+pub(crate) struct DiffWrapAsk {
+    pub(crate) lines: Arc<Vec<Line<'static>>>,
+    pub(crate) width: usize,
+    pub(crate) gutter_width: usize,
+}
+
+/// The diff's display rows, wrapped once per diff, width and gutter setting.
 pub(crate) struct DiffRowCache {
     pub(crate) lines: Arc<Vec<Line<'static>>>,
     pub(crate) width: usize,
@@ -2784,6 +2802,59 @@ pub(crate) enum DeleteAgentFocus {
     /// The "also delete the branch" box, which exists only while the worktree
     /// box is ticked.
     BranchCheckbox,
+}
+
+/// The folder browser's path-completion lookup still out, if any. The lookup
+/// reads the directory on a worker; an answer for anything but the newest ask,
+/// or for a path since edited, is dropped.
+#[derive(Debug, Default)]
+pub(crate) struct PathCompletion {
+    /// The id the next ask gets.
+    pub(crate) next: u64,
+    /// The newest ask still out.
+    pub(crate) ask: Option<PathCompletionAsk>,
+}
+
+/// The themes the theme picker offers, read off the UI thread when it opens,
+/// so moving the cursor previews one without reading a file.
+pub(crate) struct ThemePreviews {
+    /// Each listed theme by id, or why it would not load.
+    pub(crate) loaded: HashMap<String, Result<crate::theme::Theme, String>>,
+    /// The theme in force when the picker opened, which Esc restores.
+    pub(crate) original: crate::theme::Theme,
+}
+
+/// The folder browser that is open and the add-project check it has out, so
+/// a check's answer reaches only the browser that asked for it: one the user
+/// has since closed (Esc abandons) or replaced is not touched.
+#[derive(Debug, Default)]
+pub(crate) struct BrowserAdd {
+    /// Which browser is open: a new one is counted each time one opens.
+    pub(crate) instance: u64,
+    /// The check that browser has out, if any.
+    pub(crate) checking: Option<u64>,
+    /// The id the next check gets.
+    pub(crate) next: u64,
+}
+
+/// One path-completion lookup the folder browser is waiting on.
+#[derive(Debug)]
+pub(crate) struct PathCompletionAsk {
+    /// Which ask this is.
+    pub(crate) id: u64,
+    /// The path as typed when it was asked.
+    pub(crate) input: String,
+    /// What the answer does when it lands.
+    pub(crate) on_answer: CompletionAnswer,
+}
+
+/// What a path-completion answer does when it lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompletionAnswer {
+    /// Show the candidates.
+    List,
+    /// Show them and apply the first: a Tab arrived before they did.
+    ApplyFirst,
 }
 
 /// The project the non-default-branch dialog will add once answered. Its base
@@ -4615,6 +4686,7 @@ mod sessions;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod text_input;
+pub(crate) mod ui_jobs;
 mod workers;
 mod worktree_manager;
 
@@ -4774,6 +4846,7 @@ impl App {
             deferred_commands: Vec::new(),
             reload_guard: None,
             reload_origin: ReloadOrigin::default(),
+            reloaded_projects: None,
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             launched_drop_paste: HashMap::default(),
@@ -4932,6 +5005,11 @@ impl App {
             unpushed_count_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
+            ui_jobs: ui_jobs::UiJobs::default(),
+            path_completion: PathCompletion::default(),
+            browser_add: BrowserAdd::default(),
+            theme_previews: None,
+            diff_wrap_ask: None,
             pr_clone_awaiting: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
@@ -5133,7 +5211,9 @@ impl App {
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
     /// PTY-activity tracking lives on the engine (`pty_activity`), so the
     /// streaming/"working" state carries across the flip with it.
-    pub(crate) fn into_engine(self) -> Engine {
+    pub(crate) fn into_engine(mut self) -> Engine {
+        // Nothing here drains a worker's answer after the hand-over.
+        self.retire_ui_jobs();
         // Unregister this App's signal handlers so repeated flip cycles don't
         // pile up orphaned registrations (each resume registers fresh flags;
         // without this, every signal would fire one stale setter per cycle) and
@@ -5171,6 +5251,8 @@ impl App {
         let result = result?;
         if matches!(result, RunExit::Quit) {
             self.shutdown_agents_gracefully();
+            self.engine
+                .flush_focused_tab_writes(dux_core::engine::FOCUSED_TAB_FLUSH_BOUND);
         }
         Ok(result)
     }
@@ -6059,41 +6141,25 @@ impl App {
             .collect();
     }
 
-    /// Syncs all runtime projects to SQLite and rebuilds `config.projects`
-    /// (stripping `leading_branch` for portability) without writing to disk.
-    /// Runtime reaction sites call this then route the save through
-    /// `engine.config_writer.save_eager` so the write joins the queue.
-    pub(crate) fn sync_projects_to_store_and_update_config(&mut self) -> Result<()> {
+    /// Rebuild `config.projects` from the runtime projects (stripping
+    /// `leading_branch` for portability) without writing to disk. The caller
+    /// then routes the config save through `engine.config_writer.save_eager`
+    /// so the write joins the queue.
+    pub(crate) fn rebuild_config_projects(&mut self) {
         let existing_projects = self.engine.config.projects.clone();
-        let stored_project_configs = self
+        let config_project_configs = self
             .engine
             .projects
             .iter()
-            .map(|project| runtime_project_to_config(project, &existing_projects))
-            .collect::<Vec<_>>();
-        let config_project_configs = stored_project_configs
-            .iter()
-            .cloned()
-            .map(|mut project| {
-                project.leading_branch = None;
-                project
+            .map(|project| {
+                let mut config = runtime_project_to_config(project, &existing_projects);
+                config.leading_branch = None;
+                config
             })
             .collect::<Vec<_>>();
-        let stored_projects = self.engine.session_store.load_projects()?;
-        for (index, project_config) in stored_project_configs.iter().enumerate() {
-            let stored_project = stored_projects.iter().find(|stored| {
-                stored.id == project_config.id || same_expanded_project_path(stored, project_config)
-            });
-            if stored_project != Some(project_config) {
-                self.engine
-                    .session_store
-                    .upsert_project_at(project_config, usize_to_i64(index))?;
-            }
-        }
         if self.engine.config.projects != config_project_configs {
             self.engine.config.projects = config_project_configs;
         }
-        Ok(())
     }
 
     /// The palette's matches, phrase hits first and the looser ones after
@@ -6312,7 +6378,10 @@ impl App {
                 Ok(())
             }
             "copy-path" => self.copy_selected_path(),
-            "open-worktree" => self.open_selected_worktree_in_default_editor(),
+            "open-worktree" => {
+                self.open_selected_worktree_in_default_editor();
+                Ok(())
+            }
             "open-worktree-with" => {
                 self.open_worktree_editor_picker();
                 Ok(())
@@ -6645,18 +6714,24 @@ impl App {
             dux_core::engine::GithubIntegration::Disabled
         };
         self.engine.github_integration_enabled = config.ui.github_integration;
-        self.engine.projects = load_projects(
-            &self.engine.session_store.load_projects()?,
-            &self.engine.session_store.load_project_created_ats()?,
-            &config,
-        );
-        persist_runtime_projects_to_config_and_store(
-            &self.engine.projects,
-            &mut config,
-            &self.engine.paths,
-            &self.bindings,
-            &self.engine.session_store,
-        )?;
+        if let Some(projects) = self.engine.take_reloaded_projects() {
+            // The reload worker built and saved these already, so nothing
+            // here touches SQLite, git or the config file again.
+            self.engine.projects = projects;
+        } else {
+            self.engine.projects = load_projects(
+                &self.engine.session_store.load_projects()?,
+                &self.engine.session_store.load_project_created_ats()?,
+                &config,
+            );
+            persist_runtime_projects_to_config_and_store(
+                &self.engine.projects,
+                &mut config,
+                &self.engine.paths,
+                &self.bindings,
+                &self.engine.session_store,
+            )?;
+        }
         let before = std::mem::replace(&mut self.engine.config, config);
         self.engine.retune_after_config_swap();
         self.run_config_swap_effects(&before, github_was_enabled);

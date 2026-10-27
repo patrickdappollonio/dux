@@ -413,7 +413,7 @@ impl Engine {
             .on_failure(|error: &String| {
                 crate::engine::Final::error(format!("Discard failed: {error}"))
             });
-            return Ok(self.spawn_changes_op(op, move || {
+            return Ok(self.spawn_changes_op(&worktree_path.clone(), op, move || {
                 let _hold = hold;
                 let tracking = classify()?;
                 crate::git::discard_confirmed(
@@ -450,7 +450,7 @@ impl Engine {
                 crate::engine::Final::info(message.clone())
             })
             .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
-        Ok(self.spawn_changes_op(op, move || {
+        Ok(self.spawn_changes_op(&worktree_path.clone(), op, move || {
             let _hold = hold;
             let tracking = classify()?;
             // The discard refuses anything that is no longer what was
@@ -718,12 +718,12 @@ impl Engine {
             Command::StageFile {
                 worktree_path,
                 path,
-            } => self.apply_stage_file(&worktree_path, &path),
+            } => self.apply_stage_file(worktree_path, path),
 
             Command::UnstageFile {
                 worktree_path,
                 path,
-            } => self.apply_unstage_file(&worktree_path, &path),
+            } => self.apply_unstage_file(worktree_path, path),
 
             Command::DiscardFileLive {
                 worktree_path,
@@ -838,28 +838,60 @@ impl Engine {
         )))
     }
 
-    /// [`Command::StageFile`]: stage one file, holding the worktree while git
-    /// runs.
+    /// [`Command::StageFile`]: stage one file off the engine thread, holding
+    /// the worktree while git runs. A stage that left repositories out of the
+    /// index says so; one that staged just the file leaves its row moving to
+    /// the staged section to say it.
     fn apply_stage_file(
-        &self,
-        worktree_path: &std::path::Path,
-        path: &str,
+        &mut self,
+        worktree_path: PathBuf,
+        path: String,
     ) -> anyhow::Result<EventReaction> {
-        let _hold = self.hold_for_git_change(worktree_path, "stage the file")?;
-        crate::git::stage_file(worktree_path, path)?;
-        Ok(EventReaction::Nothing)
+        let hold = self.hold_for_git_change(&worktree_path, "stage the file")?;
+        let staged = path.clone();
+        let op =
+            crate::engine::status_op(crate::status_text!["Staging ", q(path.clone()), "\u{2026}"])
+                .on_success(move |report: &crate::git::StageReport| {
+                    if report.left_anything_out() {
+                        crate::engine::Final::info(crate::status_text![
+                            "Staged ",
+                            q(staged.clone()),
+                            format!(
+                                " without the repositories inside it: left out {}, which staging \
+                         would record as links to repositories, not as files.",
+                                report.left_out_words()
+                            )
+                        ])
+                    } else {
+                        crate::engine::Final::clear()
+                    }
+                })
+                .on_failure(git_change_failed("stage", &path));
+        Ok(self.spawn_changes_op(&worktree_path.clone(), op, move || {
+            let _hold = hold;
+            crate::git::stage_with_report(&worktree_path, &[path]).map_err(|err| format!("{err:#}"))
+        }))
     }
 
-    /// [`Command::UnstageFile`]: unstage one file, holding the worktree while
-    /// git runs.
+    /// [`Command::UnstageFile`]: unstage one file off the engine thread,
+    /// holding the worktree while git runs.
     fn apply_unstage_file(
-        &self,
-        worktree_path: &std::path::Path,
-        path: &str,
+        &mut self,
+        worktree_path: PathBuf,
+        path: String,
     ) -> anyhow::Result<EventReaction> {
-        let _hold = self.hold_for_git_change(worktree_path, "unstage the file")?;
-        crate::git::unstage_file(worktree_path, path)?;
-        Ok(EventReaction::Nothing)
+        let hold = self.hold_for_git_change(&worktree_path, "unstage the file")?;
+        let op = crate::engine::status_op(crate::status_text![
+            "Unstaging ",
+            q(path.clone()),
+            "\u{2026}"
+        ])
+        .on_success(|(): &()| crate::engine::Final::clear())
+        .on_failure(git_change_failed("unstage", &path));
+        Ok(self.spawn_changes_op(&worktree_path.clone(), op, move || {
+            let _hold = hold;
+            crate::git::unstage_file(&worktree_path, &path).map_err(|err| format!("{err:#}"))
+        }))
     }
 
     /// [`Command::DeleteTerminal`]: close a terminal gracefully. It is sent
@@ -1259,7 +1291,7 @@ impl Engine {
             // recovery stays inside the UI and does not require a sticky
             // status.
             .on_failure(|error: &String| crate::engine::Final::error(error.clone()));
-        self.spawn_changes_op(op, move || {
+        self.spawn_changes_op(&worktree_path.clone(), op, move || {
             let _hold = hold;
             match crate::git::commit_preflight(&worktree_path, &message) {
                 crate::git::CommitPreflight::EmptyMessage => {
@@ -1414,6 +1446,10 @@ impl Engine {
         }
         self.reloading = true;
         self.reload_guard = Some(guard);
+        self.reloaded_projects = Some(crate::engine::ReloadProjects {
+            at_start: self.projects.clone(),
+            built: None,
+        });
         if let Some(id) = &self.operation_in_dispatch {
             self.operations
                 .await_reload(id, crate::engine::ReloadSlot::Now);
@@ -1706,6 +1742,7 @@ impl Engine {
                         crate::git::pull_current_branch(&repo_path, &guard, timeout)
                             .map(|()| PullOutcome::Pulled {
                                 current_branch: None,
+                                default_warning: None,
                             })
                             .map_err(|error| format!("{error:#}"))
                     }
@@ -1851,7 +1888,10 @@ impl Engine {
         if let Some((project_id, project_name)) = self
             .projects
             .iter()
-            .find(|existing| existing.path == project.path)
+            .find(|existing| {
+                crate::project_browser::known_path_key(&existing.path)
+                    == crate::project_browser::known_path_key(&project.path)
+            })
             .map(|existing| (existing.id.clone(), existing.name.clone()))
         {
             let message = crate::status_text![
@@ -2077,6 +2117,22 @@ fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize
         .collect();
 }
 
+/// The failure final of a stage or unstage of `path`: what could not be done
+/// and git's own reason.
+fn git_change_failed(
+    verb: &'static str,
+    path: &str,
+) -> impl Fn(&String) -> crate::engine::Final + Send + 'static {
+    let path = path.to_string();
+    move |error: &String| {
+        crate::engine::Final::error(crate::status_text![
+            format!("Could not {verb} "),
+            q(path.clone()),
+            format!(": {}.", error.trim().trim_end_matches('.'))
+        ])
+    }
+}
+
 /// The tri-state status op for a `PullTarget::Project` refresh. A failure is a
 /// warning rather than an error: the refresh is best-effort and the project
 /// keeps working from local branch state.
@@ -2138,15 +2194,28 @@ fn run_project_refresh(
     if !crate::git::has_origin_remote(repo_path).map_err(|e| format!("{e:#}"))? {
         // Nothing to pull, and that is fine; still re-read the current branch
         // so the sidebar stays fresh.
+        let current_branch = crate::git::current_branch(repo_path).ok();
         return Ok(PullOutcome::NoOrigin {
-            current_branch: crate::git::current_branch(repo_path).ok(),
+            default_warning: default_warning_for(repo_path, current_branch.as_deref()),
+            current_branch,
         });
     }
     crate::git::pull_branch(repo_path, &leading_branch, guard, timeout)
         .map_err(|e| format!("{e:#}"))?;
+    let current_branch = crate::git::current_branch(repo_path).ok();
     Ok(PullOutcome::Pulled {
-        current_branch: crate::git::current_branch(repo_path).ok(),
+        default_warning: default_warning_for(repo_path, current_branch.as_deref()),
+        current_branch,
     })
+}
+
+/// How `branch` compares with the repository's default, for a refresh
+/// worker to carry to its completion.
+fn default_warning_for(
+    repo_path: &std::path::Path,
+    branch: Option<&str>,
+) -> Option<crate::worker::BranchWarningKind> {
+    branch.and_then(|branch| crate::git::branch_warning_kind(repo_path, branch))
 }
 
 /// A terminating PTY a launch has to outlive: the gone signal and the moment
@@ -3392,6 +3461,155 @@ mod tests {
         }
     }
 
+    fn staged_names(repo: &std::path::Path) -> String {
+        let out = crate::git::test_support::git_command()
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(repo)
+            .output()
+            .expect("git diff");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A stage answers with its busy at once and stages on a worker; staging
+    /// just the file ends on a cleared spinner, since the row moving says it.
+    #[test]
+    fn staging_a_file_runs_on_a_worker() {
+        let repo = discard_test_repo();
+        std::fs::write(repo.path().join("new.txt"), "x\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::StageFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "new.txt".to_string(),
+            })
+            .expect("dispatched");
+        assert!(
+            matches!(&reaction, EventReaction::Status(s) if s.tone == StatusTone::Busy),
+            "the stage answers with a busy, not a finished stage"
+        );
+
+        let done = finish_discard(&mut engine, reaction);
+        assert!(matches!(done, EventReaction::ClearStatus(_)), "cleared");
+        assert!(staged_names(repo.path()).contains("new.txt"));
+    }
+
+    /// A stage and then an unstage of the same file run in the order they
+    /// were asked for, after a change to the worktree that was still running:
+    /// neither touches git while it runs, and the unstage lands last.
+    #[test]
+    fn changes_to_one_worktree_run_in_the_order_asked() {
+        let repo = discard_test_repo();
+        std::fs::write(repo.path().join("new.txt"), "x\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+        let running = crate::changes_lane::ticket(repo.path()).wait();
+
+        let stage = engine
+            .apply(Command::StageFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "new.txt".to_string(),
+            })
+            .expect("stage");
+        let unstage = engine
+            .apply(Command::UnstageFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "new.txt".to_string(),
+            })
+            .expect("unstage");
+        let key = |reaction: &EventReaction| match reaction {
+            EventReaction::Status(update) => update.key.clone().expect("keyed"),
+            _ => panic!("expected a busy"),
+        };
+        let (stage_key, unstage_key) = (key(&stage), key(&unstage));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !matches!(
+                engine.worker_rx.try_recv(),
+                Ok(crate::worker::WorkerEvent::StatusOpCompleted { .. })
+            ),
+            "a change ran while an earlier one held the worktree"
+        );
+
+        drop(running);
+        let mut finished = Vec::new();
+        while finished.len() < 2 {
+            if let crate::worker::WorkerEvent::StatusOpCompleted { resolved } = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the changes report")
+            {
+                finished.push(resolved.key);
+            }
+        }
+        assert_eq!(finished, [stage_key, unstage_key]);
+        assert!(!staged_names(repo.path()).contains("new.txt"));
+    }
+
+    /// A folder staged through the command keeps the repository inside it out
+    /// of the index, and the final says so rather than dropping the report.
+    #[test]
+    fn staging_a_folder_says_what_it_left_out() {
+        let repo = discard_test_repo();
+        let vendor = repo.path().join("vendor");
+        std::fs::create_dir_all(vendor.join("lib")).expect("folder");
+        std::fs::write(vendor.join("x.js"), "x\n").expect("write");
+        let status = crate::test_git::fixture_git()
+            .args(["init", "-q"])
+            .current_dir(vendor.join("lib"))
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        std::fs::write(vendor.join("lib").join("own.txt"), "own\n").expect("write");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::StageFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "vendor".to_string(),
+            })
+            .expect("dispatched");
+
+        match finish_discard(&mut engine, reaction) {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert!(
+                    update.message.contains("left out 1 nested repository"),
+                    "{}",
+                    update.message
+                );
+            }
+            _ => panic!("expected an info final"),
+        }
+        assert!(staged_names(repo.path()).contains("vendor/x.js"));
+    }
+
+    /// An unstage git refuses ends on an error final naming the file.
+    #[test]
+    fn a_failed_unstage_ends_on_an_error_naming_the_file() {
+        let (mut engine, tmp) = test_engine();
+        let missing = tmp.path().join("no-repository-here");
+        std::fs::create_dir_all(&missing).expect("folder");
+
+        let reaction = engine
+            .apply(Command::UnstageFile {
+                worktree_path: missing,
+                path: "a.txt".to_string(),
+            })
+            .expect("dispatched");
+
+        match finish_discard(&mut engine, reaction) {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.starts_with("Could not unstage \"a.txt\": "),
+                    "{}",
+                    update.message
+                );
+            }
+            _ => panic!("expected an error final"),
+        }
+    }
+
     /// A folded folder is discarded whole, and the message says it was a
     /// folder: "deleted untracked file" about thirty thousand files is a lie
     /// about how much just went.
@@ -3891,7 +4109,9 @@ mod tests {
         // The one-shot worker posts ChangedFilesReady tagged with the worktree.
         let event = crate::engine::test_support::recv_changed_files_ready(&mut engine);
         match event {
-            WorkerEvent::ChangedFilesReady { outcome, worktree } => {
+            WorkerEvent::ChangedFilesReady {
+                outcome, worktree, ..
+            } => {
                 let (staged, unstaged) = outcome.expect("git read the worktree");
                 assert_eq!(worktree.as_path(), repo.path());
                 assert!(staged.iter().any(|f| f.path == "staged.txt"), "{staged:?}");
@@ -4033,7 +4253,7 @@ mod tests {
         )
         .expect("a dirty checkout must not block the refresh");
         match outcome {
-            PullOutcome::Pulled { current_branch } => {
+            PullOutcome::Pulled { current_branch, .. } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
             other @ PullOutcome::NoOrigin { .. } => panic!("expected Pulled, got {other:?}"),
@@ -4054,7 +4274,7 @@ mod tests {
         )
         .expect("no origin must not be an error");
         match &outcome {
-            PullOutcome::NoOrigin { current_branch } => {
+            PullOutcome::NoOrigin { current_branch, .. } => {
                 assert_eq!(current_branch.as_deref(), Some("main"));
             }
             other @ PullOutcome::Pulled { .. } => panic!("expected NoOrigin, got {other:?}"),

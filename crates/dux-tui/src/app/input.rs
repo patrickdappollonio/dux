@@ -1,3 +1,4 @@
+use super::CompletionAnswer;
 use super::components::wrap_lines::cluster_width;
 use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focus};
 use super::modal::{
@@ -7,6 +8,7 @@ use super::*;
 use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
+use dux_core::project_browser::AddPathProbe;
 use dux_core::statusline::StatusTone;
 use dux_core::text::count_of;
 use ratatui::buffer::CellWidth;
@@ -1495,7 +1497,7 @@ impl App {
                 Action::OpenAgentInfo => self.open_agent_info(),
                 Action::EditMacros => self.open_edit_macros(),
                 Action::CopyPath => self.copy_selected_path()?,
-                Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
+                Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor(),
                 Action::ChooseWorktreeEditor => self.open_worktree_editor_picker(),
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
                 Action::InteractAgent => {
@@ -2951,8 +2953,8 @@ impl App {
             })?,
             RightSection::CommitInput => return Ok(()),
         };
+        // The stage runs on a worker, whose completion reads the listing again.
         self.apply_reaction(reaction);
-        self.reload_changed_files();
         // If the section we were in is now empty, move to the other one.
         if self.right_section == RightSection::Staged && self.engine.staged_files.is_empty() {
             self.right_section = RightSection::Unstaged;
@@ -4335,18 +4337,30 @@ impl App {
             tab_completions.clear();
             *tab_index = 0;
         }
+        // A lookup still out was for the editor just closed, and so was a
+        // folder check: leaving the editor abandons what it asked for.
+        self.path_completion.ask = None;
+        self.browser_add.checking = None;
     }
 
+    /// What a completion key did. With no candidates yet it asks for them,
+    /// and a forward Tab wants the first one applied when they land.
     fn handle_project_browser_completion_key(
         key: KeyEvent,
         path_input: &mut TextInput,
-        tab_completions: &mut Vec<String>,
+        tab_completions: &[String],
         tab_index: &mut usize,
-    ) -> bool {
+    ) -> CompletionKey {
         if tab_completions.is_empty() {
-            *tab_completions = Self::path_editor_completion_candidates(&path_input.text);
-            *tab_index = 0;
-        } else if key.code == KeyCode::Up || is_reverse_tab(key) {
+            return CompletionKey::NeedsCandidates(
+                if key.code == KeyCode::Tab && !is_reverse_tab(key) {
+                    CompletionAnswer::ApplyFirst
+                } else {
+                    CompletionAnswer::List
+                },
+            );
+        }
+        if key.code == KeyCode::Up || is_reverse_tab(key) {
             if *tab_index == 0 {
                 *tab_index = tab_completions.len().saturating_sub(1);
             } else {
@@ -4360,9 +4374,9 @@ impl App {
             && let Some(completion) = tab_completions.get(*tab_index)
         {
             path_input.set_text(completion.clone());
-            true
+            CompletionKey::Applied
         } else {
-            false
+            CompletionKey::Moved
         }
     }
 
@@ -4381,6 +4395,7 @@ impl App {
 
         let mut add_path = None;
         let mut refresh_completions = false;
+        let mut ask_first = None;
         if let PromptState::BrowseProjects {
             path_input,
             tab_completions,
@@ -4390,12 +4405,18 @@ impl App {
         {
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                    refresh_completions = Self::handle_project_browser_completion_key(
+                    match Self::handle_project_browser_completion_key(
                         key,
                         path_input,
                         tab_completions,
                         tab_index,
-                    );
+                    ) {
+                        CompletionKey::Moved => {}
+                        CompletionKey::Applied => refresh_completions = true,
+                        CompletionKey::NeedsCandidates(on_answer) => {
+                            ask_first = Some(on_answer);
+                        }
+                    }
                 }
                 KeyCode::Enter => add_path = Some(path_input.text.trim().to_string()),
                 _ => refresh_completions = path_input.handle_key(key),
@@ -4403,6 +4424,9 @@ impl App {
         }
         if refresh_completions {
             self.refresh_path_editor_completions();
+        }
+        if let Some(on_answer) = ask_first {
+            self.ask_for_path_completions(on_answer);
         }
         if let Some(path) = add_path {
             self.commit_browser_path(path);
@@ -5821,24 +5845,82 @@ impl App {
         }
 
         if let CreateAgentRequest::NewProject { project, .. } = &request {
+            // Whether the name is taken asks git, so it is asked on a worker
+            // and the create (or the question about attaching) follows.
             let repo_path = std::path::PathBuf::from(&project.path);
-            if let git::CreateAgentBranchPlan::ExistingBranch { location } =
-                git::create_agent_branch_preflight(&repo_path, &name)
-            {
-                set_create_agent_request_custom_name(&mut request, name.clone());
-                self.prompt = PromptState::ConfirmUseExistingBranch {
-                    request,
-                    branch_name: name,
-                    location,
-                    focus: ConfirmFocus::Cancel,
-                };
-                return Ok(());
-            }
+            let branch = name.clone();
+            self.spawn_ui_job(
+                crate::app::ui_jobs::UiJob {
+                    busy: dux_core::status_text![
+                        "Checking whether a branch named ",
+                        q(name.clone()),
+                        " already exists\u{2026}"
+                    ],
+                    stopped: format!(
+                        "dux could not check whether a branch named \"{name}\" already exists, \
+                         so the agent was not created; dux.log has the details."
+                    ),
+                },
+                move || git::create_agent_branch_preflight(&repo_path, &branch),
+                move |app: &mut App, plan: Option<git::CreateAgentBranchPlan>| {
+                    if let Some(plan) = plan {
+                        app.continue_create_agent_after_preflight(request, name, plan);
+                    }
+                },
+            );
+            return Ok(());
         }
 
         let message = Self::create_agent_request_message(&request, &name);
         set_create_agent_request_custom_name(&mut request, name);
         self.dispatch_create_agent_request(request, message)
+    }
+
+    /// A new agent's create once git has said whether its name is a branch
+    /// already: a taken name asks whether to attach to it, and anything else
+    /// creates the agent.
+    fn continue_create_agent_after_preflight(
+        &mut self,
+        mut request: CreateAgentRequest,
+        name: String,
+        plan: git::CreateAgentBranchPlan,
+    ) {
+        // The project as it is now: its base or provider may have changed
+        // while git was asked, and the create follows what is in force.
+        if let CreateAgentRequest::NewProject { project, .. } = &mut request {
+            let Some(current) = self.engine.projects.iter().find(|p| p.id == project.id) else {
+                self.set_error(format!(
+                    "Agent \"{name}\" was not created: project \"{}\" is no longer in the \
+                     workspace.",
+                    project.name
+                ));
+                return;
+            };
+            *project = current.clone();
+        }
+        if let git::CreateAgentBranchPlan::ExistingBranch { location } = plan {
+            if let Some(blocker) = self.job_dialog_blocker() {
+                self.set_warning(format!(
+                    "Agent \"{name}\" was not created: a branch with that name already exists, \
+                     and attaching to it needs your confirmation, which was not asked because \
+                     {blocker}. Create the agent again to be asked."
+                ));
+                return;
+            }
+            set_create_agent_request_custom_name(&mut request, name.clone());
+            self.prompt = PromptState::ConfirmUseExistingBranch {
+                request,
+                branch_name: name,
+                location,
+                focus: ConfirmFocus::Cancel,
+            };
+            return;
+        }
+        let message = Self::create_agent_request_message(&request, &name);
+        set_create_agent_request_custom_name(&mut request, name);
+        if let Err(error) = self.dispatch_create_agent_request(request, message) {
+            self.set_error(format!("{error:#}"));
+        }
     }
 
     fn handle_name_new_agent_prompt_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -8308,7 +8390,27 @@ impl App {
         candidates
     }
 
+    /// The typed path changed: the candidates shown are for the old one, so
+    /// they go, and the new ones are looked up.
     fn refresh_path_editor_completions(&mut self) {
+        if let PromptState::BrowseProjects {
+            editing_path: true,
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut self.prompt
+        {
+            tab_completions.clear();
+            *tab_index = 0;
+        }
+        self.ask_for_path_completions(CompletionAnswer::List);
+    }
+
+    /// Look up the completions for the typed path on a worker: reading a
+    /// directory can stall on a slow mount, and this runs on every keystroke.
+    /// `apply_first` is a Tab that arrived before the candidates did; an ask
+    /// already out for the same path takes it on rather than asking twice.
+    fn ask_for_path_completions(&mut self, on_answer: CompletionAnswer) {
         let input = match &self.prompt {
             PromptState::BrowseProjects {
                 editing_path: true,
@@ -8317,45 +8419,133 @@ impl App {
             } => path_input.text.clone(),
             _ => return,
         };
-        let candidates = Self::path_editor_completion_candidates(&input);
-        if let PromptState::BrowseProjects {
+        if let Some(ask) = &mut self.path_completion.ask
+            && ask.input == input
+        {
+            if on_answer == CompletionAnswer::ApplyFirst {
+                ask.on_answer = CompletionAnswer::ApplyFirst;
+            }
+            return;
+        }
+        let id = self.path_completion.next;
+        self.path_completion.next += 1;
+        self.path_completion.ask = Some(crate::app::PathCompletionAsk {
+            id,
+            input: input.clone(),
+            on_answer,
+        });
+        self.spawn_quiet_ui_job(
+            move || Self::path_editor_completion_candidates(&input),
+            move |app: &mut App, candidates: Option<Vec<String>>| match candidates {
+                Some(candidates) => app.land_path_completions(id, candidates),
+                // A lookup that stopped answers nothing; the next ask must not
+                // wait on it.
+                None => {
+                    app.path_completion.ask.take_if(|ask| ask.id == id);
+                }
+            },
+        );
+    }
+
+    /// Show the candidates a lookup found, if they are still for the newest
+    /// ask and the path it was asked about.
+    fn land_path_completions(&mut self, id: u64, candidates: Vec<String>) {
+        let Some(ask) = self.path_completion.ask.take_if(|ask| ask.id == id) else {
+            return;
+        };
+        let PromptState::BrowseProjects {
+            editing_path: true,
+            path_input,
             tab_completions,
             tab_index,
             ..
         } = &mut self.prompt
+        else {
+            return;
+        };
+        if path_input.text != ask.input {
+            return;
+        }
+        *tab_completions = candidates;
+        *tab_index = 0;
+        if ask.on_answer == CompletionAnswer::ApplyFirst
+            && let Some(first) = tab_completions.first().cloned()
         {
-            *tab_completions = candidates;
-            *tab_index = 0;
+            path_input.set_text(first);
+            self.refresh_path_editor_completions();
         }
     }
 
+    /// Add the folder the browser chose. What it is (a repository root, a
+    /// plain folder `git init` could adopt, or neither) is read on a worker,
+    /// and the browser stays open until the answer lands.
     fn add_project_from_browser_path(&mut self, path: &str) {
-        let return_prompt = self.prompt.clone();
-        if let Err(message) = self.engine.validate_project_add_path(path) {
+        let shown = path.trim().to_string();
+        // One check at a time per browser: a second confirm while one is out
+        // would race it to the add.
+        if self.browser_add.checking.is_some() {
+            self.set_info(format!(
+                "dux is still checking a folder for this browser; \"{shown}\" was not checked. \
+                 Confirm it again once the check ends."
+            ));
+            return;
+        }
+        let instance = self.browser_add.instance;
+        let id = self.browser_add.next;
+        self.browser_add.next += 1;
+        self.browser_add.checking = Some(id);
+        self.spawn_add_path_probe(path, move |app: &mut App, probe| {
+            // The answer belongs to the browser that asked, still open for
+            // adding a project. One the user has closed (Esc abandons) or
+            // replaced since gets nothing.
+            let asked = app.browser_add.checking == Some(id);
+            if asked {
+                app.browser_add.checking = None;
+            }
+            let Some(probe) = probe else { return };
+            let still_open = matches!(
+                app.prompt,
+                PromptState::BrowseProjects {
+                    purpose: BrowsePurpose::AddProject,
+                    ..
+                }
+            );
+            if !asked || app.browser_add.instance != instance || !still_open {
+                return;
+            }
+            let return_prompt = app.prompt.clone();
+            app.continue_browser_add(probe, return_prompt);
+        });
+    }
+
+    fn continue_browser_add(&mut self, probe: AddPathProbe, return_prompt: PromptState) {
+        match probe {
             // Not addable as-is. A plain folder gets the adopt-a-folder prompt
             // (git init + seed + initial commit); anything else (a subfolder,
             // a .git dir, an already-registered path) keeps the failure modal
             // with the ORIGINAL add error, which now names the enclosing root.
-            if let Ok(canonical) = self.engine.validate_project_init_path(path) {
-                let candidates = dux_core::gitignore_seed::matched_candidates(&canonical)
-                    .iter()
-                    .map(|c| c.dir.to_string())
-                    .collect();
+            AddPathProbe::Initable {
+                path,
+                gitignore_candidates,
+                ..
+            } => {
                 self.prompt = PromptState::ConfirmInitRepo {
-                    path: canonical.to_string_lossy().to_string(),
+                    path: path.to_string_lossy().to_string(),
                     name: String::new(),
-                    candidates,
+                    candidates: gitignore_candidates,
                     focus: ConfirmFocus::Cancel,
                     return_prompt: Box::new(return_prompt),
                 };
-                return;
             }
-            self.open_add_project_failed_modal(message, return_prompt);
-            return;
-        }
-        self.prompt = PromptState::None;
-        if let Err(error) = self.add_project(path, String::new()) {
-            self.open_add_project_failed_modal(format!("{error:#}"), return_prompt);
+            AddPathProbe::Refused(message) => {
+                self.open_add_project_failed_modal(message, return_prompt);
+            }
+            AddPathProbe::Repository(repository) => {
+                self.prompt = PromptState::None;
+                if let Err(error) = self.add_probed_project(repository, String::new()) {
+                    self.open_add_project_failed_modal(format!("{error:#}"), return_prompt);
+                }
+            }
         }
     }
 
@@ -12693,6 +12883,17 @@ fn killed_runtime_message(agents: usize, terminals: usize, already_gone: usize) 
     )
 }
 
+/// What a completion key in the folder browser's path editor did.
+enum CompletionKey {
+    /// Moved the highlight among the candidates.
+    Moved,
+    /// Applied a candidate to the path.
+    Applied,
+    /// There were no candidates yet, so they must be looked up, and what to
+    /// do once they land.
+    NeedsCandidates(CompletionAnswer),
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -12887,6 +13088,8 @@ mod tests {
             })
             .unwrap();
         app.drain_events();
+        // The branch it found is saved on a worker before the create goes on.
+        crate::app::test_support::finish_ui_jobs(app);
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -14091,6 +14294,45 @@ mod tests {
         );
     }
 
+    /// The reload worker hands back the projects it built and saved, and the
+    /// apply adopts them as they are: the UI thread does not read the session
+    /// database, git or the config file for them again.
+    #[test]
+    fn an_applied_reload_adopts_the_projects_its_worker_built() {
+        let mut app = test_app(default_bindings());
+        let mut built = app.engine.projects[0].clone();
+        built.name = "built-on-the-worker".to_string();
+        // The reload started with the projects as they are now.
+        app.engine.reloaded_projects = Some(dux_core::engine::ReloadProjects {
+            at_start: app.engine.projects.clone(),
+            built: None,
+        });
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::ConfigReloadReady(Box::new(Ok(
+                dux_core::worker::ReloadedConfig {
+                    config: app.engine.config.clone(),
+                    projects: Some(vec![built]),
+                },
+            ))))
+            .expect("queue the reload");
+
+        drain_until(&mut app, |app| {
+            app.engine
+                .projects
+                .first()
+                .is_some_and(|project| project.name == "built-on-the-worker")
+        });
+
+        let names: Vec<&str> = app
+            .engine
+            .projects
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["built-on-the-worker"]);
+    }
+
     #[test]
     fn reload_config_command_keeps_current_config_and_opens_modal_on_validation_error() {
         let mut app = test_app(default_bindings());
@@ -14851,6 +15093,7 @@ not_a_real_action = ["x"]
                 },
                 result: Ok(dux_core::worker::PullOutcome::Pulled {
                     current_branch: Some("feature/demo".to_string()),
+                    default_warning: None,
                 }),
                 status: dux_core::engine::ResolvedFinal::new(
                     format!("pull-project:{}", app.engine.projects[0].id),
@@ -17456,6 +17699,114 @@ not_a_real_action = ["x"]
         assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
     }
 
+    /// The branch the inspection found is saved to the session database on a
+    /// worker: the create waits, with a busy, and goes on once it is saved.
+    /// Send the branch inspection's answer for the selected project and
+    /// apply it, leaving the base save out on its worker.
+    fn inspect_and_hold_the_save(app: &mut App) -> Project {
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project.clone());
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CreateAgentBranchInspected {
+                project: project.clone(),
+                result: Ok(CreateAgentBranchInspection {
+                    current_branch: "main".to_string(),
+                    leading_branch: "main".to_string(),
+                }),
+                status_op_id: None,
+            })
+            .unwrap();
+        app.drain_events();
+        project
+    }
+
+    /// The save writes the detected base and nothing else: a change made to
+    /// the project's row meanwhile stays.
+    #[test]
+    fn saving_the_inspected_branch_leaves_the_rest_of_the_project_alone() {
+        let mut app = test_app(default_bindings());
+        let project = inspect_and_hold_the_save(&mut app);
+        app.engine
+            .session_store
+            .update_project_default_provider(&project.id, Some("codex"))
+            .unwrap();
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        let stored = app.engine.session_store.load_projects().unwrap();
+        let row = stored.iter().find(|p| p.id == project.id).expect("row");
+        assert_eq!(row.default_provider.as_deref(), Some("codex"));
+        assert_eq!(row.leading_branch.as_deref(), Some("main"));
+    }
+
+    /// A project removed while its base was being saved is not written back,
+    /// and no create goes on for it.
+    #[test]
+    fn saving_the_inspected_branch_skips_a_project_removed_meanwhile() {
+        let mut app = test_app(default_bindings());
+        let project = inspect_and_hold_the_save(&mut app);
+        app.engine.projects.retain(|p| p.id != project.id);
+        rusqlite::Connection::open(&app.engine.paths.sessions_db_path)
+            .unwrap()
+            .execute("delete from projects where id = ?1", [&project.id])
+            .unwrap();
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        let stored = app.engine.session_store.load_projects().unwrap();
+        assert!(stored.iter().all(|p| p.id != project.id), "written back");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// The name prompt the save leads to is not opened over a pane taking
+    /// keystrokes.
+    #[test]
+    fn the_name_prompt_after_the_save_does_not_open_over_an_interactive_pane() {
+        let mut app = test_app(default_bindings());
+        inspect_and_hold_the_save(&mut app);
+        app.input_target = InputTarget::Agent;
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(matches!(app.prompt, PromptState::None), "{:?}", app.prompt);
+        let said: Vec<String> = app
+            .status
+            .snapshot()
+            .into_iter()
+            .map(|status| status.message)
+            .collect();
+        assert!(
+            said.iter()
+                .any(|message| message.contains("a pane is taking your keystrokes")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn the_inspected_branch_is_saved_before_the_create_goes_on() {
+        let mut app = test_app(default_bindings());
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project.clone());
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CreateAgentBranchInspected {
+                project,
+                result: Ok(CreateAgentBranchInspection {
+                    current_branch: "main".to_string(),
+                    leading_branch: "main".to_string(),
+                }),
+                status_op_id: None,
+            })
+            .unwrap();
+        app.drain_events();
+        assert!(matches!(app.prompt, PromptState::None), "{:?}", app.prompt);
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
     #[test]
     fn create_agent_always_opens_name_prompt_empty_by_default() {
         let mut app = test_app(default_bindings());
@@ -17567,6 +17918,13 @@ not_a_real_action = ["x"]
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        // Git is asked on a worker: the key returns with the dialog closed and
+        // a busy, and the question follows the answer.
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::ConfirmUseExistingBranch { .. })
+        });
 
         match &app.prompt {
             PromptState::ConfirmUseExistingBranch {
@@ -18064,6 +18422,7 @@ not_a_real_action = ["x"]
             })
             .unwrap();
         app.drain_events();
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         match &app.prompt {
             PromptState::NameNewAgent { request, .. } => match request {
@@ -18785,6 +19144,7 @@ not_a_real_action = ["x"]
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         match &app.prompt {
             PromptState::ConfirmUseExistingBranch { request, .. } => match request {
@@ -25232,6 +25592,7 @@ cyan = "#00ffff"
         .expect("write theme");
 
         app.open_change_theme_prompt();
+        crate::app::test_support::finish_ui_jobs(&mut app);
         let item_count = match &app.prompt {
             PromptState::ChangeTheme(prompt) => prompt.options.len(),
             other => panic!("expected change theme prompt, got {other:?}"),
@@ -25615,6 +25976,7 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         match &app.prompt {
             PromptState::AddProjectFailed { message, .. } => {
@@ -25639,6 +26001,225 @@ cyan = "#00ffff"
                 assert_eq!(path_input.text, typed.to_string_lossy());
             }
             other => panic!("expected browser prompt restored, got {other:?}"),
+        }
+    }
+
+    /// A browser in path-editing mode on `folder`, a plain folder.
+    fn browser_typing(app: &App, folder: &std::path::Path) -> PromptState {
+        PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
+            current_dir: PathBuf::from(&app.engine.projects[0].path),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(folder.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        }
+    }
+
+    /// Esc after confirming a folder abandons the check: when the answer
+    /// lands, no dialog opens and nothing is added.
+    #[test]
+    fn escaping_a_browser_check_abandons_its_answer() {
+        let mut app = test_app(default_bindings());
+        let outside = tempdir().expect("outside tempdir");
+        app.prompt = browser_typing(&app, outside.path());
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::BrowseProjects {
+                    editing_path: false,
+                    ..
+                }
+            ),
+            "the abandoned answer opened {:?}",
+            app.prompt
+        );
+    }
+
+    /// A second confirm while the first check is out starts no second check:
+    /// it says so, and the one answer opens one dialog.
+    #[test]
+    fn a_second_confirm_while_a_browser_check_is_out_is_refused() {
+        let mut app = test_app(default_bindings());
+        let outside = tempdir().expect("outside tempdir");
+        app.prompt = browser_typing(&app, outside.path());
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.browser_add.next, 1, "one check was started");
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        assert!(matches!(app.prompt, PromptState::ConfirmInitRepo { .. }));
+        assert!(
+            app.status.text().contains("still checking"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// A browser closed and opened again is a different browser: the first
+    /// one's answer does not reach it.
+    #[test]
+    fn a_reopened_browser_does_not_take_the_closed_ones_answer() {
+        let mut app = test_app(default_bindings());
+        let outside = tempdir().expect("outside tempdir");
+        app.prompt = browser_typing(&app, outside.path());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        app.open_project_browser();
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(matches!(app.prompt, PromptState::BrowseProjects { .. }));
+        assert!(app.browser_add.checking.is_none());
+    }
+
+    /// A completion asked for an editor since closed does not reach the one
+    /// opened after it, even when the text is the same.
+    #[test]
+    fn a_closed_path_editors_completion_does_not_reach_the_next_one() {
+        let mut app = test_app(default_bindings());
+        let root = tempdir().expect("root");
+        std::fs::create_dir_all(root.path().join("alpha")).expect("alpha");
+        let typed = format!("{}/", root.path().display());
+        let mut browser = browser_typing(&app, root.path());
+        if let PromptState::BrowseProjects { path_input, .. } = &mut browser {
+            path_input.set_text(typed.clone());
+        }
+        app.prompt = browser;
+
+        // A Tab before the candidates land asks for the first to be applied.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.reset_project_browser_path_editor();
+        if let PromptState::BrowseProjects {
+            editing_path,
+            path_input,
+            ..
+        } = &mut app.prompt
+        {
+            *editing_path = true;
+            path_input.set_text(typed.clone());
+        }
+        app.refresh_path_editor_completions();
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        let PromptState::BrowseProjects { path_input, .. } = &app.prompt else {
+            panic!("expected the browser");
+        };
+        assert_eq!(path_input.text, typed, "the closed editor's Tab applied");
+    }
+
+    /// A lookup that cannot start leaves nothing behind for the next one to
+    /// wait on.
+    #[test]
+    fn a_path_completion_that_cannot_start_is_let_go() {
+        let mut app = test_app(default_bindings());
+        let root = tempdir().expect("root");
+        app.prompt = browser_typing(&app, root.path());
+
+        crate::app::ui_jobs::fail_next_quiet_spawn();
+        app.refresh_path_editor_completions();
+
+        assert!(app.path_completion.ask.is_none());
+    }
+
+    /// The new agent's create follows the project as it is when git answers,
+    /// not as it was when the name was confirmed.
+    #[test]
+    fn a_new_agent_create_reads_the_project_again_when_git_answers() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
+        run_git(&repo_path, &["branch", "reuse-me"]);
+        app.prompt = name_new_agent_prompt(&app, "reuse-me");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.engine.projects[0].leading_branch = Some("changed-meanwhile".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        let PromptState::ConfirmUseExistingBranch {
+            request: CreateAgentRequest::NewProject { project, .. },
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the attach question, got {:?}", app.prompt);
+        };
+        assert_eq!(project.leading_branch.as_deref(), Some("changed-meanwhile"));
+    }
+
+    /// A project removed while git was asked takes the create with it, out
+    /// loud.
+    #[test]
+    fn a_new_agent_create_for_a_project_since_removed_says_so() {
+        let mut app = test_app(default_bindings());
+        app.prompt = name_new_agent_prompt(&app, "fresh-name");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.engine.projects.clear();
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(
+            app.status.text().contains("is no longer in the workspace"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    /// A question a worker's answer would raise is not put over a pane the
+    /// user is typing into: it is dropped, and the status line says so.
+    #[test]
+    fn a_workers_question_does_not_open_over_an_interactive_pane() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
+        run_git(&repo_path, &["branch", "reuse-me"]);
+        app.prompt = name_new_agent_prompt(&app, "reuse-me");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.input_target = InputTarget::Agent;
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(matches!(app.prompt, PromptState::None), "{:?}", app.prompt);
+        assert!(
+            app.status
+                .text()
+                .contains("a pane is taking your keystrokes"),
+            "{}",
+            app.status.text()
+        );
+    }
+
+    fn name_new_agent_prompt(app: &App, name: &str) -> PromptState {
+        PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+                cloned: None,
+            },
+            input: TextInput::with_text(name.to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            review_copy: None,
+            focus: NameNewAgentFocus::Input,
         }
     }
 
@@ -25670,6 +26251,11 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        // The folder is probed on a worker: the browser is still up, with a
+        // busy, when the key returns.
+        assert!(matches!(app.prompt, PromptState::BrowseProjects { .. }));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         let canonical = typed
             .canonicalize()
@@ -25741,6 +26327,7 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         match &app.prompt {
             PromptState::AddProjectFailed { message, .. } => {
@@ -25757,8 +26344,9 @@ cyan = "#00ffff"
         std::fs::create_dir_all(&project_dir).expect("project dir");
         init_test_repo(&project_dir);
 
-        app.add_project(project_dir.to_string_lossy().as_ref(), String::new())
-            .expect("add project");
+        app.add_project(project_dir.to_string_lossy().as_ref(), String::new());
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
         drain_until(&mut app, |app| {
             app.status
                 .text()
@@ -25806,6 +26394,7 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
         match &app.prompt {
             PromptState::BrowseProjects {
                 path_input,
@@ -25836,6 +26425,7 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
         match &app.prompt {
             PromptState::BrowseProjects {
                 path_input,
@@ -25854,6 +26444,42 @@ cyan = "#00ffff"
             }
             other => panic!("expected browser prompt, got {other:?}"),
         }
+    }
+
+    /// The completions are read on a worker: a Tab pressed before they land
+    /// still completes the path, with the first candidate, once they do.
+    #[test]
+    fn project_browser_tab_before_the_completions_land_applies_the_first() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.engine.projects[0].path);
+        std::fs::create_dir_all(root.join("alpha")).expect("alpha dir");
+        let typed = root.join("alp").to_string_lossy().to_string();
+        app.prompt = PromptState::BrowseProjects {
+            purpose: crate::app::BrowsePurpose::AddProject,
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.clone()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        let PromptState::BrowseProjects { path_input, .. } = &app.prompt else {
+            panic!("expected browser prompt");
+        };
+        assert_eq!(path_input.text, typed, "nothing applied before the answer");
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+        let PromptState::BrowseProjects { path_input, .. } = &app.prompt else {
+            panic!("expected browser prompt");
+        };
+        assert!(path_input.text.ends_with("alpha/"), "{}", path_input.text);
     }
 
     #[test]
@@ -25876,6 +26502,7 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
+        crate::app::test_support::finish_ui_jobs(&mut app);
         match &app.prompt {
             PromptState::BrowseProjects {
                 path_input,
@@ -28223,6 +28850,7 @@ cyan = "#00ffff"
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("the confirm key must be handled");
+        crate::app::test_support::finish_ui_jobs(app);
     }
 
     /// A typed path is the same choice as a navigated one: in a browser opened
@@ -40610,12 +41238,15 @@ cyan = "#00ffff"
             }
             "ConfirmCreateInitialCommit" => {
                 let repo = scratch_unborn_repo(&mut app);
-                app.add_project(&repo, "Fresh".to_string())
-                    .expect("add an unborn repo");
+                app.add_project(&repo, "Fresh".to_string());
+                crate::app::test_support::finish_ui_jobs(&mut app);
             }
             "ConfirmInitRepo" => {
                 let dir = scratch_plain_dir(&mut app);
+                // The answer reaches only the browser that asked.
+                app.open_project_browser();
                 app.add_project_from_browser_path(&dir);
+                crate::app::test_support::finish_ui_jobs(&mut app);
             }
             "ConfirmUseExistingBranch" => {
                 let project = app.engine.projects[0].clone();
@@ -40638,6 +41269,7 @@ cyan = "#00ffff"
                     focus: NameNewAgentFocus::Input,
                 };
                 tap(&mut app, KeyCode::Enter);
+                crate::app::test_support::finish_ui_jobs(&mut app);
             }
             "ConfirmKillRunning" => {
                 let worktree = PathBuf::from(

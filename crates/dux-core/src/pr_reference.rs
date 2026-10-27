@@ -1800,7 +1800,7 @@ mod resolution_tests {
         let projects = vec![widget];
 
         let reference = parse_typed_reference("https://github.com/acme/unknown/pull/3").unwrap();
-        assert!(resolve(&reference, &projects).matches.is_empty());
+        assert_eq!(resolve(&reference, &projects).matches, []);
         assert_eq!(
             reference.repository_label().as_deref(),
             Some("github.com/acme/unknown"),
@@ -2017,7 +2017,7 @@ mod resolution_tests {
 
         let reference = parse_typed_reference("https://github.com/acme/widget/pull/5").unwrap();
         let resolution = resolve(&reference, &projects);
-        assert!(resolution.matches.is_empty());
+        assert_eq!(resolution.matches, []);
         assert_eq!(
             resolution.uninspected,
             vec![],
@@ -2038,7 +2038,7 @@ mod resolution_tests {
 
         let reference = parse_typed_reference("https://gitlab.com/acme/widget/pull/5").unwrap();
         let resolution = resolve(&reference, &projects);
-        assert!(resolution.matches.is_empty());
+        assert_eq!(resolution.matches, []);
         assert_eq!(
             resolution.uninspected,
             vec![UninspectedProject {
@@ -2056,7 +2056,7 @@ mod resolution_tests {
 
         let reference = parse_typed_reference("acme/widget#1").unwrap();
         let resolution = resolve(&reference, &projects);
-        assert!(resolution.matches.is_empty());
+        assert_eq!(resolution.matches, []);
         assert_eq!(
             resolution.uninspected,
             vec![UninspectedProject {
@@ -2075,7 +2075,7 @@ mod resolution_tests {
         let (dir, widget) = project_with_origin("widget", "git@github.com:acme/gadget.git");
         let projects = vec![widget];
         let reference = parse_typed_reference("acme/widget#1").unwrap();
-        assert!(resolve(&reference, &projects).matches.is_empty());
+        assert_eq!(resolve(&reference, &projects).matches, []);
 
         let out = crate::git::test_support::git_command()
             .args([
@@ -2168,7 +2168,7 @@ mod resolution_tests {
 
         let reference = parse_typed_reference("https://github.com/acme/unknown/pull/3").unwrap();
         let resolution = resolve(&reference, &projects);
-        assert!(resolution.matches.is_empty());
+        assert_eq!(resolution.matches, []);
         assert!(
             resolution.is_complete(),
             "every project was inspected, so \"none of them\" really means none of them"
@@ -2184,7 +2184,7 @@ mod resolution_tests {
 
         let reference = parse_typed_reference("#123").unwrap();
         let resolution = resolve(&reference, &projects);
-        assert!(resolution.matches.is_empty());
+        assert_eq!(resolution.matches, []);
         assert!(
             resolution.is_complete(),
             "a bare number is refused with an explanation; listing every project as \

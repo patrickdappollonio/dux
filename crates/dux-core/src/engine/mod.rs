@@ -249,9 +249,32 @@ pub struct LaunchedDropPaste {
 pub struct ChangedFilesRefreshQueue {
     pending: Option<PathBuf>,
     running: bool,
+    /// The number the next read gets as it starts. The refresh worker and the
+    /// poller read on threads of their own, so their answers can land in
+    /// either order; a read that started later saw the newer tree.
+    next_read: u64,
+    /// The newest read whose lists were applied.
+    newest_applied: Option<u64>,
 }
 
 impl ChangedFilesRefreshQueue {
+    /// Number a read that is starting now.
+    pub(crate) fn start_read(&mut self) -> u64 {
+        let read = self.next_read;
+        self.next_read += 1;
+        read
+    }
+
+    /// Whether the read numbered `read` may replace the lists: no read that
+    /// started after it has been applied. Applying it records it.
+    pub(crate) fn admit_read(&mut self, read: u64) -> bool {
+        if self.newest_applied.is_some_and(|newest| newest > read) {
+            return false;
+        }
+        self.newest_applied = Some(read);
+        true
+    }
+
     /// Queue a read of `worktree`, replacing any read that has not started yet.
     /// Answers whether the caller has to spawn the reader (no reader running).
     pub fn request(&mut self, worktree: PathBuf) -> bool {
@@ -315,6 +338,48 @@ fn watched_worktree_of(watch: &Mutex<Option<PathBuf>>) -> Option<PathBuf> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
+}
+
+/// A reload's project list: the one its worker built, and the engine's as it
+/// stood when the reload started, so a change that landed in between is never
+/// undone by adopting the worker's.
+#[derive(Debug)]
+pub struct ReloadProjects {
+    /// The engine's projects when the reload started.
+    pub at_start: Vec<Project>,
+    /// The list the worker built and saved, once it has answered.
+    pub built: Option<Vec<Project>>,
+}
+
+/// Whether two project lists agree on everything a reload decides: which
+/// projects there are, in which order, and what each says that is saved (its
+/// name, path, provider, base, auto-reopen, startup command and environment).
+/// What dux learns about a checkout as it runs (its branch, its status,
+/// whether the folder is there) is not a reload's.
+fn same_reload_owned_projects(a: &[Project], b: &[Project]) -> bool {
+    let owned = |p: &Project| {
+        (
+            p.id.clone(),
+            p.name.clone(),
+            p.path.clone(),
+            p.explicit_default_provider.clone(),
+            p.leading_branch.clone(),
+            p.auto_reopen_agents,
+            p.startup_command.clone(),
+            p.env.clone(),
+        )
+    };
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| owned(a) == owned(b))
+}
+
+/// How long an exiting process waits for the focused-tab writes still
+/// queued: each is one small update, so this only matters when the session
+/// database is held by another writer.
+pub const FOCUSED_TAB_FLUSH_BOUND: Duration = Duration::from_secs(2);
+
+/// The lane the focused-tab writes to `db_path` share, so they land in order.
+fn focused_tab_lane(db_path: &Path) -> PathBuf {
+    db_path.with_extension("focused-tab")
 }
 
 /// See [`Engine::serve_memory`].
@@ -413,6 +478,10 @@ pub struct Engine {
     /// Who asked for the reloads running and deferred, so one dux asked for
     /// after its own write is not announced.
     pub reload_origin: ReloadOrigin,
+    /// The project list a reload's worker built off the engine thread, with
+    /// the list as it stood when that reload started, until the apply of its
+    /// config takes it.
+    pub reloaded_projects: Option<ReloadProjects>,
     /// Each live agent tab's provider terminal, by tab id.
     pub providers: HashMap<TabId, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
@@ -2475,6 +2544,7 @@ impl Engine {
                 | Command::PersistProject { .. }
                 | Command::RemoveProject { .. }
                 | Command::DeleteProject { .. }
+                | Command::ReorderProjects { .. }
         )
     }
 
@@ -3096,46 +3166,16 @@ impl Engine {
         &self,
         raw_path: &str,
     ) -> std::result::Result<PathBuf, String> {
-        let trimmed = raw_path.trim();
-        let path = PathBuf::from(trimmed)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(trimmed));
-        if !path.exists() || !crate::git::is_git_repo(&path) {
-            crate::logger::error(&format!("add project rejected for {}", path.display()));
-            return Err(format!("\"{}\" is not a git repository.", path.display()));
-        }
-        // Fail-open on Indeterminate (a gate, per the CommitState doctrine);
-        // WorkTreeRoot and BareRoot pass (bare adds are shipped behavior).
-        // NotARepo is unreachable after the is_git_repo check above.
-        match crate::git::repo_path_kind(&path) {
-            crate::git::RepoPathKind::InsideWorkTree { root } => {
-                return Err(format!(
-                    "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
-                    path.display(),
-                    root.display(),
-                    root.display()
-                ));
-            }
-            crate::git::RepoPathKind::InsideGitDir { .. } => {
-                return Err(format!(
-                    "\"{}\" is inside git's internal directory. Add the repository itself instead.",
-                    path.display()
-                ));
-            }
-            _ => {}
-        }
-        if self.projects.iter().any(|project| {
-            PathBuf::from(&project.path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&project.path))
-                == path
-        }) {
-            return Err(format!(
-                "\"{}\" is already registered as a project.",
-                path.display()
-            ));
-        }
-        Ok(path)
+        crate::project_browser::validate_add_path(raw_path, &self.project_paths())
+    }
+
+    /// Every registered project's path, as stored, for a check that runs off
+    /// the engine thread against what is registered now.
+    pub fn project_paths(&self) -> Vec<String> {
+        self.projects
+            .iter()
+            .map(|project| project.path.clone())
+            .collect()
     }
 
     /// Validate a raw path string before initializing it as a brand-new git
@@ -3153,54 +3193,7 @@ impl Engine {
         &self,
         raw_path: &str,
     ) -> std::result::Result<PathBuf, String> {
-        let trimmed = raw_path.trim();
-        let path = match PathBuf::from(trimmed).canonicalize() {
-            Ok(path) if path.is_dir() => path,
-            _ => {
-                return Err(format!("\"{trimmed}\" is not an existing folder."));
-            }
-        };
-        match crate::git::repo_path_kind(&path) {
-            crate::git::RepoPathKind::NotARepo => {}
-            crate::git::RepoPathKind::WorkTreeRoot | crate::git::RepoPathKind::BareRoot => {
-                return Err(format!(
-                    "\"{}\" is already a git repository. Use Add project instead.",
-                    path.display()
-                ));
-            }
-            crate::git::RepoPathKind::InsideWorkTree { root } => {
-                return Err(format!(
-                    "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
-                    path.display(),
-                    root.display(),
-                    root.display()
-                ));
-            }
-            crate::git::RepoPathKind::InsideGitDir { .. } => {
-                return Err(format!(
-                    "\"{}\" is inside git's internal directory. Add the repository itself instead.",
-                    path.display()
-                ));
-            }
-            crate::git::RepoPathKind::Indeterminate => {
-                return Err(format!(
-                    "couldn't determine whether \"{}\" is already a git repository, so refusing to initialize one there.",
-                    path.display()
-                ));
-            }
-        }
-        if self.projects.iter().any(|project| {
-            PathBuf::from(&project.path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&project.path))
-                == path
-        }) {
-            return Err(format!(
-                "\"{}\" is already registered as a project.",
-                path.display()
-            ));
-        }
-        Ok(path)
+        crate::project_browser::validate_init_path(raw_path, &self.project_paths())
     }
 
     /// Rebuild config.toml's `[[projects]]` from the current runtime projects and
@@ -3235,6 +3228,31 @@ impl Engine {
     /// merge; the new config is still adopted.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
         self.apply_reloaded_config_probing(config, GhReprobe::Now)
+    }
+
+    /// The project list the reload that just finished built on its worker,
+    /// for the apply of its config to adopt. `None` when it built none, or
+    /// when the projects changed after the reload started (a base change
+    /// landing, say): the worker's list could be older than that change, so
+    /// the apply builds the list again rather than restore stale state.
+    /// Only what a reload decides is compared (see
+    /// [`same_reload_owned_projects`]): a branch-status poll landing meanwhile
+    /// does not count, and its answer is kept.
+    pub fn take_reloaded_projects(&mut self) -> Option<Vec<Project>> {
+        let reload = self.reloaded_projects.take()?;
+        if !same_reload_owned_projects(&reload.at_start, &self.projects) {
+            return None;
+        }
+        // What the workspace learned since about each project's checkout (a
+        // branch-status poll) is newer than what the worker read.
+        let mut built = reload.built?;
+        for project in &mut built {
+            if let Some(live) = self.projects.iter().find(|live| live.id == project.id) {
+                project.current_branch.clone_from(&live.current_branch);
+                project.branch_status = live.branch_status;
+            }
+        }
+        Some(built)
     }
 
     /// [`Self::apply_reloaded_config`] that leaves the `gh` probe a reload
@@ -3365,11 +3383,14 @@ impl Engine {
         if probe == GhReprobe::Now {
             self.probe_gh_after_reload(before);
         }
-        self.projects = crate::project_browser::load_projects(
-            &self.session_store.load_projects()?,
-            &self.session_store.load_project_created_ats()?,
-            &config,
-        );
+        self.projects = match self.take_reloaded_projects() {
+            Some(projects) => projects,
+            None => crate::project_browser::load_projects(
+                &self.session_store.load_projects()?,
+                &self.session_store.load_project_created_ats()?,
+                &config,
+            ),
+        };
         self.config = config;
         self.retune_after_config_swap();
         self.refresh_project_defaults();
@@ -4110,11 +4131,15 @@ impl Engine {
                 remedy: crate::poller_status::REMEDY_NEXT_CHANGED_FILES_REFRESH.into(),
             },
             move |tx| {
-                let Some(path) = lock_changed_files_queue(&queue_for_worker).next_request() else {
-                    // Nothing queued: the flag is cleared under the same lock
-                    // the next requester takes, so the worker can exit without
-                    // a request slipping through the gap.
-                    return LoopControl::Break;
+                let (path, read) = {
+                    let mut queue = lock_changed_files_queue(&queue_for_worker);
+                    let Some(path) = queue.next_request() else {
+                        // Nothing queued: the flag is cleared under the same
+                        // lock the next requester takes, so the worker can exit
+                        // without a request slipping through the gap.
+                        return LoopControl::Break;
+                    };
+                    (path, queue.start_read())
                 };
                 let outcome =
                     crate::git::changed_files_for_display(&path).map_err(|e| e.to_string());
@@ -4122,6 +4147,7 @@ impl Engine {
                     .send(WorkerEvent::ChangedFilesReady {
                         outcome,
                         worktree: path,
+                        read,
                     })
                     .is_err()
                 {
@@ -4144,6 +4170,7 @@ impl Engine {
                     "dux could not start a worker thread to read the changed files".to_string(),
                 ),
                 worktree: worktree_if_unspawned,
+                read: lock_changed_files_queue(&queue).start_read(),
             });
         }
     }
@@ -4171,6 +4198,7 @@ impl Engine {
         }
         let watched = Arc::clone(&self.watched_worktree);
         let has_agent = Arc::clone(&self.has_active_processes);
+        let reads = Arc::clone(&self.changed_files_refresh);
         // How long the last sweep took, so the next wait can be paced against
         // it. Zero until one has run, which leaves the first wait at the plain
         // interval.
@@ -4191,6 +4219,7 @@ impl Engine {
                 thread::sleep(changed_files_poll_delay(interval, last_sweep));
                 let path = watched_worktree_of(&watched);
                 let started = Instant::now();
+                let read = lock_changed_files_queue(&reads).start_read();
                 let swept = path
                     .as_ref()
                     .map(|worktree_path| crate::git::changed_files_for_display(worktree_path));
@@ -4211,6 +4240,7 @@ impl Engine {
                             // poll that finished after the watch moved gets dropped
                             // instead of clobbering the current session's files.
                             worktree: worktree_path.clone(),
+                            read,
                         })
                         .is_err()
                 {
@@ -7221,14 +7251,14 @@ impl Engine {
     /// Normalizes `tab_id` to `None` when it is absent, equal to `session_id`
     /// (the session-slot tab, represented as absence), or does not name a live
     /// extra tab belonging to this session, so a stale/foreign id can never be
-    /// persisted. DB-first (mirroring `ToggleAgentAutoReopen`): the storage
-    /// write happens before the in-memory session is updated, so a persistence
-    /// failure leaves memory and SQLite in sync.
+    /// persisted. The choice is in force in memory at once and saved on a
+    /// worker, in the order the switches happened; a save that fails is
+    /// logged rather than reported, since nothing the user sees depends on it
+    /// until the next start.
     ///
     /// # Errors
     ///
-    /// Returns an error for an unknown session or a session database write that
-    /// fails.
+    /// Returns an error for an unknown session.
     pub fn set_last_focused_tab(
         &mut self,
         session_id: &str,
@@ -7252,12 +7282,63 @@ impl Engine {
             }
             _ => None,
         };
-        self.session_store
-            .set_last_focused_tab(session_id, normalized.as_deref())?;
+        self.persist_last_focused_tab(session_id, normalized.clone());
         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
             session.last_focused_tab = normalized;
         }
         Ok(())
+    }
+
+    /// Save a session's remembered tab on a worker: a tab switch is a key
+    /// press, and the database can be held by another writer for seconds.
+    /// The writes go through one lane in the order the switches happened, so
+    /// the last switch is the one the database keeps; a write that fails is
+    /// logged, since the in-memory choice is already in force.
+    fn persist_last_focused_tab(&self, session_id: &str, tab_id: Option<String>) {
+        let db_path = self.paths.sessions_db_path.clone();
+        let ticket = crate::changes_lane::ticket(&focused_tab_lane(&db_path));
+        let session_id = session_id.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("dux-focused-tab".into())
+            .spawn(move || {
+                let _turn = ticket.wait();
+                // Written only while the tab is still an extra one: a promotion
+                // that made it the slot tab since must not be undone.
+                let saved = crate::storage::SessionStore::open(&db_path).and_then(|store| {
+                    store.remember_focused_extra_tab(&session_id, tab_id.as_deref())
+                });
+                if let Err(err) = saved {
+                    crate::logger::warn(&format!(
+                        "could not remember the focused tab of agent {session_id}: {err:#}"
+                    ));
+                }
+            });
+        if let Err(err) = spawned {
+            crate::logger::warn(&format!(
+                "could not start the worker that remembers a focused tab: {err}"
+            ));
+        }
+    }
+
+    /// Wait until every focused-tab write asked for so far has finished.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn wait_for_focused_tab_writes(&self) {
+        drop(crate::changes_lane::ticket(&focused_tab_lane(&self.paths.sessions_db_path)).wait());
+    }
+
+    /// Give the focused-tab writes still queued up to `bound` to finish, for
+    /// a process about to exit; answers whether they did. One left behind is
+    /// a remembered tab lost, which is logged.
+    pub fn flush_focused_tab_writes(&self, bound: Duration) -> bool {
+        let flushed = crate::changes_lane::ticket(&focused_tab_lane(&self.paths.sessions_db_path))
+            .wait_at_most(bound)
+            .is_some();
+        if !flushed {
+            crate::logger::warn(
+                "a remembered focused tab was still being saved at exit and may be lost",
+            );
+        }
+        flushed
     }
 }
 
@@ -10432,6 +10513,59 @@ mod tests {
         }
     }
 
+    /// A reload's worker list is adopted only when the projects are as they
+    /// were when the reload started: a base change that landed in between
+    /// stands, and the apply builds the list again instead.
+    #[test]
+    fn a_reloads_project_list_is_not_adopted_over_a_later_change() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/srv/repo"));
+        let built = engine.projects.clone();
+        engine.reloaded_projects = Some(ReloadProjects {
+            at_start: engine.projects.clone(),
+            built: Some(built.clone()),
+        });
+        assert_eq!(engine.take_reloaded_projects(), Some(built.clone()));
+
+        engine.reloaded_projects = Some(ReloadProjects {
+            at_start: engine.projects.clone(),
+            built: Some(built),
+        });
+        engine.projects[0].leading_branch = Some("changed-meanwhile".to_string());
+        assert_eq!(engine.take_reloaded_projects(), None);
+    }
+
+    /// A branch-status poll landing during a reload is not a change the
+    /// reload's list could undo: the worker's list is still adopted, with the
+    /// poll's answer kept.
+    #[test]
+    fn a_branch_status_update_during_a_reload_still_adopts_its_list() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/srv/repo"));
+        engine.reloaded_projects = Some(ReloadProjects {
+            at_start: engine.projects.clone(),
+            built: Some(engine.projects.clone()),
+        });
+        engine.projects[0].current_branch = "polled".to_string();
+        engine.projects[0].branch_status = crate::model::ProjectBranchStatus::NotLeading;
+
+        let adopted = engine.take_reloaded_projects().expect("adopted");
+        assert_eq!(adopted[0].current_branch, "polled");
+        assert_eq!(
+            adopted[0].branch_status,
+            crate::model::ProjectBranchStatus::NotLeading
+        );
+    }
+
+    /// A project reorder during a reload waits for it, like every other
+    /// project change.
+    #[test]
+    fn a_project_reorder_defers_while_reloading() {
+        assert!(Engine::is_config_mutating(&Command::ReorderProjects {
+            project_ids: Vec::new(),
+        }));
+    }
+
     #[test]
     fn config_mutating_commands_defer_while_reloading() {
         let (mut engine, _tmp) = test_engine();
@@ -12433,7 +12567,8 @@ mod tests {
     fn set_last_focused_tab_persists_a_live_extra_tab() {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat");
-        engine.session_store.upsert_session(&session).unwrap();
+        // Its slot tab stored too, as every agent's is.
+        engine.session_store.create_session(&session).unwrap();
         engine.sessions.push(session);
         let tab = AgentTab {
             id: "tab-1".to_string(),
@@ -12453,9 +12588,51 @@ mod tests {
             engine.sessions[0].last_focused_tab.as_deref(),
             Some("tab-1")
         );
+        engine.wait_for_focused_tab_writes();
         let reloaded = engine.session_store.load_sessions().expect("reload");
         let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
         assert_eq!(s.last_focused_tab.as_deref(), Some("tab-1"));
+    }
+
+    /// The remembered tab is saved on a worker: the switch returns with the
+    /// choice in force while an earlier write still holds the database, and
+    /// the database has it once that write is done.
+    #[test]
+    fn set_last_focused_tab_does_not_wait_for_the_database() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        // Its slot tab stored too, as every agent's is.
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new(tab.id.clone()), tab);
+        let earlier =
+            crate::changes_lane::ticket(&focused_tab_lane(&engine.paths.sessions_db_path)).wait();
+
+        engine
+            .set_last_focused_tab("s1", Some("tab-1"))
+            .expect("the switch is taken");
+        assert_eq!(
+            engine.sessions[0].last_focused_tab.as_deref(),
+            Some("tab-1")
+        );
+        let stored = |engine: &Engine| {
+            engine.session_store.load_sessions().unwrap()[0]
+                .last_focused_tab
+                .clone()
+        };
+        assert_eq!(stored(&engine), None, "not written while the lane is held");
+
+        drop(earlier);
+        engine.wait_for_focused_tab_writes();
+        assert_eq!(stored(&engine).as_deref(), Some("tab-1"));
     }
 
     #[test]
@@ -12471,6 +12648,7 @@ mod tests {
             .expect("normalize session-slot id");
 
         assert_eq!(engine.sessions[0].last_focused_tab, None);
+        engine.wait_for_focused_tab_writes();
         let reloaded = engine.session_store.load_sessions().expect("reload");
         assert_eq!(reloaded[0].last_focused_tab, None);
     }
@@ -13430,6 +13608,37 @@ mod tab_ops_tests {
         assert_eq!(engine.tab_ids_for_session("s1"), vec![TabId::new("t3")]);
     }
 
+    /// A focused-tab write still queued when a promotion makes its tab the
+    /// slot tab lands after the promotion and does not put the memory back.
+    #[test]
+    fn a_queued_focus_write_does_not_undo_a_promotion() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+        let earlier =
+            crate::changes_lane::ticket(&focused_tab_lane(&engine.paths.sessions_db_path)).wait();
+        engine.set_last_focused_tab("s1", Some("t2")).unwrap();
+
+        engine.close_tab("s1", "s1-slot").expect("promotion");
+        drop(earlier);
+        engine.wait_for_focused_tab_writes();
+
+        assert_eq!(
+            engine.session_store.load_sessions().unwrap()[0].last_focused_tab,
+            None
+        );
+    }
+
+    /// Quitting waits for a queued focused-tab write, but not forever.
+    #[test]
+    fn flushing_focused_tab_writes_is_bounded() {
+        let (engine, _tmp) = test_engine();
+        let held =
+            crate::changes_lane::ticket(&focused_tab_lane(&engine.paths.sessions_db_path)).wait();
+        assert!(!engine.flush_focused_tab_writes(Duration::from_millis(50)));
+        drop(held);
+        assert!(engine.flush_focused_tab_writes(Duration::from_secs(5)));
+    }
+
     #[test]
     fn promotion_forgets_a_focus_memory_that_named_the_promoted_tab() {
         let (mut engine, _tmp) = test_engine();
@@ -13437,6 +13646,9 @@ mod tab_ops_tests {
         engine.set_last_focused_tab("s1", Some("t2")).unwrap();
 
         engine.close_tab("s1", "s1-slot").expect("promotion");
+        // The write queued before the promotion lands after it, and must not
+        // put back a memory of what is now the slot tab.
+        engine.wait_for_focused_tab_writes();
 
         assert_eq!(
             engine.sessions[0].last_focused_tab, None,

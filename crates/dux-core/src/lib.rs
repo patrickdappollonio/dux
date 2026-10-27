@@ -19,6 +19,7 @@ pub mod base_branch;
 pub mod bidi;
 pub(crate) mod bounded_command;
 pub mod browser;
+pub mod changes_lane;
 pub mod changes_status;
 pub(crate) mod checkout_move;
 pub mod client;
@@ -78,6 +79,7 @@ pub mod reload_signal;
 pub mod resource_stats;
 #[cfg(all(test, target_os = "linux"))]
 mod review27_tests;
+pub mod route_checks;
 pub mod row_state;
 pub mod scroll_hint;
 pub(crate) mod scroll_margins;

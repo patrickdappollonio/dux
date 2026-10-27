@@ -56,6 +56,16 @@ impl Engine {
         }
     }
 
+    /// The refusal `command` would meet at admission now, without holding
+    /// anything, for a caller about to make slow checks before dispatching it:
+    /// an in-the-way refusal answers first, as it would from the engine.
+    pub fn wire_admission_refusal(&self, command: &WireCommand) -> Option<String> {
+        let admission = self.wire_admission(command)?;
+        self.check_admission(&admission)
+            .err()
+            .map(|in_the_way| anyhow::Error::from(in_the_way).to_string())
+    }
+
     /// Check `admission` without holding anything: refused when an open
     /// record other than the one being dispatched holds what it wants.
     ///

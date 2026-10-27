@@ -904,6 +904,7 @@ mod tests {
                 dux_core::wire::WireCommand::AddProjectCreateInitialCommit {
                     path: repo.to_string_lossy().into_owned(),
                     name: String::new(),
+                    checked: None,
                 },
                 StatusScope::All,
             )

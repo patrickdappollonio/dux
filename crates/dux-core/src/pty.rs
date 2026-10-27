@@ -2651,34 +2651,37 @@ fn join_reader_bounded(reader: ReaderToJoin) {
 /// user setting: it bounds a wait that is normally microseconds.
 pub(crate) const READER_JOIN_BOUND: Duration = Duration::from_millis(250);
 
-/// Resolve a process name from its PID.
+/// Resolve a process name from its PID without starting a process: the
+/// engine thread asks this for every terminal on each foreground refresh, so
+/// it must stay a bounded read.
 ///
-/// On Linux, reads `/proc/{pid}/comm` directly (fast, no subprocess).
-/// On macOS (no `/proc`), falls back to `ps -p {pid} -o comm=`.
+/// On Linux it reads `/proc/{pid}/comm`.
+#[cfg(not(target_os = "macos"))]
 fn process_name(pid: u32) -> Option<String> {
-    // Fast path: try /proc/pid/comm (Linux).
-    if let Ok(name) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    // Fallback: use ps (works on macOS and any POSIX system).
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-        .ok()?;
-    let name = String::from_utf8_lossy(&output.stdout);
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // ps may return a full path; extract just the binary name.
-    std::path::Path::new(trimmed)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(std::string::ToString::to_string)
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Resolve a process name from its PID without starting a process: the
+/// engine thread asks this for every terminal on each foreground refresh, so
+/// it must stay a bounded call.
+///
+/// On macOS (no `/proc`) it asks libproc for the name the kernel records at
+/// exec, the last component of the path the program was started by.
+#[cfg(target_os = "macos")]
+fn process_name(pid: u32) -> Option<String> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    // The kernel's longest process name is 2 * MAXCOMLEN (32) bytes.
+    let mut buffer = [0u8; 64];
+    let size = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: `proc_name` writes at most `size` bytes into `buffer`, which is
+    // that long and lives for the call, and returns how many it wrote.
+    let written = unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), size) };
+    let written = usize::try_from(written).ok().filter(|&n| n > 0)?;
+    let name = String::from_utf8_lossy(buffer.get(..written)?);
+    let trimmed = name.trim_end_matches('\0').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 struct TerminalState {
@@ -6197,6 +6200,18 @@ mod tests {
             reader_exits_after_drop(&reader_exited),
             "the reader thread never exited after drop, so the child was not killed"
         );
+    }
+
+    #[test]
+    fn process_name_names_a_running_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let name = process_name(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(name.as_deref(), Some("sleep"));
     }
 
     #[test]

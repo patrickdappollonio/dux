@@ -9,7 +9,7 @@ use std::thread;
 
 use dux_core::config::{Config, DuxPaths};
 use dux_core::engine::{ConfigSurface, ReloadCompletionGuard};
-use dux_core::worker::WorkerEvent;
+use dux_core::worker::{ReloadedConfig, WorkerEvent};
 
 use crate::keybindings::RuntimeBindings;
 use crate::storage::SessionStore;
@@ -68,12 +68,15 @@ impl ConfigSurface for TuiConfigSurface {
                                 &store,
                             )
                             .map_err(|err| format!("{err:#}"))?;
-                            Ok(config)
+                            Ok(ReloadedConfig {
+                                config,
+                                projects: Some(projects),
+                            })
                         }
                         Err(message) => Err(message),
                     },
                 );
-            guard.complete(result);
+            guard.complete_with_projects(result);
         });
     }
 

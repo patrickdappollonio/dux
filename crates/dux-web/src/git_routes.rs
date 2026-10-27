@@ -237,21 +237,31 @@ pub(crate) async fn resolve_mutation_worktree(
 /// removal of that worktree waits for it. Refused with a 409 that says why once
 /// the worktree's removal has begun: nothing new may start in a folder that is
 /// about to go, and nothing may bring it back.
-pub(crate) fn hold_root_for_write(
+///
+/// The hold resolves where the folder really is on disk, which can stall on a
+/// slow or unreachable mount, so it is taken off the async runtime.
+pub(crate) async fn hold_root_for_write(
     state: &AppState,
     root: &Path,
     kind: dux_core::worktree_ops::WorktreeOpKind,
     what: &str,
 ) -> Result<dux_core::worktree_ops::WorktreeOpGuard, RouteRejection> {
-    state
-        .engine
-        .worktree_ops()
-        .hold(root, kind)
-        .map_err(|refused| {
-            (StatusCode::CONFLICT, refused.sentence(what).to_string())
-                .into_response()
-                .into()
-        })
+    let mut holds = hold_targets_for_write(state, root, &[], kind, what).await?;
+    Ok(holds.swap_remove(0))
+}
+
+/// [`hold_root_for_write`] for a caller already off the async runtime.
+fn hold_path_blocking(
+    ops: &dux_core::worktree_ops::WorktreeOps,
+    path: &Path,
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<dux_core::worktree_ops::WorktreeOpGuard, RouteRejection> {
+    ops.hold(path, kind).map_err(|refused| {
+        (StatusCode::CONFLICT, refused.sentence(what).to_string())
+            .into_response()
+            .into()
+    })
 }
 
 /// Hold every path an editor operation TOUCHES, not the editor's root: the
@@ -263,19 +273,36 @@ pub(crate) fn hold_root_for_write(
 /// folder being removed is refused, and a removal of a folder waits for every
 /// operation touching anything inside it. The targets are the root joined with
 /// the request's relative paths, as spelled; the containment and symlink
-/// checks of the operation itself still run after this.
-pub(crate) fn hold_targets_for_write(
+/// checks of the operation itself still run after this. The root's hold comes
+/// first in the returned list. Taken off the async runtime, as
+/// [`hold_root_for_write`] is.
+pub(crate) async fn hold_targets_for_write(
     state: &AppState,
     root: &Path,
     targets: &[&str],
     kind: dux_core::worktree_ops::WorktreeOpKind,
     what: &str,
 ) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
-    let mut holds = vec![hold_root_for_write(state, root, kind, what)?];
-    for target in targets {
-        holds.push(hold_root_for_write(state, &root.join(target), kind, what)?);
+    let ops = state.engine.worktree_ops().clone();
+    let mut paths = vec![root.to_path_buf()];
+    paths.extend(targets.iter().map(|target| root.join(target)));
+    let what = what.to_string();
+    match tokio::task::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| hold_path_blocking(&ops, path, kind, &what))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    {
+        Ok(holds) => holds,
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("hold task failed: {e}"),
+        )
+            .into_response()
+            .into()),
     }
-    Ok(holds)
 }
 
 /// What an editor delete or move holds while it runs (see
@@ -302,8 +329,8 @@ pub(crate) fn guard_destructive_targets(
 ) -> Result<DestructiveGuard, RouteRejection> {
     let ops = state.engine.worktree_ops();
     let mut guard = DestructiveGuard {
-        _root: hold_root_for_write(
-            state,
+        _root: hold_path_blocking(
+            ops,
             root,
             dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
             what,
@@ -412,6 +439,47 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), RouteR
     }
 }
 
+/// The first steps of every git change a route makes: the session's
+/// worktree, this request's turn in its lane (see [`lane_turn`]), and a hold
+/// on it for `what`, refused once its removal has begun.
+async fn begin_git_change(
+    state: &AppState,
+    session_id: String,
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<
+    (
+        PathBuf,
+        dux_core::changes_lane::Turn,
+        dux_core::worktree_ops::WorktreeOpGuard,
+    ),
+    RouteRejection,
+> {
+    let worktree = resolve_mutation_worktree(state, session_id).await?;
+    let turn = lane_turn(&worktree).await?;
+    let hold = hold_root_for_write(state, &worktree, kind, what).await?;
+    Ok((worktree, turn, hold))
+}
+
+/// Take this request's place in `worktree`'s lane, in line with every other
+/// git change to it from either surface, and wait for its turn. Taken as the
+/// request arrives, before any check reads git, so every check and the change
+/// itself see the tree the changes asked for earlier have left, as the
+/// engine's own changes do.
+async fn lane_turn(worktree: &Path) -> Result<dux_core::changes_lane::Turn, RouteRejection> {
+    let ticket = dux_core::changes_lane::ticket(worktree);
+    tokio::task::spawn_blocking(move || ticket.wait())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git task failed: {e}"),
+            )
+                .into_response()
+                .into()
+        })
+}
+
 /// Run a blocking git closure off the reactor, mapping its result to a response
 /// error (the success arm is left to the caller, which may also refresh state).
 ///
@@ -432,6 +500,7 @@ async fn run_git<F, T>(
     action: &'static str,
     worktree: &Path,
     hold: dux_core::worktree_ops::WorktreeOpGuard,
+    turn: dux_core::changes_lane::Turn,
     op: F,
 ) -> Result<T, RouteRejection>
 where
@@ -439,11 +508,13 @@ where
     T: Send + 'static,
 {
     let worktree = worktree.to_path_buf();
-    // The hold rides INTO the blocking task: a client that disconnects drops
-    // this future, and the git work it started must still keep its worktree
-    // registered until it has actually finished.
+    // The hold and the lane turn ride INTO the blocking task: a client that
+    // disconnects drops this future, and the git work it started must still
+    // keep its worktree registered, and the next change waiting, until it has
+    // actually finished.
     match tokio::task::spawn_blocking(move || {
         let _hold = hold;
+        let _turn = turn;
         op()
     })
     .await
@@ -492,30 +563,33 @@ async fn stage(
         return unknown_session();
     }
     let session_id = id.clone();
-    let worktree = match resolve_mutation_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r.into_response(),
-    };
-    let hold = match hold_root_for_write(
+    let (worktree, turn, hold) = match begin_git_change(
         &state,
-        &worktree,
+        id,
         dux_core::worktree_ops::WorktreeOpKind::GitChange,
         "change files in it",
-    ) {
-        Ok(hold) => hold,
+    )
+    .await
+    {
+        Ok(begun) => begun,
         Err(r) => return r.into_response(),
     };
     if let Err(r) = validate_changed_path(&worktree, &op.path).await {
         return r.into_response();
     }
-    if let Some(sentence) = dux_core::git::stage_refusal(&worktree, &op.path) {
-        return (StatusCode::BAD_REQUEST, sentence).into_response();
+    // The refusal asks git and the filesystem, so it runs off the runtime.
+    let wt = worktree.clone();
+    let path = op.path.clone();
+    match off_runtime(move || dux_core::git::stage_refusal(&wt, &path)).await {
+        Ok(None) => {}
+        Ok(Some(sentence)) => return (StatusCode::BAD_REQUEST, sentence).into_response(),
+        Err(r) => return r.into_response(),
     }
     // A folder is staged without the repositories inside it, and the answer
     // says how many it left out, so the browser can say so.
     let wt = worktree.clone();
     let paths = vec![op.path];
-    let report = match run_git(STAGE_ACTION, &worktree, hold, move || {
+    let report = match run_git(STAGE_ACTION, &worktree, hold, turn, move || {
         dux_core::git::stage_with_report(&wt, &paths)
     })
     .await
@@ -567,17 +641,15 @@ async fn discard(
         return unknown_session();
     }
     let session_id = id.clone();
-    let worktree = match resolve_mutation_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r.into_response(),
-    };
-    let hold = match hold_root_for_write(
+    let (worktree, turn, hold) = match begin_git_change(
         &state,
-        &worktree,
+        id,
         dux_core::worktree_ops::WorktreeOpKind::GitChange,
         "change files in it",
-    ) {
-        Ok(hold) => hold,
+    )
+    .await
+    {
+        Ok(begun) => begun,
         Err(r) => return r.into_response(),
     };
     // Discard is destructive (deletes untracked files / restores tracked ones),
@@ -619,8 +691,11 @@ async fn discard(
     let target = worktree.join(&path);
     // A link at the path is removed whether it is untracked or stands where a
     // tracked file was (the restore replaces it).
-    let deletes_a_link =
-        std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink());
+    let link = target.clone();
+    let deletes_a_link = match off_runtime(move || is_a_link(&link)).await {
+        Ok(is_link) => is_link,
+        Err(r) => return r.into_response(),
+    };
     let claim = match confirmed {
         Some(
             dux_core::git::ConfirmedEntry::Folder { .. }
@@ -641,25 +716,31 @@ async fn discard(
     };
     // A folder that is no longer what the user confirmed is a refusal they can
     // act on (look again), which `run_git` answers as one.
-    let files_deleted = match run_git("discard the file's changes", &worktree, hold, move || {
-        dux_core::git::discard_confirmed(
-            &wt,
-            &path,
-            if untracked {
-                dux_core::git::FileTracking::Untracked
-            } else {
-                dux_core::git::FileTracking::Tracked
-            },
-            confirmed,
-            || match &claim {
-                Some(claim) => check.clear(&[claim], "delete"),
-                None => Err(dux_core::destructive::Refused(format!(
-                    "dux did not delete {}: nothing confirmed it as a folder",
-                    dux_core::home_path::shorten_home(&target)
-                ))),
-            },
-        )
-    })
+    let files_deleted = match run_git(
+        "discard the file's changes",
+        &worktree,
+        hold,
+        turn,
+        move || {
+            dux_core::git::discard_confirmed(
+                &wt,
+                &path,
+                if untracked {
+                    dux_core::git::FileTracking::Untracked
+                } else {
+                    dux_core::git::FileTracking::Tracked
+                },
+                confirmed,
+                || match &claim {
+                    Some(claim) => check.clear(&[claim], "delete"),
+                    None => Err(dux_core::destructive::Refused(format!(
+                        "dux did not delete {}: nothing confirmed it as a folder",
+                        dux_core::home_path::shorten_home(&target)
+                    ))),
+                },
+            )
+        },
+    )
     .await
     {
         Ok(files) => files,
@@ -673,6 +754,26 @@ async fn discard(
         Json(serde_json::json!({ "files_deleted": files_deleted })),
     )
         .into_response()
+}
+
+/// Whether a link stands at `path` (the link itself, never what it leads to).
+fn is_a_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Run a blocking check (git, the filesystem) off the async runtime; a task
+/// that fails to finish is a 500.
+async fn off_runtime<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, RouteRejection> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git task failed: {e}"),
+        )
+            .into_response()
+            .into()
+    })
 }
 
 /// Claim `target` for a delete that takes it whole, off the runtime, since a
@@ -853,17 +954,15 @@ async fn files_op(
         )
             .into_response();
     }
-    let worktree = match resolve_mutation_worktree(&state, session_id.clone()).await {
-        Ok(w) => w,
-        Err(r) => return r.into_response(),
-    };
-    let hold = match hold_root_for_write(
+    let (worktree, turn, hold) = match begin_git_change(
         &state,
-        &worktree,
+        session_id.clone(),
         dux_core::worktree_ops::WorktreeOpKind::GitChange,
         "change files in it",
-    ) {
-        Ok(hold) => hold,
+    )
+    .await
+    {
+        Ok(begun) => begun,
         Err(r) => return r.into_response(),
     };
 
@@ -888,15 +987,21 @@ async fn files_op(
     // sentence, and the rest of the batch goes ahead.
     let wt = worktree.clone();
     let batch = done.clone();
-    let partition = match run_git(section.action(), &worktree, hold, move || match section {
-        Section::Staged => {
-            dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
-                staged: batch,
-                ..Default::default()
-            })
-        }
-        Section::Unstaged => dux_core::git::stage_partitioned(&wt, &batch),
-    })
+    let partition = match run_git(
+        section.action(),
+        &worktree,
+        hold,
+        turn,
+        move || match section {
+            Section::Staged => {
+                dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
+                    staged: batch,
+                    ..Default::default()
+                })
+            }
+            Section::Unstaged => dux_core::git::stage_partitioned(&wt, &batch),
+        },
+    )
     .await
     {
         Ok(partition) => partition,
@@ -947,24 +1052,22 @@ async fn file_op<F>(
 where
     F: FnOnce(PathBuf, String) -> anyhow::Result<()> + Send + 'static,
 {
-    let worktree = match resolve_mutation_worktree(&state, session_id.clone()).await {
-        Ok(w) => w,
-        Err(r) => return r.into_response(),
-    };
-    let hold = match hold_root_for_write(
+    let (worktree, turn, hold) = match begin_git_change(
         &state,
-        &worktree,
+        session_id.clone(),
         dux_core::worktree_ops::WorktreeOpKind::GitChange,
         "change files in it",
-    ) {
-        Ok(hold) => hold,
+    )
+    .await
+    {
+        Ok(begun) => begun,
         Err(r) => return r.into_response(),
     };
     if let Err(r) = validate_changed_path(&worktree, &path).await {
         return r.into_response();
     }
     let wt = worktree.clone();
-    if let Err(r) = run_git(action, &worktree, hold, move || op(wt, path)).await {
+    if let Err(r) = run_git(action, &worktree, hold, turn, move || op(wt, path)).await {
         return r.into_response();
     }
     refresh_changed_files_now(&state, session_id, &worktree);
@@ -991,17 +1094,15 @@ async fn commit(
             .into_response();
     }
     let session_id = id.clone();
-    let worktree = match resolve_mutation_worktree(&state, id).await {
-        Ok(w) => w,
-        Err(r) => return r.into_response(),
-    };
-    let hold = match hold_root_for_write(
+    let (worktree, turn, hold) = match begin_git_change(
         &state,
-        &worktree,
+        id,
         dux_core::worktree_ops::WorktreeOpKind::Commit,
         "commit in it",
-    ) {
-        Ok(hold) => hold,
+    )
+    .await
+    {
+        Ok(begun) => begun,
         Err(r) => return r.into_response(),
     };
     // The empty-message and nothing-staged refusals are the shared core decision
@@ -1034,9 +1135,13 @@ async fn commit(
     }
     let wt = worktree.clone();
     let message = op.message;
-    if let Err(r) = run_git("commit the staged changes", &worktree, hold, move || {
-        dux_core::git::commit(&wt, &message).map(|_| ())
-    })
+    if let Err(r) = run_git(
+        "commit the staged changes",
+        &worktree,
+        hold,
+        turn,
+        move || dux_core::git::commit(&wt, &message).map(|_| ()),
+    )
     .await
     {
         return r.into_response();
@@ -1521,9 +1626,14 @@ mod tests {
         let hold = dux_core::worktree_ops::WorktreeOps::new()
             .hold(&worktree, dux_core::worktree_ops::WorktreeOpKind::Commit)
             .unwrap();
-        let err = super::run_git("commit the staged changes", &worktree, hold, move || {
-            Err::<(), _>(anyhow::anyhow!("git commit failed: {stderr}"))
-        })
+        let turn = super::lane_turn(&worktree).await.expect("a turn");
+        let err = super::run_git(
+            "commit the staged changes",
+            &worktree,
+            hold,
+            turn,
+            move || Err::<(), _>(anyhow::anyhow!("git commit failed: {stderr}")),
+        )
         .await
         .expect_err("a failing git op must produce a response")
         .into_response();
@@ -1570,6 +1680,113 @@ mod tests {
         std::fs::write(worktree.join("f.txt"), "line1\nline2\n").unwrap();
         std::fs::write(worktree.join("second.txt"), "new\n").unwrap();
         std::fs::write(worktree.join("-lead.txt"), "new\n").unwrap();
+    }
+
+    /// Send `uri` with `body` as its own request and give it time to take its
+    /// place in the worktree's lane.
+    async fn queued(
+        app: &axum::Router,
+        uri: &'static str,
+        body: &'static str,
+    ) -> tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>> {
+        let request = tokio::spawn(app.clone().oneshot(json_req("POST", uri, body)));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        request
+    }
+
+    /// A commit asked for after a stage sees the stage: its nothing-staged
+    /// check runs in its own turn, after the stage's, not as it arrives.
+    #[tokio::test]
+    async fn a_commit_after_a_stage_sees_what_the_stage_staged() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+        let running = dux_core::changes_lane::ticket(&worktree).wait();
+
+        let stage = queued(&app, "/api/v1/sessions/s1/git/stage", r#"{"path":"f.txt"}"#).await;
+        let commit = queued(
+            &app,
+            "/api/v1/sessions/s1/git/commit",
+            r#"{"message":"after the stage"}"#,
+        )
+        .await;
+        drop(running);
+
+        let staged = stage.await.unwrap().unwrap();
+        assert_eq!(staged.status(), StatusCode::OK);
+        let committed = commit.await.unwrap().unwrap();
+        assert_eq!(
+            committed.status(),
+            StatusCode::OK,
+            "{}",
+            body_text(committed).await
+        );
+    }
+
+    /// A discard asked for after a stage of the same new file reads the file
+    /// as the stage left it: staged, so it is refused, and the file stays.
+    #[tokio::test]
+    async fn a_discard_after_a_stage_does_not_delete_the_staged_file() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+        let running = dux_core::changes_lane::ticket(&worktree).wait();
+
+        let stage = queued(
+            &app,
+            "/api/v1/sessions/s1/git/stage",
+            r#"{"path":"second.txt"}"#,
+        )
+        .await;
+        let discard = queued(
+            &app,
+            "/api/v1/sessions/s1/git/discard",
+            r#"{"path":"second.txt","kind":"file"}"#,
+        )
+        .await;
+        drop(running);
+
+        assert_eq!(stage.await.unwrap().unwrap().status(), StatusCode::OK);
+        let discarded = discard.await.unwrap().unwrap();
+        assert_eq!(discarded.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            worktree.join("second.txt").exists(),
+            "the staged file was deleted"
+        );
+    }
+
+    /// A stage from the browser waits its turn behind a change to the same
+    /// worktree still running from anywhere (the engine, the terminal UI), so
+    /// two changes asked one after the other never land the other way round.
+    #[tokio::test]
+    async fn a_web_stage_waits_for_an_earlier_change_to_its_worktree() {
+        let (tmp, app, _state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        dirty_three(&worktree);
+        let running = dux_core::changes_lane::ticket(&worktree).wait();
+
+        let request = tokio::spawn(app.clone().oneshot(json_req(
+            "POST",
+            "/api/v1/sessions/s1/git/stage",
+            r#"{"path":"second.txt"}"#,
+        )));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !request.is_finished(),
+            "the stage ran past the earlier change"
+        );
+
+        drop(running);
+        let resp = request.await.unwrap().unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", body_text(resp).await);
+        let staged = tokio::task::spawn_blocking(move || {
+            dux_core::git::changed_files_for_display(&worktree)
+                .unwrap()
+                .0
+        })
+        .await
+        .unwrap();
+        assert!(staged.iter().any(|file| file.path == "second.txt"));
     }
 
     /// The batch route does in ONE call what N single-path calls did: one git

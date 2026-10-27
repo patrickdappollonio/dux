@@ -16,7 +16,7 @@
 use std::sync::mpsc::Sender;
 
 use crate::config::{Config, DuxPaths};
-use crate::worker::WorkerEvent;
+use crate::worker::{ReloadedConfig, WorkerEvent};
 
 /// Guarantees a reload worker posts exactly one
 /// `WorkerEvent::ConfigReloadReady`, even on an early return or a panic.
@@ -45,11 +45,20 @@ impl ReloadCompletionGuard {
 
     /// Post the real reload result and mark the guard satisfied so `Drop` does
     /// not also post an `Err`. Call this exactly once, on the normal path.
-    pub fn complete(mut self, result: Result<Config, String>) {
+    pub fn complete(self, result: Result<Config, String>) {
+        self.complete_with_projects(result.map(|config| ReloadedConfig {
+            config,
+            projects: None,
+        }));
+    }
+
+    /// [`Self::complete`] for a worker that also built the runtime project
+    /// list, so the apply adopts it rather than building it again.
+    pub fn complete_with_projects(mut self, result: Result<ReloadedConfig, String>) {
         self.send(result);
     }
 
-    fn send(&mut self, result: Result<Config, String>) {
+    fn send(&mut self, result: Result<ReloadedConfig, String>) {
         if !self.sent {
             self.sent = true;
             let _ = self

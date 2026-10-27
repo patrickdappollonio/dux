@@ -191,6 +191,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         deferred_commands: Vec::new(),
         reload_guard: None,
         reload_origin: ReloadOrigin::default(),
+        reloaded_projects: None,
         providers: std::collections::HashMap::new(),
         running_provider_pins: std::collections::HashMap::new(),
         launched_drop_paste: HashMap::default(),
@@ -306,6 +307,11 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         unpushed_count_rx: None,
         rename_pushed_rx: None,
         pr_clone_check_rx: None,
+        ui_jobs: crate::app::ui_jobs::UiJobs::default(),
+        path_completion: crate::app::PathCompletion::default(),
+        browser_add: crate::app::BrowserAdd::default(),
+        theme_previews: None,
+        diff_wrap_ask: None,
         pr_clone_awaiting: None,
         notes_fetch_rx: None,
         deferred_first_load_notes: None,
@@ -728,6 +734,20 @@ fn test_app_removes_its_scratch_root_when_dropped() {
 fn test_app_cannot_launch_a_real_agent_cli() {
     let app = test_app(default_bindings());
     dux_core::test_provider::assert_fixture_config_is_harmless(&app.engine.config);
+}
+
+/// Run every job a key put on a worker to its end, continuation included.
+pub(crate) fn finish_ui_jobs(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !app.ui_jobs.is_idle() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a worker job never answered; status: {}",
+            app.status.text()
+        );
+        app.drain_ui_jobs();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 /// Opening a worktree "in an editor" from this crate's tests resolves to the

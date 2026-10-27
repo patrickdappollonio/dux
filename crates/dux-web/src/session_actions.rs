@@ -190,6 +190,7 @@ impl CreateSessionBody {
                 name,
                 use_existing_branch,
                 copy_uncommitted_changes,
+                name_checked: None,
             },
             CreateSessionBody::Fork { session_id, name } => {
                 WireCommand::ForkSession { session_id, name }
@@ -202,6 +203,7 @@ impl CreateSessionBody {
                 project_id,
                 worktree_path,
                 name,
+                checked: None,
             },
             CreateSessionBody::FromPr {
                 project_id,
@@ -282,40 +284,138 @@ async fn replay_created_session(
     )
 }
 
-async fn existing_branch_conflict(state: &AppState, body: &CreateSessionBody) -> Option<Response> {
-    let CreateSessionBody::New {
-        project_id,
-        name,
-        use_existing_branch,
-        ..
-    } = body
-    else {
-        return None;
-    };
-    let name = name.trim();
-    if *use_existing_branch || name.is_empty() {
-        return None;
+/// Turn the create's body into its wire command, with the checks that ask git
+/// made here on the blocking pool so the engine thread does not make them.
+///
+/// Existing-branch consent: an unconfirmed user-typed name that names an
+/// existing branch is refused with a confirmable 409 carrying the branch and
+/// its location, so the client asks and re-POSTs with `use_existing_branch`
+/// rather than silently adopting that branch's history; a name found free rides
+/// the command as checked. An adopt's worktree listing is read here too, and a
+/// worktree no agent may adopt is the same 400 the engine would answer. A
+/// request naming no known project is left for the engine to refuse.
+async fn checked_create_command(
+    state: &AppState,
+    body: CreateSessionBody,
+    operation: &OperationQuery,
+) -> Result<WireCommand, crate::rest_common::RouteRejection> {
+    match body.into_wire() {
+        WireCommand::CreateAgent {
+            project_id,
+            name,
+            copy_uncommitted_changes,
+            use_existing_branch,
+            ..
+        } => {
+            let trimmed = name.trim().to_string();
+            let mut name_checked = None;
+            if !use_existing_branch && !trimmed.is_empty() {
+                match state
+                    .engine
+                    .create_agent_branch_plan(project_id.clone(), trimmed.clone())
+                    .await
+                {
+                    Some(dux_core::git::CreateAgentBranchPlan::ExistingBranch { location }) => {
+                        let location = match location {
+                            dux_core::git::BranchLocation::Local => "local",
+                            dux_core::git::BranchLocation::Remote => "remote",
+                        };
+                        return Err((
+                            StatusCode::CONFLICT,
+                            Json(serde_json::json!({
+                                "existing_branch": { "name": trimmed, "location": location }
+                            })),
+                        )
+                            .into_response()
+                            .into());
+                    }
+                    Some(_) => name_checked = Some(trimmed),
+                    None => {}
+                }
+            }
+            Ok(WireCommand::CreateAgent {
+                project_id,
+                name,
+                copy_uncommitted_changes,
+                use_existing_branch,
+                name_checked,
+            })
+        }
+        WireCommand::CreateAgentFromWorktree {
+            project_id,
+            worktree_path,
+            name,
+            ..
+        } => checked_adopt_command(state, project_id, worktree_path, name, operation).await,
+        other => Ok(other),
     }
-    let plan = state
+}
+
+/// [`checked_create_command`] for an adopt: refused first when a change is
+/// in the way of it, then the project's worktrees listed on the blocking pool.
+async fn checked_adopt_command(
+    state: &AppState,
+    project_id: String,
+    worktree_path: String,
+    name: String,
+    operation: &OperationQuery,
+) -> Result<WireCommand, crate::rest_common::RouteRejection> {
+    // A change in the way (the project being removed) is refused first,
+    // as the engine refuses it, and before git runs against a project
+    // that is going.
+    let unchecked = WireCommand::CreateAgentFromWorktree {
+        project_id: project_id.clone(),
+        worktree_path: worktree_path.clone(),
+        name: name.clone(),
+        checked: None,
+    };
+    if let Some(refused) = state.engine.wire_admission_refusal(unchecked).await {
+        let response = if operation.asked() {
+            followed_refusal(state, StatusCode::CONFLICT, refused)
+        } else {
+            (StatusCode::CONFLICT, refused).into_response()
+        };
+        return Err(response.into());
+    }
+    let Some(inputs) = state
         .engine
-        .create_agent_branch_plan(project_id.clone(), name.to_string())
-        .await?;
-    let dux_core::git::CreateAgentBranchPlan::ExistingBranch { location } = plan else {
-        return None;
+        .project_worktree_inputs(project_id.clone())
+        .await
+    else {
+        return Ok(WireCommand::CreateAgentFromWorktree {
+            project_id,
+            worktree_path,
+            name,
+            checked: None,
+        });
     };
-    let location = match location {
-        dux_core::git::BranchLocation::Local => "local",
-        dux_core::git::BranchLocation::Remote => "remote",
-    };
-    Some(
-        (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "existing_branch": { "name": name, "location": location }
-            })),
+    let path = worktree_path.clone();
+    let checked = tokio::task::spawn_blocking(move || {
+        dux_core::route_checks::check_adopt_worktree(
+            &inputs.project,
+            &inputs.paths,
+            &inputs.sessions,
+            &path,
         )
-            .into_response(),
-    )
+    })
+    .await;
+    match checked {
+        Ok(Ok(checked)) => Ok(WireCommand::CreateAgentFromWorktree {
+            project_id,
+            worktree_path,
+            name,
+            checked: Some(checked),
+        }),
+        Ok(Err(refused)) => Err((StatusCode::BAD_REQUEST, refused.to_string())
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worktree check failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
 }
 
 /// Dispatch a create and tell an accepted outcome from a refusal to serve back.
@@ -328,7 +428,7 @@ async fn existing_branch_conflict(state: &AppState, body: &CreateSessionBody) ->
 /// response, which keeps the error small enough for clippy's large-error lint.
 async fn dispatch_create(
     state: &AppState,
-    body: CreateSessionBody,
+    command: WireCommand,
     headers: &HeaderMap,
     operation: &OperationQuery,
 ) -> Result<dux_core::wire::WireCommandOutcome, (StatusCode, String)> {
@@ -336,13 +436,13 @@ async fn dispatch_create(
     let outcome = if operation.asked() {
         state
             .engine
-            .apply_wire_operation(body.into_wire(), scope, OperationKind::AgentCreate)
+            .apply_wire_operation(command, scope, OperationKind::AgentCreate)
             .await
             .map(|(outcome, _)| outcome)
     } else {
         state
             .engine
-            .apply_wire_recorded(body.into_wire(), scope, OperationKind::AgentCreate)
+            .apply_wire_recorded(command, scope, OperationKind::AgentCreate)
             .await
     }
     .map_err(|e| {
@@ -401,18 +501,17 @@ async fn create_session(
         return response;
     }
 
-    // Existing-branch consent: an unconfirmed user-typed name that names an existing
-    // branch is refused with a confirmable 409 carrying the branch and its location,
-    // so the client asks and re-POSTs with `use_existing_branch` rather than silently
-    // adopting that branch's history. The wire command refuses the same way.
-    if let Some(response) = existing_branch_conflict(&state, &body).await {
-        return response;
-    }
+    // The from-PR create resolves differently, below.
+    let from_pr = matches!(body, CreateSessionBody::FromPr { .. });
+    let command = match checked_create_command(&state, body, &operation).await {
+        Ok(command) => command,
+        Err(response) => return response.into_response(),
+    };
 
     // Followed as an operation: the record answers at once, and its id is the
     // create op (or, for a from-PR create, the lookup that hands off to it).
     if operation.asked() {
-        return match dispatch_create(&state, body, &headers, &operation).await {
+        return match dispatch_create(&state, command, &headers, &operation).await {
             Ok(outcome) => match &outcome.operation {
                 Some(record) => {
                     if let Some(key) = key {
@@ -434,7 +533,7 @@ async fn create_session(
     // (inside the PR-lookup followup), so it has no synchronous `created_op_id` and
     // must fall back to the set-difference await with a longer window (the
     // `gh pr view` network call routinely exceeds the default 20s).
-    let default_window = if matches!(body, CreateSessionBody::FromPr { .. }) {
+    let default_window = if from_pr {
         FROM_PR_CREATE_AWAIT_TIMEOUT
     } else {
         CREATE_AWAIT_TIMEOUT
@@ -447,7 +546,7 @@ async fn create_session(
         None => return engine_unavailable(),
     };
 
-    let outcome = match dispatch_create(&state, body, &headers, &operation).await {
+    let outcome = match dispatch_create(&state, command, &headers, &operation).await {
         Ok(outcome) => outcome,
         Err(refusal) => return refusal.into_response(),
     };
@@ -1742,6 +1841,75 @@ mod tests {
             !String::from_utf8_lossy(&body).is_empty(),
             "the refusal must carry the engine's message"
         );
+    }
+
+    /// An adopt into a project whose removal is running is refused as in the
+    /// way, before any worktree listing, as the engine refuses it.
+    #[tokio::test]
+    async fn an_adopt_into_a_project_being_removed_is_in_the_way_first() {
+        let (_tmp, engine) = engine_with_project_and_branch("other");
+        engine.open_operation("op-rm", dux_core::operations::OperationKind::ProjectRemove);
+        engine
+            .operations
+            .admit(
+                Some("op-rm"),
+                &[],
+                &[dux_core::operations::Hold::exclusive(
+                    dux_core::engine::InFlightKey::Project("p1".to_string()),
+                )],
+            )
+            .expect("the removal holds the project");
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        let response = post_create(
+            &app,
+            serde_json::json!({
+                "kind": "from_worktree",
+                "project_id": "p1",
+                "worktree_path": "/nowhere/at/all",
+                "name": "adopted",
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            dux_core::operations::is_in_the_way(&String::from_utf8_lossy(&body)),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    /// An adopt of a folder that is no managed worktree is listed in the
+    /// route, and refused there with the engine's own sentence as a 400,
+    /// followed or not.
+    #[tokio::test]
+    async fn an_adopt_of_a_folder_that_is_no_managed_worktree_is_refused_at_once() {
+        for uri in ["/api/v1/sessions", "/api/v1/sessions?operation=1"] {
+            let (_tmp, app, project_id) = router_with_project_and_branch("other");
+            let response = post_create_at(
+                &app,
+                uri,
+                serde_json::json!({
+                    "kind": "from_worktree",
+                    "project_id": project_id,
+                    "worktree_path": "/nowhere/at/all",
+                    "name": "adopted",
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).starts_with(
+                    "Worktree \"/nowhere/at/all\" is not an adoptable managed worktree"
+                ),
+                "{uri}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
     }
 
     /// An unconfirmed create whose name matches an existing branch is

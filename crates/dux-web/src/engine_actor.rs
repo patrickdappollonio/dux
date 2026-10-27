@@ -420,6 +420,10 @@ pub(crate) enum EngineRequest {
     /// classification shells to git and runs off-thread in the server handler.
     /// `None` when the project id is unknown.
     ProjectWorktreeInputs(String, oneshot::Sender<Option<ProjectWorktreeInputs>>),
+    /// The refusal a wire command would meet at admission now, holding
+    /// nothing, so a route answers it before running slow checks. An in-memory
+    /// read.
+    WireAdmissionRefusal(Box<WireCommand>, oneshot::Sender<Option<String>>),
     /// Decide a worktree-manager removal against the engine's LIVE state and
     /// announce it, `None` when the project id is unknown. The slow part (the
     /// wait for operations in the worktree, then git) is the admitted ticket's,
@@ -2154,6 +2158,22 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// The refusal `command` would meet at admission now (see
+    /// [`EngineRequest::WireAdmissionRefusal`]); `None` when it would be
+    /// admitted or the engine thread is gone.
+    pub(crate) async fn wire_admission_refusal(&self, command: WireCommand) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::WireAdmissionRefusal(Box::new(command), tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// The project list, host policy, per-host git protocols, the program the
     /// pull request lookup runs and the gh-availability flag the pull-request
     /// reference resolver needs. See
@@ -2497,6 +2517,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::FileDropRefreshTarget(..)
         | EngineRequest::ProjectPath(..)
         | EngineRequest::ProjectWorktreeInputs(..)
+        | EngineRequest::WireAdmissionRefusal(..)
         // Announces a removal in the worktree registry; no spine row changes
         // until the removal finishes and the listing is asked again.
         | EngineRequest::AdmitManagerRemoval { .. }
@@ -3511,6 +3532,7 @@ impl EngineService {
                             engine.shutdown_ptys(grace);
                         }
                     }
+                    engine.flush_focused_tab_writes(dux_core::engine::FOCUSED_TAB_FLUSH_BOUND);
                     let _ = reply.send(());
                     stopped = true;
                     break;
@@ -4716,6 +4738,9 @@ fn handle_request(
         ),
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             answer(reply, project_worktree_inputs(engine, &project_id));
+        }
+        EngineRequest::WireAdmissionRefusal(command, reply) => {
+            answer(reply, engine.wire_admission_refusal(&command));
         }
         EngineRequest::SessionStartupLogContext(session_id, reply) => {
             answer(reply, session_startup_log_context(engine, &session_id));
@@ -9405,6 +9430,16 @@ mod tests {
                 false,
             ),
             (
+                "WireAdmissionRefusal",
+                EngineRequest::WireAdmissionRefusal(
+                    Box::new(WireCommand::RemoveProject {
+                        project_id: "p1".into(),
+                    }),
+                    dead_reply(),
+                ),
+                false,
+            ),
+            (
                 "AdmitManagerRemoval",
                 EngineRequest::AdmitManagerRemoval {
                     project_id: "p1".into(),
@@ -9553,7 +9588,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            46,
+            47,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

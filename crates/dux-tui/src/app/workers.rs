@@ -133,7 +133,9 @@ impl DrainedEventMetadata {
                 _ => None,
             },
             changed_files_answer: match event {
-                WorkerEvent::ChangedFilesReady { outcome, worktree } => Some(ChangedFilesAnswer {
+                WorkerEvent::ChangedFilesReady {
+                    outcome, worktree, ..
+                } => Some(ChangedFilesAnswer {
                     worktree: worktree.clone(),
                     error: outcome.as_ref().err().cloned(),
                 }),
@@ -180,6 +182,7 @@ impl App {
         self.drain_unpushed_count();
         self.drain_rename_pushed_probe();
         self.drain_pr_clone_folder_check();
+        self.drain_ui_jobs();
         self.drain_branch_listing();
         self.drain_pending_diff();
         self.drain_changes_tree_work();
@@ -1021,31 +1024,90 @@ impl App {
         }
     }
 
+    /// Save the branch the inspection found for `project`, then carry on with
+    /// the create. The session database is written on a worker, since another
+    /// writer can hold it for seconds; the create continues once it is saved,
+    /// as it did when the save ran here.
+    /// Save the branch the inspection found for `project`, then carry on with
+    /// the create. Only that project's base is written, and on a worker, since
+    /// another writer can hold the session database for seconds; a project
+    /// removed meanwhile is left alone. The create continues once the base is
+    /// saved, as it did when the save ran here.
     fn apply_continue_create_agent_after_inspection(
         &mut self,
         project: Project,
         inspection: CreateAgentBranchInspection,
     ) {
         let project_name = project.name.clone();
-        match self.sync_projects_to_store_and_update_config() {
-            Ok(()) => {
+        let project_id = project.id.clone();
+        let base = inspection.leading_branch.clone();
+        let db_path = self.engine.paths.sessions_db_path.clone();
+        self.spawn_ui_job(
+            crate::app::ui_jobs::UiJob {
+                busy: dux_core::status_text![
+                    "Saving the branch dux found for project ",
+                    q(project_name.clone()),
+                    "\u{2026}"
+                ],
+                stopped: format!(
+                    "dux could not finish saving the branch it found for project \
+                     \"{project_name}\"; dux.log has the details."
+                ),
+            },
+            move || save_project_base(&db_path, &project_id, &base),
+            move |app: &mut App, saved: Option<Result<BaseSaved, String>>| {
+                app.continue_after_base_saved(project, inspection, saved);
+            },
+        );
+    }
+
+    fn continue_after_base_saved(
+        &mut self,
+        project: Project,
+        inspection: CreateAgentBranchInspection,
+        saved: Option<Result<BaseSaved, String>>,
+    ) {
+        let project_name = project.name.clone();
+        // The project as the workspace has it now decides whether the create
+        // goes on; a row the database no longer holds was only not written.
+        if !self.engine.projects.iter().any(|p| p.id == project.id) {
+            self.set_info(format!(
+                "No agent was started: project \"{project_name}\" was removed while dux was \
+                 saving the branch it found."
+            ));
+            return;
+        }
+        match saved {
+            Some(Ok(BaseSaved::Saved)) => {
+                self.rebuild_config_projects();
                 if let Err(error) = self
                     .engine
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
                     self.set_error(format!(
-                        "Project branch was detected, but config.toml could not be updated: {error}"
+                        "Project branch was detected, but config.toml could not be updated: \
+                         {error}"
                     ));
                 }
             }
-            Err(error) => self.set_error(format!(
-                "Project branch was detected, but the session database could not be updated: {error:#}"
+            Some(Err(error)) => self.set_error(format!(
+                "Project branch was detected, but the session database could not be updated: \
+                 {error}"
             )),
+            Some(Ok(BaseSaved::ProjectGone)) | None => {}
+        }
+        if let Some(blocker) = self.job_dialog_blocker() {
+            self.set_info(format!(
+                "The new agent's name prompt for project \"{project_name}\" was not opened \
+                 because {blocker}. Start the agent again when you are ready."
+            ));
+            return;
         }
         self.continue_create_agent_after_branch_inspection(project, inspection);
         self.set_info(format!(
-            "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+            "Branch check complete for \"{project_name}\". Confirm or edit the agent name to \
+             continue."
         ));
     }
 
@@ -2412,6 +2474,34 @@ pub(crate) fn run_create_agent_branch_inspection_job(
     });
 }
 
+/// How saving a project's detected base ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseSaved {
+    /// The base is in the session database.
+    Saved,
+    /// The project is no longer stored, so nothing was written.
+    ProjectGone,
+}
+
+/// Write `base` as the base of project `project_id`, and nothing else, so a
+/// removal or reorder made meanwhile is not undone. Blocking: run it on a
+/// worker.
+fn save_project_base(
+    db_path: &std::path::Path,
+    project_id: &str,
+    base: &str,
+) -> Result<BaseSaved, String> {
+    let store = crate::storage::SessionStore::open(db_path).map_err(|e| format!("{e:#}"))?;
+    let stored = store.load_projects().map_err(|e| format!("{e:#}"))?;
+    if !stored.iter().any(|project| project.id == project_id) {
+        return Ok(BaseSaved::ProjectGone);
+    }
+    store
+        .update_project_leading_branch(project_id, base)
+        .map(|()| BaseSaved::Saved)
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -3732,6 +3822,7 @@ mod tests {
                     .process_worker_event(dux_core::worker::WorkerEvent::ChangedFilesReady {
                         outcome: Err("git status failed: index.lock exists".to_string()),
                         worktree: worktree.clone(),
+                        read: 0,
                     });
             app.apply_reaction(reaction);
         }

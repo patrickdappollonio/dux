@@ -237,11 +237,14 @@ impl Engine {
         self.spawn_status_op_with(op, work, ChangedFiles::Unchanged)
     }
 
-    /// [`Self::spawn_status_op`] for work that changes a worktree's files:
-    /// its completion also has the surfaces read the changed-files listing
-    /// again, so the change shows the moment it is done.
+    /// [`Self::spawn_status_op`] for work that changes `worktree`'s files:
+    /// it runs after every change to `worktree` asked for before it (see
+    /// [`crate::changes_lane`]), and its completion also has the surfaces read
+    /// the changed-files listing again, so the change shows the moment it is
+    /// done.
     pub(crate) fn spawn_changes_op<T, E, F>(
         &mut self,
+        worktree: &std::path::Path,
         op: crate::engine::StatusOp<T, E>,
         work: F,
     ) -> EventReaction
@@ -250,7 +253,15 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.spawn_status_op_with(op, work, ChangedFiles::ReadAgain)
+        let ticket = crate::changes_lane::ticket(worktree);
+        self.spawn_status_op_with(
+            op,
+            move || {
+                let _turn = ticket.wait();
+                work()
+            },
+            ChangedFiles::ReadAgain,
+        )
     }
 
     fn spawn_status_op_with<T, E, F>(

@@ -136,6 +136,230 @@ pub fn project_base_for_add(
     )
 }
 
+/// What each project or agent directory, as stored, resolves to on disk,
+/// remembered where the resolving already happens off the engine thread
+/// (loading the project list, checking a folder to add, listing a project's
+/// worktrees), so the engine can tell one by its real location, symlinked
+/// spellings included, without touching the filesystem.
+fn project_keys() -> &'static std::sync::Mutex<HashMap<String, PathBuf>> {
+    static KEYS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PathBuf>>> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(Default::default)
+}
+
+/// Resolve `stored` (a directory as stored) to its real location and
+/// remember it. Blocking: call it off the engine thread.
+pub fn resolve_path_key(stored: &str) -> PathBuf {
+    let key = canonical_or_original(Path::new(stored));
+    project_keys()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(stored.to_string(), key.clone());
+    key
+}
+
+/// The real location remembered for `stored`, or `stored` itself when it was
+/// never resolved (a path added through a check is already canonical). In
+/// memory only: safe on the engine thread.
+pub(crate) fn known_path_key(stored: &str) -> PathBuf {
+    project_keys()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(stored)
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(stored))
+}
+
+/// The check [`crate::engine::Engine::validate_project_add_path`] makes,
+/// against `registered`, the project paths as stored. Blocking: it
+/// canonicalizes and asks git, so a worker runs it.
+///
+/// # Errors
+///
+/// Returns the user-facing sentence when the path is not a git repository,
+/// sits inside one or inside its git directory, or is already a project.
+pub fn validate_add_path(raw_path: &str, registered: &[String]) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim();
+    let path = PathBuf::from(trimmed)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(trimmed));
+    if !path.exists() || !git::is_git_repo(&path) {
+        crate::logger::error(&format!("add project rejected for {}", path.display()));
+        return Err(format!("\"{}\" is not a git repository.", path.display()));
+    }
+    // Fail-open on Indeterminate (a gate, per the CommitState doctrine);
+    // WorkTreeRoot and BareRoot pass (bare adds are shipped behavior).
+    // NotARepo is unreachable after the is_git_repo check above.
+    match git::repo_path_kind(&path) {
+        git::RepoPathKind::InsideWorkTree { root } => {
+            return Err(format!(
+                "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
+                path.display(),
+                root.display(),
+                root.display()
+            ));
+        }
+        git::RepoPathKind::InsideGitDir { .. } => {
+            return Err(format!(
+                "\"{}\" is inside git's internal directory. Add the repository itself instead.",
+                path.display()
+            ));
+        }
+        _ => {}
+    }
+    if registered
+        .iter()
+        .any(|registered| resolve_path_key(registered) == path)
+    {
+        return Err(format!(
+            "\"{}\" is already registered as a project.",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// The check [`crate::engine::Engine::validate_project_init_path`] makes,
+/// against `registered`, the project paths as stored. Blocking, like
+/// [`validate_add_path`].
+///
+/// # Errors
+///
+/// Returns the user-facing sentence when the path is not an existing folder,
+/// is or sits inside a git repository (or its git directory), cannot be
+/// classified, or is already a project.
+pub fn validate_init_path(raw_path: &str, registered: &[String]) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim();
+    let path = match PathBuf::from(trimmed).canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        _ => {
+            return Err(format!("\"{trimmed}\" is not an existing folder."));
+        }
+    };
+    match git::repo_path_kind(&path) {
+        git::RepoPathKind::NotARepo => {}
+        git::RepoPathKind::WorkTreeRoot | git::RepoPathKind::BareRoot => {
+            return Err(format!(
+                "\"{}\" is already a git repository. Use Add project instead.",
+                path.display()
+            ));
+        }
+        git::RepoPathKind::InsideWorkTree { root } => {
+            return Err(format!(
+                "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
+                path.display(),
+                root.display(),
+                root.display()
+            ));
+        }
+        git::RepoPathKind::InsideGitDir { .. } => {
+            return Err(format!(
+                "\"{}\" is inside git's internal directory. Add the repository itself instead.",
+                path.display()
+            ));
+        }
+        git::RepoPathKind::Indeterminate => {
+            return Err(format!(
+                "couldn't determine whether \"{}\" is already a git repository, so refusing to initialize one there.",
+                path.display()
+            ));
+        }
+    }
+    if registered
+        .iter()
+        .any(|registered| resolve_path_key(registered) == path)
+    {
+        return Err(format!(
+            "\"{}\" is already registered as a project.",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// What the add-project flows learn about a folder before deciding what to
+/// do with it, read in one blocking call so a worker can make it.
+#[derive(Clone, Debug)]
+pub enum AddPathProbe {
+    /// A repository root that may be added, with what git says about it.
+    Repository(RepositoryProbe),
+    /// Not addable as it is, but a plain folder `git init` could adopt.
+    Initable {
+        /// The folder, canonicalized.
+        path: PathBuf,
+        /// The starter-ignore folders found in it.
+        gitignore_candidates: Vec<String>,
+        /// Why it cannot be added as it is.
+        add_refusal: String,
+    },
+    /// Not addable, with the sentence that says why.
+    Refused(String),
+}
+
+/// A repository root [`probe_add_path`] found addable.
+#[derive(Clone, Debug)]
+pub struct RepositoryProbe {
+    /// The repository root, canonicalized.
+    pub path: PathBuf,
+    /// The checked-out branch, empty on a detached HEAD.
+    pub branch: String,
+    /// The observations [`crate::add_project_plan::add_project_plan`] decides
+    /// from.
+    pub inspection: crate::add_project_plan::AddProjectInspection,
+    /// The base new worktrees branch from when the folder stays on its branch.
+    pub stay_base: String,
+}
+
+/// Probe `raw_path` for the add-project flows: validated against
+/// `registered` (the project paths as stored), and, for a repository root,
+/// its branch, its branch warning, its kind and whether it has commits. A
+/// folder that is not addable is offered for `git init` when it could be.
+/// Blocking: canonicalize and several git calls.
+pub fn probe_add_path(raw_path: &str, registered: &[String]) -> AddPathProbe {
+    let path = match validate_add_path(raw_path, registered) {
+        Ok(path) => path,
+        Err(message) => {
+            return match validate_init_path(raw_path, registered) {
+                Ok(path) => AddPathProbe::Initable {
+                    gitignore_candidates: crate::gitignore_seed::matched_candidates(&path)
+                        .iter()
+                        .map(|candidate| candidate.dir.to_string())
+                        .collect(),
+                    path,
+                    add_refusal: message,
+                },
+                Err(_) => AddPathProbe::Refused(message),
+            };
+        }
+    };
+    let branch = match git::current_branch_opt(&path) {
+        Ok(branch) => branch.unwrap_or_default(),
+        Err(error) => return AddPathProbe::Refused(format!("{error:#}")),
+    };
+    let current = (!branch.is_empty()).then_some(branch.as_str());
+    let inspection = crate::add_project_plan::AddProjectInspection {
+        path_kind: git::repo_path_kind(&path),
+        current_branch: current.map(str::to_string),
+        branch_warning: current.and_then(|branch| git::branch_warning_kind(&path, branch)),
+        // Only a confirmed unborn HEAD takes the initial-commit path; an
+        // indeterminate git result fails open, so a transient failure never
+        // hijacks a normal add with the commit dialog.
+        has_commits: git::repo_commit_state(&path) != git::CommitState::Unborn,
+    };
+    let stay_base = project_base_for_add(
+        &path,
+        current,
+        crate::add_project_plan::DefaultCheckout::StayOnCurrent,
+    )
+    .into_branch();
+    AddPathProbe::Repository(RepositoryProbe {
+        path,
+        branch,
+        inspection,
+        stay_base,
+    })
+}
+
 /// Convert a slice of `ProjectConfig` entries (from SQLite) into runtime `Project` values.
 /// Each project gets its path expanded, its provider resolved (falling back to the global
 /// default), and its current branch read from git. Missing or non-git paths are flagged
@@ -178,6 +402,7 @@ pub fn load_projects<S: std::hash::BuildHasher>(
                 )
             })
         });
+        resolve_path_key(&path.to_string_lossy());
         projects.push(Project {
             id: project.id.clone(),
             name: project.name.clone().unwrap_or_else(|| {
@@ -223,8 +448,9 @@ pub fn classify_project_worktrees(
                 // is the user's folder: one pointed inside dux's managed area
                 // must read as occupied here, or the worktree manager would offer
                 // to force-remove the ground out from under it. Canonical, so a
-                // symlink cannot hide it.
-                canonical_or_original(Path::new(session.directory())),
+                // symlink cannot hide it. Remembered, so the engine can ask the
+                // same question later without the filesystem.
+                resolve_path_key(session.directory()),
                 session.id.clone(),
             )
         })

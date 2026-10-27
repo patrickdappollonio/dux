@@ -759,6 +759,10 @@ pub enum WorkerEvent {
         /// watch may have moved; the tag lets the engine drop a stale poll rather
         /// than overwrite the current session's files.
         worktree: PathBuf,
+        /// The number the read took as it started (see
+        /// [`crate::engine::ChangedFilesRefreshQueue`]): a read older than the
+        /// newest one applied is dropped.
+        read: u64,
     },
     /// A standalone agent's folder was classified by
     /// `Engine::spawn_folder_repo_probe`. The engine stores the verdict and, if
@@ -1058,7 +1062,7 @@ pub enum WorkerEvent {
     },
     /// A config reload read the file: the new config, or why it could not be
     /// loaded.
-    ConfigReloadReady(Box<Result<Config, String>>),
+    ConfigReloadReady(Box<Result<ReloadedConfig, String>>),
     /// A project change finished saving to the session database.
     ProjectPersistenceCompleted {
         /// The change saved.
@@ -1132,6 +1136,19 @@ pub enum WorkerEvent {
     },
 }
 
+/// What a config reload worker read: the config, and, when its surface's
+/// worker loaded them, the projects it merged and saved, so the apply on the
+/// engine thread has no SQLite, git or config file to touch again.
+#[derive(Clone, Debug)]
+pub struct ReloadedConfig {
+    /// The reloaded config.
+    pub config: Config,
+    /// The runtime project list the worker built from the session database
+    /// and the reloaded config, already saved back; `None` when the worker
+    /// did not build one and the apply must.
+    pub projects: Option<Vec<crate::model::Project>>,
+}
+
 /// How a successful (non-erroring) pull worker run ended. `current_branch` is
 /// the checkout's branch after the run, when the worker re-read it.
 #[derive(Clone, Debug)]
@@ -1140,21 +1157,39 @@ pub enum PullOutcome {
     Pulled {
         /// The branch the checkout is on after the pull, when it was re-read.
         current_branch: Option<String>,
+        /// How that branch compares with the repository's default, read on
+        /// the worker so the completion never asks git (`None` when it is
+        /// the default, or was not re-read).
+        default_warning: Option<BranchWarningKind>,
     },
     /// The repo has no `origin` remote: nothing to pull, and that is a normal
     /// state for local-only repos, not a failure.
     NoOrigin {
         /// The branch the checkout is on, when it was re-read.
         current_branch: Option<String>,
+        /// How that branch compares with the repository's default; see
+        /// [`PullOutcome::Pulled`].
+        default_warning: Option<BranchWarningKind>,
     },
 }
 
 impl PullOutcome {
     pub(crate) fn current_branch(&self) -> Option<&String> {
         match self {
-            PullOutcome::Pulled { current_branch } | PullOutcome::NoOrigin { current_branch } => {
-                current_branch.as_ref()
+            PullOutcome::Pulled { current_branch, .. }
+            | PullOutcome::NoOrigin { current_branch, .. } => current_branch.as_ref(),
+        }
+    }
+
+    /// How the re-read branch compares with the repository's default.
+    pub(crate) fn default_warning(&self) -> Option<&BranchWarningKind> {
+        match self {
+            PullOutcome::Pulled {
+                default_warning, ..
             }
+            | PullOutcome::NoOrigin {
+                default_warning, ..
+            } => default_warning.as_ref(),
         }
     }
 }

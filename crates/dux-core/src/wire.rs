@@ -387,6 +387,10 @@ pub enum WireCommand {
         path: String,
         /// The project's display name; empty derives it from the path.
         name: String,
+        /// What the route already read from git for this command, so the
+        /// engine thread does not; never sent by a client.
+        #[serde(skip)]
+        checked: Option<crate::route_checks::AddProjectChecked>,
     },
     /// Check the repo's default branch out FIRST, then register it as a project,
     /// mirroring the TUI's "Check Out & Add" button. Only valid when the repo's
@@ -404,6 +408,10 @@ pub enum WireCommand {
         path: String,
         /// The project's display name; empty derives it from the path.
         name: String,
+        /// What the route already read from git for this command, so the
+        /// engine thread does not; never sent by a client.
+        #[serde(skip)]
+        checked: Option<crate::route_checks::CheckoutDefaultChecked>,
     },
     /// Create an empty initial commit for a fresh (unborn) repo, THEN register
     /// it as a project. Used when the client's inspect reported `has_commits:
@@ -418,6 +426,10 @@ pub enum WireCommand {
         path: String,
         /// The project's display name; empty derives it from the path.
         name: String,
+        /// What the route already read from git for this command, so the
+        /// engine thread does not; never sent by a client.
+        #[serde(skip)]
+        checked: Option<crate::route_checks::InitialCommitChecked>,
     },
     /// Initialize a brand-new git repository in a plain folder, seed a starter
     /// `.gitignore`, create an empty initial commit, THEN register it as a
@@ -493,6 +505,11 @@ pub enum WireCommand {
         /// confirmed, so the create proceeds and adopts that branch's history.
         #[serde(default)]
         use_existing_branch: bool,
+        /// The name the route already asked git about and found no branch
+        /// for, so the engine thread does not ask again; never sent by a
+        /// client.
+        #[serde(skip)]
+        name_checked: Option<String>,
     },
     /// Create a STANDALONE agent: point a provider at a folder the user already
     /// has and run it there. No project, no branch, no worktree.
@@ -685,6 +702,10 @@ pub enum WireCommand {
         worktree_path: String,
         /// The new agent's display name.
         name: String,
+        /// What the route already read from git for this command, so the
+        /// engine thread does not; never sent by a client.
+        #[serde(skip)]
+        checked: Option<crate::route_checks::AdoptChecked>,
     },
     /// Create a new agent checked out on a GitHub PR's head branch, mirroring
     /// the TUI's `new-agent-from-pr` palette command. `pr` is the user-typed
@@ -2053,7 +2074,10 @@ fn add_project_final(o: &crate::engine::WebAddProjectOutcome) -> crate::engine::
 ///
 /// Fails when no default branch is known for certain: a heuristic guess on a branch, or a
 /// detached HEAD with no `origin/HEAD`.
-fn checkout_default_target(validated: &Path, branch: Option<&str>) -> anyhow::Result<String> {
+pub(crate) fn checkout_default_target(
+    validated: &Path,
+    branch: Option<&str>,
+) -> anyhow::Result<String> {
     Ok(match branch {
         // On a normal HEAD: require a Known default (Heuristic is rejected).
         Some(current) => match crate::git::branch_warning_kind(validated, current) {
@@ -2210,14 +2234,22 @@ impl Engine {
                     WireStatus::from_update(&update),
                 )))
             }
-            WireCommand::AddProjectCheckoutDefault { path, name } => {
-                let status = self.add_project_checkout_default(&path, name)?;
+            WireCommand::AddProjectCheckoutDefault {
+                path,
+                name,
+                checked,
+            } => {
+                let status = self.add_project_checkout_default(&path, name, checked)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
                     status,
                 )))
             }
-            WireCommand::AddProjectCreateInitialCommit { path, name } => {
-                let status = self.add_project_create_initial_commit(&path, name)?;
+            WireCommand::AddProjectCreateInitialCommit {
+                path,
+                name,
+                checked,
+            } => {
+                let status = self.add_project_create_initial_commit(&path, name, checked)?;
                 Ok(WireDispatch::handled(
                     WireCommandOutcome::with_optional_status(status),
                 ))
@@ -3670,21 +3702,23 @@ impl Engine {
         &mut self,
         path: &str,
         name: String,
+        checked: Option<crate::route_checks::CheckoutDefaultChecked>,
     ) -> anyhow::Result<WireStatus> {
-        let validated = self
-            .validate_project_add_path(path)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        // A confirmed unborn repo has no default branch to check out; reject
-        // explicitly rather than relying on `branch_warning_kind` to bail with a
-        // less specific message. Fail open on an indeterminate git result.
-        if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
-            anyhow::bail!(
-                "\"{}\" has no commits yet, so there's no default branch to check out. Create an initial commit first.",
-                validated.display()
-            );
-        }
-        let branch = crate::git::current_branch_opt(&validated)?;
-        let default_branch = checkout_default_target(&validated, branch.as_deref())?;
+        let checked = match checked {
+            Some(checked) => {
+                self.refuse_registered(&checked.validated)?;
+                checked
+            }
+            None => crate::route_checks::check_add_project_checkout_default(
+                path,
+                &self.project_paths(),
+            )?,
+        };
+        let crate::route_checks::CheckoutDefaultChecked {
+            validated,
+            branch,
+            default_branch,
+        } = checked;
         let leading_branch = crate::add_project_plan::project_base_at_add(
             branch.as_deref(),
             Some(&default_branch),
@@ -3762,28 +3796,37 @@ impl Engine {
         &mut self,
         path: &str,
         name: String,
+        checked: Option<crate::route_checks::InitialCommitChecked>,
     ) -> anyhow::Result<Option<WireStatus>> {
-        let validated = self
-            .validate_project_add_path(path)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let path_str = validated.to_string_lossy().to_string();
-        // Handle the race where a commit landed between the client's inspect and
-        // this request. Fail-closed commit state: only Unborn proceeds to the
-        // bootstrap; a now-Born repo is just registered (no commit needed), and an
-        // indeterminate git state is a hard, synchronous error (not a stranded
-        // busy that expires to a 202).
-        match crate::git::repo_commit_state(&validated) {
-            crate::git::CommitState::Unborn => {}
-            crate::git::CommitState::Born => {
-                // Already has commits, so there is nothing to bootstrap: register
-                // it through the normal add path so the request still succeeds.
-                // Map the reaction to a status EXACTLY as the plain `AddProject`
-                // handler does: only a confirmed `Added` outcome is info, a
-                // rolled-back add relays its error tone, and a deferred `Nothing`
-                // yields no toast rather than a fabricated success.
+        let checked = match checked {
+            Some(checked) => {
+                self.refuse_registered(checked.validated())?;
+                checked
+            }
+            None => crate::route_checks::check_add_project_create_initial_commit(
+                path,
+                &self.project_paths(),
+            )?,
+        };
+        let (validated, branch, leading_branch) = match checked {
+            crate::route_checks::InitialCommitChecked::Unborn {
+                validated,
+                branch,
+                leading_branch,
+            } => (validated, branch, leading_branch),
+            crate::route_checks::InitialCommitChecked::Born(plain) => {
+                // A commit has landed since the client looked, so there is
+                // nothing to bootstrap: register it through the normal add path
+                // so the request still succeeds. Map the reaction to a status
+                // EXACTLY as the plain `AddProject` handler does: only a
+                // confirmed `Added` outcome is info, a rolled-back add relays its
+                // error tone, and a deferred `Nothing` yields no toast rather
+                // than a fabricated success.
+                let path_str = plain.validated.to_string_lossy().to_string();
                 let cmd = self.wire_to_command(WireCommand::AddProject {
                     path: path_str,
                     name,
+                    checked: Some(plain),
                 })?;
                 let reaction = self.apply(cmd)?;
                 let status = match added_status_message(&reaction) {
@@ -3792,19 +3835,8 @@ impl Engine {
                 };
                 return Ok(status);
             }
-            crate::git::CommitState::Indeterminate => {
-                anyhow::bail!(
-                    "Couldn't determine the commit state of \"{path_str}\"; not creating an initial commit. Check the repository and retry."
-                );
-            }
-        }
-        // Real branch the commit will land on (propagate a git error rather than
-        // silently defaulting the branch, matching the sibling add paths).
-        let branch = crate::git::current_branch_opt(&validated)?.unwrap_or_default();
-        let leading_branch = crate::project_browser::leading_branch_for_project(
-            &validated,
-            (!branch.is_empty()).then_some(branch.as_str()),
-        );
+        };
+        let path_str = validated.to_string_lossy().to_string();
         // Serialize per repo path: reject a second concurrent request rather than
         // let two workers both bootstrap. Cleared on completion in
         // `process_worker_event` (and on a worker panic, below).
@@ -5131,25 +5163,24 @@ impl Engine {
 
     /// Registering the repository at `path` as a project, refused when the path is not a usable
     /// repository or has no commits yet.
-    fn add_project_command(&self, path: &str, name: &str) -> anyhow::Result<Command> {
-        let validated = self
-            .validate_project_add_path(path)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
-            anyhow::bail!(
-                "\"{}\" has no commits yet, so it can't back a worktree. Create an initial commit first (the app offers to do this for you when adding the project).",
-                validated.display()
-            );
-        }
-        let branch = crate::git::current_branch_opt(&validated)?;
-        // A plain add is the dialog's unticked box: the folder stays
-        // where it is and new worktrees branch from it.
-        let leading_branch = crate::project_browser::project_base_for_add(
-            &validated,
-            branch.as_deref(),
-            crate::add_project_plan::DefaultCheckout::StayOnCurrent,
-        )
-        .into_branch();
+    fn add_project_command(
+        &self,
+        path: &str,
+        name: &str,
+        checked: Option<crate::route_checks::AddProjectChecked>,
+    ) -> anyhow::Result<Command> {
+        let checked = match checked {
+            Some(checked) => {
+                self.refuse_registered(&checked.validated)?;
+                checked
+            }
+            None => crate::route_checks::check_add_project(path, &self.project_paths())?,
+        };
+        let crate::route_checks::AddProjectChecked {
+            validated,
+            branch,
+            base: leading_branch,
+        } = checked;
         let path_str = validated.to_string_lossy().to_string();
         let display_name = if name.trim().is_empty() {
             validated
@@ -5259,32 +5290,33 @@ impl Engine {
                     status_op_id: None,
                 }
             }
-            WireCommand::AddProject { path, name } => self.add_project_command(&path, &name)?,
+            WireCommand::AddProject {
+                path,
+                name,
+                checked,
+            } => self.add_project_command(&path, &name, checked)?,
             WireCommand::RemoveProject { project_id } => Command::RemoveProject {
-                project_name: self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .map_or_else(
-                        || crate::sidebar::short_project_id(&project_id),
-                        |p| p.name.clone(),
-                    ),
+                project_name: self.project_label(&project_id),
                 project_id,
             },
             WireCommand::DeleteProject { project_id } => Command::DeleteProject {
-                project_name: self
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .map_or_else(
-                        || crate::sidebar::short_project_id(&project_id),
-                        |p| p.name.clone(),
-                    ),
+                project_name: self.project_label(&project_id),
                 project_id,
             },
             command => return Ok(WireCommandMapping::Unhandled(command)),
         };
         Ok(WireCommandMapping::Mapped(mapped))
+    }
+
+    /// The project's name, or its short id when no project has `project_id`.
+    fn project_label(&self, project_id: &str) -> String {
+        self.projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map_or_else(
+                || crate::sidebar::short_project_id(project_id),
+                |p| p.name.clone(),
+            )
     }
 
     fn create_agent_command(
@@ -5293,6 +5325,7 @@ impl Engine {
         name: &str,
         copy_uncommitted_changes: Option<bool>,
         existing_branch: ExistingBranch,
+        name_checked: Option<&str>,
     ) -> anyhow::Result<Command> {
         let use_existing_branch = existing_branch == ExistingBranch::Attach;
         let project = self
@@ -5310,8 +5343,13 @@ impl Engine {
             }
             Some(trimmed.to_string())
         };
+        // The route asks git about the name on the blocking pool and says which
+        // name it found free; only a name nobody asked about is asked here.
+        // A branch made between that answer and the create is the same race
+        // as one made between this check and the worker that creates it.
         if !use_existing_branch
             && let Some(name) = &custom_name
+            && name_checked != Some(name.as_str())
             && matches!(
                 crate::git::create_agent_branch_preflight(
                     std::path::Path::new(&project.path),
@@ -5320,10 +5358,7 @@ impl Engine {
                 crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
             )
         {
-            anyhow::bail!(
-                "A branch named \"{name}\" already exists. Creating this agent would \
-                 attach to that branch's history. Confirm to attach, or pick a different name."
-            );
+            anyhow::bail!("{}", crate::agent_job::existing_branch_refusal(name));
         }
         let request = CreateAgentRequest::NewProject {
             project,
@@ -5396,6 +5431,7 @@ impl Engine {
         project_id: &str,
         worktree_path: &str,
         name: &str,
+        checked: Option<crate::route_checks::AdoptChecked>,
     ) -> anyhow::Result<Command> {
         let project = self
             .projects
@@ -5403,19 +5439,29 @@ impl Engine {
             .find(|p| p.id == project_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
-        let requested =
-            crate::project_browser::canonical_or_original(std::path::Path::new(&worktree_path));
-        let entry = self
-            .adoptable_managed_worktrees(&project)?
-            .into_iter()
-            .find(|entry| entry.path == requested)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Worktree \"{worktree_path}\" is not an adoptable managed worktree for \
-                     project \"{}\". Refresh the list and pick a worktree that has no agent yet.",
-                    project.name
-                )
-            })?;
+        let entry = match checked {
+            // The route listed the worktrees on the blocking pool; what can
+            // have changed since is an agent taking the worktree, a standalone
+            // one pointed at it included, which the sessions in memory say,
+            // each by the real location the listing remembered.
+            Some(checked) => {
+                if self.sessions.iter().any(|session| {
+                    crate::project_browser::known_path_key(session.directory()) == checked.path
+                }) {
+                    return Err(crate::route_checks::not_adoptable(
+                        worktree_path,
+                        &project.name,
+                    ));
+                }
+                checked
+            }
+            None => crate::route_checks::check_adopt_worktree(
+                &project,
+                &self.paths,
+                &self.sessions,
+                worktree_path,
+            )?,
+        };
         let trimmed = name.trim();
         if trimmed.is_empty() {
             anyhow::bail!("Agent name cannot be empty.");
@@ -5466,6 +5512,7 @@ impl Engine {
                 name,
                 copy_uncommitted_changes,
                 use_existing_branch,
+                name_checked,
             } => self.create_agent_command(
                 &project_id,
                 &name,
@@ -5475,6 +5522,7 @@ impl Engine {
                 } else {
                     ExistingBranch::Refuse
                 },
+                name_checked.as_deref(),
             )?,
             WireCommand::ForkSession { session_id, name } => {
                 self.fork_session_command(&session_id, &name)?
@@ -5483,7 +5531,8 @@ impl Engine {
                 project_id,
                 worktree_path,
                 name,
-            } => self.adopt_worktree_command(&project_id, &worktree_path, &name)?,
+                checked,
+            } => self.adopt_worktree_command(&project_id, &worktree_path, &name, checked)?,
             command => return Ok(WireCommandMapping::Unhandled(command)),
         };
         Ok(WireCommandMapping::Mapped(mapped))
@@ -5718,20 +5767,22 @@ impl Engine {
     /// no working-tree writes) and is the single source of truth shared by the
     /// listing handler and the wire re-validation, so the client's path is always
     /// checked against a fresh classification rather than a stale snapshot.
-    pub(crate) fn adoptable_managed_worktrees(
-        &self,
-        project: &Project,
-    ) -> anyhow::Result<Vec<crate::worker::ProjectWorktreeEntry>> {
-        let worktrees = crate::git::list_worktrees(std::path::Path::new(&project.path))?;
-        Ok(crate::project_browser::classify_project_worktrees(
-            project,
-            &self.paths,
-            &self.sessions,
-            worktrees,
-        )
-        .into_iter()
-        .filter(|entry| entry.is_selectable() && entry.is_managed_by_dux)
-        .collect())
+    /// Refuse `validated` when a project already has it. Each project is
+    /// compared by the real location remembered when it was loaded or
+    /// checked (see [`crate::project_browser::known_path_key`]), so a
+    /// symlinked spelling is caught without touching the filesystem here.
+    fn refuse_registered(&self, validated: &std::path::Path) -> anyhow::Result<()> {
+        if self
+            .projects
+            .iter()
+            .any(|project| crate::project_browser::known_path_key(&project.path) == validated)
+        {
+            anyhow::bail!(
+                "\"{}\" is already registered as a project.",
+                validated.display()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -9606,6 +9657,7 @@ mod tests {
                     name: "my-agent".to_string(),
                     copy_uncommitted_changes: None,
                     use_existing_branch: false,
+                    name_checked: None,
                 },
                 crate::operations::OperationKind::AgentCreate,
             )
@@ -10515,6 +10567,7 @@ mod tests {
             WireCommand::AddProjectCheckoutDefault {
                 path: "/repo".to_string(),
                 name: "My Project".to_string(),
+                checked: None,
             }
         );
     }
@@ -10549,6 +10602,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCreateInitialCommit {
                 path: path.clone(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("dispatch initial-commit add");
         // Drive the worker chain (InitialCommitCreated → AddProjectAfterInitialCommit
@@ -10585,6 +10639,7 @@ mod tests {
         let res = engine.apply_wire(WireCommand::AddProjectCreateInitialCommit {
             path: repo.path().to_string_lossy().into_owned(),
             name: "Demo".to_string(),
+            checked: None,
         });
         assert!(
             res.is_err(),
@@ -10669,6 +10724,7 @@ mod tests {
         let res = engine.apply_wire(WireCommand::AddProjectCreateInitialCommit {
             path: unborn.path().to_string_lossy().into_owned(),
             name: "Demo".to_string(),
+            checked: None,
         });
         assert!(
             res.is_err(),
@@ -11274,6 +11330,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCreateInitialCommit {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("dispatch initial-commit add")
             .status
@@ -11445,6 +11502,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCreateInitialCommit {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("dispatch");
         assert!(
@@ -11476,12 +11534,13 @@ mod tests {
         let res = engine.apply_wire(WireCommand::AddProjectCheckoutDefault {
             path: repo.path().to_string_lossy().into_owned(),
             name: "Demo".to_string(),
+            checked: None,
         });
         assert!(
             res.is_err(),
             "checkout-default of a commit-less repo must be rejected, not registered"
         );
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
     }
 
     #[test]
@@ -11496,6 +11555,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: work.to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("add-checkout");
         let busy = outcome.status.expect("busy status");
@@ -11554,6 +11614,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: work.to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("add-checkout");
 
@@ -11580,7 +11641,7 @@ mod tests {
         );
         // The inline rollback undid both the in-memory list and the SQLite row,
         // so nothing persisted.
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
         assert_eq!(
             engine.session_store.load_projects().expect("load projects"),
             Vec::<crate::config::ProjectConfig>::new()
@@ -11605,7 +11666,7 @@ mod tests {
             assert!(finals[0].message.contains(needle), "{}", finals[0].message);
         }
         assert!(dest.join(".git").exists(), "the clone was not kept");
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
         assert!(engine.sessions.is_empty());
     }
 
@@ -12475,7 +12536,7 @@ mod tests {
                 crowded.display()
             )
         );
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
         let (mut engine, _engine_dir) = test_engine();
         serve_pull_requests(&mut engine, &held_gh, pr_remote);
         let folder = checkout_of_widget(root, "held-agreed", pr_remote, "");
@@ -12813,6 +12874,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: String::new(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -12823,7 +12885,7 @@ mod tests {
         );
         // HEAD untouched; no project added.
         assert_eq!(current_git_branch(repo.path()), "feature");
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
     }
 
     #[test]
@@ -12834,6 +12896,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: dir.path().to_string_lossy().into_owned(),
                 name: String::new(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -12857,6 +12920,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: path_str.clone(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("add-checkout");
         let status = outcome.status.expect("busy status");
@@ -12904,6 +12968,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: work.to_string_lossy().into_owned(),
                 name: "Detached".to_string(),
+                checked: None,
             })
             .expect("should succeed: origin/HEAD resolves to main");
         let status = outcome.status.expect("busy status");
@@ -12934,6 +12999,7 @@ mod tests {
             .apply_wire(WireCommand::AddProjectCheckoutDefault {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: String::new(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -13163,8 +13229,18 @@ mod tests {
                 path: "a.txt".to_string(),
             })
             .expect("apply_wire");
-        // StageFile dispatches to EventReaction::Nothing -> no status.
-        assert!(outcome.status.is_none());
+        // The stage runs on a worker: the outcome is its busy, and the index
+        // changes once the worker reports.
+        assert_eq!(outcome.status.expect("a busy").tone, "busy");
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the stage reports");
+            if matches!(event, crate::worker::WorkerEvent::StatusOpCompleted { .. }) {
+                break;
+            }
+        }
 
         let staged = crate::git::test_support::git_command()
             .args(["diff", "--cached", "--name-only"])
@@ -13373,6 +13449,7 @@ mod tests {
             WireCommand::AddProject {
                 path: "/repo".to_string(),
                 name: "My Project".to_string(),
+                checked: None,
             }
         );
     }
@@ -13397,6 +13474,7 @@ mod tests {
             .wire_to_command(WireCommand::AddProject {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: String::new(),
+                checked: None,
             })
             .expect("reconstruct");
         // canonicalize so the assertion survives symlinked temp dirs (e.g. /tmp -> /private/tmp).
@@ -13425,11 +13503,91 @@ mod tests {
         let result = engine.wire_to_command(WireCommand::AddProject {
             path: dir.path().to_string_lossy().into_owned(),
             name: String::new(),
+            checked: None,
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(
             err.to_string().contains("not a git repository"),
             "err: {err}"
+        );
+    }
+
+    /// With the route's check attached, the engine adds what the check read
+    /// and asks git nothing: the path here is one git would refuse outright.
+    #[test]
+    fn apply_wire_add_project_uses_the_routes_check_without_git() {
+        let (mut engine, tmp) = test_engine();
+        let unread = tmp.path().join("never-looked-at");
+        engine
+            .apply_wire(WireCommand::AddProject {
+                path: "ignored".to_string(),
+                name: "Demo".to_string(),
+                checked: Some(crate::route_checks::AddProjectChecked {
+                    validated: unread.clone(),
+                    branch: Some("from-the-check".to_string()),
+                    base: "trunk".to_string(),
+                }),
+            })
+            .expect("add");
+        let project = engine.projects.first().expect("added");
+        assert_eq!(std::path::PathBuf::from(&project.path), unread);
+        assert_eq!(project.current_branch, "from-the-check");
+        assert_eq!(project.leading_branch.as_deref(), Some("trunk"));
+    }
+
+    /// A project registered through a symlinked spelling (a hand edit, a
+    /// reload) is still the same folder: the engine refuses the add by the
+    /// real location remembered when the project was loaded, not by spelling.
+    #[test]
+    fn apply_wire_add_project_refuses_a_symlinked_spelling_of_a_project() {
+        let (mut engine, tmp) = test_engine();
+        let real = tmp.path().join("real-repo");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("linked-repo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let stored = link.to_string_lossy().into_owned();
+        crate::project_browser::resolve_path_key(&stored);
+        engine.projects.push(sample_project("p1", &stored));
+        let canonical = std::fs::canonicalize(&real).unwrap();
+
+        let refused = engine
+            .apply_wire(WireCommand::AddProject {
+                path: canonical.to_string_lossy().into_owned(),
+                name: String::new(),
+                checked: Some(crate::route_checks::AddProjectChecked {
+                    validated: canonical.clone(),
+                    branch: Some("main".to_string()),
+                    base: "main".to_string(),
+                }),
+            })
+            .expect_err("the same folder");
+        assert!(
+            refused.to_string().contains("already registered"),
+            "{refused}"
+        );
+        assert_eq!(engine.projects.len(), 1);
+    }
+
+    /// A project registered between the route's check and the apply is still
+    /// refused, synchronously and in the same words, without asking git.
+    #[test]
+    fn apply_wire_add_project_rechecks_the_registered_projects() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/srv/repo"));
+        let refused = engine
+            .apply_wire(WireCommand::AddProject {
+                path: "/srv/repo".to_string(),
+                name: String::new(),
+                checked: Some(crate::route_checks::AddProjectChecked {
+                    validated: PathBuf::from("/srv/repo"),
+                    branch: Some("main".to_string()),
+                    base: "main".to_string(),
+                }),
+            })
+            .expect_err("already a project");
+        assert_eq!(
+            refused.to_string(),
+            "\"/srv/repo\" is already registered as a project."
         );
     }
 
@@ -13445,6 +13603,7 @@ mod tests {
             .apply_wire(WireCommand::AddProject {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("add");
         let status = outcome
@@ -13471,6 +13630,7 @@ mod tests {
             .apply_wire(WireCommand::AddProject {
                 path: repo.path().to_string_lossy().into_owned(),
                 name: "Demo".to_string(),
+                checked: None,
             })
             .expect("add");
         let status = outcome
@@ -13482,7 +13642,7 @@ mod tests {
             "the optimistic success message leaked: {}",
             status.message
         );
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
     }
 
     #[test]
@@ -13557,6 +13717,7 @@ mod tests {
                 name: "feature-x".to_string(),
                 copy_uncommitted_changes: None,
                 use_existing_branch: false,
+                name_checked: None,
             }
         );
     }
@@ -13573,6 +13734,7 @@ mod tests {
                 name: "feature-x".to_string(),
                 copy_uncommitted_changes: None,
                 use_existing_branch: false,
+                name_checked: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -13599,6 +13761,7 @@ mod tests {
                 name: String::new(),
                 copy_uncommitted_changes: None,
                 use_existing_branch: false,
+                name_checked: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -13648,6 +13811,7 @@ mod tests {
                 name: String::new(),
                 copy_uncommitted_changes: Some(false),
                 use_existing_branch: false,
+                name_checked: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -13670,6 +13834,7 @@ mod tests {
             name: "feature-x".to_string(),
             copy_uncommitted_changes: None,
             use_existing_branch: false,
+            name_checked: None,
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
@@ -13697,6 +13862,7 @@ mod tests {
                 name: bad.to_string(),
                 copy_uncommitted_changes: None,
                 use_existing_branch: false,
+                name_checked: None,
             });
             let err = result.map(|_| ()).unwrap_err();
             let msg = err.to_string();
@@ -13705,6 +13871,54 @@ mod tests {
                 "expected rejection for {bad:?}, got: {msg}"
             );
         }
+    }
+
+    /// A name the route found free is not asked about again on the engine
+    /// thread; one nobody asked about still is, and a taken one is refused.
+    #[test]
+    fn wire_to_command_create_agent_asks_git_only_about_an_unchecked_name() {
+        let repo = init_repo_with_commit();
+        crate::git::test_support::git_command()
+            .args(["branch", "taken"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git branch");
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_str().unwrap()));
+        let create = |name_checked: Option<String>| WireCommand::CreateAgent {
+            project_id: "p1".to_string(),
+            name: "taken".to_string(),
+            copy_uncommitted_changes: None,
+            use_existing_branch: false,
+            name_checked,
+        };
+
+        let refused = engine
+            .wire_to_command(create(None))
+            .map(|_| ())
+            .expect_err("asked here, the name is taken");
+        assert!(refused.to_string().contains("already exists"), "{refused}");
+        engine
+            .wire_to_command(create(Some("taken".to_string())))
+            .expect("the route's answer is taken as given");
+    }
+
+    /// A client cannot hand the engine a check of its own: the field is not
+    /// read from what it sends.
+    #[test]
+    fn a_route_check_is_never_read_from_a_client() {
+        let json = r#"{"command":"add_project","args":{"path":"/x","name":"","checked":{"validated":"/x","branch":null,"base":"main"}}}"#;
+        let command: WireCommand = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            command,
+            WireCommand::AddProject {
+                path: "/x".to_string(),
+                name: String::new(),
+                checked: None,
+            }
+        );
     }
 
     #[test]
@@ -13719,6 +13933,7 @@ mod tests {
                     name: good.to_string(),
                     copy_uncommitted_changes: None,
                     use_existing_branch: false,
+                    name_checked: None,
                 })
                 .unwrap_or_else(|e| panic!("expected {good:?} to be accepted, got: {e}"));
             match cmd {
@@ -13746,6 +13961,7 @@ mod tests {
                 name: "   ".to_string(),
                 copy_uncommitted_changes: None,
                 use_existing_branch: false,
+                name_checked: None,
             })
             .expect("whitespace-only name should reconstruct");
         match cmd {
@@ -15047,6 +15263,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: "/wt/feat".to_string(),
                 name: "my-agent".to_string(),
+                checked: None,
             }
         );
     }
@@ -15062,6 +15279,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: worktree_path.to_string_lossy().to_string(),
                 name: "Display Name".replace(' ', "-"),
+                checked: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -15094,6 +15312,75 @@ mod tests {
         }
     }
 
+    /// With the route's listing attached, the engine adopts the worktree it
+    /// names without listing git's worktrees again.
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_uses_the_routes_check() {
+        let (mut engine, tmp) = test_engine();
+        engine
+            .projects
+            .push(sample_project("p1", tmp.path().to_str().unwrap()));
+        let listed = tmp.path().join("not-a-worktree-git-knows");
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: listed.to_string_lossy().into_owned(),
+                name: "adopted".to_string(),
+                checked: Some(crate::route_checks::AdoptChecked {
+                    path: listed.clone(),
+                    branch_name: "from-the-check".to_string(),
+                }),
+            })
+            .expect("the route's check is taken");
+        let Command::DispatchCreateAgentRequest { request, .. } = cmd else {
+            panic!("expected a create");
+        };
+        let CreateAgentRequest::ExistingManagedWorktree {
+            worktree_path,
+            branch_name,
+            ..
+        } = *request
+        else {
+            panic!("expected an adopt");
+        };
+        assert_eq!(worktree_path, listed);
+        assert_eq!(branch_name, "from-the-check");
+    }
+
+    /// A standalone agent started in the worktree after the route listed it
+    /// takes it: the adopt is refused, as an agent's managed worktree is.
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_rechecks_standalone_agents() {
+        let (mut engine, tmp) = test_engine();
+        engine
+            .projects
+            .push(sample_project("p1", tmp.path().to_str().unwrap()));
+        let listed = tmp.path().join("the-worktree");
+        let mut standalone = sample_session("s9", "", "notes");
+        standalone.workspace =
+            crate::model::AgentWorkspace::Folder(crate::model::FolderWorkspace {
+                folder_path: listed.to_string_lossy().into_owned(),
+            });
+        engine.sessions.push(standalone);
+
+        let refused = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: listed.to_string_lossy().into_owned(),
+                name: "adopted".to_string(),
+                checked: Some(crate::route_checks::AdoptChecked {
+                    path: listed,
+                    branch_name: "b".to_string(),
+                }),
+            })
+            .map(|_| ())
+            .expect_err("an agent holds it now");
+        assert!(
+            refused.to_string().contains("not an adoptable"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn wire_to_command_create_agent_from_worktree_unknown_project_errors() {
         let (engine, _tmp) = test_engine();
@@ -15102,6 +15389,7 @@ mod tests {
                 project_id: "ghost".to_string(),
                 worktree_path: "/wt/feat".to_string(),
                 name: "my-agent".to_string(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -15123,6 +15411,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: repo_path,
                 name: "my-agent".to_string(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -15155,6 +15444,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: managed.to_string_lossy().to_string(),
                 name: "my-agent".to_string(),
+                checked: None,
             })
             .map(|_| ())
             .unwrap_err();
@@ -15180,6 +15470,7 @@ mod tests {
                     project_id: "p1".to_string(),
                     worktree_path: path.clone(),
                     name: blank.to_string(),
+                    checked: None,
                 })
                 .map(|_| ())
                 .unwrap_err();
@@ -15196,6 +15487,7 @@ mod tests {
                     project_id: "p1".to_string(),
                     worktree_path: path.clone(),
                     name: bad.to_string(),
+                    checked: None,
                 })
                 .map(|_| ())
                 .unwrap_err();
@@ -15231,6 +15523,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: path.clone(),
                 name: "adopted".to_string(),
+                checked: None,
             })
             .expect("first attach");
         assert!(
@@ -15248,6 +15541,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 worktree_path: path,
                 name: "adopted-again".to_string(),
+                checked: None,
             })
             .expect("second attach");
         let status = second.status.expect("repeat surfaces the in-flight guard");

@@ -1654,11 +1654,12 @@ impl SessionStore {
 
     /// Record the branch a project's new worktrees start from. SQLite only: the
     /// base is derived state and config never carries it.
-    pub(crate) fn update_project_leading_branch(
-        &self,
-        project_id: &str,
-        branch: &str,
-    ) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails or no project with `project_id` is
+    /// stored.
+    pub fn update_project_leading_branch(&self, project_id: &str, branch: &str) -> Result<()> {
         let updated = self.conn.execute(
             r"
             update projects
@@ -2610,6 +2611,25 @@ impl SessionStore {
     pub fn set_last_focused_tab(&self, id: &str, tab_id: Option<&str>) -> Result<()> {
         self.conn.execute(
             "update agent_sessions set last_focused_tab = ?2 where id = ?1",
+            params![id, tab_id],
+        )?;
+        Ok(())
+    }
+
+    /// [`Self::set_last_focused_tab`] for a write that may land after the
+    /// tabs changed: `tab_id` is remembered only while it is still one of the
+    /// session's extra tabs, so a promotion that made it the slot tab (and so
+    /// forgot the memory) is not undone. `None` always clears.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
+    pub fn remember_focused_extra_tab(&self, id: &str, tab_id: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "update agent_sessions set last_focused_tab = ?2 where id = ?1 and ( \
+                 ?2 is null or ( \
+                     ?2 is not coalesce(slot_tab_id, '') \
+                     and exists (select 1 from agent_tabs where id = ?2 and session_id = ?1)))",
             params![id, tab_id],
         )?;
         Ok(())

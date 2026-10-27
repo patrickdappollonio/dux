@@ -386,7 +386,9 @@ async fn upload_dropped_file(
             worktree,
             dux_core::worktree_ops::WorktreeOpKind::Upload,
             "save the dropped file",
-        ) {
+        )
+        .await
+        {
             Ok(hold) => Some(hold),
             Err(r) => return r.into_response(),
         },

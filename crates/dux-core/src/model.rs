@@ -137,7 +137,7 @@ impl ProviderKind {
 
 /// A project as the running dux holds it: its config, its derived git state and its row's
 /// timestamps.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     /// The project's unique id.
     pub id: String,

@@ -5505,6 +5505,31 @@ impl StageReport {
     pub fn left_anything_out(&self) -> bool {
         self.left_out_repositories + self.left_out_worktrees > 0
     }
+
+    /// What was left out, in words: "1 nested repository and 2 worktrees of
+    /// this repository".
+    pub fn left_out_words(&self) -> String {
+        let plural = |count: usize, one: &str, many: &str| {
+            let noun = if count == 1 { one } else { many };
+            format!("{} {noun}", crate::model::group_thousands(count))
+        };
+        let mut parts = Vec::new();
+        if self.left_out_repositories > 0 {
+            parts.push(plural(
+                self.left_out_repositories,
+                "nested repository",
+                "nested repositories",
+            ));
+        }
+        if self.left_out_worktrees > 0 {
+            parts.push(plural(
+                self.left_out_worktrees,
+                "worktree of this repository",
+                "worktrees of this repository",
+            ));
+        }
+        crate::model::join_words(&parts)
+    }
 }
 
 /// Stage `file_paths`, and say what was left out.
@@ -5841,6 +5866,7 @@ fn run_pathspecs_output<P: AsRef<[u8]>>(
     Ok(output.stdout)
 }
 
+#[cfg(test)]
 pub(crate) fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     stage_with_report(worktree_path, &[file_path.to_string()]).map(|_| ())
 }

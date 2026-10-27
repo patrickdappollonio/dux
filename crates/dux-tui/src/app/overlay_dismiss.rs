@@ -1257,6 +1257,7 @@ mod tests {
     fn clicking_a_list_row_inside_a_modal_still_selects_it() {
         let mut app = test_app(default_bindings());
         app.open_change_theme_prompt();
+        crate::app::test_support::finish_ui_jobs(&mut app);
         render(&mut app);
         let (list, offset) = match app.overlay_layout.active {
             OverlayMouseLayout::ChangeTheme { list, offset, .. } => (list, offset),
@@ -1676,6 +1677,7 @@ mod tests {
     /// preview" has nothing to revert and the test would pass vacuously.
     fn open_theme_picker_with_live_preview(app: &mut App) {
         app.open_change_theme_prompt();
+        crate::app::test_support::finish_ui_jobs(app);
         let before = format!("{:?}", app.theme.app_bg);
         let enough_themes = match &mut app.prompt {
             PromptState::ChangeTheme(prompt) => {

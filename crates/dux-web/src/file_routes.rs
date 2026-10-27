@@ -885,7 +885,9 @@ async fn write_file<R: EditorRoot>(
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "save the file",
-    ) {
+    )
+    .await
+    {
         Ok(hold) => hold,
         Err(r) => return r.into_response(),
     };
@@ -1014,7 +1016,9 @@ async fn create_file<R: EditorRoot>(
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "create the file",
-    ) {
+    )
+    .await
+    {
         Ok(hold) => hold,
         Err(r) => return r.into_response(),
     };
@@ -1054,7 +1058,9 @@ async fn create_dir<R: EditorRoot>(
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
         "create the folder",
-    ) {
+    )
+    .await
+    {
         Ok(hold) => hold,
         Err(r) => return r.into_response(),
     };

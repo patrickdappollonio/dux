@@ -15,6 +15,7 @@ use super::{
     WorktreesFinalOutcome, diff_read_busy, kill_running_matches, pick_project_matches,
     preflight_server_listeners,
 };
+use crate::app::ui_jobs::RequestKind;
 use crate::config::provider_config;
 use crate::editor;
 use crate::keybindings::Action;
@@ -28,7 +29,7 @@ use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, Workt
 use dux_core::ids::{SessionIdRef, TabId, TabIdRef};
 use dux_core::model::CompanionTerminal;
 use dux_core::model::TerminalOwner;
-use dux_core::project_browser::leading_branch_for_project;
+use dux_core::project_browser::{AddPathProbe, RepositoryProbe, leading_branch_for_project};
 use dux_core::worker::ReviewCopyConsent;
 use dux_core::worker::{
     AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, CreateAgentBranchInspection,
@@ -149,6 +150,10 @@ impl App {
     }
 
     fn open_folder_browser(&mut self, purpose: BrowsePurpose) {
+        // A new browser: whatever an earlier one had out is not its answer.
+        self.browser_add.instance += 1;
+        self.browser_add.checking = None;
+        self.path_completion.ask = None;
         let start_dir = dux_core::project_browser::resolve_start_dir(&self.engine.config);
         self.prompt = PromptState::BrowseProjects {
             purpose,
@@ -179,37 +184,73 @@ impl App {
         }
     }
 
-    pub(crate) fn add_project(&mut self, raw_path: &str, name: String) -> Result<()> {
-        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
-        let path = match self.engine.validate_project_add_path(raw_path) {
-            Ok(path) => path,
-            Err(message) => {
-                self.set_error(message);
-                return Ok(());
+    /// Add the repository at `raw_path` as a project. What git says about it
+    /// is read on a worker; the dialog it needs, or the add itself, follows
+    /// when the answer lands. The project browser's own entry is
+    /// `add_project_from_browser_path`; this one is the dialogs' test door.
+    #[cfg(test)]
+    pub(crate) fn add_project(&mut self, raw_path: &str, name: String) {
+        self.spawn_add_path_probe(raw_path, move |app: &mut App, probe| match probe {
+            None => {}
+            Some(AddPathProbe::Repository(repository)) => {
+                if let Err(error) = app.add_probed_project(repository, name) {
+                    app.set_error(format!("{error:#}"));
+                }
             }
-        };
+            Some(AddPathProbe::Initable { add_refusal, .. }) => app.set_error(add_refusal),
+            Some(AddPathProbe::Refused(message)) => app.set_error(message),
+        });
+    }
+
+    /// Read what the add-project flows need to know about `raw_path` on a
+    /// worker, against the projects registered now, then run `then` with it.
+    pub(crate) fn spawn_add_path_probe(
+        &mut self,
+        raw_path: &str,
+        then: impl FnOnce(&mut App, Option<AddPathProbe>) + Send + 'static,
+    ) {
+        let raw = raw_path.to_string();
+        let shown = raw_path.trim().to_string();
+        let registered = self.engine.project_paths();
+        self.spawn_ui_job(
+            crate::app::ui_jobs::UiJob {
+                busy: dux_core::status_text![
+                    "Checking ",
+                    n(shown.clone()),
+                    " before adding it as a project\u{2026}"
+                ],
+                stopped: format!(
+                    "dux could not finish checking \"{shown}\", so it was not added; dux.log has \
+                     the details."
+                ),
+            },
+            move || dux_core::project_browser::probe_add_path(&raw, &registered),
+            then,
+        );
+    }
+
+    /// The add once git has answered for a repository root: the dialog its
+    /// state needs, or the add itself.
+    pub(crate) fn add_probed_project(
+        &mut self,
+        repository: RepositoryProbe,
+        name: String,
+    ) -> Result<()> {
+        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
+        let RepositoryProbe {
+            path,
+            branch,
+            inspection,
+            stay_base,
+        } = repository;
         logger::info(&format!("attempting to add project {}", path.display()));
 
-        // Run the git probes, then let the core-owned `add_project_plan` decide
-        // the action and warning, which the web's inspect endpoint consumes too;
-        // the TUI renders its own dialog copy from the returned typed codes.
-        // `validate_project_add_path` above already rejected blocked and non-repo
-        // paths, so only the unborn-commit and branch-warning rungs get here.
-        let branch = git::current_branch_opt(&path)?.unwrap_or_default();
-        let branch_warning = (!branch.is_empty())
-            .then(|| git::branch_warning_kind(&path, &branch))
-            .flatten();
-        let inspection = dux_core::add_project_plan::AddProjectInspection {
-            path_kind: git::repo_path_kind(&path),
-            current_branch: (!branch.is_empty()).then(|| branch.clone()),
-            branch_warning,
-            // Only a confirmed unborn HEAD takes the initial-commit path; an
-            // indeterminate git result fails open, so a transient failure never
-            // hijacks a normal add with the commit dialog.
-            has_commits: git::repo_commit_state(&path) != git::CommitState::Unborn,
-        };
+        // The core-owned `add_project_plan` decides the action and warning,
+        // which the web's inspect endpoint consumes too; the TUI renders its
+        // own dialog copy from the returned typed codes. The probe already
+        // rejected blocked and non-repo paths, so only the unborn-commit and
+        // branch-warning rungs get here.
         let plan = dux_core::add_project_plan::add_project_plan(&inspection);
-
         if matches!(plan.action, AddProjectAction::NeedsInitialCommit) {
             self.prompt = PromptState::ConfirmCreateInitialCommit {
                 path: path.to_string_lossy().to_string(),
@@ -250,14 +291,8 @@ impl App {
 
         // No dialog, no checkout: new worktrees branch from where the folder is
         // (the default, or the fallback on a detached HEAD).
-        let leading_branch = dux_core::project_browser::project_base_for_add(
-            &path,
-            (!branch.is_empty()).then_some(branch.as_str()),
-            dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
-        )
-        .into_branch();
         let path_str = path.to_string_lossy().to_string();
-        self.finish_add_project(&path_str, &name, branch, leading_branch)
+        self.finish_add_project(&path_str, &name, branch, stay_base)
     }
 
     /// Saves the project to SQLite and config.toml inline, with no background
@@ -1296,24 +1331,68 @@ impl App {
         // silently defaulting the branch, which would mis-tag the project and
         // break the next agent creation. The non-default-branch heuristic warning
         // is deliberately skipped: for a repo the user just created, "this does
-        // not look like main" is noise.
-        let branch = match git::current_branch_opt(Path::new(&path)) {
-            Ok(b) => b.unwrap_or_default(),
-            Err(e) => {
-                self.set_error(format!(
-                    "Couldn't read the current branch of \"{path}\": {e:#}"
-                ));
-                return;
-            }
-        };
-        let leading_branch = leading_branch_for_project(
-            Path::new(&path),
-            (!branch.is_empty()).then_some(branch.as_str()),
+        // not look like main" is noise. These questions ask git, so they are
+        // asked on a worker and the commit follows the answer.
+        let repo = path.to_string();
+        let owned = path.to_string();
+        self.spawn_ui_job(
+            crate::app::ui_jobs::UiJob {
+                busy: dux_core::status_text![
+                    "Checking ",
+                    n(path.to_string()),
+                    " before creating an initial commit\u{2026}"
+                ],
+                stopped: format!(
+                    "dux could not finish checking \"{path}\", so no initial commit was created; \
+                     dux.log has the details."
+                ),
+            },
+            move || {
+                let repo_path = Path::new(&repo);
+                git::current_branch_opt(repo_path)
+                    .map(|branch| {
+                        let branch = branch.unwrap_or_default();
+                        let leading_branch = leading_branch_for_project(
+                            repo_path,
+                            (!branch.is_empty()).then_some(branch.as_str()),
+                        );
+                        (branch, leading_branch, git::repo_commit_state(repo_path))
+                    })
+                    .map_err(|e| format!("{e:#}"))
+            },
+            move |app: &mut App,
+                  probed: Option<Result<(String, String, git::CommitState), String>>| {
+                match probed {
+                    None => {}
+                    Some(Ok((branch, leading_branch, state))) => app
+                        .continue_create_initial_commit(
+                            &owned,
+                            name,
+                            branch,
+                            leading_branch,
+                            state,
+                        ),
+                    Some(Err(e)) => app.set_error(format!(
+                        "Couldn't read the current branch of \"{owned}\": {e}"
+                    )),
+                }
+            },
         );
+    }
+
+    /// The initial-commit flow once git has answered for `path`.
+    fn continue_create_initial_commit(
+        &mut self,
+        path: &str,
+        name: String,
+        branch: String,
+        leading_branch: String,
+        state: git::CommitState,
+    ) {
         // Fail-closed commit state, mirroring the web handler: only a confirmed
         // unborn repo goes through the bootstrap worker. If a commit raced in
         // since the dialog opened, register it directly; if git can't say, stop.
-        match git::repo_commit_state(Path::new(&path)) {
+        match state {
             git::CommitState::Unborn => {}
             git::CommitState::Born => {
                 if let Err(e) = self.finish_add_project(path, &name, branch, leading_branch) {
@@ -3886,10 +3965,51 @@ impl App {
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }
 
+    /// Open the theme picker. The themes are listed and read on a worker,
+    /// so the preview on every cursor move reads nothing; the picker opens when
+    /// they are in.
     pub(crate) fn open_change_theme_prompt(&mut self) {
-        let options = crate::theme::discover_available(&self.engine.paths);
+        let paths = self.engine.paths.clone();
+        self.spawn_ui_job(
+            crate::app::ui_jobs::UiJob {
+                busy: "Reading the themes\u{2026}".into(),
+                stopped: "dux could not finish reading the themes; dux.log has the details."
+                    .to_string(),
+            },
+            move || {
+                let options = crate::theme::discover_available(&paths);
+                let loaded = options
+                    .iter()
+                    .map(|option| {
+                        let theme = crate::theme::load(&option.id, &paths)
+                            .map_err(|err| format!("{err:#}"));
+                        (option.id.clone(), theme)
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                (options, loaded)
+            },
+            |app: &mut App, read| {
+                if let Some((options, loaded)) = read {
+                    app.show_change_theme_prompt(options, loaded);
+                }
+            },
+        );
+    }
+
+    fn show_change_theme_prompt(
+        &mut self,
+        options: Vec<crate::theme::ThemeListing>,
+        loaded: std::collections::HashMap<String, Result<crate::theme::Theme, String>>,
+    ) {
         if options.is_empty() {
             self.set_error("No themes available.");
+            return;
+        }
+        if let Some(blocker) = self.job_dialog_blocker() {
+            self.set_info(format!(
+                "The theme picker was not opened because {blocker}. Open it again when you are \
+                 ready."
+            ));
             return;
         }
         let current = self.engine.config.ui.theme.clone();
@@ -3897,6 +4017,10 @@ impl App {
             .iter()
             .position(|opt| opt.id == current)
             .unwrap_or(0);
+        self.theme_previews = Some(crate::app::ThemePreviews {
+            loaded,
+            original: self.theme,
+        });
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
@@ -3912,7 +4036,8 @@ impl App {
     /// Live-preview the theme at the prompt's current selection, on every cursor
     /// move in the picker, so the whole UI repaints without committing. Failures
     /// are swallowed: a theme that will not load leaves the previous preview in
-    /// place and the picker stays open.
+    /// place and the picker stays open. The themes were read when the picker
+    /// opened, so this reads nothing.
     pub(crate) fn preview_change_theme_selection(&mut self) {
         let id = match &self.prompt {
             PromptState::ChangeTheme(prompt) => prompt
@@ -3922,23 +4047,21 @@ impl App {
             _ => None,
         };
         let Some(id) = id else { return };
-        if let Ok(theme) = crate::theme::load(&id, &self.engine.paths) {
-            self.theme = theme;
+        if let Some(Ok(theme)) = self
+            .theme_previews
+            .as_ref()
+            .and_then(|previews| previews.loaded.get(&id))
+        {
+            self.theme = *theme;
         }
     }
 
-    /// Cancel the theme picker. Reloads the theme that was active when the
-    /// picker opened so any live previews are reverted.
+    /// Cancel the theme picker, putting back the theme that was active when it
+    /// opened so any live previews are reverted.
     pub(crate) fn cancel_change_theme(&mut self) {
-        let original = match &self.prompt {
-            PromptState::ChangeTheme(prompt) => Some(prompt.current.clone()),
-            _ => None,
-        };
         self.prompt = PromptState::None;
-        if let Some(original) = original
-            && let Ok(theme) = crate::theme::load(&original, &self.engine.paths)
-        {
-            self.theme = theme;
+        if let Some(previews) = self.theme_previews.take() {
+            self.theme = previews.original;
         }
     }
 
@@ -3953,6 +4076,7 @@ impl App {
             return;
         };
         self.prompt = PromptState::None;
+        let previews = self.theme_previews.take();
         if selected.id == prompt.current {
             self.set_info(format!(
                 "Theme \"{}\" is already active. Pick a different one to change it.",
@@ -3960,11 +4084,22 @@ impl App {
             ));
             return;
         }
-        let theme = match crate::theme::load(&selected.id, &self.engine.paths) {
-            Ok(theme) => theme,
-            Err(err) => {
+        let theme = match previews
+            .as_ref()
+            .and_then(|previews| previews.loaded.get(&selected.id))
+        {
+            Some(Ok(theme)) => *theme,
+            Some(Err(err)) => {
                 self.set_error(format!(
-                    "Couldn't load theme \"{}\": {err:#}",
+                    "Couldn't load theme \"{}\": {err}",
+                    selected.display_name
+                ));
+                return;
+            }
+            None => {
+                self.set_error(format!(
+                    "Couldn't load theme \"{}\": the theme picker had not read it. Open the \
+                     picker again.",
                     selected.display_name
                 ));
                 return;
@@ -4500,24 +4635,54 @@ impl App {
         }
     }
 
-    pub(crate) fn open_selected_worktree_in_default_editor(&mut self) -> Result<()> {
+    /// Open the selected agent's directory in the configured editor. Finding
+    /// the editors reads every `PATH` directory, so it runs on a worker and the
+    /// open follows when it answers.
+    pub(crate) fn open_selected_worktree_in_default_editor(&mut self) {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent session first.");
-            return Ok(());
+            return;
         };
-        let editors = editor::detect_installed_editors();
+        let directory = session.directory().to_string();
+        let session_label = session.display_label();
+        let request = self.ui_jobs.begin_request(RequestKind::Editor);
+        self.spawn_ui_job(
+            editor_search_job(),
+            editor::detect_installed_editors,
+            move |app: &mut App, editors: Option<Vec<editor::DetectedEditor>>| {
+                let Some(editors) = editors else { return };
+                if !app.ui_jobs.is_newest(RequestKind::Editor, request) {
+                    app.set_info(format!(
+                        "Agent \"{session_label}\" was not opened in an editor: a newer editor \
+                         request replaced it."
+                    ));
+                    return;
+                }
+                app.open_in_preferred_editor(&directory, &session_label, &editors);
+            },
+        );
+    }
+
+    fn open_in_preferred_editor(
+        &mut self,
+        directory: &str,
+        session_label: &str,
+        editors: &[editor::DetectedEditor],
+    ) {
         let Some(selected_editor) =
-            editor::preferred_editor(&editors, &self.engine.config.editor.default)
+            editor::preferred_editor(editors, &self.engine.config.editor.default)
         else {
             self.set_error(
                 "No supported editor CLI found on PATH. Install cursor, code, zed, vscodium, or sublime.",
             );
-            return Ok(());
+            return;
         };
 
-        let session_label = session.display_label();
         let configured_default = self.engine.config.editor.default.trim().to_string();
-        self.open_worktree_in_editor(session.directory(), &session_label, &selected_editor)?;
+        if let Err(e) = self.open_worktree_in_editor(directory, session_label, &selected_editor) {
+            self.set_error(format!("{e:#}"));
+            return;
+        }
 
         if !configured_default.is_empty()
             && !editor::matches_configured_editor(&selected_editor, &configured_default)
@@ -4527,20 +4692,53 @@ impl App {
                 selected_editor.label, selected_editor.command, configured_default
             ));
         }
-
-        Ok(())
     }
 
+    /// Offer the editors found on `PATH` for the selected agent's directory.
+    /// The search runs on a worker; the picker opens when it answers, unless
+    /// another dialog has been opened meanwhile.
     pub(crate) fn open_worktree_editor_picker(&mut self) {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent session first.");
             return;
         };
-        let editors = editor::detect_installed_editors();
+        let worktree_path = session.directory().to_string();
+        let session_label = session.display_label();
+        let request = self.ui_jobs.begin_request(RequestKind::Editor);
+        self.spawn_ui_job(
+            editor_search_job(),
+            editor::detect_installed_editors,
+            move |app: &mut App, editors: Option<Vec<editor::DetectedEditor>>| {
+                let Some(editors) = editors else { return };
+                if !app.ui_jobs.is_newest(RequestKind::Editor, request) {
+                    app.set_info(format!(
+                        "The editor picker for agent \"{session_label}\" was not opened: a newer \
+                         editor request replaced it."
+                    ));
+                    return;
+                }
+                app.open_editor_picker_with(worktree_path, session_label, editors);
+            },
+        );
+    }
+
+    fn open_editor_picker_with(
+        &mut self,
+        worktree_path: String,
+        session_label: String,
+        editors: Vec<editor::DetectedEditor>,
+    ) {
         if editors.is_empty() {
             self.set_error(
                 "No supported editor CLI found on PATH. Install cursor, code, zed, vscodium, or sublime.",
             );
+            return;
+        }
+        if let Some(blocker) = self.job_dialog_blocker() {
+            self.set_info(format!(
+                "The editor picker for agent \"{session_label}\" was not opened because \
+                 {blocker}. Ask for it again when you are ready."
+            ));
             return;
         }
 
@@ -4551,10 +4749,9 @@ impl App {
                     .position(|editor| editor.command == preferred.command)
             })
             .unwrap_or(0);
-        let session_label = session.display_label();
         self.prompt = PromptState::PickEditor {
             session_label,
-            worktree_path: session.directory().to_string(),
+            worktree_path,
             editors,
             selected,
         };
@@ -5204,6 +5401,15 @@ fn terminal_launch_failure(prefix: &str, err: &anyhow::Error) -> String {
     }
 }
 
+/// The worker job that looks for editor CLIs on `PATH`.
+fn editor_search_job() -> crate::app::ui_jobs::UiJob {
+    crate::app::ui_jobs::UiJob {
+        busy: "Looking for editor CLIs on PATH\u{2026}".into(),
+        stopped: "dux could not finish looking for editor CLIs on PATH; dux.log has the details."
+            .to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5304,6 +5510,7 @@ mod tests {
             deferred_commands: Vec::new(),
             reload_guard: None,
             reload_origin: ReloadOrigin::default(),
+            reloaded_projects: None,
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             launched_drop_paste: HashMap::default(),
@@ -5422,6 +5629,11 @@ mod tests {
             unpushed_count_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
+            ui_jobs: crate::app::ui_jobs::UiJobs::default(),
+            path_completion: crate::app::PathCompletion::default(),
+            browser_add: crate::app::BrowserAdd::default(),
+            theme_previews: None,
+            diff_wrap_ask: None,
             pr_clone_awaiting: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
@@ -5721,6 +5933,7 @@ mod tests {
             deferred_commands: Vec::new(),
             reload_guard: None,
             reload_origin: ReloadOrigin::default(),
+            reloaded_projects: None,
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             launched_drop_paste: HashMap::default(),
@@ -5897,17 +6110,24 @@ mod tests {
     fn set_focused_tab_writes_through_to_the_engine_and_persists() {
         let mut app =
             test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        // The session's slot tab is stored too, as every agent's is.
         app.engine
             .session_store
-            .upsert_session(&app.engine.sessions[0].clone())
+            .create_session(&app.engine.sessions[0].clone())
             .expect("seed session row");
         seed_tab(&mut app, "t1", "s1", "claude", 1);
+        let stored_tab = app.engine.agent_tabs[TabIdRef::new("t1")].clone();
+        app.engine
+            .session_store
+            .insert_agent_tab(&stored_tab)
+            .expect("store the tab");
 
         app.set_focused_tab("s1", "t1");
         assert_eq!(
             app.engine.sessions[0].last_focused_tab.as_deref(),
             Some("t1")
         );
+        app.engine.wait_for_focused_tab_writes();
         let reloaded = app.engine.session_store.load_sessions().expect("reload");
         let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
         assert_eq!(s.last_focused_tab.as_deref(), Some("t1"));
@@ -5915,6 +6135,7 @@ mod tests {
         // Switching back to Main clears the remembered engine value too.
         app.set_focused_tab("s1", "s1");
         assert_eq!(app.engine.sessions[0].last_focused_tab, None);
+        app.engine.wait_for_focused_tab_writes();
         let reloaded = app.engine.session_store.load_sessions().expect("reload");
         let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
         assert_eq!(s.last_focused_tab, None);
@@ -6174,8 +6395,9 @@ mod tests {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
 
-        app.add_project(&path, "Fresh".to_string())
-            .expect("add_project");
+        app.add_project(&path, "Fresh".to_string());
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         assert!(
             matches!(app.prompt, PromptState::ConfirmCreateInitialCommit { .. }),
@@ -6193,12 +6415,13 @@ mod tests {
     fn resolving_create_initial_commit_births_head_and_adds_project() {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(&path.clone(), "Fresh".to_string())
-            .expect("add_project");
+        app.add_project(&path.clone(), "Fresh".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         // Confirming dispatches a background worker; the commit + registration
         // complete asynchronously. Drain until the project appears (bounded).
         app.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm);
+        crate::app::test_support::finish_ui_jobs(&mut app);
         assert!(matches!(app.prompt, PromptState::None));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.engine.projects.is_empty() && std::time::Instant::now() < deadline {
@@ -6249,9 +6472,10 @@ mod tests {
         std::fs::set_permissions(&objects, ro).unwrap();
 
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(&path.clone(), "Fresh".to_string())
-            .expect("add_project");
+        app.add_project(&path.clone(), "Fresh".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
         app.resolve_confirm_create_initial_commit(ConfirmAnswer::Confirm);
+        crate::app::test_support::finish_ui_jobs(&mut app);
         // The gate is keyed by the repository's real path, which macOS reaches
         // through a symlink.
         let gate = dux_core::engine::InFlightKey::InitialCommit(
@@ -6299,7 +6523,8 @@ mod tests {
         let path = repo.path().to_string_lossy().to_string();
 
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(&path, "Trunk".to_string()).expect("add");
+        app.add_project(&path, "Trunk".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
         assert!(
             matches!(app.prompt, PromptState::ConfirmCreateInitialCommit { .. }),
             "unborn repo must prompt for a commit, not the branch warning, got {:?}",
@@ -6311,10 +6536,11 @@ mod tests {
     fn cancelling_create_initial_commit_leaves_repo_and_workspace_untouched() {
         let (_repo, path) = init_unborn_repo();
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.add_project(&path.clone(), "Fresh".to_string())
-            .expect("add_project");
+        app.add_project(&path.clone(), "Fresh".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         app.resolve_confirm_create_initial_commit(ConfirmAnswer::Cancel);
+        crate::app::test_support::finish_ui_jobs(&mut app);
 
         assert!(
             !dux_core::git::repo_has_commits(Path::new(&path)),
@@ -6595,7 +6821,7 @@ mod tests {
             app.status.message()
         );
         // The rollback undid the in-memory list and the SQLite row.
-        assert!(app.engine.projects.is_empty());
+        assert_eq!(app.engine.projects, []);
         assert_eq!(
             app.engine
                 .session_store
@@ -6751,6 +6977,71 @@ mod tests {
     /// offered only in that state, and hidden rather than disabled elsewhere: a
     /// command that exists only while something is broken would otherwise sit in
     /// the palette promising a repair nothing needs.
+    /// The editor search runs on a worker: the picker is not up when the key
+    /// returns, only a busy, and it opens once the search answers.
+    #[test]
+    fn the_editor_picker_opens_when_the_editor_search_answers() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.selected_left = 1;
+
+        app.open_worktree_editor_picker();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+
+        drain_until(&mut app, "the editor picker", |app| {
+            matches!(app.prompt, PromptState::PickEditor { .. })
+        });
+    }
+
+    /// Only the newest editor request acts: an earlier one's answer is
+    /// dropped and says so.
+    #[test]
+    fn only_the_newest_editor_request_opens_the_picker() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.selected_left = 1;
+
+        app.open_worktree_editor_picker();
+        app.open_worktree_editor_picker();
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(matches!(app.prompt, PromptState::PickEditor { .. }));
+        let said = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(
+            said.contains("a newer editor request replaced it"),
+            "{said}"
+        );
+    }
+
+    /// A picker whose answer lands over another dialog does not replace it,
+    /// and says it was not opened.
+    #[test]
+    fn the_editor_picker_does_not_replace_a_dialog_opened_meanwhile() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.selected_left = 1;
+
+        app.open_worktree_editor_picker();
+        app.prompt = PromptState::Command {
+            input: crate::app::text_input::TextInput::new(),
+            selected: 0,
+        };
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        assert!(matches!(app.prompt, PromptState::Command { .. }));
+        let said = app
+            .status
+            .most_recent_tui()
+            .map(|(_, message)| message)
+            .unwrap_or_default();
+        assert!(said.contains("another dialog is open"), "{said}");
+    }
+
     #[test]
     fn recreate_working_copy_is_offered_only_where_there_is_something_to_recreate() {
         let mut app =
@@ -9312,6 +9603,30 @@ mod tests {
         );
     }
 
+    /// The themes are read on a worker: the picker is not up when the
+    /// command returns, only a busy, and opens with every theme already read,
+    /// so a preview needs no file.
+    #[test]
+    fn the_theme_picker_opens_once_its_themes_are_read() {
+        let mut app = app_with_one_session();
+        app.open_change_theme_prompt();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
+
+        let PromptState::ChangeTheme(prompt) = &app.prompt else {
+            panic!("expected the picker, got {:?}", app.prompt);
+        };
+        let previews = app.theme_previews.as_ref().expect("read");
+        assert!(
+            prompt
+                .options
+                .iter()
+                .all(|option| previews.loaded.contains_key(&option.id))
+        );
+    }
+
     /// Every colour on screen changes, which is the biggest visible change dux
     /// makes, so the theme swap says nothing.
     #[test]
@@ -9323,6 +9638,18 @@ mod tests {
             return;
         };
         let before = app.status.most_recent_tui().map(|(_, text)| text);
+        // The themes the picker read when it opened.
+        app.theme_previews = Some(crate::app::ThemePreviews {
+            loaded: options
+                .iter()
+                .map(|option| {
+                    let theme = crate::theme::load(&option.id, &app.engine.paths)
+                        .map_err(|err| format!("{err:#}"));
+                    (option.id.clone(), theme)
+                })
+                .collect(),
+            original: app.theme,
+        });
 
         app.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
             options,
@@ -10655,6 +10982,8 @@ mod tests {
             "Enter dispatches the create and closes the prompt, got {:?}",
             app.prompt
         );
+        // Whether the name is taken is asked on a worker first.
+        crate::app::test_support::finish_ui_jobs(app);
     }
 
     const CREATED_SENTENCE: &str = "Created claude agent \"agent-one\" in project \"repo\". The new worktree is ready in a fresh session.";
@@ -10761,8 +11090,9 @@ mod tests {
         let (_root, repo, feature_commit) = clone_on_a_feature_branch();
         let mut app = journey_app();
 
-        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
-            .expect("add_project");
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string());
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
         answer_branch_dialog(
             &mut app,
             dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,
@@ -10793,8 +11123,9 @@ mod tests {
         let (_root, repo, feature_commit) = clone_on_a_feature_branch();
         let mut app = journey_app();
 
-        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
-            .expect("add_project");
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string());
+
+        crate::app::test_support::finish_ui_jobs(&mut app);
         answer_branch_dialog(
             &mut app,
             dux_core::add_project_plan::DefaultCheckout::CheckOutDefault,
@@ -10823,8 +11154,8 @@ mod tests {
         let (root, repo, _) = clone_on_a_feature_branch();
         crate::app::test_support::run_git_output(&repo, &["switch", "-q", "-c", "develop"]);
         let mut app = journey_app();
-        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string())
-            .expect("add_project");
+        app.add_project(repo.to_string_lossy().as_ref(), "repo".to_string());
+        crate::app::test_support::finish_ui_jobs(&mut app);
         answer_branch_dialog(
             &mut app,
             dux_core::add_project_plan::DefaultCheckout::StayOnCurrent,

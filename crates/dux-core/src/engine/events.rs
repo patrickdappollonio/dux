@@ -7,7 +7,6 @@
 //! described by an `EventReaction` variant; the App's `apply_reaction`
 //! translates each variant back into concrete view mutations.
 
-use std::path::Path;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -3454,7 +3453,21 @@ impl Engine {
     /// [`EventReaction::ConfigAdopted`]. Either failure goes last in the
     /// returned `Multi` so it wins the status line over a deferred save's
     /// success message.
-    fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
+    fn process_config_reload_ready(
+        &mut self,
+        result: Result<crate::worker::ReloadedConfig, String>,
+    ) -> EventReaction {
+        // The projects the worker built wait for the apply of its config; a
+        // reload with none leaves that apply to build them.
+        let result = result.map(|reloaded| {
+            if let Some(reload) = &mut self.reloaded_projects {
+                reload.built = reloaded.projects;
+            }
+            reloaded.config
+        });
+        if result.is_err() {
+            self.reloaded_projects = None;
+        }
         // The GitHub integration's state before the reload. The drain below
         // applies the reloaded config, which moves it; it goes back with the
         // old config, so every surface's apply compares with the true state.
@@ -3596,6 +3609,12 @@ impl Engine {
             {
                 reloaded.source_text = source;
             }
+            // The deferred commands may have changed the projects since the
+            // worker read them; the list in force now is the one to adopt.
+            self.reloaded_projects = Some(crate::engine::ReloadProjects {
+                at_start: self.projects.clone(),
+                built: Some(self.projects.clone()),
+            });
             reactions.push(EventReaction::ApplyReloadedConfig(Box::new(reloaded)));
         }
         reactions.extend(deferred_reactions);
@@ -3620,6 +3639,7 @@ impl Engine {
             String,
         >,
         worktree: &std::path::Path,
+        read: u64,
     ) -> EventReaction {
         // Poll results can outlive their watch and must not replace another
         // worktree's files, nor report a failure about a watch that has moved
@@ -3628,6 +3648,16 @@ impl Engine {
             .watched_worktree_path()
             .is_some_and(|current| current == worktree);
         if !still_watched {
+            return EventReaction::Nothing;
+        }
+        // The poller and the refresh worker read on threads of their own: a
+        // read that started before one already applied saw an older tree.
+        let fresh = self
+            .changed_files_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit_read(read);
+        if !fresh {
             return EventReaction::Nothing;
         }
         let session_id = self.watched_session_id.clone();
@@ -3682,11 +3712,7 @@ impl Engine {
                 } else if existing.leading_branch.is_some() {
                     ProjectBranchStatus::NotLeading
                 } else {
-                    let warning = crate::git::branch_warning_kind(
-                        Path::new(&existing.path),
-                        &existing.current_branch,
-                    );
-                    crate::git::branch_status_from_warning(warning.as_ref())
+                    crate::git::branch_status_from_warning(outcome.default_warning())
                 };
         }
         let final_reaction = status.into_reaction();
@@ -5049,9 +5075,11 @@ impl Engine {
                     create_final,
                 )
             }
-            WorkerEvent::ChangedFilesReady { outcome, worktree } => {
-                self.process_changed_files_ready(outcome, &worktree)
-            }
+            WorkerEvent::ChangedFilesReady {
+                outcome,
+                worktree,
+                read,
+            } => self.process_changed_files_ready(outcome, &worktree, read),
             WorkerEvent::FolderRepoStatusReady { session_id, status } => {
                 self.process_folder_repo_status_ready(&session_id, status)
             }
@@ -6410,6 +6438,7 @@ mod tests {
             },
             result: Ok(crate::worker::PullOutcome::Pulled {
                 current_branch: Some("feature-x".to_string()),
+                default_warning: None,
             }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-project:p1",
@@ -6436,6 +6465,42 @@ mod tests {
         );
     }
 
+    /// With no leading branch on record, the branch status comes from what
+    /// the pull worker read about the default branch, not from git asked again
+    /// on the engine thread: a worker that found the checkout on its default
+    /// leaves it leading, whatever the branch is called.
+    #[test]
+    fn pull_completed_project_takes_the_default_warning_from_the_worker() {
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", "/tmp/p1");
+        project.leading_branch = None;
+        engine.projects.push(project);
+        let repo_path = "/tmp/p1".to_string();
+        engine.mark_in_flight(project_pull_key(&repo_path));
+
+        engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path,
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: None,
+            },
+            result: Ok(crate::worker::PullOutcome::Pulled {
+                current_branch: Some("trunk".to_string()),
+                default_warning: None,
+            }),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::info("Refreshed."),
+            ),
+        });
+
+        assert_eq!(
+            engine.projects[0].branch_status,
+            ProjectBranchStatus::Leading
+        );
+    }
+
     /// A no-origin refresh still updates the project's current branch and
     /// resolves the keyed info final (nothing to pull is not a failure).
     #[test]
@@ -6455,6 +6520,7 @@ mod tests {
             },
             result: Ok(crate::worker::PullOutcome::NoOrigin {
                 current_branch: Some("feature-x".to_string()),
+                default_warning: None,
             }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-project:p1",
@@ -7170,6 +7236,7 @@ mod tests {
                 vec![sample_changed_file("unstaged.txt")],
             )),
             worktree,
+            read: 0,
         });
 
         // The view follow-up that repaints the TUI's changed-files pane.
@@ -7178,6 +7245,30 @@ mod tests {
         assert_eq!(engine.staged_files[0].path, "staged.txt");
         assert_eq!(engine.unstaged_files.len(), 1);
         assert_eq!(engine.unstaged_files[0].path, "unstaged.txt");
+    }
+
+    /// A listing whose read started before one already applied saw an older
+    /// tree, and does not replace it however late it lands.
+    #[test]
+    fn an_older_changed_files_read_never_replaces_a_newer_one() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = PathBuf::from("/tmp/wt-current");
+        *engine.watched_worktree.lock().unwrap() = Some(worktree.clone());
+        let (older, newer) = {
+            let mut queue = engine.changed_files_refresh.lock().unwrap();
+            (queue.start_read(), queue.start_read())
+        };
+        let listing = |path: &str, read: u64| WorkerEvent::ChangedFilesReady {
+            outcome: Ok((vec![sample_changed_file(path)], Vec::new())),
+            worktree: worktree.clone(),
+            read,
+        };
+
+        engine.process_worker_event(listing("after-the-stage.txt", newer));
+        let late = engine.process_worker_event(listing("before-the-stage.txt", older));
+
+        assert!(matches!(late, EventReaction::Nothing));
+        assert_eq!(engine.staged_files[0].path, "after-the-stage.txt");
     }
 
     /// A read git could not answer must not be flattened into "no changes":
@@ -7195,6 +7286,7 @@ mod tests {
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
             outcome: Err("git status failed: index.lock exists".to_string()),
             worktree,
+            read: 0,
         });
 
         assert!(matches!(reaction, EventReaction::Nothing));
@@ -7222,6 +7314,7 @@ mod tests {
             let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
                 outcome: Err("git status failed: index.lock exists".to_string()),
                 worktree: worktree.clone(),
+                read: 0,
             });
             if let EventReaction::Status(status) = reaction {
                 warnings.push(status);
@@ -7246,6 +7339,7 @@ mod tests {
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
             outcome: Ok((Vec::new(), Vec::new())),
             worktree,
+            read: 0,
         });
         let EventReaction::Multi(parts) = reaction else {
             panic!("a recovering read owes both a repaint and a status")
@@ -7280,6 +7374,7 @@ mod tests {
             )),
             // Computed for the worktree we have since stopped watching.
             worktree: PathBuf::from("/tmp/wt-stale"),
+            read: 0,
         });
 
         // Dropped: no view follow-up, and engine state is unchanged.
@@ -7303,6 +7398,7 @@ mod tests {
                 vec![sample_changed_file("stale.txt")],
             )),
             worktree: PathBuf::from("/tmp/wt-stale"),
+            read: 0,
         });
 
         assert!(matches!(reaction, EventReaction::Nothing));
@@ -9639,7 +9735,7 @@ mod tests {
             project_name: "Pee One".to_string(),
         };
         let outcome = engine.process_project_persistence_completed(action, Ok(()), None);
-        assert!(engine.projects.is_empty());
+        assert_eq!(engine.projects, []);
         assert!(matches!(
             outcome.view,
             ProjectPersistenceView::Removed { ref project_name } if project_name == "Pee One"
@@ -10357,16 +10453,6 @@ mod tests {
         };
         assert!(!view.launched);
         assert!(view.status.is_some());
-    }
-
-    #[test]
-    fn apply_stage_file_propagates_git_error_for_missing_worktree() {
-        let (mut engine, _tmp) = test_engine();
-        let result = engine.apply(crate::engine::Command::StageFile {
-            worktree_path: PathBuf::from("/nonexistent/worktree"),
-            path: "missing.rs".to_string(),
-        });
-        assert!(result.is_err());
     }
 
     #[test]
@@ -11314,6 +11400,9 @@ mod tests {
                 _ => None,
             })
             .expect("reloaded config");
+        // An apply with no project list handed to it reads the database,
+        // which is what fails here.
+        engine.reloaded_projects = None;
         break_the_session_database(&engine);
         assert!(
             engine.apply_reloaded_config(*applied).is_err(),
@@ -11780,6 +11869,7 @@ mod tests {
             },
             result: Ok(crate::worker::PullOutcome::Pulled {
                 current_branch: None,
+                default_warning: None,
             }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-project:p1",
@@ -11840,6 +11930,7 @@ mod tests {
             target: PullTarget::Session,
             result: Ok(crate::worker::PullOutcome::Pulled {
                 current_branch: None,
+                default_warning: None,
             }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-session:/tmp/wt-session",

@@ -1020,6 +1020,70 @@ enum UncommittedCopy {
     LeaveInProject,
 }
 
+/// How many made-up names a create tries before giving up on finding one
+/// that is not a branch yet.
+const GENERATED_NAME_ATTEMPTS: usize = 16;
+
+/// A name from `generate` that `taken` does not refuse (a branch already, a
+/// folder already there), tried at most [`GENERATED_NAME_ATTEMPTS`] times;
+/// `None` when every one was taken.
+fn free_generated_name(
+    mut generate: impl FnMut() -> String,
+    taken: impl Fn(&str) -> bool,
+) -> Option<String> {
+    (0..GENERATED_NAME_ATTEMPTS)
+        .map(|_| generate())
+        .find(|name| !taken(name))
+}
+
+/// Whether a made-up `name` cannot be used: it is a branch already, or the
+/// folder its worktree would get is already there.
+fn generated_name_is_taken(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    name: &str,
+) -> bool {
+    git::branch_exists(repo_path, name).is_some()
+        || git::directory_presence(&git::managed_worktree_path(
+            worktrees_root,
+            project_name,
+            name,
+        )) == git::DirectoryPresence::Present
+}
+
+/// The refusal for a create that asked dux for a name when every name dux made
+/// up was taken.
+const NO_FREE_GENERATED_NAME: &str = "dux could not find a free name for the new agent: every \
+     name it made up is already a branch or a folder. Give the agent a name and try again.";
+
+/// The refusal for a create whose made-up name became a branch while the
+/// project was pulled, after it was picked.
+fn generated_name_taken_refusal(name: &str) -> String {
+    format!(
+        "The name dux picked for the new agent, \"{name}\", became a branch while the project \
+         was being pulled, so nothing was created. Try again, or give the agent a name."
+    )
+}
+
+/// The refusal for a create whose name is an existing branch nobody agreed to
+/// attach to.
+pub(crate) fn existing_branch_refusal(name: &str) -> String {
+    format!(
+        "A branch named \"{name}\" already exists. Creating this agent would attach to that \
+         branch's history. Confirm to attach, or pick a different name."
+    )
+}
+
+/// Where a new agent's name came from, which decides how a clash is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameOrigin {
+    /// The user gave it.
+    Typed,
+    /// dux made it up because none was given.
+    MadeUp,
+}
+
 /// Whether a branch that already has the agent's name refuses the create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FreshBranch {
@@ -1328,6 +1392,66 @@ impl CreatePlanContext<'_> {
         }
     }
 
+    /// The name a new agent gets: the one typed, or a made-up one. A name
+    /// dux makes up is the user's only in that they asked for one, so one that
+    /// is already a branch is replaced, not refused; `None` (the failure sent)
+    /// when no made-up name was free.
+    fn agent_name_for(
+        &self,
+        repo_path: &Path,
+        project_name: &str,
+        custom_name: Option<String>,
+    ) -> Option<(String, NameOrigin)> {
+        if let Some(name) = custom_name {
+            return Some((name, NameOrigin::Typed));
+        }
+        let taken = |name: &str| {
+            generated_name_is_taken(repo_path, &self.paths.worktrees_root, project_name, name)
+        };
+        let made_up = free_generated_name(git::docker_style_name, taken);
+        if made_up.is_none() {
+            self.send_failure(NO_FREE_GENERATED_NAME);
+        }
+        made_up.map(|name| (name, NameOrigin::MadeUp))
+    }
+
+    /// Refuse the create when `name` is a branch it may not take, saying why;
+    /// answers whether it refused.
+    fn refuse_an_existing_branch(
+        &self,
+        repo_path: &Path,
+        name: &str,
+        origin: NameOrigin,
+        branch: BranchAttach,
+        fresh: FreshBranch,
+    ) -> bool {
+        if git::branch_exists(repo_path, name).is_none() {
+            return false;
+        }
+        // A clone's first agent starts a branch of its own; one that appeared
+        // since the clone looked is refused, never attached to.
+        if fresh == FreshBranch::Required {
+            self.send_failure(
+                "a branch with that name already exists in the clone. Pick another name, or \
+                 use New agent, which offers to attach to that branch.",
+            );
+            return true;
+        }
+        // Attaching to a branch's history is the user's to agree to: a branch
+        // of this name that appeared after the name was checked (another
+        // create, a fetch) is refused rather than attached to silently. A
+        // made-up name that became a branch since it was picked (the pull
+        // fetched one) is refused too: its folder is already held.
+        if branch == BranchAttach::CreateNew {
+            self.send_failure(match origin {
+                NameOrigin::Typed => existing_branch_refusal(name),
+                NameOrigin::MadeUp => generated_name_taken_refusal(name),
+            });
+            return true;
+        }
+        false
+    }
+
     fn plan_new_project(
         &mut self,
         project: crate::model::Project,
@@ -1344,24 +1468,18 @@ impl CreatePlanContext<'_> {
             crate::project_browser::leading_branch_for_project(&repo_path, current)
         });
         let title = custom_name.clone();
-        let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
+        let (resolved_name, origin) =
+            self.agent_name_for(&repo_path, &project.name, custom_name)?;
         if self.refuse_occupied_folder(&project.name, &resolved_name) {
             return None;
         }
         if pull == PreCreatePull::PullFirst {
             self.try_pre_create_pull(&project, &repo_path, &leading_branch);
         }
-        let existing = git::branch_exists(&repo_path, &resolved_name).is_some();
-        // A clone's first agent starts a branch of its own; one that appeared
-        // since the clone looked is refused, never attached to.
-        if fresh == FreshBranch::Required && existing {
-            self.send_failure(
-                "a branch with that name already exists in the clone. Pick another name, or \
-                 use New agent, which offers to attach to that branch.",
-            );
+        if self.refuse_an_existing_branch(&repo_path, &resolved_name, origin, branch, fresh) {
             return None;
         }
-        let attach_existing = branch == BranchAttach::AttachExisting || existing;
+        let attach_existing = branch == BranchAttach::AttachExisting;
         if !attach_existing
             && self.refuse_unbranchable_project(&project, &repo_path, &leading_branch)
         {
@@ -4255,17 +4373,54 @@ mod tests {
         );
     }
 
+    /// A made-up name that is already a branch is replaced by another one,
+    /// not refused; only when every attempt is taken does the create give up.
+    /// A made-up name whose worktree folder is already there is taken too,
+    /// so another name is tried rather than the create refused.
     #[test]
-    fn an_auto_named_agent_that_collides_with_an_existing_branch_attaches() {
-        // The last-mile `branch_exists` check turns a pet name that happens to
-        // match a real branch into an attach; the provenance must follow it,
-        // because the user never asked to hand that branch to dux.
+    fn a_generated_name_whose_folder_is_there_is_taken() {
         let repo = init_test_repo();
-        create_branch(repo.path(), "already-here");
+        let root = tempfile::tempdir().unwrap();
+        assert!(!generated_name_is_taken(
+            repo.path(),
+            root.path(),
+            "demo",
+            "quiet-fox"
+        ));
+        std::fs::create_dir_all(git::managed_worktree_path(root.path(), "demo", "quiet-fox"))
+            .unwrap();
+        assert!(generated_name_is_taken(
+            repo.path(),
+            root.path(),
+            "demo",
+            "quiet-fox"
+        ));
+    }
+
+    #[test]
+    fn a_generated_name_that_is_a_branch_is_replaced() {
+        let repo = init_test_repo();
+        create_branch(repo.path(), "taken-name");
+        let taken = |name: &str| git::branch_exists(repo.path(), name).is_some();
+        let mut names = ["taken-name", "free-name"].into_iter();
+        assert_eq!(
+            free_generated_name(|| names.next().unwrap().to_string(), taken),
+            Some("free-name".to_string())
+        );
+        assert_eq!(
+            free_generated_name(|| "taken-name".to_string(), taken),
+            None
+        );
+    }
+
+    /// A create asked for with no name gets a generated one that is not a
+    /// branch, and goes ahead.
+    #[test]
+    fn a_create_with_no_name_gets_a_free_generated_one() {
+        let repo = init_test_repo();
         let request = CreateAgentRequest::NewProject {
             project: test_project(repo.path()),
-            custom_name: Some("already-here".to_string()),
-            // NOT confirmed by the dialog: the arm discovers the branch itself.
+            custom_name: None,
             use_existing_branch: false,
             pull_before_create: false,
             copy_uncommitted_changes: false,
@@ -4274,7 +4429,32 @@ mod tests {
         let session = drive_create_job(repo.path(), request);
         assert_eq!(
             session.branch_provenance().unwrap(),
-            crate::model::BranchProvenance::AttachedExisting
+            crate::model::BranchProvenance::CreatedByDux
+        );
+    }
+
+    #[test]
+    fn a_create_whose_name_became_a_branch_unasked_is_refused() {
+        // A branch of the agent's name that nobody agreed to attach to (made
+        // after the name was checked, by another create or a fetch) refuses
+        // the create with the sentence the name check gives, rather than
+        // handing that branch's history to the agent silently.
+        let repo = init_test_repo();
+        create_branch(repo.path(), "already-here");
+        let request = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("already-here".to_string()),
+            // NOT confirmed by the dialog.
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+            cloned: None,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(run.session.is_none(), "nothing was created");
+        assert_eq!(
+            run.failure.as_deref(),
+            Some(existing_branch_refusal("already-here").as_str())
         );
     }
 
