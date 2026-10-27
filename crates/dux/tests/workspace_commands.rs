@@ -154,8 +154,9 @@ fn isolate_from_the_developer(root: &Path, bin: &Path) {
         ("GIT_SSH_VARIANT", "simple".into()),
         ("PATH", format!("{}:{path}", bin.display()).into()),
     ] {
-        // SAFETY: this binary runs this one test, and no other thread is
-        // running yet.
+        // SAFETY: this binary runs this one test, and the serve that reads
+        // the environment starts after this; libtest's own thread only
+        // waits for the test.
         unsafe { std::env::set_var(name, value) };
     }
 }

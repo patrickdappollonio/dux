@@ -14,8 +14,8 @@ use std::io::Write;
 
 use crate::commands::{
     AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
-    ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSub,
-    ServerSub, TabsSub, TerminalsSub, WorktreesSub,
+    ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSource,
+    RemoteSub, ServerSub, TabsSub, TerminalsSub, WorktreesSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
@@ -39,6 +39,27 @@ impl Selection {
         std::env::var(REMOTE_VARIABLE).ok()
     }
 
+    /// [`crate::commands::check_config_target`] for `remote`, the name this
+    /// selection resolved, with what selected it.
+    pub(crate) fn check_config_target(&self, remote: Option<&str>) -> Result<(), String> {
+        crate::commands::check_config_target(
+            remote.map(|name| (name, self.remote_source())),
+            self.local_flag(),
+        )
+    }
+
+    /// What selects the remote when one is selected: the flag, else the variable,
+    /// else the saved default, in the order [`Self::remote_name`] reads them.
+    fn remote_source(&self) -> RemoteSource {
+        if self.remote.is_some() {
+            RemoteSource::Flag
+        } else if Self::variable().is_some_and(|v| !v.is_empty()) {
+            RemoteSource::Variable
+        } else {
+            RemoteSource::SavedDefault
+        }
+    }
+
     /// The remote this selection names, reading the saved default only when
     /// nothing else names one.
     pub(crate) fn remote_name(&self, paths: &DuxPaths) -> Result<Option<String>, CliError> {
@@ -55,23 +76,22 @@ impl Selection {
         Ok(Remotes::load(&paths.root)?.default)
     }
 
-    /// [`Self::remote_name`] for the `dux config` command `args`. A reset never reads
-    /// remotes.toml, so a broken one cannot stop the reset that removes it; any other
-    /// command that cannot read it says so, with the ways on.
+    /// [`Self::remote_name`] for the `dux config` command `args`. A reset goes ahead
+    /// past a remotes.toml it cannot read, so a broken one cannot stop the reset that
+    /// removes it; a saved default it can read is a selected remote like any other.
+    /// Any other command that cannot read it says so, with the ways on.
     pub(crate) fn config_remote_name(
         &self,
         paths: &DuxPaths,
         args: &[String],
     ) -> Result<Option<String>, CliError> {
+        let selected = self.remote_name(paths);
         if args.first().is_some_and(|word| word == "reset") {
-            return Ok(connect::selected_remote(
-                self.remote.as_deref(),
-                self.local_flag(),
-                Self::variable().as_deref(),
-                None,
-            ));
+            // `remote_name` reads remotes.toml only when nothing else names a
+            // remote, so a read it could not make selects none.
+            return Ok(selected.unwrap_or(None));
         }
-        self.remote_name(paths).map_err(|error| {
+        selected.map_err(|error| {
             CliError::new(
                 error.exit,
                 format!(
@@ -912,8 +932,6 @@ fn server_connections(command: ConnectionsSub, selection: &Selection) -> Result<
     server_inspect::connections_ls(&client, shape(&list))
 }
 
-/// `dux server logs`: the last lines of the server log and, with `follow`, every line after.
-/// With no dux running on this machine, its log file is read as it stands.
 /// `dux server logs` and `dux server connections`. Log lines go to `out` as they are read, and
 /// what is said about them to `err`.
 pub(crate) fn server(

@@ -318,11 +318,10 @@ async fn smoke_caddy_is_ready_only_once_its_sites_handshake() {
         )
         .await;
         let root = caddy.caddy_root().await;
-        let first = serve_client(&dux, &root).await.get("/healthz").await;
         // Any answer at all: a handshake in the window gets none (the client
         // panics with the TLS alert), and whether dux admits the tailnet name
         // yet is another journey's question.
-        assert!(first.status >= 100, "{}", first.describe());
+        serve_client(&dux, &root).await.get("/healthz").await;
     })
     .await;
 }
@@ -426,8 +425,9 @@ pub(crate) async fn start_web_server(dux: &Dux) {
     dux.tmux_keys(&["C-p"]).await;
     dux.wait_for_screen("Command Palette", Duration::from_secs(15))
         .await;
+    // The text and the Enter reach the palette in order through one PTY, and
+    // the palette filters when it handles the Enter.
     dux.tmux_type("start-web-server").await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
     dux.tmux_keys(&["Enter"]).await;
 }
 

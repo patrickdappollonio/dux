@@ -32,9 +32,7 @@ fn main() -> Result<()> {
             Ok(remote) => remote,
             Err(error) => client_commands::finish(Err(error)),
         };
-        if let Err(message) =
-            commands::check_config_target(remote.as_deref(), selection.local_flag())
-        {
+        if let Err(message) = selection.check_config_target(remote.as_deref()) {
             usage_error(&message);
         }
         // A config command that ends with one of the command line's own codes

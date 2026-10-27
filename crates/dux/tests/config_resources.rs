@@ -120,8 +120,9 @@ fn config_file_resources_through_a_running_dux_and_with_none() {
         .set(std::env::var_os("PATH").unwrap_or_default())
         .unwrap();
     // Nothing the serve might run (gh, tailscale, git) is the developer's own.
-    // SAFETY: this binary runs this one test, and no other thread is running
-    // yet.
+    // SAFETY: this binary runs this one test, and the serve that reads the
+    // environment starts after this; libtest's own thread only waits for the
+    // test.
     unsafe { std::env::set_var("PATH", root.join("no-tools")) };
     let port = serve(&root);
     let run = dux(

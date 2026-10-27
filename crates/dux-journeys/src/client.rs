@@ -331,7 +331,8 @@ impl Client {
     ///
     /// # Panics
     ///
-    /// When `path` does not join onto the base URL, or the request gets no response.
+    /// When `path` does not join onto the base URL, the request gets no response, or the
+    /// response's body cannot be read.
     pub async fn send(
         &self,
         method: Method,
@@ -368,7 +369,12 @@ impl Client {
                 )
             })
             .collect();
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().await.unwrap_or_else(|err| {
+            panic!(
+                "{method} {path} answered {status} but its body could not be read: {}",
+                error_chain(&err)
+            )
+        });
         Response {
             status,
             headers,
@@ -385,7 +391,6 @@ impl Client {
         .await
     }
 
-    /// Log in and panic unless it worked.
     /// Sign in, waiting out any slow-down the way a person does: a 429 says
     /// how long to wait (`Retry-After`), and dux slows every address down after
     /// a failed attempt, this machine included.

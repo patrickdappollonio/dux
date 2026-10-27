@@ -424,8 +424,9 @@ impl Dux {
     ///
     /// # Panics
     ///
-    /// When the exec cannot run (the container stopped), or reports no exit code within 10
-    /// seconds.
+    /// When the exec cannot run (the container stopped), its output cannot be read, or it
+    /// reports no exit code within 10 seconds of its output closing. The script itself runs
+    /// unbounded: its output is read until it closes.
     pub async fn exec(&self, script: &str) -> Exec {
         let mut result = self
             .container
@@ -445,8 +446,14 @@ impl Dux {
                     self.name
                 )
             });
-        let stdout = result.stdout_to_vec().await.unwrap_or_default();
-        let stderr = result.stderr_to_vec().await.unwrap_or_default();
+        let stdout = result
+            .stdout_to_vec()
+            .await
+            .unwrap_or_else(|err| panic!("read the exec's stdout in {}: {err}", self.name));
+        let stderr = result
+            .stderr_to_vec()
+            .await
+            .unwrap_or_else(|err| panic!("read the exec's stderr in {}: {err}", self.name));
         let code = eventually(
             "the exec to report its exit code",
             Duration::from_secs(10),

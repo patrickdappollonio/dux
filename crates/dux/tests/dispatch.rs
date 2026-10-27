@@ -279,27 +279,43 @@ fn remotes_are_saved_listed_made_default_and_forgotten() {
 
 #[test]
 fn config_refuses_a_selected_remote_or_an_unreadable_remotes_file_and_touches_nothing() {
-    let refusal = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n";
     let saved_default =
         "default = \"work\"\n\n[remotes.work]\nurl = \"https://work.example.com\"\n";
-    for (case, args, env, remotes) in [
+    let flag = "dux config edits this machine's config.toml, and --remote box names another \
+                machine; run it without --remote\n";
+    let variable = "dux config edits this machine's config.toml, and DUX_REMOTE selects work; \
+                    run \"dux --local config …\" to go ahead, or unset DUX_REMOTE\n";
+    let default = "dux config edits this machine's config.toml, and work is the saved default \
+                   remote; run \"dux --local config …\" to go ahead, or \"dux remote default \
+                   --unset\" to clear the default\n";
+    for (case, args, env, remotes, refusal) in [
         (
             "flag",
             &["--remote", "box", "config", "set", "server.port", "4000"][..],
             &[][..],
             None,
+            flag,
         ),
         (
             "variable",
             &["config", "set", "ui.theme", "x"][..],
             &[("DUX_REMOTE", "work")][..],
             None,
+            variable,
         ),
         (
             "default",
             &["config", "set", "ui.theme", "x"][..],
             &[][..],
             Some(saved_default),
+            default,
+        ),
+        (
+            "default-reset",
+            &["config", "reset"][..],
+            &[][..],
+            Some(saved_default),
+            default,
         ),
     ] {
         let dir = home(&format!("config-remote-{case}"));
@@ -311,6 +327,9 @@ fn config_refuses_a_selected_remote_or_an_unreadable_remotes_file_and_touches_no
         assert_eq!(run.stderr(), refusal, "{case}");
         assert_eq!(run.stdout(), "", "{case}");
         assert!(!dir.join("config.toml").exists(), "{case}");
+        if remotes.is_some() {
+            assert!(dir.join("remotes.toml").exists(), "{case}");
+        }
     }
     let dir = home("config-remote-local");
     let run = dux_in(
@@ -331,7 +350,8 @@ fn config_refuses_a_selected_remote_or_an_unreadable_remotes_file_and_touches_no
         assert!(run.stderr().contains(needle), "{needle}: {}", run.stderr());
     }
     assert!(!dir.join("config.toml").exists());
-    // `--local` and a reset never read it.
+    // `--local` never reads it, and a reset goes ahead past it because it
+    // removes the file.
     let run = dux_in(&dir, &["--local", "config", "path"], &[]);
     assert_eq!(run.code(), 0, "{}", run.stderr());
     let run = dux_in(&dir, &["config", "reset"], &[]);

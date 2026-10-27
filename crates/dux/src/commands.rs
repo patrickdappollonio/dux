@@ -200,16 +200,43 @@ pub(crate) fn split_config(args: &[String]) -> Option<ConfigInvocation> {
     None
 }
 
-/// `dux config` edits this machine's file, so a remote selected by `--remote`, `DUX_REMOTE` or
-/// the saved default is refused unless `--local` is given.
-pub(crate) fn check_config_target(remote: Option<&str>, local: LocalFlag) -> Result<(), String> {
-    if remote.is_some() && local == LocalFlag::Absent {
-        return Err(
-            "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE"
-                .to_string(),
-        );
+/// What selected the remote a command would talk to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteSource {
+    /// `--remote` on the command line.
+    Flag,
+    /// The `DUX_REMOTE` environment variable.
+    Variable,
+    /// The default saved with `dux remote default`.
+    SavedDefault,
+}
+
+/// `dux config` edits this machine's file, so a selected `remote` is refused unless
+/// `--local` is given, naming what selected it and the way out that applies.
+pub(crate) fn check_config_target(
+    remote: Option<(&str, RemoteSource)>,
+    local: LocalFlag,
+) -> Result<(), String> {
+    let Some((name, source)) = remote else {
+        return Ok(());
+    };
+    if local == LocalFlag::Given {
+        return Ok(());
     }
-    Ok(())
+    let start = "dux config edits this machine's config.toml";
+    Err(match source {
+        RemoteSource::Flag => {
+            format!("{start}, and --remote {name} names another machine; run it without --remote")
+        }
+        RemoteSource::Variable => format!(
+            "{start}, and DUX_REMOTE selects {name}; run \"dux --local config …\" to go ahead, \
+             or unset DUX_REMOTE"
+        ),
+        RemoteSource::SavedDefault => format!(
+            "{start}, and {name} is the saved default remote; run \"dux --local config …\" to \
+             go ahead, or \"dux remote default --unset\" to clear the default"
+        ),
+    })
 }
 
 #[derive(Subcommand, Debug)]
@@ -908,14 +935,19 @@ mod tests {
 
     #[test]
     fn a_selected_remote_refuses_config_unless_local() {
-        let msg = "dux config edits this machine's config.toml; run \"dux --local config …\" to go ahead, or unset DUX_REMOTE";
+        let default = Some(("box", RemoteSource::SavedDefault));
         assert_eq!(
-            check_config_target(Some("box"), LocalFlag::Absent),
-            Err(msg.to_string())
+            check_config_target(default, LocalFlag::Absent),
+            Err(
+                "dux config edits this machine's config.toml, and box is the saved default \
+                 remote; run \"dux --local config …\" to go ahead, or \"dux remote default \
+                 --unset\" to clear the default"
+                    .to_string()
+            )
         );
         assert_eq!(check_config_target(None, LocalFlag::Absent), Ok(()));
         assert_eq!(check_config_target(None, LocalFlag::Given), Ok(()));
-        assert_eq!(check_config_target(Some("box"), LocalFlag::Given), Ok(()));
+        assert_eq!(check_config_target(default, LocalFlag::Given), Ok(()));
     }
 
     /// Change lines the command tree accepts.

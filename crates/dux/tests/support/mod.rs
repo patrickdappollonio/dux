@@ -65,7 +65,9 @@ pub(crate) fn home(prefix: &str, name: &str) -> PathBuf {
 }
 
 /// Serve dux on `root` in this process, on a loopback port, and wait until
-/// its control socket answers. Returns the port.
+/// its control socket and its port answer. Returns the port. The port is one
+/// the system handed out and this function let go, so another process can take
+/// it first; the serve then stops and this panics saying so.
 pub(crate) fn serve(root: &Path) -> u16 {
     let paths = DuxPaths {
         root: root.to_path_buf(),
@@ -90,17 +92,55 @@ pub(crate) fn serve(root: &Path) -> u16 {
     // `dux keys ls` through the API reads the terminal UI's bindings, which
     // the dux binary installs before it serves.
     dux_tui::install_canonical_renderer();
-    std::thread::spawn(move || dux_web::run_server(&paths, plan, "test".to_string(), &[]));
+    let server =
+        std::thread::spawn(move || dux_web::run_server(&paths, plan, "test".to_string(), &[]));
     let lock_path = root.join("dux.lock");
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
+        // A serve that stopped (the port was taken between the probe above
+        // and its bind, or it could not start) says why.
+        if server.is_finished() {
+            match server.join() {
+                Ok(Ok(())) => panic!("dux stopped serving before it answered"),
+                Ok(Err(error)) => panic!("dux could not serve: {error:#}"),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
         let socket = std::fs::read_to_string(&lock_path)
             .map(|text| LockFileContents::parse(&text).control_socket)
             .unwrap_or_default();
-        if socket.is_some_and(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok()) {
+        // The control socket is bound before the port is, so the port is
+        // ready only once it answers as this process's dux.
+        if socket.is_some_and(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok())
+            && answers_as_this_dux(port)
+        {
             return port;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("dux never answered on its control socket");
+    panic!("dux never answered on its control socket and its port");
+}
+
+/// Whether `GET /api/v1/build` on the loopback `port` names this process's
+/// server run, which no other program on the port can.
+fn answers_as_this_dux(port: u16) -> bool {
+    use std::io::{Read, Write};
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = Duration::from_secs(2);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, timeout) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || write!(
+            stream,
+            "GET /api/v1/build HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && response.contains(&dux_web::build_routes::build_identity().process)
 }

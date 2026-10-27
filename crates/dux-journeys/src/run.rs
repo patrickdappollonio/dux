@@ -28,6 +28,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// The label naming the run that created a container or network.
 pub const RUN_LABEL: &str = "dux-journeys.run";
@@ -71,12 +72,18 @@ pub fn run_id() -> &'static str {
         let dir = runs_dir();
         std::fs::create_dir_all(&dir)
             .unwrap_or_else(|err| panic!("create the run directory {}: {err}", dir.display()));
+        // The heartbeat is locked under a name no sweep reads and only then
+        // renamed into place, so another run's sweep never finds it free and
+        // judges this run dead.
         let path = dir.join(format!("{id}.lock"));
-        let heartbeat = File::create(&path)
-            .unwrap_or_else(|err| panic!("create the run heartbeat {}: {err}", path.display()));
+        let unplaced = dir.join(format!("{id}.lock.new"));
+        let heartbeat = File::create(&unplaced)
+            .unwrap_or_else(|err| panic!("create the run heartbeat {}: {err}", unplaced.display()));
         heartbeat
             .lock()
-            .unwrap_or_else(|err| panic!("lock the run heartbeat {}: {err}", path.display()));
+            .unwrap_or_else(|err| panic!("lock the run heartbeat {}: {err}", unplaced.display()));
+        std::fs::rename(&unplaced, &path)
+            .unwrap_or_else(|err| panic!("place the run heartbeat {}: {err}", path.display()));
         install_signal_cleanup(id.clone());
         Run {
             id,
@@ -143,6 +150,7 @@ pub fn remove_run(run: &str) {
 /// nothing but the file). Live runs, and runs with no heartbeat here, are left
 /// alone.
 pub fn sweep_dead_runs() {
+    remove_unplaced_heartbeats(&runs_dir(), UNPLACED_GRACE);
     let Ok(entries) = std::fs::read_dir(runs_dir()) else {
         return;
     };
@@ -167,8 +175,45 @@ pub fn sweep_dead_runs() {
     }
 }
 
+/// How long a heartbeat may sit unlocked under its unplaced name before a
+/// sweep calls it a crash's leftover: far longer than a run takes to lock and
+/// rename it.
+const UNPLACED_GRACE: Duration = Duration::from_secs(60);
+
+/// Remove every `<id>.lock.new` in `dir` that is not locked and is older than
+/// `grace`: a run that crashed between creating its heartbeat and placing it.
+/// Such a run created nothing in Docker, so the file is all it left.
+fn remove_unplaced_heartbeats(dir: &Path, grace: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let unplaced = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".lock.new"))
+            .is_some_and(|run| !run.is_empty() && run.chars().all(|c| c.is_ascii_hexdigit()));
+        if !unplaced || liveness(&path) != Liveness::Dead {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > grace);
+        if stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// On SIGINT, SIGTERM or SIGQUIT: remove this run's containers and networks,
-/// then let the signal do what it would have done.
+/// then let the signal do what it would have done. A Ctrl-C (SIGINT) while that
+/// removal is still running (Docker not answering) ends the process at once
+/// and leaves what is left to the next run's sweep; any other signal then is
+/// ignored, because a CI cancellation sends SIGTERM right behind its SIGINT.
 fn install_signal_cleanup(run: String) {
     use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM};
     let mut signals = match signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGQUIT]) {
@@ -181,13 +226,26 @@ fn install_signal_cleanup(run: String) {
         }
     };
     std::thread::spawn(move || {
-        if let Some(signal) = signals.forever().next() {
-            crate::util::say(
-                "dux-journeys: interrupted; removing this run's containers and networks",
-            );
+        let mut received = signals.forever();
+        let Some(signal) = received.next() else {
+            return;
+        };
+        crate::util::say(
+            "dux-journeys: interrupted; removing this run's containers and networks \
+             (Ctrl-C again to stop without waiting)",
+        );
+        std::thread::spawn(move || {
             remove_run(&run);
             let _ = std::fs::remove_file(runs_dir().join(format!("{run}.lock")));
             let _ = signal_hook::low_level::emulate_default_handler(signal);
+            std::process::exit(130);
+        });
+        if received.any(|again| again == SIGINT) {
+            crate::util::say(
+                "dux-journeys: Ctrl-C again; stopping now, and the next run removes what this \
+                 one left",
+            );
+            let _ = signal_hook::low_level::emulate_default_handler(SIGINT);
             std::process::exit(130);
         }
     });
@@ -215,6 +273,38 @@ mod tests {
         drop(held);
         assert_eq!(liveness(&path), Liveness::Dead);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn only_an_old_unlocked_unplaced_heartbeat_is_swept() {
+        let dir = scratch("unplaced").parent().unwrap().to_path_buf();
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        let make = |name: &str, aged: bool| {
+            let path = dir.join(name);
+            let file = File::create(&path).unwrap();
+            if aged {
+                file.set_modified(long_ago).unwrap();
+            }
+            (path, file)
+        };
+        let (crashed, _) = make("aa11.lock.new", true);
+        let (fresh, _) = make("bb22.lock.new", false);
+        let (held, held_file) = make("cc33.lock.new", true);
+        held_file.lock().unwrap();
+        let (placed, _) = make("dd44.lock", true);
+        remove_unplaced_heartbeats(&dir, Duration::from_secs(60));
+        assert!(!crashed.exists(), "a crash's leftover is removed");
+        assert!(
+            fresh.exists(),
+            "a run still placing its heartbeat is left alone"
+        );
+        assert!(held.exists(), "a locked heartbeat is left alone");
+        assert!(
+            placed.exists(),
+            "a placed heartbeat is the run sweep's to judge"
+        );
+        drop(held_file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
