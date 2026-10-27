@@ -7304,7 +7304,7 @@ impl Engine {
                 let _turn = ticket.wait();
                 // Written only while the tab is still an extra one: a promotion
                 // that made it the slot tab since must not be undone.
-                let saved = crate::storage::SessionStore::open(&db_path).and_then(|store| {
+                let saved = crate::storage::SessionStore::open_live(&db_path).and_then(|store| {
                     store.remember_focused_extra_tab(&session_id, tab_id.as_deref())
                 });
                 if let Err(err) = saved {

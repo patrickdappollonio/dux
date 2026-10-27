@@ -167,6 +167,23 @@ impl SessionStore {
         Ok(store)
     }
 
+    /// Open a second connection to a database this process has already
+    /// opened, for a worker making one small write while dux runs. Unlike
+    /// [`Self::open`] it runs none of the start-up migrations or repairs:
+    /// those belong to the moment the database is first opened, and run again
+    /// against a live database they act on rows other code is in the middle of
+    /// using (a repair adopting a tab as an agent's first tab, say).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database cannot be opened.
+    pub fn open_live(path: &std::path::Path) -> Result<Self> {
+        let conn =
+            Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self { conn })
+    }
+
     fn migrate(&self) -> Result<()> {
         self.migrate_projects_and_sessions_tables()?;
         self.migrate_session_identity_columns()?;
@@ -3699,6 +3716,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pointer, None, "a failed migration leaves nothing behind");
+    }
+
+    /// A worker's connection to the live database repairs nothing: the state
+    /// a start-up repair would act on is left for the code that owns it.
+    #[test]
+    fn a_live_open_runs_no_start_up_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.sqlite3");
+        let store = SessionStore::open(&path).unwrap();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        store.delete_agent_tab("slot-1").unwrap();
+
+        drop(SessionStore::open_live(&path).unwrap());
+
+        assert_eq!(slot_pointer(&store, "s1").as_deref(), Some("slot-1"));
+        assert_eq!(
+            store.count_agent_tabs("s1").unwrap(),
+            1,
+            "the extra tab stays an extra"
+        );
     }
 
     #[test]

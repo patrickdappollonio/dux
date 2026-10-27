@@ -2491,7 +2491,7 @@ fn save_project_base(
     project_id: &str,
     base: &str,
 ) -> Result<BaseSaved, String> {
-    let store = crate::storage::SessionStore::open(db_path).map_err(|e| format!("{e:#}"))?;
+    let store = crate::storage::SessionStore::open_live(db_path).map_err(|e| format!("{e:#}"))?;
     let stored = store.load_projects().map_err(|e| format!("{e:#}"))?;
     if !stored.iter().any(|project| project.id == project_id) {
         return Ok(BaseSaved::ProjectGone);
