@@ -2484,6 +2484,9 @@ pub(crate) struct ServeCore {
 struct ControlLeg {
     stop: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    /// How many requests this leg has begun handling.
+    #[cfg(test)]
+    started: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ControlLeg {
@@ -2496,12 +2499,21 @@ impl ControlLeg {
     ) -> Option<Self> {
         let (stop, own_lane) = tokio::sync::watch::channel(false);
         let parent_lane = shutdown.subscribe();
+        #[cfg(test)]
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let app = control_socket::counting_requests(app, Arc::clone(&started));
         match control_socket::spawn_control_leg(
             app,
             listener,
             wait_for_leg_shutdown(parent_lane, own_lane),
         ) {
-            Ok(task) => Some(Self { stop, task }),
+            Ok(task) => Some(Self {
+                stop,
+                task,
+                #[cfg(test)]
+                started,
+            }),
             Err(err) => {
                 dux_core::logger::error(&format!(
                     "[server] could not serve the control socket: {err}. Command-line clients \
@@ -2872,6 +2884,15 @@ impl ServeCore {
         self.control
             .as_ref()
             .is_none_or(|control| control.task.is_finished())
+    }
+
+    /// How many requests the control socket has begun handling, for a test that
+    /// must know one is in flight before it hands the core over.
+    #[cfg(test)]
+    pub(crate) fn control_requests_started(&self) -> usize {
+        self.control.as_ref().map_or(0, |control| {
+            control.started.load(std::sync::atomic::Ordering::Relaxed)
+        })
     }
 
     /// Whether a required leg's accept loop died, so the caller can stop serving

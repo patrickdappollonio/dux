@@ -1,14 +1,24 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, cleanup, render, screen } from "@testing-library/react"
 
 // The card only calls `startDormantTab` from the store; stub it so we can render
 // in isolation and assert the docs link.
 vi.mock("@/lib/store", () => ({ startDormantTab: vi.fn() }))
 
 const { DormantTabCard } = await import("./DormantTabCard")
+const { noteServerClock, resetServerClockForTests } = await import("@/lib/serverClock")
 
-afterEach(cleanup)
+// The server's run clock as the document under test arrived with it.
+const CLOCK = 1_000
+
+beforeEach(() => noteServerClock(CLOCK))
+
+afterEach(() => {
+  cleanup()
+  resetServerClockForTests()
+  vi.useRealTimers()
+})
 
 describe("DormantTabCard", () => {
   // Launching a dormant tab picks up that provider's most recent conversation
@@ -64,7 +74,7 @@ describe("DormantTabCard", () => {
         lastRunVerdict={{
           ending: "exited",
           status: 1,
-          ended_seconds_ago: 120,
+          ended_at: CLOCK - 120,
           excerpt: [
             "Error: Failed to resume session",
             "already has an active writer",
@@ -94,7 +104,7 @@ describe("DormantTabCard", () => {
         lastRunVerdict={{
           ending: "launch_failed",
           error: "no such file or directory",
-          ended_seconds_ago: 3,
+          ended_at: CLOCK - 3,
           excerpt: [],
         }}
       />,
@@ -117,7 +127,7 @@ describe("DormantTabCard", () => {
         lastRunFailed
         lastRunVerdict={{
           ending: "rapid_clean_exit",
-          ended_seconds_ago: 0,
+          ended_at: CLOCK,
           excerpt: [],
         }}
       />,
@@ -140,7 +150,7 @@ describe("DormantTabCard", () => {
         lastRunVerdict={{
           ending: "exited",
           status: null,
-          ended_seconds_ago: 5,
+          ended_at: CLOCK - 5,
           excerpt: [],
         }}
       />,
@@ -161,7 +171,7 @@ describe("DormantTabCard", () => {
         lastRunFailed
         lastRunVerdict={{
           ending: "signalled_by_the_kernel",
-          ended_seconds_ago: 5,
+          ended_at: CLOCK - 5,
           excerpt: [],
         }}
       />,
@@ -169,6 +179,45 @@ describe("DormantTabCard", () => {
     const body = document.body.textContent ?? ""
     expect(body).toMatch(/ended with an error or a non-zero exit/i)
     expect(body).not.toMatch(/signalled_by_the_kernel/)
+  })
+
+  // The server sends the verdict once and never again while nothing changes,
+  // so the age has to move here: the card ages it on its own clock.
+  it("ages the verdict as time passes, with no new document", () => {
+    vi.useFakeTimers()
+    noteServerClock(CLOCK)
+    render(
+      <DormantTabCard
+        sessionId="s1"
+        tabId="b2"
+        provider="claude"
+        lastRunFailed
+        lastRunVerdict={{ ending: "exited", status: 1, ended_at: CLOCK, excerpt: [] }}
+      />,
+    )
+    expect(document.body.textContent ?? "").toMatch(/status 1 moments ago/)
+    act(() => {
+      vi.advanceTimersByTime(3 * 60 * 1000)
+    })
+    expect(document.body.textContent ?? "").toMatch(/status 1 about 3 minutes ago/)
+  })
+
+  // A document that has not said what the server's clock reads leaves no honest
+  // age to print, so the card keeps to the sentence that names none.
+  it("names no age before the server's clock is known", () => {
+    resetServerClockForTests()
+    render(
+      <DormantTabCard
+        sessionId="s1"
+        tabId="b2"
+        provider="claude"
+        lastRunFailed
+        lastRunVerdict={{ ending: "exited", status: 1, ended_at: CLOCK, excerpt: [] }}
+      />,
+    )
+    const body = document.body.textContent ?? ""
+    expect(body).toMatch(/ended with an error or a non-zero exit/i)
+    expect(body).not.toMatch(/ago/)
   })
 
   it("links to the resume docs, safely, in a new tab", () => {

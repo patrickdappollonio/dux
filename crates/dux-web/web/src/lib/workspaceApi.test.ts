@@ -21,6 +21,19 @@ afterEach(() => {
 })
 
 describe("fetchWorkspace", () => {
+  it("hands back the run clock the document arrived with", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ projects: [], sessions: [], sidebar: { groups: [], agentless_start: null } }),
+      text: async () => "",
+      headers: { get: (name: string) => (name === "x-dux-run-clock" ? "500" : null) },
+    })) as unknown as typeof fetch
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect((await fetchWorkspace()).clock).toBe(500)
+  })
+
   it("issues a same-origin GET and returns the parsed body on 200", async () => {
     const body = {
       projects: [{ id: "p1" }],

@@ -168,11 +168,28 @@ async fn get_workspace(State(state): State<AppState>) -> Response {
     // already a JSON string with its `rev` embedded, so it goes back raw rather than
     // being deserialized to be re-serialized. These are the exact bytes the push
     // frame carries, which is what makes the two orderable.
+    // The run clock rides in a header, outside the cached bytes, for the same
+    // reason it rides beside the pushed frame's document: the browser ages the
+    // verdicts against it.
     match state.engine.spine_json().await {
-        Some(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Some(json) => (
+            [
+                (header::CONTENT_TYPE, "application/json".to_string()),
+                (
+                    header::HeaderName::from_static(RUN_CLOCK_HEADER),
+                    dux_core::tab_verdict::run_clock_seconds().to_string(),
+                ),
+            ],
+            json,
+        )
+            .into_response(),
         None => engine_unavailable(),
     }
 }
+
+/// The header `GET /api/v1/workspace` carries the server's run clock in
+/// ([`dux_core::tab_verdict::run_clock_seconds`]), as the response was built.
+const RUN_CLOCK_HEADER: &str = "x-dux-run-clock";
 
 async fn get_projects(State(state): State<AppState>) -> Response {
     match state.engine.spine().await {
@@ -375,5 +392,31 @@ mod tests {
             .finish("op-d", StatusTone::Info, "Deleted.", None, Instant::now());
         let listed = get_json(&app, "/api/v1/sessions").await;
         assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    }
+
+    /// The workspace read carries the server's run clock beside the document,
+    /// which the browser ages a verdict against.
+    #[tokio::test]
+    async fn the_workspace_read_carries_the_run_clock() {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let engine = crate::test_support::unstarted_test_engine(tmp.path());
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/workspace")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let clock = resp
+            .headers()
+            .get(RUN_CLOCK_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok());
+        assert!(clock.is_some(), "{:?}", resp.headers());
     }
 }

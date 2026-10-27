@@ -27,12 +27,12 @@ describe("humanizeAgeAgo", () => {
 describe("endingSentence", () => {
   it("words every ending with its age, exactly as the terminal UI does", () => {
     expect(
-      endingSentence({ ending: "exited", status: 1, ended_seconds_ago: 120, excerpt: [] }),
+      endingSentence({ ending: "exited", status: 1, ended_at: 0, excerpt: [] }, 120),
     ).toBe(
       "Its last run exited with status 1 about 2 minutes ago, so dux didn\u2019t start it again on its own.",
     )
     expect(
-      endingSentence({ ending: "exited_unknown", ended_seconds_ago: 0, excerpt: [] }),
+      endingSentence({ ending: "exited_unknown", ended_at: 0, excerpt: [] }, 0),
     ).toBe(
       "Its last run exited with an unknown status moments ago, so dux didn\u2019t start it again on its own.",
     )
@@ -40,12 +40,12 @@ describe("endingSentence", () => {
       endingSentence({
         ending: "launch_failed",
         error: "no such file",
-        ended_seconds_ago: 0,
+        ended_at: 0,
         excerpt: [],
-      }),
+      }, 0),
     ).toBe("Its last run could not be launched moments ago: no such file")
     expect(
-      endingSentence({ ending: "rapid_clean_exit", ended_seconds_ago: 120, excerpt: [] }),
+      endingSentence({ ending: "rapid_clean_exit", ended_at: 0, excerpt: [] }, 120),
     ).toBe(
       "Its last run ended about 2 minutes ago in under five seconds with status 0, which dux treats as a run that never came up.",
     )
@@ -53,7 +53,7 @@ describe("endingSentence", () => {
 
   it("falls back to the generic sentence for a kind it does not know", () => {
     expect(
-      endingSentence({ ending: "from-a-newer-server", ended_seconds_ago: 5, excerpt: [] }),
+      endingSentence({ ending: "from-a-newer-server", ended_at: 0, excerpt: [] }, 5),
     ).toBe(genericEndingSentence())
   })
 
@@ -62,10 +62,10 @@ describe("endingSentence", () => {
   // answer worse than saying nothing specific.
   it("falls back rather than fabricating a status of zero", () => {
     expect(
-      endingSentence({ ending: "exited", status: null, ended_seconds_ago: 5, excerpt: [] }),
+      endingSentence({ ending: "exited", status: null, ended_at: 0, excerpt: [] }, 5),
     ).toBe(genericEndingSentence())
     expect(
-      endingSentence({ ending: "exited", ended_seconds_ago: 5, excerpt: [] }),
+      endingSentence({ ending: "exited", ended_at: 0, excerpt: [] }, 5),
     ).toBe(genericEndingSentence())
   })
 
@@ -75,7 +75,7 @@ describe("endingSentence", () => {
   // derived; the Rust side builds its sentence from the constant directly.
   it("quotes RAPID_EXIT_WINDOW's five seconds in the rapid-exit sentence", () => {
     expect(
-      endingSentence({ ending: "rapid_clean_exit", ended_seconds_ago: 0, excerpt: [] }),
+      endingSentence({ ending: "rapid_clean_exit", ended_at: 0, excerpt: [] }, 0),
     ).toContain("in under five seconds")
   })
 
@@ -88,13 +88,13 @@ describe("endingSentence", () => {
     const ascii = (text: string) => text.replace(/\u2019/g, "'")
     expect(
       ascii(
-        endingSentence({ ending: "exited", status: 1, ended_seconds_ago: 120, excerpt: [] }),
+        endingSentence({ ending: "exited", status: 1, ended_at: 0, excerpt: [] }, 120),
       ),
     ).toBe(
       "Its last run exited with status 1 about 2 minutes ago, so dux didn't start it again on its own.",
     )
     expect(
-      ascii(endingSentence({ ending: "exited_unknown", ended_seconds_ago: 0, excerpt: [] })),
+      ascii(endingSentence({ ending: "exited_unknown", ended_at: 0, excerpt: [] }, 0)),
     ).toBe(
       "Its last run exited with an unknown status moments ago, so dux didn't start it again on its own.",
     )
@@ -103,13 +103,13 @@ describe("endingSentence", () => {
         endingSentence({
           ending: "launch_failed",
           error: "no such file",
-          ended_seconds_ago: 0,
+          ended_at: 0,
           excerpt: [],
-        }),
+        }, 0),
       ),
     ).toBe("Its last run could not be launched moments ago: no such file")
     expect(
-      ascii(endingSentence({ ending: "rapid_clean_exit", ended_seconds_ago: 120, excerpt: [] })),
+      ascii(endingSentence({ ending: "rapid_clean_exit", ended_at: 0, excerpt: [] }, 120)),
     ).toBe(
       "Its last run ended about 2 minutes ago in under five seconds with status 0, which dux treats as a run that never came up.",
     )

@@ -73,7 +73,8 @@ export interface TabRunVerdict {
   status?: number | null
   /** The spawn error, for `launch_failed` only. */
   error?: string | null
-  ended_seconds_ago: number
+  /** When the run ended, on the server's run clock: aged by `lib/serverClock.ts`. */
+  ended_at: number
   excerpt: string[]
 }
 
@@ -405,6 +406,9 @@ export interface EventsServerMessage {
    *  `GET /api/v1/workspace` returns. Typed as `unknown` because the shape check
    *  belongs at the one ingestion boundary, `normalizeWorkspace`. */
   workspace?: unknown
+  /** The server's run clock as the `workspace` frame was sent, which the
+   *  document's verdicts are aged against (`lib/serverClock.ts`). */
+  clock?: number
   /** The claiming connection's id on a `pty.owner` handover. A client compares it
    *  against its own PTY-socket connection id to decide ownership: own id = owner,
    *  foreign id = read-only placeholder. */

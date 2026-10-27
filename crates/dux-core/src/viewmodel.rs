@@ -871,7 +871,10 @@ pub(crate) struct TabRunVerdictView {
     pub status: Option<u32>,
     /// The spawn error, for `launch_failed` only.
     pub error: Option<String>,
-    pub ended_seconds_ago: u64,
+    /// When the run ended, on the server's run clock
+    /// ([`crate::tab_verdict::run_clock_seconds`]). Fixed for the life of the
+    /// verdict, so an aging verdict never changes the published document.
+    pub ended_at: u64,
     /// The last visible non-blank lines of the run, already capped and
     /// character-truncated by the engine.
     pub excerpt: Vec<String>,
@@ -883,7 +886,7 @@ impl TabRunVerdictView {
             ending: verdict.ending.wire_kind().to_string(),
             status: verdict.ending.status(),
             error: verdict.ending.error().map(str::to_string),
-            ended_seconds_ago: verdict.ended_seconds_ago(),
+            ended_at: verdict.ended_at_run_clock(),
             excerpt: verdict.excerpt.clone(),
         }
     }
@@ -943,10 +946,10 @@ pub struct AgentTabView {
     /// screen: what the dormant card prints instead of "something went wrong".
     /// `None` exactly when `last_run_failed` is false.
     ///
-    /// `ended_seconds_ago` rather than a timestamp: the age is what the sentence
-    /// says, and the engine's clock is a monotonic `Instant` with no wall-clock
-    /// spelling. It goes stale by one spine refresh interval, which a coarse age
-    /// absorbs.
+    /// When the run ended on the server's run clock rather than an age or a
+    /// wall-clock timestamp: an age would change the document every second, and
+    /// the engine's clock is a monotonic `Instant` with no wall-clock spelling.
+    /// The browser ages it against the run clock reading each delivery carries.
     pub(crate) last_run_verdict: Option<TabRunVerdictView>,
     /// What this tab's live process launched with, for a file dropped onto its
     /// pane; `None` when no process is live.
@@ -3332,6 +3335,23 @@ mod tests {
         let cleared = tab(&engine, "s1-slot");
         assert!(!cleared.last_run_failed);
         assert!(cleared.last_run_verdict.is_none());
+    }
+
+    /// A verdict nothing touches publishes the same spine on every rebuild, so
+    /// an idle workspace with a dormant failed tab sends browsers nothing new as
+    /// its age grows.
+    #[test]
+    fn a_verdicts_spine_is_the_same_on_every_rebuild() {
+        let (mut engine, _tmp) = engine_with_two_tabs();
+        engine.mark_tab_run_failed(
+            TabIdRef::new("s1-slot"),
+            crate::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
+        let before = serde_json::to_string(&engine.spine()).expect("the spine serializes");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let after = serde_json::to_string(&engine.spine()).expect("the spine serializes");
+        assert_eq!(before, after);
     }
 
     /// A failed LAUNCH publishes the spawn error rather than a status, and the

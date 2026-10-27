@@ -14,7 +14,27 @@
 //! in the same words; the browser ports [`humanize_age_ago`] and
 //! [`ending_sentence`] and pins the port in its own tests.
 
+use std::sync::OnceLock;
 use std::time::Instant;
+
+/// The moment this process first read its run clock.
+static RUN_CLOCK_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn run_clock_epoch() -> Instant {
+    *RUN_CLOCK_EPOCH.get_or_init(Instant::now)
+}
+
+/// Whole seconds on this process's run clock: monotonic, and meaningful only
+/// against another reading of the same run.
+///
+/// It is how a browser ages a verdict without comparing its clock with the
+/// server's: the verdict carries when it ended on this clock, a value that never
+/// changes, so publishing it moves nothing; each delivery of the document
+/// carries the clock's reading as it was sent, and the browser adds the time
+/// that has passed on its own clock since it received that reading.
+pub fn run_clock_seconds() -> u64 {
+    run_clock_epoch().elapsed().as_secs()
+}
 
 /// How many lines of the run's final output the verdict keeps. Small on
 /// purpose: this is the tail a person reads at a glance on a card, not a log.
@@ -106,6 +126,8 @@ pub struct TabRunVerdict {
 impl TabRunVerdict {
     /// A verdict on a run ending now, with the lines it left on screen.
     pub fn new(ending: TabRunEnding, excerpt: Vec<String>) -> Self {
+        // Started first, so the run clock cannot begin after a run it dates.
+        run_clock_epoch();
         Self {
             ending,
             ended_at: Instant::now(),
@@ -116,6 +138,13 @@ impl TabRunVerdict {
     /// How many whole seconds ago the run ended.
     pub fn ended_seconds_ago(&self) -> u64 {
         self.ended_at.elapsed().as_secs()
+    }
+
+    /// When the run ended, in whole seconds on [`run_clock_seconds`]'s clock.
+    pub fn ended_at_run_clock(&self) -> u64 {
+        self.ended_at
+            .saturating_duration_since(run_clock_epoch())
+            .as_secs()
     }
 }
 

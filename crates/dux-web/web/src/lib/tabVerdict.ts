@@ -1,3 +1,4 @@
+import { runClockAgeSeconds } from "@/lib/serverClock"
 import type { TabRunVerdict } from "@/lib/types"
 
 // The dormant card's words, ported one-for-one from `dux_core::tab_verdict` and
@@ -32,13 +33,24 @@ export function humanizeAgeAgo(seconds: number): string {
   return `about ${Math.floor((s + DAY / 2) / DAY)} days ago`
 }
 
-/** The one sentence the card prints about how the last run ended. Neutral about
+/** The card's sentence for `verdict` as of now, aged against the server's run
+ * clock. Before any document has said what that clock reads there is no honest
+ * age to print, so the generic sentence stands in. */
+export function verdictSentenceNow(verdict: TabRunVerdict): string {
+  const ageSeconds = runClockAgeSeconds(verdict.ended_at)
+  return ageSeconds === null
+    ? genericEndingSentence()
+    : endingSentence(verdict, ageSeconds)
+}
+
+/** The one sentence the card prints about how the last run ended, `ageSeconds`
+ * after it did. Neutral about
  * blame, since a non-zero exit is often the user quitting a CLI: it says what
  * dux observed and what dux therefore did not do, never that anything crashed.
  * An `ending` this build does not know (a newer server) takes the generic
  * sentence rather than printing a wire kind at a person. */
-export function endingSentence(verdict: TabRunVerdict): string {
-  const age = humanizeAgeAgo(verdict.ended_seconds_ago)
+export function endingSentence(verdict: TabRunVerdict, ageSeconds: number): string {
+  const age = humanizeAgeAgo(ageSeconds)
   switch (verdict.ending) {
     case "launch_failed":
       return `Its last run could not be launched ${age}: ${verdict.error ?? "no reason given"}`

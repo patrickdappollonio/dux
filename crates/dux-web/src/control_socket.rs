@@ -165,6 +165,28 @@ pub fn listener_of(engine: &dux_core::engine::Engine) -> Option<std::os::unix::n
     }
 }
 
+/// `app`, counting into `started` every request it begins handling: a request
+/// counted there is one a graceful stop finishes rather than closes unread.
+#[cfg(test)]
+pub(crate) fn counting_requests(
+    app: Router,
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> Router {
+    app.layer(axum::middleware::from_fn_with_state(started, count_started))
+}
+
+#[cfg(test)]
+async fn count_started(
+    axum::extract::State(started): axum::extract::State<
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    >,
+    request: Request,
+    next: Next,
+) -> Response {
+    started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    next.run(request).await
+}
+
 /// Serve `app` on the control socket, on the current runtime, until `stop`
 /// resolves, then finish the requests already accepted. A failure ends only this task.
 pub(crate) fn spawn_control_leg(

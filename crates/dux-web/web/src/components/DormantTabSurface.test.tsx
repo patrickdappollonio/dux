@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 const startDormantTab = vi.fn()
@@ -10,10 +10,17 @@ vi.mock("@/lib/store", () => ({
 }))
 
 const { DormantTabSurface } = await import("./DormantTabSurface")
+const { noteServerClock, resetServerClockForTests } = await import("@/lib/serverClock")
+
+// The server's run clock as the document under test arrived with it.
+const CLOCK = 1_000
+
+beforeEach(() => noteServerClock(CLOCK))
 
 afterEach(() => {
   cleanup()
   startDormantTab.mockClear()
+  resetServerClockForTests()
 })
 
 describe("DormantTabSurface", () => {
@@ -49,7 +56,7 @@ describe("DormantTabSurface", () => {
         lastRunVerdict={{
           ending: "exited",
           status: 1,
-          ended_seconds_ago: 0,
+          ended_at: CLOCK,
           excerpt: ["already has an active writer"],
         }}
       />,

@@ -233,7 +233,16 @@ impl App {
                 companion.note_engine_activity(applies);
                 companion.service(&mut self.engine)
             }
-            _ => return,
+            // No core to lend the engine to, but the one a stop handed over may
+            // still have finished a change this surface has to show.
+            Some(companion) => {
+                let handed_over = companion.take_handed_over();
+                if handed_over == dux_core::background_serve::ServiceOutcome::default() {
+                    return;
+                }
+                handed_over
+            }
+            None => return,
         };
         if outcome.mutated || followup_ran {
             // A browser's action changed state this surface also shows.
@@ -1245,6 +1254,9 @@ pub(crate) mod tests {
         /// What the next `service` call hands over as statuses raised for every
         /// surface, standing in for a command-line change it served.
         statuses_next: Vec<dux_core::wire::WireStatus>,
+        /// What the companion's last hand-over left to report, standing in for
+        /// a command-line change the stopped core finished.
+        handed_over: ServiceOutcome,
         /// One entry per maintenance hand-off the seam made.
         maintenance: Vec<DrainedMaintenance>,
         /// Stand in for the REAL fanout's side effects: its `drive_*` follow-ups
@@ -1376,6 +1388,10 @@ pub(crate) mod tests {
                 retirement: recorded.retirement_next.take(),
                 statuses: std::mem::take(&mut recorded.statuses_next),
             }
+        }
+
+        fn take_handed_over(&mut self) -> ServiceOutcome {
+            std::mem::take(&mut self.recorded.lock().expect("not poisoned").handed_over)
         }
 
         fn note_maintenance(&mut self, maintenance: &DrainedMaintenance) {
@@ -3683,6 +3699,40 @@ pub(crate) mod tests {
                 .iter()
                 .any(|status| status.message.contains("from the command line")),
             "the change's status reaches the line"
+        );
+    }
+
+    /// A stop whose hand-over finished a command-line change and left no core
+    /// behind still shows that change's status and refreshes this surface.
+    #[test]
+    fn a_handed_over_change_reaches_the_line_with_no_core_left() {
+        let mut app = test_app(default_bindings());
+        let (mut companion, recorded) = FakeCompanion::serving();
+        companion.release(&mut app.engine);
+        app.companion = Some(companion);
+        assert!(!app.companion.as_ref().expect("installed").has_core());
+        recorded.lock().expect("not poisoned").handed_over = ServiceOutcome {
+            mutated: true,
+            statuses: vec![dux_core::wire::WireStatus::new(
+                "info",
+                "Deleted agent \"feat\" from the command line.",
+            )],
+            ..ServiceOutcome::default()
+        };
+
+        app.service_companion();
+
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .any(|status| status.message.contains("from the command line")),
+            "the change's status reaches the line"
+        );
+        assert_eq!(
+            recorded.lock().expect("not poisoned").serviced,
+            0,
+            "with no core, nothing is lent the engine"
         );
     }
 }

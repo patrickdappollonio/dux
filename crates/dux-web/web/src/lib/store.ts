@@ -113,7 +113,9 @@ import {
   type Spine,
   fetchWorkspace,
   normalizeWorkspace,
+  withClock,
 } from "./workspaceApi"
+import { noteServerClock } from "./serverClock"
 import {
   type PendingSlotTab,
   isFirstTab,
@@ -1322,7 +1324,7 @@ function handleStatusEvent(event: EventsServerMessage): void {
 function applyPushedWorkspace(event: EventsServerMessage): void {
   try {
     applyWorkspace(
-      normalizeWorkspace(event.workspace as RawWorkspace),
+      withClock(normalizeWorkspace(event.workspace as RawWorkspace), event.clock),
       loadWorkspaceSeq,
     )
     serverPushesWorkspace = true
@@ -2078,6 +2080,9 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     // so), and a rev recorded before a failed apply would make the fallback
     // refetch of this same document read as stale and be discarded.
   }
+  // Only the document being applied moves the clock reading: a stale one was
+  // sent earlier and would put an older reading back.
+  noteServerClock(rawSpine.clock)
   // `tabs` is normalized to an array at the fetch boundary (`fetchWorkspace`), so an
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.

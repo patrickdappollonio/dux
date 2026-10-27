@@ -21,6 +21,11 @@ export interface Spine {
    * the client applies such a document rather than guessing. Meaningless across
    * server restarts. */
   rev?: number
+  /** Not part of the document: the server's run clock as this delivery of it
+   * was sent (a header on the fetch, a field beside the pushed frame's body).
+   * Recorded only by the apply that accepts the document, so a stale delivery
+   * cannot put back an older reading (`lib/serverClock.ts`). */
+  clock?: number
   /** Every known project, in display order. */
   projects: ProjectView[]
   /** Every agent session, in display order. */
@@ -62,8 +67,19 @@ export async function fetchWorkspace(): Promise<Spine> {
       resp.status,
     )
   }
-  return normalizeWorkspace((await resp.json()) as RawWorkspace)
+  const workspace = normalizeWorkspace((await resp.json()) as RawWorkspace)
+  return withClock(workspace, Number(resp.headers.get(RUN_CLOCK_HEADER) ?? Number.NaN))
 }
+
+/** `workspace` with the run clock its delivery carried, when it carried one. */
+export function withClock(workspace: Spine, clock: unknown): Spine {
+  return typeof clock === "number" && Number.isFinite(clock)
+    ? { ...workspace, clock }
+    : workspace
+}
+
+/** The header the workspace GET carries the server's run clock in. */
+const RUN_CLOCK_HEADER = "x-dux-run-clock"
 
 /** The workspace document as it arrives on the wire, from any server version:
  * optional fields still optional, terminals possibly still nested inside their

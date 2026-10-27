@@ -26,6 +26,8 @@ use dux_web::background::BackgroundServer;
 #[derive(Default)]
 pub(crate) struct WebCompanion {
     server: Option<BackgroundServer>,
+    /// What the last hand-over's drain did, reported with the next service turn.
+    carried: ServiceOutcome,
 }
 
 impl WebCompanion {
@@ -49,7 +51,9 @@ impl WebCompanion {
         let Some(server) = self.server.take() else {
             return;
         };
-        if let Some(err) = server.hand_over(engine) {
+        let handed = server.hand_over(engine);
+        self.carried.absorb(handed.drained);
+        if let Some(err) = handed.error {
             dux_core::logger::warn(&format!(
                 "[server] the background web server had already stopped serving before it was \
                  turned off: {err:#}"
@@ -86,25 +90,9 @@ impl WebCompanion {
              are untouched and still running here. Use start-background-server to serve again."
         ))
     }
-}
 
-impl BackgroundServeCompanion for WebCompanion {
-    fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction) {
-        if let Some(server) = self.server.as_mut() {
-            server.on_reaction(engine, reaction);
-        }
-    }
-
-    fn note_maintenance(&mut self, maintenance: &DrainedMaintenance) {
-        if maintenance.is_empty() {
-            return;
-        }
-        if let Some(server) = self.server.as_mut() {
-            server.note_maintenance(maintenance);
-        }
-    }
-
-    fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
+    /// One service turn of the core there is, retiring it when it stopped.
+    fn service_core(&mut self, engine: &mut Engine) -> ServiceOutcome {
         let mut outcome = match self.server.as_mut() {
             Some(server) => server.service(engine),
             None => ServiceOutcome::default(),
@@ -145,6 +133,36 @@ impl BackgroundServeCompanion for WebCompanion {
         // noticed the death still drained whatever was queued.
         outcome.retirement = self.retire_if_failed(engine);
         outcome
+    }
+}
+
+impl BackgroundServeCompanion for WebCompanion {
+    fn on_reaction(&mut self, engine: &mut Engine, reaction: &EventReaction) {
+        if let Some(server) = self.server.as_mut() {
+            server.on_reaction(engine, reaction);
+        }
+    }
+
+    fn note_maintenance(&mut self, maintenance: &DrainedMaintenance) {
+        if maintenance.is_empty() {
+            return;
+        }
+        if let Some(server) = self.server.as_mut() {
+            server.note_maintenance(maintenance);
+        }
+    }
+
+    fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
+        // A hand-over before this turn (a start or a stop) owes its drain first;
+        // one this turn runs (a retirement) owes it after.
+        let mut reported = self.take_handed_over();
+        reported.absorb(self.service_core(engine));
+        reported.absorb(self.take_handed_over());
+        reported
+    }
+
+    fn take_handed_over(&mut self) -> ServiceOutcome {
+        std::mem::take(&mut self.carried)
     }
 
     fn note_config_applied(&mut self, config: &dux_core::config::Config) {

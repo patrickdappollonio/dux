@@ -25,6 +25,9 @@ function session(id: string, projectId: string): Spine["sessions"][number] {
 // Pending resolvers for each in-flight `/api/v1/workspace` fetch, in call order.
 let spineResolvers: ((body: Spine) => void)[] = []
 
+// The run clock the next resolved `/api/v1/workspace` fetch answers with.
+let workspaceClockHeader: string | null = null
+
 const fetchMock = vi.fn(async (url: string) => {
   // The public status route answers as every dux does: no password here.
   if (String(url).includes("/api/v1/auth/status")) {
@@ -39,12 +42,13 @@ const fetchMock = vi.fn(async (url: string) => {
     const body = await new Promise<Spine>((resolve) => {
       spineResolvers.push(resolve)
     })
+    const clock = workspaceClockHeader
     return {
       ok: true,
       status: 200,
       json: async () => body,
       text: async () => "",
-      headers: { get: () => null },
+      headers: { get: (name: string) => (name === "x-dux-run-clock" ? clock : null) },
     } as unknown as Response
   }
   // /api/v1/bootstrap and anything else: empty body.
@@ -70,6 +74,7 @@ class FakeWebSocket {
 
 beforeEach(() => {
   spineResolvers = []
+  workspaceClockHeader = null
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -122,5 +127,34 @@ describe("loadWorkspace in-flight guard", () => {
     await Promise.resolve()
     await Promise.resolve()
     expect(mod.getSnapshot().spine?.sessions.map((s) => s.id)).toEqual(["new"])
+  })
+})
+
+describe("the run clock reading", () => {
+  // A slow boot fetch that lands after a newer push is dropped as stale, and
+  // the older clock reading it carried must go with it, or every verdict's age
+  // would jump back by however long the fetch took.
+  it("moves only with a document that is applied", async () => {
+    const mod = await import("./store")
+    const clock = await import("./serverClock")
+    await waitForResolvers(1)
+
+    mod.eventsSocket.onEvent({
+      event: "workspace",
+      rev: 5,
+      clock: 900,
+      workspace: makeSpine({ rev: 5 }),
+    })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine?.rev).toBe(5)
+    })
+
+    workspaceClockHeader = "100"
+    spineResolvers[0](makeSpine({ rev: 3 }))
+    // Let the stale reply resolve and be dropped.
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(mod.getSnapshot().spine?.rev).toBe(5)
+    expect(Math.floor(clock.runClockAgeSeconds(0) ?? 0)).toBe(900)
   })
 })

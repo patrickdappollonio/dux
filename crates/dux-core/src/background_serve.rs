@@ -221,6 +221,19 @@ pub struct ServiceOutcome {
     pub statuses: Vec<crate::wire::WireStatus>,
 }
 
+impl ServiceOutcome {
+    /// Fold in what a LATER turn did: either turn having mutated or stopped
+    /// counts, the first retirement wins, and the statuses keep their order.
+    pub fn absorb(&mut self, later: Self) {
+        self.mutated |= later.mutated;
+        self.stopped |= later.stopped;
+        if self.retirement.is_none() {
+            self.retirement = later.retirement;
+        }
+        self.statuses.extend(later.statuses);
+    }
+}
+
 /// What a background serve claims for the terminal UI as it starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServeClaims {
@@ -255,6 +268,12 @@ pub trait BackgroundServeCompanion {
     /// Do the companion's per-iteration work, after the terminal UI has finished
     /// draining. Called once per TUI loop iteration while serving.
     fn service(&mut self, engine: &mut Engine) -> ServiceOutcome;
+
+    /// What a core that has since stopped left this surface to report: the
+    /// changes and statuses of the requests its hand-over finished. [`Self::service`]
+    /// reports them while a core is up; an iteration with no core takes them here,
+    /// so a stop that leaves no core behind still shows them.
+    fn take_handed_over(&mut self) -> ServiceOutcome;
 
     /// Note that the terminal UI changed engine state this iteration, so the
     /// companion can open its own change-detection gate. Called with the number of

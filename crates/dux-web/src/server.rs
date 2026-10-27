@@ -2945,7 +2945,7 @@ fn sessions_changed_event() -> Event {
 }
 
 /// The pushed workspace-document frame:
-/// `{"event":"workspace","rev":N,"workspace":{…}}`.
+/// `{"event":"workspace","rev":N,"clock":C,"workspace":{…}}`.
 ///
 /// Built by splicing the cached serialization into a string rather than by
 /// serializing a struct. The document is already JSON in the engine's cache and
@@ -2954,10 +2954,17 @@ fn sessions_changed_event() -> Event {
 /// appears twice on purpose: once at the top level, where a client reads it
 /// without touching the body, and once inside the document, where a client that
 /// FETCHED the same bytes over REST finds it.
+///
+/// `clock` is the server's run clock as the frame is sent
+/// ([`dux_core::tab_verdict::run_clock_seconds`]), which the browser ages the
+/// document's verdicts against. It sits outside the document so the cached
+/// bytes stay the same until something in them changes.
 fn workspace_frame_text(doc: &WorkspaceDoc) -> String {
     format!(
-        r#"{{"event":"workspace","rev":{},"workspace":{}}}"#,
-        doc.rev, doc.json
+        r#"{{"event":"workspace","rev":{},"clock":{},"workspace":{}}}"#,
+        doc.rev,
+        dux_core::tab_verdict::run_clock_seconds(),
+        doc.json
     )
 }
 
@@ -3347,7 +3354,7 @@ async fn close_signed_out_events_socket(
     code: u16,
 ) {
     presence.end_deliberately();
-    let _ = sink.lock().await.send(auth_close(code)).await;
+    send_close(sink, auth_close(code)).await;
     console.client_disconnected(peer_ip);
 }
 
@@ -4051,10 +4058,43 @@ fn lagged_catchup_texts(
     texts
 }
 
-/// Send one already-serialized `/ws/events` text frame.
+/// How long one text frame may take to send, the wait for the sink lock
+/// included. A peer that stops reading fills the TCP send buffer, and an
+/// unbounded send then parks the socket's whole loop, holding its connection
+/// slot and its session's lease and never seeing a sign-out, while the kernel
+/// retries for many minutes. It is the window after which a silent peer is
+/// already judged half-open, which a workspace frame on a live but slow link
+/// fits inside many times over.
+const FRAME_SEND_DEADLINE: std::time::Duration = PONG_DEADLINE;
+
+/// Send one already-serialized text frame, giving up after
+/// [`FRAME_SEND_DEADLINE`].
 async fn send_text(sink: &SharedSink, text: String) -> Result<(), ()> {
-    let mut guard = sink.lock().await;
-    guard.send(Message::Text(text.into())).await.map_err(|_| ())
+    send_text_on(sink, text).await
+}
+
+/// [`send_text`] on any sink, so the deadline can be tested against one that
+/// never accepts a frame.
+async fn send_text_on<S>(sink: &tokio::sync::Mutex<S>, text: String) -> Result<(), ()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    send_bounded(sink, Message::Text(text.into()), FRAME_SEND_DEADLINE).await
+}
+
+/// Send `frame` on `sink`, giving up after `deadline`, the lock wait included.
+async fn send_bounded<S>(
+    sink: &tokio::sync::Mutex<S>,
+    frame: Message,
+    deadline: std::time::Duration,
+) -> Result<(), ()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    with_send_deadline(deadline, async {
+        sink.lock().await.send(frame).await.map_err(|_| ())
+    })
+    .await
 }
 
 /// Serialize and send one `/ws/events` frame as a text message.
@@ -4263,10 +4303,7 @@ where
 /// Send a closing frame on a live socket's `sink`, giving up after
 /// [`LIVENESS_SEND_DEADLINE`]: the peer it closes may already be gone.
 async fn send_close(sink: &SharedSink, frame: Message) {
-    let _ = with_send_deadline(LIVENESS_SEND_DEADLINE, async {
-        sink.lock().await.send(frame).await.map_err(|_| ())
-    })
-    .await;
+    let _ = send_bounded(sink, frame, LIVENESS_SEND_DEADLINE).await;
 }
 
 /// Send one WebSocket Ping frame on `sink` for the liveness reaper. `Err(())` when
@@ -6604,6 +6641,48 @@ mod tests {
         );
     }
 
+    /// A sink that never accepts a frame, standing in for a peer that stopped
+    /// reading once the TCP send buffer is full.
+    struct StalledSink;
+
+    impl futures_util::Sink<Message> for StalledSink {
+        type Error = axum::Error;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// An events frame sent to a peer that stopped reading gives up at the
+    /// deadline instead of parking the socket's loop.
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_to_a_peer_that_stopped_reading_gives_up() {
+        let sink = tokio::sync::Mutex::new(StalledSink);
+        let sent = tokio::time::timeout(
+            FRAME_SEND_DEADLINE * 2,
+            send_text_on(&sink, "{}".to_string()),
+        )
+        .await;
+        assert_eq!(sent, Ok(Err(())));
+    }
+
     /// And the wrapper is transparent to a send that does complete, in both
     /// directions: it must not turn an ordinary failure into a success or add
     /// latency to a healthy one.
@@ -7744,12 +7823,17 @@ mod tests {
             texts.iter().any(|t| t == r#"{"event":"sessions.changed"}"#),
             "the coarse nudge stays, for a client that does not read the document: {texts:?}"
         );
-        assert!(
-            texts.iter().any(
-                |t| t == r#"{"event":"workspace","rev":7,"workspace":{"rev":7,"sessions":[]}}"#
-            ),
-            "and the document itself rides along: {texts:?}"
+        let frame = texts
+            .iter()
+            .filter_map(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+            .find(|v| v["event"] == "workspace")
+            .unwrap_or_else(|| panic!("and the document itself rides along: {texts:?}"));
+        assert_eq!(frame["rev"], 7);
+        assert_eq!(
+            frame["workspace"],
+            serde_json::json!({"rev": 7, "sessions": []})
         );
+        assert!(frame["clock"].is_u64(), "with the run clock it was sent at");
 
         // A connection holding neither coarse topic is caught up with neither.
         let other: std::collections::HashSet<String> = ["config".to_string()].into_iter().collect();

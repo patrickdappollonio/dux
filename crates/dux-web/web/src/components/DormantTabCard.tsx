@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react"
+
 import { Button } from "@/components/ui/button"
 import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startDormantTab } from "@/lib/store"
-import { endingSentence, genericEndingSentence } from "@/lib/tabVerdict"
+import { genericEndingSentence, verdictSentenceNow } from "@/lib/tabVerdict"
 import type { TabRunVerdict } from "@/lib/types"
 
 // The center-pane surface for a dormant tab waiting to be asked: an extra tab
@@ -36,6 +38,7 @@ export function DormantTabCard({
   lastRunVerdict?: TabRunVerdict | null
 }) {
   const excerpt = lastRunVerdict?.excerpt ?? []
+  useSecondTicks(lastRunVerdict != null)
   return (
     <div className="flex h-full w-full select-none flex-col items-center justify-center gap-4 overflow-hidden px-6 text-center">
       <img
@@ -51,7 +54,7 @@ export function DormantTabCard({
         {lastRunFailed ? (
           <p className="text-sm text-muted-foreground">
             {lastRunVerdict
-              ? endingSentence(lastRunVerdict)
+              ? verdictSentenceNow(lastRunVerdict)
               : genericEndingSentence()}
           </p>
         ) : null}
@@ -91,4 +94,15 @@ export function DormantTabCard({
       </Button>
     </div>
   )
+}
+
+// Re-render once a second while `active`, so the verdict's age keeps moving on
+// a document the server has no reason to send again.
+function useSecondTicks(active: boolean): void {
+  const [, setTicks] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => setTicks((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [active])
 }

@@ -63,6 +63,17 @@ impl std::fmt::Debug for BackgroundServer {
     }
 }
 
+/// What a hand-over left behind.
+#[derive(Debug)]
+pub struct HandedOver {
+    /// What the turns that finished the accepted requests did: a change one of
+    /// them made and the statuses it raised are still owed to the terminal UI,
+    /// whose next turn is the one that reports them.
+    pub drained: ServiceOutcome,
+    /// The first listener failure, if one was recorded.
+    pub error: Option<anyhow::Error>,
+}
+
 /// How long a hand-over waits for the control socket's accepted requests to be
 /// answered before the core stops anyway.
 const HAND_OVER_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
@@ -226,14 +237,20 @@ impl BackgroundServer {
     ///
     /// An operation wait answers at once; any other request still open after
     /// [`HAND_OVER_BOUND`] is cut.
-    pub fn hand_over(mut self, engine: &mut Engine) -> Option<anyhow::Error> {
+    pub fn hand_over(mut self, engine: &mut Engine) -> HandedOver {
         self.core.stop_control_socket();
         let deadline = std::time::Instant::now() + HAND_OVER_BOUND;
+        let mut drained = ServiceOutcome::default();
         while !self.core.control_socket_drained() && std::time::Instant::now() < deadline {
-            self.service(engine);
+            drained.absorb(self.service(engine));
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        self.stop()
+        // This core is stopping on purpose, so its loop ending is no news.
+        drained.stopped = false;
+        HandedOver {
+            drained,
+            error: self.stop(),
+        }
     }
 
     /// The log file this serve opened, `None` when it could not open one.
@@ -321,6 +338,12 @@ impl BackgroundServer {
     /// Do the web-only per-iteration work.
     pub fn service(&mut self, engine: &mut Engine) -> ServiceOutcome {
         self.service.service_engine_once(engine)
+    }
+
+    /// How many requests the control socket has begun handling.
+    #[cfg(test)]
+    pub(crate) fn control_requests_started(&self) -> usize {
+        self.core.control_requests_started()
     }
 
     /// This serve's live Tailscale-mode handle, for a test that moves its leg.
@@ -550,7 +573,7 @@ mod tests {
         wait: std::thread::JoinHandle<Result<String, String>>,
     ) -> (std::time::Duration, String) {
         let started = std::time::Instant::now();
-        assert!(core.hand_over(engine).is_none());
+        assert!(core.hand_over(engine).error.is_none());
         let took = started.elapsed();
         let answer = wait
             .join()
@@ -807,6 +830,60 @@ mod tests {
         toggling_back_on_serves_a_fresh_app(&mut engine);
 
         the_log_keeps_the_access_logged_serve(tmp.path(), first_addr);
+    }
+
+    /// A command-line change the hand-over finishes still owes the terminal UI
+    /// its status and its refresh: the core is gone by the next turn, so the
+    /// hand-over is what carries them.
+    #[test]
+    fn a_change_the_hand_over_finishes_still_reports_its_status() {
+        let (mut engine, _tmp) = engine_in_tempdir();
+        engine.config.server.tailscale = "no".to_string();
+        std::fs::set_permissions(
+            &engine.paths.root,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let socket = engine.paths.root.join("dux.sock");
+        assert_eq!(
+            dux_core::control_socket::open(&mut engine.single_instance_lock, &socket),
+            None
+        );
+        let core = BackgroundServer::start_control_only(&mut engine)
+            .expect("the socket core starts")
+            .expect("dux holds a control socket");
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s-cli"));
+        let delete = request_over_socket_as(&socket, "DELETE", "/api/v1/sessions/s-cli");
+        // Begun by the router, so the hand-over finishes it rather than closing
+        // it unread; nothing else talks to this socket. No turn has run yet, so
+        // only the hand-over's own turns can have served it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while core.control_requests_started() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the delete never reached the router"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let handed = core.hand_over(&mut engine);
+        let answer = delete
+            .join()
+            .expect("the request thread")
+            .expect("the request was answered");
+        assert!(answer.starts_with("HTTP/1.1 204"), "{answer}");
+        assert!(handed.drained.mutated, "the delete changed the workspace");
+        assert!(
+            handed
+                .drained
+                .statuses
+                .iter()
+                .any(|status| status.message.contains("Deleted")),
+            "{:?}",
+            handed.drained.statuses
+        );
+        assert!(!handed.drained.stopped);
     }
 
     /// The plain terminal UI's core serves the control socket alone, and a change
