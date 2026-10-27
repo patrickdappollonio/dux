@@ -84,4 +84,15 @@ describe("deviceLabel", () => {
     // iPhone UA also contains "like Mac OS X".
     expect(deviceLabel(UA.safariIphone)).toContain("iOS")
   })
+
+  // dux-core strips the same characters before it matches, so a smuggled
+  // reordering mark cannot make the two surfaces name one device differently.
+  it("ignores bidi and control characters, as the terminal UI does", () => {
+    const smuggled = UA.chromeMac.replace("Chrome/", "Chr\u202Eome\u0007/")
+    expect(deviceLabel(smuggled)).toBe("Chrome on macOS")
+    expect(deviceLabel("\u2066the dux TUI\u200F")).toBe("the dux TUI")
+    expect(deviceLabel("\u202A\u061C\u0000")).toBeNull()
+    // Rust's trim leaves U+FEFF, so the label is no longer the exact match.
+    expect(deviceLabel("\uFEFFthe dux TUI")).toBeNull()
+  })
 })

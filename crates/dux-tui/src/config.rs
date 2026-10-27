@@ -1587,11 +1587,12 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "tree_list_max_concurrency",
             comment: Some(CommentSource::Static(
-                "# Maximum number of /files/tree directory listings the web editor may run\n\
-                 # concurrently across all sessions. Each listing does one blocking read_dir\n\
-                 # off the server's async reactor; this protects the server's blocking-thread\n\
-                 # pool from a burst of tree requests (for example several tabs expanding\n\
-                 # directories at once) starving other blocking work such as git operations\n\
+                "# Maximum number of directory listings, file-search walks and markdown\n\
+                 # preview image reads the web editor may run concurrently across all\n\
+                 # sessions. Each one does blocking filesystem work off the server's async\n\
+                 # reactor; this protects the server's blocking-thread pool from a burst\n\
+                 # (for example several tabs expanding directories at once, or a preview\n\
+                 # full of images) starving other blocking work such as git operations\n\
                  # and file reads/writes. A request beyond the limit waits for a free slot\n\
                  # rather than being refused. Set to 0 to disable the bound entirely.\n\
                  # The limit is sized at startup, so changing it needs a restart.",

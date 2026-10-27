@@ -678,9 +678,23 @@ async fn diff_contents(
 ///    `is_outside`, which is rejected immediately.
 /// 2. After `canonicalize()` the resolved target is re-verified inside the
 ///    canonical root, closing the gap in which a symlink could be replaced.
-async fn read_raw<R: EditorRoot>(root: R, Query(q): Query<RawQuery>) -> Response {
+///
+/// A markdown preview asks for every image it shows at once, so reads share the
+/// [`tree_list_permit`] bound with the editor's other small filesystem work. The
+/// permit bounds how many reads hold a blocking thread at once; it is released
+/// when the read is done, so a file's bytes, up to `MAX_RAW_BYTES`, stay in memory
+/// past it until the response has been sent.
+async fn read_raw<R: EditorRoot>(
+    State(state): State<AppState>,
+    root: R,
+    Query(q): Query<RawQuery>,
+) -> Response {
     let worktree = root.path().to_path_buf();
     let path = q.path;
+    let _permit = match tree_list_permit(&state).await {
+        Ok(permit) => permit,
+        Err(resp) => return resp.into_response(),
+    };
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
         // Use the read-permissive resolver so symlinked images inside the
         // worktree reach this proxy. The image proxy intentionally does NOT

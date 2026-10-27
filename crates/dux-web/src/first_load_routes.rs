@@ -75,7 +75,7 @@ impl FirstLoadState {
     pub(crate) fn pending(&self) -> Option<PendingFirstLoadView> {
         self.pending
             .lock()
-            .expect("the pending lock is not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -83,7 +83,7 @@ impl FirstLoadState {
         *self
             .pending
             .lock()
-            .expect("the pending lock is not poisoned") = screen;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = screen;
     }
 }
 

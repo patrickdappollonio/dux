@@ -1138,11 +1138,12 @@ pub struct ServerConfig {
     /// disables the cap. Default 50000. A config reload applies it to the next
     /// search-index fetch.
     pub search_index_max_files: usize,
-    /// Maximum number of `/files/tree` directory listings the web editor may
-    /// run concurrently across all sessions. Each listing does one blocking
-    /// `read_dir` off the async reactor (`spawn_blocking`); this protects the
-    /// server's blocking-thread pool from a burst of tree requests (e.g. many
-    /// tabs expanding directories at once) starving other blocking work like
+    /// Maximum number of `/files/tree` directory listings, file-search walks and
+    /// `/files/raw` image reads the web editor may run concurrently across all
+    /// sessions. Each does blocking filesystem work off the async reactor
+    /// (`spawn_blocking`); this protects the server's blocking-thread pool from
+    /// a burst (e.g. many tabs expanding directories at once, or a markdown
+    /// preview full of images) starving other blocking work like
     /// git operations and file reads/writes. A request beyond the limit WAITS
     /// for a free slot rather than being rejected: unlike the
     /// `max_websocket_*_connections` family, this bounds a small, fast unit of

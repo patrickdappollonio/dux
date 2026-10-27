@@ -187,7 +187,7 @@ impl ConnectionRegistry {
         let mut entries = self
             .entries
             .lock()
-            .expect("the entries lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = match browser {
             Some(browser) => format!("browser:{}", browser.as_str()),
             None => after
@@ -209,7 +209,7 @@ impl ConnectionRegistry {
         let mut entries = self
             .entries
             .lock()
-            .expect("the entries lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.insert(id, entry);
         self.recount(&entries);
     }
@@ -219,7 +219,7 @@ impl ConnectionRegistry {
         let mut entries = self
             .entries
             .lock()
-            .expect("the entries lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.remove(id);
         self.recount(&entries);
     }
@@ -256,7 +256,7 @@ impl ConnectionRegistry {
     pub(crate) fn class_of(&self, id: &str) -> Option<ConnClass> {
         self.entries
             .lock()
-            .expect("the entries lock is not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .map(|entry| entry.class)
     }
@@ -267,7 +267,7 @@ impl ConnectionRegistry {
     pub(crate) fn is_live(&self, id: &str) -> bool {
         self.entries
             .lock()
-            .expect("the entries lock is not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(id)
     }
 }
@@ -806,7 +806,7 @@ impl IdempotencyCache {
         let mut map = self
             .entries
             .lock()
-            .expect("the entries lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.retain(|_, (_, at)| now.saturating_duration_since(*at) < IDEMPOTENCY_TTL);
         map.get(key).map(|(id, _)| id.clone())
     }
@@ -816,7 +816,7 @@ impl IdempotencyCache {
     pub(crate) fn record(&self, key: String, id: String) {
         self.entries
             .lock()
-            .expect("the entries lock is not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, (id, Instant::now()));
     }
 }

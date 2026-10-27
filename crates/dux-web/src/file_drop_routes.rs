@@ -64,7 +64,7 @@
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -135,10 +135,9 @@ pub fn routes(state: &AppState) -> Router<AppState> {
             // display. A `0` cap is handled inside the handler as "file drop is
             // off" rather than as a zero-byte limit, so the refusal can say so.
             .layer(DefaultBodyLimit::max(max_bytes.max(1)))
-            // Outermost is the point: the body is buffered in full before the
-            // handler's first line, so a permit taken inside it would be taken after
-            // the memory was already spent. A request beyond the limit waits up to
-            // `PERMIT_WAIT` and is then refused.
+            // Outermost is the point: the permit is held for the whole body read,
+            // so a request beyond the concurrency limit has spent no memory on its
+            // body yet. It waits up to `PERMIT_WAIT` and is then refused.
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 hold_a_file_drop_permit,
@@ -216,8 +215,8 @@ fn unknown_pane(pane_id: &str) -> String {
 }
 
 /// The pty a drop is for, resolved from the pane's id, or the refusal that
-/// answers before the body is looked at: file drop switched off, a pane id
-/// nothing answers to, or a terminal another device is driving.
+/// answers before the body is kept: file drop switched off, a pane id nothing
+/// answers to, or a terminal another device is driving.
 async fn drop_pty(
     state: &AppState,
     query: &DropQuery,
@@ -251,51 +250,113 @@ async fn drop_pty(
             .into());
     };
 
-    // The courtesy check: the websocket's own write check enforces input authority,
-    // and this only tells a viewer who cannot paste before the file is written. An
-    // editor tree drop pastes nothing, so it is skipped explicitly, or a browser
-    // carrying a `conn` from the pane it came from could have a durable save
-    // refused by a check that does not apply to it.
-    if query.dir.is_none()
-        && let Some(conn) = query.conn
-        && state.input_held_by_someone_else(&pty, conn)
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            "Another device is driving this terminal, so the path could not be \
-             pasted. Take over input and drop the file again."
-                .to_string(),
-        )
-            .into_response()
-            .into());
+    if let Some(refusal) = held_elsewhere(state, &pty, query) {
+        return Err(refusal.into());
     }
     Ok(pty)
 }
 
-async fn upload_dropped_file(
-    State(state): State<AppState>,
-    Query(query): Query<DropQuery>,
-    body: Result<Bytes, BytesRejection>,
-) -> Response {
-    let pty = match drop_pty(&state, &query).await {
-        Ok(pty) => pty,
-        Err(refusal) => return refusal.into_response(),
-    };
+/// The courtesy check: the websocket's own write check enforces input authority,
+/// and this only tells a viewer who cannot paste before the file is written. An
+/// editor tree drop pastes nothing, so it is skipped explicitly, or a browser
+/// carrying a `conn` from the pane it came from could have a durable save
+/// refused by a check that does not apply to it.
+///
+/// Asked twice: before the body is read, so a viewer is told at once, and again
+/// once the body has arrived, because another device can take over while a slow
+/// upload is still arriving, and the file would then be saved and never pasted.
+fn held_elsewhere(state: &AppState, pty: &str, query: &DropQuery) -> Option<Response> {
+    if query.dir.is_none()
+        && let Some(conn) = query.conn
+        && state.input_held_by_someone_else(pty, conn)
+    {
+        return Some(
+            (
+                StatusCode::CONFLICT,
+                "Another device is driving this terminal, so the path could not be \
+                 pasted. Take over input and drop the file again.",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
 
-    let Ok(bytes) = body else {
-        // The limit is enforced by the body-limit layer, which rejects with
-        // its own terse message; replace it with one that names the setting.
+/// Read and discard what is left of a refused drop's body, up to `limit` bytes,
+/// holding none of it. Answering with the body unread makes the server close the
+/// connection under data the client is still sending, and the browser can then
+/// see a reset rather than the refusal. A body past the limit, or one that
+/// fails, is abandoned there: the answer is sent either way.
+async fn drain_body(body: axum::body::Body, limit: usize) {
+    use futures_util::StreamExt;
+
+    let mut seen = 0usize;
+    let mut stream = body.into_data_stream();
+    while let Some(Ok(chunk)) = stream.next().await {
+        seen = seen.saturating_add(chunk.len());
+        if seen > limit {
+            return;
+        }
+    }
+}
+
+/// The answer to a body that could not be read. The limit is enforced by the
+/// body-limit layer, which rejects with its own terse message; that one is
+/// replaced with one naming the setting. Any other failure is a body that did
+/// not arrive in full, which no setting would have changed.
+fn body_refusal(rejection: &BytesRejection, max_bytes: usize) -> Response {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "That file is over the {} byte limit for a dropped file. \
+                "That file is over the {max_bytes} byte limit for a dropped file. \
                  Nothing was written. Raise [server] file_drop_max_bytes in \
-                 config.toml and restart to allow bigger files.",
-                state.file_drop_max_bytes
+                 config.toml and restart to allow bigger files."
             ),
         )
             .into_response();
+    }
+    dux_core::logger::warn(&format!(
+        "[server] /api/v1/file-drop: the request body could not be read: {rejection}"
+    ));
+    (
+        StatusCode::BAD_REQUEST,
+        "The file did not arrive in full, so nothing was written. Try the drop again.",
+    )
+        .into_response()
+}
+
+/// Takes the raw request rather than a body extractor, because an extractor is
+/// run before the handler's first line: the refusals in [`drop_pty`] would then
+/// come only after the whole body had been buffered. A refusal still reads the
+/// body to its end, discarding it, so the answer reaches the browser; and the
+/// ownership check is asked again once the body is in, just before the write.
+async fn upload_dropped_file(
+    State(state): State<AppState>,
+    Query(query): Query<DropQuery>,
+    request: Request,
+) -> Response {
+    let pty = match drop_pty(&state, &query).await {
+        Ok(pty) => pty,
+        Err(refusal) => {
+            // With file drop switched off there is no configured size, so the
+            // drain is bounded by the default one.
+            let limit = match state.file_drop_max_bytes {
+                0 => dux_core::config::DEFAULT_FILE_DROP_MAX_BYTES,
+                configured => configured,
+            };
+            drain_body(request.into_body(), limit).await;
+            return refusal.into_response();
+        }
     };
+
+    let bytes = match Bytes::from_request(request, &state).await {
+        Ok(bytes) => bytes,
+        Err(rejection) => return body_refusal(&rejection, state.file_drop_max_bytes),
+    };
+    if let Some(refusal) = held_elsewhere(&state, &pty, &query) {
+        return refusal;
+    }
 
     let destination = match query.dir.clone() {
         Some(dir) => {
@@ -1036,6 +1097,33 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn a_take_over_while_the_body_arrives_refuses_and_writes_nothing() {
+            let world = drop_world().await;
+            let state = world.state.clone();
+            let body = axum::body::Body::from_stream(futures_util::stream::once(async move {
+                state.give_input_to("s1-slot", 7);
+                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"png"))
+            }));
+            let resp = world
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/file-drop?pty=s1-slot&filename=shot.png&conn=99")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            assert!(
+                !world.wt.join(".dux").exists(),
+                "a drop refused after its body arrived must write nothing"
+            );
+        }
+
+        #[tokio::test]
         async fn a_drop_refreshes_that_agent_s_changed_files() {
             let world = drop_world().await;
             let (generation, _) = world.refreshes();
@@ -1247,6 +1335,64 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         let msg = body_text(resp).await;
         assert!(msg.contains("switched off"), "got: {msg}");
+        assert!(std::fs::read_dir(&wt).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refused_drop_reads_its_body_to_the_end_before_answering() {
+        // Answering with the body unread closes the connection under the
+        // client's upload, and the browser sees a reset instead of the refusal.
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_tmp, _wt, app) = router_with_limits(0, 4);
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let chunks = futures_util::stream::iter([b"first".as_slice(), b"last".as_slice()]).map(
+            move |chunk| {
+                if chunk == b"last" {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(chunk))
+            },
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/file-drop?pty=s1-slot&filename=shot.png")
+                    .body(axum::body::Body::from_stream(chunks))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the refused body must be read to its end"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_fails_to_arrive_is_not_called_too_large() {
+        let (_tmp, wt, app) = router();
+        let body = axum::body::Body::from_stream(futures_util::stream::once(async {
+            Err::<axum::body::Bytes, _>(std::io::Error::other("connection reset"))
+        }));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/file-drop?pty=s1-slot&filename=shot.png")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let msg = body_text(resp).await;
+        assert!(!msg.contains("file_drop_max_bytes"), "got: {msg}");
         assert!(std::fs::read_dir(&wt).unwrap().next().is_none());
     }
 

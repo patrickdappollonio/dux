@@ -82,8 +82,8 @@ pub struct AppState {
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
     pub(crate) max_ws_tabs_per_agent: u32,
-    /// Bounds concurrent `/files/tree` listings across all sessions
-    /// (`[server] tree_list_max_concurrency`), so a burst cannot exhaust the
+    /// Bounds concurrent `/files/tree` listings, search walks and `/files/raw` reads
+    /// across all sessions (`[server] tree_list_max_concurrency`), so a burst cannot exhaust the
     /// blocking-thread pool and starve other blocking work. `None` when the value is
     /// `0`, unlimited, and the route takes no permit. A request beyond the limit
     /// waits rather than being rejected, unlike the `ws_*_semaphore` connection caps:
@@ -183,7 +183,7 @@ impl AppState {
     /// An unowned pty is not denied, matching `may_write`: the first write claims it.
     pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
         matches!(
-            self.pty_size_owners.owners.lock().expect("the pty size owners lock is not poisoned").map.get(pty_id),
+            self.pty_size_owners.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner).map.get(pty_id),
             Some(record) if record.conn_id != conn_id
         )
     }
@@ -432,7 +432,7 @@ pub struct RouterParams {
     /// time itself by it; it bounds the send that ANSWERS a beat, which must not
     /// outlive the window the client is waiting in.
     pub heartbeat_deadline_seconds: u32,
-    /// Cap on concurrent `/files/tree` directory listings
+    /// Cap on concurrent `/files/tree` listings, search walks and `/files/raw` reads
     /// (`[server] tree_list_max_concurrency`). Defaults to
     /// [`dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY`]; the serve
     /// paths override it from config via
@@ -4845,6 +4845,57 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "the seeded worktree is not a git repo, so the changed-file guard rejects it as 400"
         );
+    }
+
+    /// The image proxy shares the tree listing's bound: with the only permit
+    /// taken, a raw read waits, and it answers once the permit comes free.
+    #[tokio::test]
+    async fn a_raw_read_waits_for_a_tree_list_permit() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("logo.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let slot: Arc<std::sync::Mutex<Option<AppState>>> = Arc::default();
+        let captured = Arc::clone(&slot);
+        let probe = Router::new().route(
+            "/test/state",
+            axum::routing::get(move |State(state): State<AppState>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    *captured.lock().unwrap() = Some(state);
+                    "ok"
+                }
+            }),
+        );
+        let app = build_app(
+            handle,
+            probe,
+            RouterParams::plain_http().with_tree_list_max_concurrency(1),
+        );
+        let status = oneshot_status(&app, "GET", "/test/state", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let state = slot.lock().unwrap().take().unwrap();
+        let held = Arc::clone(state.tree_list_semaphore.as_ref().unwrap())
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        let read = tokio::spawn(async move {
+            oneshot_status(
+                &app,
+                "GET",
+                "/api/v1/sessions/s1/files/raw?path=logo.png",
+                None,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !read.is_finished(),
+            "a raw read must wait for a free permit"
+        );
+
+        drop(held);
+        assert_eq!(read.await.unwrap(), StatusCode::OK);
     }
 
     /// An oversized `:id` (longer than `MAX_ID_LEN`) is rejected with 404 by the

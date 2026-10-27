@@ -159,11 +159,38 @@ fn server_error(message: &str) -> Response {
     )
 }
 
+/// Why a request body could not be read in full.
+#[derive(Clone, Copy)]
+enum BodyRead {
+    /// More than the limit arrived.
+    TooLarge,
+    /// The body failed before it ended, a dropped connection most often.
+    Failed,
+}
+
 /// Read a request body of at most `limit` bytes into a buffer that is wiped
-/// when dropped. A body that is larger, or that fails to arrive, is `None`.
-async fn bounded_body(body: Body, limit: usize) -> Option<Zeroizing<Vec<u8>>> {
-    let bytes = axum::body::to_bytes(body, limit).await.ok()?;
-    Some(Zeroizing::new(bytes.to_vec()))
+/// when dropped.
+async fn bounded_body(body: Body, limit: usize) -> Result<Zeroizing<Vec<u8>>, BodyRead> {
+    use futures_util::StreamExt;
+
+    let mut buffer = Zeroizing::new(Vec::new());
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| BodyRead::Failed)?;
+        if chunk.len() > limit.saturating_sub(buffer.len()) {
+            return Err(BodyRead::TooLarge);
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(buffer)
+}
+
+/// The refusal for a body [`bounded_body`] could not read.
+fn unread_body(why: BodyRead, max_password_bytes: u32) -> Response {
+    match why {
+        BodyRead::TooLarge => too_long(max_password_bytes),
+        BodyRead::Failed => bad_request("The request did not arrive in full. Try again."),
+    }
 }
 
 /// A configured byte cap as a length. A `u32` always fits a `usize` on the
@@ -264,13 +291,14 @@ async fn sign_in(
 ) -> SignIn {
     let snapshot = state.auth.snapshot();
     let config = &snapshot.config;
-    let Some(raw) = bounded_body(
+    let raw = match bounded_body(
         request.into_body(),
         body_limit(config.max_password_bytes, 1),
     )
     .await
-    else {
-        return SignIn::Refused(too_long(config.max_password_bytes));
+    {
+        Ok(raw) => raw,
+        Err(why) => return SignIn::Refused(unread_body(why, config.max_password_bytes)),
     };
     let Ok(body) = serde_json::from_slice::<LoginBody>(&raw) else {
         return SignIn::Refused(bad_request(
@@ -582,13 +610,14 @@ async fn change_password(
 ) -> Response {
     let snapshot = state.auth.snapshot();
     let config = &snapshot.config;
-    let Some(raw) = bounded_body(
+    let raw = match bounded_body(
         request.into_body(),
         body_limit(config.max_password_bytes, 2),
     )
     .await
-    else {
-        return too_long(config.max_password_bytes);
+    {
+        Ok(raw) => raw,
+        Err(why) => return unread_body(why, config.max_password_bytes),
     };
     let Ok(body) = serde_json::from_slice::<PasswordBody>(&raw) else {
         return bad_request(

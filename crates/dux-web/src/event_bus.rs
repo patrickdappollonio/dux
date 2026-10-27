@@ -109,30 +109,22 @@ impl EventBus {
 
     /// Increment the interest refcount for `topic` (a connection just subscribed
     /// to a topic it was not already holding).
-    ///
-    /// # Panics
-    ///
-    /// When a thread panicked while holding the interest lock.
     pub fn add_interest(&self, topic: &str) {
         let mut map = self
             .interest
             .lock()
-            .expect("the interest lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *map.entry(topic.to_string()).or_insert(0) += 1;
     }
 
     /// Decrement the interest refcount for `topic`, removing it at zero. Saturating
     /// and underflow-logged: dropping interest in a topic that was never counted is
     /// a bookkeeping bug, so it is logged rather than panicking or wrapping.
-    ///
-    /// # Panics
-    ///
-    /// When a thread panicked while holding the interest lock.
     pub fn drop_interest(&self, topic: &str) {
         let mut map = self
             .interest
             .lock()
-            .expect("the interest lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match map.get_mut(topic) {
             Some(count) => {
                 *count = count.saturating_sub(1);
@@ -151,15 +143,11 @@ impl EventBus {
     /// The session ids that currently have at least one `:changes` subscriber.
     /// Drives the changed-files poller: idle sessions (no subscriber) are never
     /// polled.
-    ///
-    /// # Panics
-    ///
-    /// When a thread panicked while holding the interest lock.
     pub fn interested_sessions(&self) -> Vec<String> {
         let map = self
             .interest
             .lock()
-            .expect("the interest lock is not poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.keys()
             .filter_map(|topic| session_id_from_changes_topic(topic))
             .map(std::string::ToString::to_string)
@@ -168,14 +156,10 @@ impl EventBus {
 
     /// Whether any connection currently holds interest in `topic`. Used by the
     /// poller's grace-eviction to decide a session's cache can be dropped.
-    ///
-    /// # Panics
-    ///
-    /// When a thread panicked while holding the interest lock.
     pub fn has_interest(&self, topic: &str) -> bool {
         self.interest
             .lock()
-            .expect("the interest lock is not poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(topic)
     }
 }
@@ -212,6 +196,24 @@ mod tests {
             session_id_from_changes_topic("session:a:b:changes"),
             Some("a:b")
         );
+    }
+
+    #[test]
+    fn a_panic_while_holding_the_interest_lock_does_not_take_the_bus_down() {
+        let bus = EventBus::new();
+        let topic = changes_topic("s1");
+        bus.add_interest(&topic);
+        std::thread::scope(|scope| {
+            let poisoner = scope.spawn(|| {
+                let _held = bus.interest.lock();
+                panic!("a panic while the interest lock is held");
+            });
+            assert!(poisoner.join().is_err());
+        });
+        assert!(bus.interest.is_poisoned());
+        assert!(bus.has_interest(&topic));
+        bus.drop_interest(&topic);
+        assert_eq!(bus.interested_sessions(), Vec::<String>::new());
     }
 
     #[test]

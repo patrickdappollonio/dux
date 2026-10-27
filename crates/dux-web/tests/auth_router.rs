@@ -219,6 +219,12 @@ impl Dux {
     }
 
     async fn send(&self, from: Arrival, request: Req) -> Answer {
+        self.send_with_body(from, request, None).await
+    }
+
+    /// [`Self::send`] with a body of the caller's own making in place of the
+    /// request's JSON, for a body that misbehaves on the wire.
+    async fn send_with_body(&self, from: Arrival, request: Req, raw: Option<Body>) -> Answer {
         let names: Vec<String> = request
             .headers
             .iter()
@@ -242,12 +248,16 @@ impl Dux {
         if let Some(cookie) = &request.cookie {
             builder = builder.header("cookie", cookie.as_str());
         }
-        let body = match &request.body {
-            Some(body) => {
+        let body = match (raw, &request.body) {
+            (Some(raw), _) => {
+                builder = builder.header("content-type", "application/json");
+                raw
+            }
+            (None, Some(body)) => {
                 builder = builder.header("content-type", "application/json");
                 Body::from(body.to_string())
             }
-            None => Body::empty(),
+            (None, None) => Body::empty(),
         };
         let mut built = builder.body(body).expect("build the request");
         built
@@ -1492,6 +1502,28 @@ async fn an_oversized_or_malformed_login_is_refused_before_any_check() {
     assert_eq!(
         dux.login(NETWORK, PASSWORD).await.status,
         StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn a_login_whose_body_fails_to_arrive_is_not_called_too_long() {
+    let dux = Dux::with_password("");
+    let cut_off = Body::from_stream(futures_util::stream::once(async {
+        Err::<axum::body::Bytes, _>(std::io::Error::other("connection reset"))
+    }));
+    let answer = dux
+        .send_with_body(
+            NETWORK,
+            Req::new(Method::POST, "/api/v1/auth/login"),
+            Some(cut_off),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    assert_ne!(
+        answer.error().as_deref(),
+        Some("password_too_long"),
+        "{}",
+        answer.body
     );
 }
 

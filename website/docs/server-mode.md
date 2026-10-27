@@ -559,7 +559,7 @@ The details:
 | `file_drop_max_bytes` | `104857600` | Largest single file or pasted image you can drop onto a pane (100 MiB). |
 | `file_drop_max_concurrency` | `2` | How many dropped-file uploads are accepted at once. |
 | `search_index_max_files` | `50000` | Cap on the web editor's "Search files…" flat walk. |
-| `tree_list_max_concurrency` | `8` | How many editor directory listings run at once. |
+| `tree_list_max_concurrency` | `8` | How many editor directory listings, file searches and preview image reads run at once. |
 | `release_notes_max_concurrency` | `2` | How many release-notes fetches run at once. |
 
 - **`shutdown_timeout_seconds`**: after SIGTERM, dux waits this long before force-killing
