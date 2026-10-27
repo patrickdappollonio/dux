@@ -360,6 +360,31 @@ pub fn probe_add_path(raw_path: &str, registered: &[String]) -> AddPathProbe {
     })
 }
 
+/// The runtime project list a config reload's worker builds from `store` and
+/// the reloaded `config`, for the apply to adopt. `None` when the database
+/// cannot be read: the reload itself still stands (its sync may already have
+/// written), and the apply builds the list, or keeps the reloaded config
+/// without one, as it does for a worker that builds none. Blocking: call it
+/// off the engine thread.
+pub fn reload_project_list(
+    store: &crate::storage::SessionStore,
+    config: &Config,
+) -> Option<Vec<Project>> {
+    let read = store
+        .load_projects()
+        .and_then(|projects| Ok((projects, store.load_project_created_ats()?)));
+    match read {
+        Ok((projects, created_ats)) => Some(load_projects(&projects, &created_ats, config)),
+        Err(error) => {
+            crate::logger::warn(&format!(
+                "the config reload could not read the projects from the session database, so \
+                 the list is built when the reload applies: {error:#}"
+            ));
+            None
+        }
+    }
+}
+
 /// Convert a slice of `ProjectConfig` entries (from SQLite) into runtime `Project` values.
 /// Each project gets its path expanded, its provider resolved (falling back to the global
 /// default), and its current branch read from git. Missing or non-git paths are flagged
@@ -769,6 +794,24 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::model::{ProviderKind, SessionStatus};
+
+    /// A database the reload cannot read its projects from leaves the list
+    /// to the apply instead of failing the reload its sync already wrote.
+    #[test]
+    fn a_reload_list_that_cannot_be_read_is_left_to_the_apply() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("sessions.sqlite3");
+        let store = crate::storage::SessionStore::open(&db).unwrap();
+        assert_eq!(
+            reload_project_list(&store, &Config::default()),
+            Some(Vec::new())
+        );
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("drop table projects")
+            .unwrap();
+        assert_eq!(reload_project_list(&store, &Config::default()), None);
+    }
 
     fn checkout_action() -> NonDefaultBranchAction {
         NonDefaultBranchAction::AddProject {

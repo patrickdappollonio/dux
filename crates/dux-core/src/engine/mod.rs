@@ -3237,18 +3237,25 @@ impl Engine {
     /// the apply builds the list again rather than restore stale state.
     /// Only what a reload decides is compared (see
     /// [`same_reload_owned_projects`]): a branch-status poll landing meanwhile
-    /// does not count, and its answer is kept.
+    /// does not count, and its answer is kept over the worker's.
     pub fn take_reloaded_projects(&mut self) -> Option<Vec<Project>> {
         let reload = self.reloaded_projects.take()?;
         if !same_reload_owned_projects(&reload.at_start, &self.projects) {
             return None;
         }
-        // What the workspace learned since about each project's checkout (a
-        // branch-status poll) is newer than what the worker read.
+        // The worker read each checkout during the reload, so its answer
+        // stands unless the workspace learned something since the reload
+        // started (a branch-status poll landed): that is newer.
         let mut built = reload.built?;
         for project in &mut built {
-            if let Some(live) = self.projects.iter().find(|live| live.id == project.id) {
+            let Some(live) = self.projects.iter().find(|live| live.id == project.id) else {
+                continue;
+            };
+            let start = reload.at_start.iter().find(|start| start.id == project.id);
+            if start.is_none_or(|start| start.current_branch != live.current_branch) {
                 project.current_branch.clone_from(&live.current_branch);
+            }
+            if start.is_none_or(|start| start.branch_status != live.branch_status) {
                 project.branch_status = live.branch_status;
             }
         }
@@ -10555,6 +10562,33 @@ mod tests {
             adopted[0].branch_status,
             crate::model::ProjectBranchStatus::NotLeading
         );
+    }
+
+    /// The worker read each checkout during the reload, so its branch wins
+    /// unless a poll landed after the reload started.
+    #[test]
+    fn a_reload_keeps_the_branch_its_worker_read_unless_a_poll_landed() {
+        let (mut engine, _tmp) = test_engine();
+        let mut start = sample_project("p1", "/srv/repo");
+        start.current_branch = "main".to_string();
+        engine.projects.push(start);
+        let mut built = engine.projects.clone();
+        built[0].current_branch = "feature".to_string();
+
+        engine.reloaded_projects = Some(ReloadProjects {
+            at_start: engine.projects.clone(),
+            built: Some(built.clone()),
+        });
+        let adopted = engine.take_reloaded_projects().expect("adopted");
+        assert_eq!(adopted[0].current_branch, "feature");
+
+        engine.reloaded_projects = Some(ReloadProjects {
+            at_start: engine.projects.clone(),
+            built: Some(built),
+        });
+        engine.projects[0].current_branch = "polled".to_string();
+        let adopted = engine.take_reloaded_projects().expect("adopted");
+        assert_eq!(adopted[0].current_branch, "polled");
     }
 
     /// A project reorder during a reload waits for it, like every other

@@ -19,11 +19,14 @@ use dux_core::ids::TabId;
 use dux_core::lockfile::SingleInstanceLock;
 use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
-use dux_core::worker::WorkerEvent;
+use dux_core::worker::{ReloadedConfig, WorkerEvent};
 
-/// Config surface for the web server: a read-only reload of `config.toml`, and
-/// recover rendering as plain comment-free TOML, since the canonical commented
-/// renderer needs the TUI's `RuntimeBindings`. The engine owns the write path.
+/// Config surface for the web server: a reload that reads `config.toml`,
+/// reconciles its `[[projects]]` with the session database (writing back only
+/// what that sync changed) and builds the runtime project list for the apply to
+/// adopt, and recover rendering as plain comment-free TOML, since the canonical
+/// commented renderer needs the TUI's `RuntimeBindings`. The engine owns every
+/// other write.
 #[derive(Debug)]
 pub struct WebConfigSurface;
 
@@ -100,10 +103,17 @@ impl ConfigSurface for WebConfigSurface {
                             &config,
                         );
                     }
-                    Ok(())
+                    // Built here, where reading SQLite and asking git may
+                    // block, so the apply adopts it (see
+                    // `Engine::take_reloaded_projects`).
+                    Ok(dux_core::project_browser::reload_project_list(
+                        &store, &config,
+                    ))
                 });
             match reconciled {
-                Ok(()) => guard.complete(Ok(config)),
+                Ok(projects) => {
+                    guard.complete_with_projects(Ok(ReloadedConfig { config, projects }));
+                }
                 Err(e) => guard.complete(Err(e)),
             }
         });
@@ -446,5 +456,86 @@ mod tests {
                 .any(|p| p.id == "cfg-only"),
             "the config-only project must be adopted into SQLite"
         );
+    }
+
+    /// The reload worker builds the project list itself, from the session
+    /// database and the reloaded config, so the apply on the engine thread
+    /// adopts it instead of reading SQLite and asking git.
+    #[test]
+    fn the_reload_worker_hands_back_the_project_list_it_built() {
+        let (_tmp, paths) = temp_paths();
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open store");
+        store
+            .upsert_project(&ProjectConfig {
+                id: "store-only".to_string(),
+                path: "/nonexistent/path/for/test".to_string(),
+                name: Some("FromStore".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: std::collections::BTreeMap::new(),
+            })
+            .expect("upsert project");
+        store.run_sql_for_tests(
+            "update projects set created_at = '2001-02-03T04:05:06+00:00' \
+             where id = 'store-only'",
+        );
+        drop(store);
+        std::fs::write(
+            &paths.config_path,
+            "[[projects]]\nid = \"cfg-only\"\npath = \"$HOME/proj\"\nname = \"FromConfig\"\n",
+        )
+        .expect("write config");
+        let (tx, rx) = mpsc::channel();
+        WebConfigSurface.reload(paths, tx);
+        let WorkerEvent::ConfigReloadReady(result) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the reload answers")
+        else {
+            panic!("the reload answers with its config");
+        };
+        let reloaded = (*result).expect("the reload succeeds");
+        let projects = reloaded.projects.expect("the worker built the projects");
+        let mut ids: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["cfg-only", "store-only"]);
+        // When a project was added is kept only in SQLite.
+        let from_store = projects.iter().find(|p| p.id == "store-only").unwrap();
+        assert_eq!(
+            from_store.created_at.map(|at| at.to_rfc3339()).as_deref(),
+            Some("2001-02-03T04:05:06+00:00")
+        );
+    }
+
+    /// A project list the worker cannot read does not refuse a reload whose
+    /// sync may already have written: it answers with the config and leaves
+    /// the list to the apply.
+    #[test]
+    fn a_reload_whose_project_list_cannot_be_read_still_answers_with_its_config() {
+        let (_tmp, paths) = temp_paths();
+        std::fs::write(
+            &paths.config_path,
+            "[[projects]]\nid = \"cfg-only\"\npath = \"$HOME/proj\"\nname = \"FromConfig\"\n",
+        )
+        .expect("write config");
+        // A date the list's read cannot take, and no other read looks at.
+        SessionStore::open(&paths.sessions_db_path)
+            .expect("open store")
+            .run_sql_for_tests(
+                "create trigger unreadable_date after insert on projects begin \
+                 update projects set created_at = x'00' where id = new.id; end;",
+            );
+        let (tx, rx) = mpsc::channel();
+        WebConfigSurface.reload(paths, tx);
+        let WorkerEvent::ConfigReloadReady(result) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the reload answers")
+        else {
+            panic!("the reload answers with its config");
+        };
+        let reloaded = (*result).expect("the reload still stands");
+        assert!(reloaded.projects.is_none());
+        assert!(reloaded.config.projects.iter().any(|p| p.id == "cfg-only"));
     }
 }

@@ -2547,6 +2547,20 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// Test builds only: run `sql` on this connection, to put the database in
+    /// a state no public method produces (a value a read cannot take, a
+    /// trigger that refuses a write).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the statements fail.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn run_sql_for_tests(&self, sql: &str) {
+        self.conn
+            .execute_batch(sql)
+            .expect("run the test's statements");
+    }
+
     /// Test builds only: make every later session delete fail, as a database
     /// that refuses a write would.
     ///

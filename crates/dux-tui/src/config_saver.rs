@@ -53,25 +53,34 @@ impl ConfigSurface for TuiConfigSurface {
                                 &store,
                             )
                             .map_err(|err| format!("{err:#}"))?;
-                            let projects = crate::app::load_projects(
-                                &store.load_projects().map_err(|err| format!("{err:#}"))?,
-                                &store
-                                    .load_project_created_ats()
-                                    .map_err(|err| format!("{err:#}"))?,
-                                &config,
-                            );
-                            crate::app::persist_runtime_projects_to_config_and_store(
-                                &projects,
-                                &mut config,
-                                &paths,
-                                &bindings,
-                                &store,
+                            // A list that cannot be read or saved leaves
+                            // building and saving it to the apply, as before
+                            // the worker built one: the sync above may already
+                            // have written, so the reload still stands, with
+                            // the config as the sync left it.
+                            let projects = dux_core::project_browser::reload_project_list(
+                                &store, &config,
                             )
-                            .map_err(|err| format!("{err:#}"))?;
-                            Ok(ReloadedConfig {
-                                config,
-                                projects: Some(projects),
-                            })
+                            .and_then(|projects| {
+                                let mut saved = config.clone();
+                                match crate::app::persist_runtime_projects_to_config_and_store(
+                                    &projects, &mut saved, &paths, &bindings, &store,
+                                ) {
+                                    Ok(()) => {
+                                        config = saved;
+                                        Some(projects)
+                                    }
+                                    Err(err) => {
+                                        dux_core::logger::warn(&format!(
+                                            "the config reload could not save the \
+                                                     project list, so it is built when the \
+                                                     reload applies: {err:#}"
+                                        ));
+                                        None
+                                    }
+                                }
+                            });
+                            Ok(ReloadedConfig { config, projects })
                         }
                         Err(message) => Err(message),
                     },
@@ -124,6 +133,72 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&paths.config_path).unwrap(), " \n");
 
         crate::config::ensure_config(&paths).expect("a start takes an empty file as defaults");
+    }
+
+    /// The worker built the list but could not save it back: the reload,
+    /// whose sync may already have written, still answers with its config and
+    /// leaves the list to the apply.
+    #[test]
+    fn a_reload_whose_project_list_cannot_be_saved_still_answers_with_its_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().unwrap();
+        // A repository whose leading branch the list detects, so saving the
+        // list writes the project's row.
+        let repo = root.join("repo");
+        let status = dux_core::test_git::fixture_git()
+            .args(["init", "-q", "-b", "main"])
+            .arg(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let project = dux_core::config::ProjectConfig {
+            id: "p1".to_string(),
+            path: repo.display().to_string(),
+            name: Some("repo".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+        };
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store.upsert_project(&project).unwrap();
+        store.run_sql_for_tests(
+            "create trigger refuse_project_updates before update on projects begin \
+             select raise(abort, 'refused by a test'); end;",
+        );
+        drop(store);
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"repo\"\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        TuiConfigSurface.reload(paths, tx);
+        let result = loop {
+            if let WorkerEvent::ConfigReloadReady(result) = rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("reload ends")
+            {
+                break *result;
+            }
+        };
+        let reloaded = result.expect("the reload still stands");
+        assert!(reloaded.projects.is_none());
+        assert!(reloaded.config.projects.iter().any(|p| p.id == "p1"));
     }
 
     /// config.toml is a symlink whose target vanished while dux runs: the
