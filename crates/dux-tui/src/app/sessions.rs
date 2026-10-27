@@ -7007,14 +7007,19 @@ mod tests {
         crate::app::test_support::finish_ui_jobs(&mut app);
 
         assert!(matches!(app.prompt, PromptState::PickEditor { .. }));
-        let said = app
+        // The two searches answer in either order, and the picker's own
+        // instruction can land after the dropped answer's sentence, so the
+        // sentence is looked for among everything the status line holds.
+        let said: Vec<String> = app
             .status
-            .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .snapshot()
+            .into_iter()
+            .map(|status| status.message)
+            .collect();
         assert!(
-            said.contains("a newer editor request replaced it"),
-            "{said}"
+            said.iter()
+                .any(|message| message.contains("a newer editor request replaced it")),
+            "{said:?}"
         );
     }
 
