@@ -1,4 +1,4 @@
-// New… then New agent, stopped at the project picker it opens first: the
+// The launcher corner's New agent… half, stopped at the project picker it opens first: the
 // projects with their agent counts, and the two ways out at its foot.
 const {
   boxOf,

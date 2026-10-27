@@ -1,5 +1,6 @@
-// The New dialog's second step: which agent's copy of the code a new terminal
-// opens in, every agent under its project and the standalone one last.
+// The launcher corner's "New terminal for an agent…": which agent's copy of the
+// code a new terminal opens in, every agent under its project and the
+// standalone one last.
 const {
   agents,
   boxOf,
@@ -8,7 +9,7 @@ const {
   expectVisible,
   expectVisibleText,
   goto,
-  openLauncherRow,
+  openLauncherEntry,
   sleep,
   takeOver,
 } = require("../lib.js")
@@ -21,11 +22,10 @@ module.exports = {
     await goto(page, `#/agent/${by["design-notes"].id}`)
     await takeOver(page)
     await clearToasts(page)
-    await openLauncherRow(page, "new-terminal-for-agent")
+    await openLauncherEntry(page, "new-terminal-for-agent")
     await sleep(600)
     await clearToasts(page)
-    // The step itself, the way back named after the list it returns to, and
-    // both kinds of group the caption names.
+    // The step itself and both kinds of group the caption names.
     await expectDialogOpen(page, "New terminal for an agent")
     await expectVisible(page, '[role="dialog"] input[aria-label="Search agents"]', "the search field")
     await expectVisibleText(page, "Standalone", { selector: '[role="dialog"] span' })

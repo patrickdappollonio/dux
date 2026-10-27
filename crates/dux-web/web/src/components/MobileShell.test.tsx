@@ -1768,15 +1768,18 @@ describe("MobileShell agent header lanes", () => {
 })
 
 // The hub's bottom bar renders the SAME launcher corner as the desktop sidebar
-// footer: one New… button and nothing beside it.
+// footer: the split button's two halves and nothing beside them.
 describe("MobileShell hub bottom bar", () => {
-  it("carries the launcher corner's one New… button", () => {
+  it("carries the launcher corner's split button", () => {
     mockState = makeState({ spine: makeSessionSpine(1) })
     render(<MobileShell />)
-    const corner = screen.getByRole("button", { name: "New…" })
+    const corner = screen.getByRole("button", { name: "New agent…" })
       .parentElement as HTMLElement
-    expect(corner.querySelectorAll("button")).toHaveLength(1)
-    expect(screen.queryByLabelText("More ways to create")).toBeNull()
+    expect(
+      Array.from(corner.querySelectorAll("button")).map(
+        (b) => b.getAttribute("aria-label") ?? b.textContent,
+      ),
+    ).toEqual(["New agent…", "More ways to start"])
   })
 })
 

@@ -8,7 +8,7 @@ const {
   expectDialogOpen,
   expectVisibleText,
   goto,
-  openLauncherRow,
+  openLauncherEntry,
   sleep,
   takeOver,
 } = require("../lib.js")
@@ -21,7 +21,7 @@ module.exports = {
     await goto(page, `#/agent/${by["design-notes"].id}`)
     await takeOver(page)
     await clearToasts(page)
-    await openLauncherRow(page, "new-agent-from-worktree")
+    await openLauncherEntry(page, "new-agent-from-worktree")
     await sleep(1200)
     await clickText(page, "demo-api", '[role="dialog"] button')
     await sleep(1600)

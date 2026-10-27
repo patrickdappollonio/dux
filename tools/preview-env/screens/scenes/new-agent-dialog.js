@@ -1,4 +1,4 @@
-// New… then New agent, through the project picker, to the naming step.
+// The launcher corner's New agent… half, through the project picker, to the naming step.
 const {
   boxOf,
   clearToasts,

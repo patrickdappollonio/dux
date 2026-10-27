@@ -1,5 +1,5 @@
-// The launcher's New… button pressed: every way to create something, in its
-// three groups, each row with the sentence that says what it makes.
+// The collapsed rail's + pressed: the New dialog, every way to create something
+// in its three groups, each row with the sentence that says what it makes.
 const {
   agents,
   boxOf,

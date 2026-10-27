@@ -467,37 +467,59 @@ async function clickBox(page, box, label) {
   await sleep(1200)
 }
 
-// The corner's one filled button, which opens the New dialog. The collapsed
-// rail's + shares its name, so the visible, labelled one is picked.
+// The visible button a selector names, as a point to click: the corner renders
+// on the sidebar and nowhere else on a computer, so the first visible one is it.
+async function visibleButton(page, selector) {
+  return page.evaluate((sel) => {
+    const b = [...document.querySelectorAll(sel)].find(
+      (x) => x.getBoundingClientRect().width > 0,
+    )
+    if (!b) return null
+    const r = b.getBoundingClientRect()
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }, selector)
+}
+
+// The New dialog ("Start something new"), which the collapsed rail's + opens:
+// the sidebar is collapsed first. Every scene runs in a fresh browser, so the
+// collapse does not outlive the scene.
 async function openLauncher(page) {
+  const trigger = await visibleButton(page, '[data-sidebar="trigger"]')
+  await clickBox(page, trigger, "sidebar collapse toggle")
+  const plus = await visibleButton(page, 'button[aria-label="New…"]')
+  await clickBox(page, plus, "collapsed rail's New… button")
+}
+
+// The corner's ▾ half, which opens its menu of every other way to start.
+async function openLauncherMenu(page) {
+  const box = await visibleButton(page, 'button[aria-label="More ways to start"]')
+  await clickBox(page, box, "launcher corner's ▾ half")
+}
+
+// One entry of the corner's menu, by the creation list's id, so a title that is
+// the start of another one cannot pick the wrong entry.
+async function openLauncherEntry(page, rowId) {
+  await openLauncherMenu(page)
+  const box = await page.evaluate((id) => {
+    const b = document.querySelector(`[role="menu"] [data-row-id="${id}"]`)
+    if (!b) return null
+    const r = b.getBoundingClientRect()
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  }, rowId)
+  await clickBox(page, box, `launcher menu entry ${rowId}`)
+}
+
+// The corner's main half, which opens the New agent project picker.
+async function openNewAgent(page) {
   const box = await page.evaluate(() => {
-    const b = [...document.querySelectorAll('button[aria-label="New…"]')].find(
-      (x) => x.getBoundingClientRect().width > 40,
+    const b = [...document.querySelectorAll('[data-sidebar="footer"] button')].find(
+      (x) => x.textContent === "New agent…" && x.getBoundingClientRect().width > 0,
     )
     if (!b) return null
     const r = b.getBoundingClientRect()
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
   })
-  await clickBox(page, box, "New… button")
-}
-
-// One row of the New dialog, by the creation list's id, so a title that is the
-// start of another one ("New agent", "New agent from PR") cannot pick the
-// wrong row.
-async function openLauncherRow(page, rowId) {
-  await openLauncher(page)
-  const box = await page.evaluate((id) => {
-    const b = document.querySelector(`[role="dialog"] [data-row-id="${id}"]`)
-    if (!b) return null
-    const r = b.getBoundingClientRect()
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
-  }, rowId)
-  await clickBox(page, box, `New dialog row ${rowId}`)
-}
-
-// The plain New agent row, which opens the project picker.
-async function openNewAgent(page) {
-  await openLauncherRow(page, "new-agent-plain")
+  await clickBox(page, box, "launcher corner's New agent… half")
 }
 
 // --- Refusal guards --------------------------------------------------------
@@ -950,7 +972,8 @@ module.exports = {
   displayOrder,
   armAttention,
   openLauncher,
-  openLauncherRow,
+  openLauncherEntry,
+  openLauncherMenu,
   openNewAgent,
   containerSh,
   stage,

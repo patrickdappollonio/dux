@@ -1063,7 +1063,7 @@ describe("FlatAgentList input group in the row menus", () => {
 })
 
 // The Agents header carries the sort control and no + of its own: creating
-// lives behind the launcher's New….
+// lives behind the launcher corner.
 describe("FlatAgentList Agents header", () => {
   it("offers no creation button beside the sort trigger", () => {
     render(<FlatAgentList handlers={handlers} />)
@@ -1167,7 +1167,7 @@ describe("FlatAgentList section counters", () => {
 
 describe("FlatAgentList Terminals divider", () => {
   // The whole divider is the collapse toggle; creating a terminal lives behind
-  // the launcher's New….
+  // the launcher corner.
   it("collapses and expands, with no creation button beside it", () => {
     render(<FlatAgentList handlers={handlers} />)
     const toggle = () => screen.getByText("Terminals").closest("button")!

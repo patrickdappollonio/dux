@@ -17,6 +17,7 @@ import { agentRowVisual } from "@/lib/agentRow"
 import { agentTerminalGroups } from "@/lib/agentTerminalPick"
 import { matchWorkspace, sessionLabel } from "@/lib/agentWorkspace"
 import {
+  newLauncherContext,
   newLauncherModel,
   type NewLauncherGroup,
   type NewLauncherRow,
@@ -33,15 +34,20 @@ import { cn } from "@/lib/utils"
 // computer and a bottom sheet on a phone, around one body, so the two lists
 // cannot drift. The rows are `newLauncherModel`, which reads the shared
 // creation lists, so a row runs exactly what the cog menu's copy of it runs.
+//
+// The launcher corner's menu opens the agent-picking step on its own; it then
+// has no list behind it to go back to.
 export function NewLauncherDialog() {
-  const { newLauncherOpen } = useDux()
+  const { newLauncherOpen, newLauncherStep } = useDux()
   const isMobile = useIsMobile()
   const onOpenChange = (open: boolean) => {
     if (!open) closeNewLauncher()
   }
   // The body mounts only while open, so every open starts on the list with an
   // empty search rather than wherever the last one was left.
-  const body = newLauncherOpen ? <LauncherBody phone={isMobile} /> : null
+  const body = newLauncherOpen ? (
+    <LauncherBody phone={isMobile} entry={newLauncherStep} />
+  ) : null
   if (isMobile) {
     return (
       <Sheet open={newLauncherOpen} onOpenChange={onOpenChange}>
@@ -61,18 +67,28 @@ export function NewLauncherDialog() {
   )
 }
 
-function LauncherBody({ phone }: { phone: boolean }) {
-  const [step, setStep] = useState<"list" | "pick-agent">("list")
+function LauncherBody({
+  phone,
+  entry,
+}: {
+  phone: boolean
+  entry: "list" | "pick-agent"
+}) {
+  const [step, setStep] = useState(entry)
   // Coming back from the agent step puts focus back on the row that went there.
   const [returned, setReturned] = useState(false)
   if (step === "pick-agent") {
     return (
       <AgentStep
         phone={phone}
-        onBack={() => {
-          setReturned(true)
-          setStep("list")
-        }}
+        onBack={
+          entry === "list"
+            ? () => {
+                setReturned(true)
+                setStep("list")
+              }
+            : null
+        }
       />
     )
   }
@@ -94,13 +110,7 @@ function LauncherList({
   focusAgentTerminal: boolean
   onPickAgent: () => void
 }) {
-  const { bootstrap, spine } = useDux()
-  const groups = newLauncherModel({
-    ghAvailable: bootstrap?.gh_available ?? false,
-    // null until the spine arrives: an unloaded list is not a zero.
-    projectCount: spine ? spine.projects.length : null,
-    agentCount: spine ? spine.sessions.length : null,
-  })
+  const groups = newLauncherModel(newLauncherContext(useDux()))
   const activate = (row: NewLauncherRow) => {
     if (row.action.kind === "pick-agent") return onPickAgent()
     // Closed first, so the dialog the row opens is the only one on screen.
@@ -275,8 +285,14 @@ function moveFocusAmongRows(event: KeyboardEvent<HTMLElement>) {
 
 // The second step behind "New terminal for an agent": which agent's directory
 // the terminal opens in. Picking one opens it through the same action the
-// agent's own menu runs.
-function AgentStep({ phone, onBack }: { phone: boolean; onBack: () => void }) {
+// agent's own menu runs. `onBack` is null when the step is the whole dialog.
+function AgentStep({
+  phone,
+  onBack,
+}: {
+  phone: boolean
+  onBack: (() => void) | null
+}) {
   const { spine } = useDux()
   const [query, setQuery] = useState("")
   const groups = useMemo(
@@ -305,20 +321,28 @@ function AgentStep({ phone, onBack }: { phone: boolean; onBack: () => void }) {
   const needle = query.trim().toLowerCase()
   return (
     <>
-      <div className={cn("flex flex-col gap-1", phone ? "px-3 pt-3 pr-14" : "-mt-1 pr-10")}>
+      <div
+        className={cn(
+          "flex flex-col gap-1",
+          phone ? "px-3 pr-14" : "pr-10",
+          phone ? (onBack ? "pt-3" : "pt-5") : onBack ? "-mt-1" : null,
+        )}
+      >
         {/* Back to the list, named after the dialog it returns to. Ghost and
             quieter than the rows: it navigates rather than creates. 32px tall
             on a computer, where its only neighbour is the close button across
             the header; the floor returns where a finger is the pointer. */}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onBack}
-          className="h-8 self-start px-1.5 text-muted-foreground max-md:min-h-10 pointer-coarse:min-h-10"
-        >
-          <ChevronLeft />
-          New…
-        </Button>
+        {onBack ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onBack}
+            className="h-8 self-start px-1.5 text-muted-foreground max-md:min-h-10 pointer-coarse:min-h-10"
+          >
+            <ChevronLeft />
+            New…
+          </Button>
+        ) : null}
         <div className={cn("flex flex-col gap-1", phone ? "px-2" : "px-1")}>
           <DialogTitle className="text-lg font-semibold">
             New terminal for an agent

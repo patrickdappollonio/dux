@@ -49,6 +49,7 @@ function seed({
 } = {}) {
   state.current = {
     newLauncherOpen: true,
+    newLauncherStep: "list",
     bootstrap: { gh_available: true },
     spine: {
       projects,
@@ -195,6 +196,17 @@ describe("NewLauncherDialog agent step", () => {
     fireEvent.click(screen.getByRole("button", { name: "New…" }))
     expect(screen.getByText("Start something new")).toBeTruthy()
     fireEvent.click(row("New terminal for an agent"))
+    fireEvent.click(screen.getByText("design-notes").closest("button")!)
+    expect(calls).toEqual(["closeNewLauncher", "createTerminal(s3)"])
+  })
+
+  // The launcher corner's menu opens this step as a dialog of its own.
+  it("opens straight on the agent step with no list behind it to go back to", () => {
+    state.current = { ...state.current, newLauncherStep: "pick-agent" }
+    render(<NewLauncherDialog />)
+    expect(screen.getByText("New terminal for an agent")).toBeTruthy()
+    expect(screen.queryByText("Start something new")).toBeNull()
+    expect(screen.queryByRole("button", { name: "New…" })).toBeNull()
     fireEvent.click(screen.getByText("design-notes").closest("button")!)
     expect(calls).toEqual(["closeNewLauncher", "createTerminal(s3)"])
   })

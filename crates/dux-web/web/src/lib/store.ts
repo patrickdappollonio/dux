@@ -797,8 +797,11 @@ export interface DuxState {
   // The shared search query filtering the flat agent/terminal list on both
   // surfaces. Empty string shows everything.
   agentSearch: string
-  // Whether the launcher's New dialog (every way to create something) is open.
+  // Whether the launcher's New dialog (every way to create something) is open,
+  // and which step it opened on: its list, or the agent-picking step behind
+  // "New terminal for an agent" on its own, as the launcher corner's menu opens it.
   newLauncherOpen: boolean
+  newLauncherStep: "list" | "pick-agent"
   // Whether the New-agent picker dialog is open. The picker is the home for agent
   // creation and every project action now that there are no project headers.
   newAgentPickerOpen: boolean
@@ -1186,6 +1189,7 @@ let state: DuxState = {
   agentSort: null,
   agentSearch: "",
   newLauncherOpen: false,
+  newLauncherStep: "list",
   newAgentPickerOpen: false,
   newAgentPickerIntent: "new",
   newAgentPickerOnlyIds: null,
@@ -7167,7 +7171,13 @@ export function setAgentSearch(query: string): void {
 }
 
 export function openNewLauncher(): void {
-  setState({ newLauncherOpen: true })
+  setState({ newLauncherOpen: true, newLauncherStep: "list" })
+}
+
+/** Opens the New dialog's agent-picking step as a dialog of its own: which
+ *  agent's copy of the code a new terminal opens in. */
+export function openAgentTerminalPicker(): void {
+  setState({ newLauncherOpen: true, newLauncherStep: "pick-agent" })
 }
 
 export function closeNewLauncher(): void {

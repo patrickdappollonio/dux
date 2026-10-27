@@ -1,5 +1,5 @@
-// Creating an agent from a pull request, one of the New dialog's other
-// ways in.
+// Creating an agent from a pull request, one of the launcher corner's menu
+// entries.
 const {
   agents,
   boxOf,
@@ -7,7 +7,7 @@ const {
   expectDialogOpen,
   expectFieldValue,
   goto,
-  openLauncherRow,
+  openLauncherEntry,
   sleep,
   takeOver,
 } = require("../lib.js")
@@ -21,7 +21,7 @@ module.exports = {
     await goto(page, `#/agent/${by["design-notes"].id}`)
     await takeOver(page)
     await clearToasts(page)
-    await openLauncherRow(page, "new-agent-from-pr")
+    await openLauncherEntry(page, "new-agent-from-pr")
     await sleep(1400)
     await page.evaluate(() => document.querySelector('[role="dialog"] input')?.focus())
     await page.keyboard.type("acme/demo-api#123", { delay: 25 })

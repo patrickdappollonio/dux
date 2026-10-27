@@ -4,8 +4,9 @@
 //
 // Every surface renders these lists, so none of them can drift on labels, icons,
 // order, gating, or the store action an item calls. The cog menu renders them
-// verbatim; the launcher's New dialog regroups them under captions and words
-// each one in a sentence (`newLauncherModel`), which is presentation.
+// verbatim; the launcher's New dialog and the launcher corner's menu regroup
+// them under captions and word each one in a sentence (`newLauncherModel`),
+// which is presentation.
 //
 // The entries carry the same `kind` tag the app menu's own do, so `appMenu.ts`
 // splices them in without importing anything back (no module cycle).
@@ -190,8 +191,9 @@ export function addProjectMenuItems(): CreationMenuItem[] {
   ]
 }
 
-/** The New dialog's one row that is not in the shared lists: it opens a second
- *  step inside the dialog (pick which agent) rather than a store action. */
+/** The New dialog's one row that is not in the shared lists: it opens the
+ *  agent-picking step (inside the dialog, or as a dialog of its own from the
+ *  launcher corner's menu) rather than a store action. */
 export const NEW_AGENT_TERMINAL_ID = "new-terminal-for-agent"
 
 /** What a New dialog row does when activated: run a shared list's own action,
@@ -206,6 +208,12 @@ export interface NewLauncherRow {
   /** One plain sentence saying what the row makes, for someone who has not met
    *  the word yet. */
   excerpt: string
+  /** The title as a menu entry: a trailing "…" iff a dialog follows. */
+  menuTitle: string
+  /** One short sentence for the launcher corner's menu, where the row sits
+   *  under its title in a narrow popup. Null for the one row the menu does not
+   *  list, because the corner's main half is that row. */
+  summary: string | null
   icon: LucideIcon
   /** True when activating it opens a further step, which earns a chevron. */
   opensStep: boolean
@@ -222,9 +230,14 @@ export interface NewLauncherGroup {
   rows: NewLauncherRow[]
 }
 
-// The dialog's own words for the shared items, keyed by their ids. The titles
-// drop the menus' trailing "…" because the chevron already says a step follows.
-const LAUNCHER_COPY: Record<string, { title: string; excerpt: string }> = {
+// The launcher's own words for the shared items, keyed by their ids: the New
+// dialog's title and sentence, and the shorter sentence the corner's menu shows.
+// The titles drop the menus' trailing "…" because the dialog's chevron already
+// says a step follows; `menuTitle` puts it back for the menu.
+const LAUNCHER_COPY: Record<
+  string,
+  { title: string; excerpt: string; summary?: string }
+> = {
   [NEW_AGENT_PLAIN_ID]: {
     title: "New agent",
     excerpt:
@@ -234,35 +247,42 @@ const LAUNCHER_COPY: Record<string, { title: string; excerpt: string }> = {
     title: "New agent from PR",
     excerpt:
       "Pick up a GitHub pull request. dux fetches its branch and starts an agent on it, ready to review or carry on.",
+    summary: "Start an agent on a GitHub pull request's branch.",
   },
   "new-agent-from-worktree": {
     title: "New agent from existing worktree",
     excerpt:
       "Start an agent in a copy of a project you already have on disk, on the branch it's already on.",
+    summary: "Use a copy of a project already on disk, on its branch.",
   },
   "new-standalone-agent": {
     title: "New standalone agent",
     excerpt:
       "Start an agent in any folder on this computer. No project or git needed.",
+    summary: "Run an agent in any folder, no project or git needed.",
   },
   "new-standalone-terminal": {
     title: "New standalone terminal",
     excerpt:
       "Open a command line in your home folder, not tied to any project. Opens right away.",
+    summary: "Opens right away, in your home folder.",
   },
   "add-project-picker": {
     title: "Add project",
     excerpt: "Point dux at a git repository that's already on this computer.",
+    summary: "Point dux at a git repository on this computer.",
   },
   "clone-repository": {
     title: "Clone a repository",
     excerpt:
       "Download a repository from GitHub or any git address, then add it as a project.",
+    summary: "Download a repository, then add it as a project.",
   },
   "init-repository": {
     title: "Initialize a repository",
     excerpt:
       "Turn a folder into a brand-new git repository and add it as a project.",
+    summary: "Turn a folder into a new git repository and project.",
   },
 }
 
@@ -292,12 +312,15 @@ export function newLauncherModel(ctx: {
   const row = (entry: CreationMenuAction): NewLauncherRow => {
     const copy = LAUNCHER_COPY[entry.id]
     if (!copy) throw new Error(`New dialog has no words for ${entry.id}`)
+    // The shared lists' own contract: a trailing "…" means a dialog follows.
+    const opensStep = entry.title.endsWith("…")
     return {
       id: entry.id,
       ...copy,
+      summary: copy.summary ?? null,
+      menuTitle: opensStep ? `${copy.title}…` : copy.title,
       icon: entry.icon,
-      // The shared lists' own contract: a trailing "…" means a dialog follows.
-      opensStep: entry.title.endsWith("…"),
+      opensStep,
       disabled: noProjects && NEEDS_A_PROJECT.has(entry.id),
       action: { kind: "run", run: entry.run },
     }
@@ -327,6 +350,8 @@ export function newLauncherModel(ctx: {
         title: "New terminal for an agent",
         excerpt:
           "Open a command line in an agent's copy of the code, to run its tests or look around beside it.",
+        menuTitle: "New terminal for an agent…",
+        summary: "Open a command line in an agent's copy of the code.",
         icon: SquareTerminal,
         opensStep: true,
         disabled: noAgents,
@@ -345,4 +370,54 @@ export function newLauncherModel(ctx: {
   return noProjects
     ? [projects, agents, terminals]
     : [agents, terminals, projects]
+}
+
+/** The live state `newLauncherModel` reads from. */
+interface LauncherState {
+  bootstrap: { gh_available?: boolean } | null
+  spine: { projects: unknown[]; sessions: unknown[] } | null
+}
+
+// Each input on its own, as a primitive, so a component can subscribe to just
+// these through `useDuxSelector` and re-render only when one of them changes.
+// The counts stay null until the spine arrives.
+export const selectGhAvailable = (state: LauncherState): boolean =>
+  state.bootstrap?.gh_available ?? false
+export const selectProjectCount = (state: LauncherState): number | null =>
+  state.spine ? state.spine.projects.length : null
+export const selectAgentCount = (state: LauncherState): number | null =>
+  state.spine ? state.spine.sessions.length : null
+
+/** What `newLauncherModel` reads from the live state: `gh` availability and the
+ *  two counts. */
+export function newLauncherContext(
+  state: LauncherState,
+): Parameters<typeof newLauncherModel>[0] {
+  return {
+    ghAvailable: selectGhAvailable(state),
+    projectCount: selectProjectCount(state),
+    agentCount: selectAgentCount(state),
+  }
+}
+
+/**
+ * The launcher corner's two halves, from the New dialog's own groups: the main
+ * half is the plain "New agent" row, and the menu is every other row, under the
+ * same groups, in the same order, with the same gating.
+ */
+export function launcherCornerModel(groups: NewLauncherGroup[]): {
+  primary: NewLauncherRow
+  menu: NewLauncherGroup[]
+} {
+  const primary = groups
+    .flatMap((group) => group.rows)
+    .find((row) => row.id === NEW_AGENT_PLAIN_ID)
+  if (!primary) throw new Error("The launcher has no plain New agent row")
+  const menu = groups
+    .map((group) => ({
+      ...group,
+      rows: group.rows.filter((row) => row.id !== NEW_AGENT_PLAIN_ID),
+    }))
+    .filter((group) => group.rows.length > 0)
+  return { primary, menu }
 }

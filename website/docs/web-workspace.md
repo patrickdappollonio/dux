@@ -19,7 +19,7 @@ On a desktop-width screen it is three panes.
 
 - A sort control (Active first by default, or by recently updated, recently created, name, or a manual drag order). Drag rows to arrange them by hand.
 - A search box that filters the list.
-- A **New…** button at the bottom that opens one dialog holding every way to create something, grouped into agents, terminals and projects. See [Agents from the browser](/docs/web-agents#creating-an-agent).
+- The launcher at the bottom: **New agent…**, with a **▾** beside it that lists every other way to create something, grouped into agents, terminals and projects. See [Agents from the browser](/docs/web-agents#creating-an-agent).
 
 **The center pane** is the focused agent's live terminal, or a welcome screen when nothing is selected.
 
@@ -107,8 +107,9 @@ Three things can go wrong with a link:
 
 ## Adding projects
 
-**Add project** lives in the **Projects** group of the dialog the **New…** button at the
-bottom of the sidebar opens (with no projects yet, that group comes first). It opens a
+**Add project** lives in the **Projects** group of the menu the **▾** beside **New
+agent…** at the bottom of the sidebar opens (with no projects yet, that group comes
+first). It opens a
 folder picker that browses the server's filesystem. Pick a git repository and it joins the
 workspace.
 
@@ -129,11 +130,11 @@ workspace.
 > [!NOTE]
 > If git on that machine cannot work out an identity for that first commit, dux fills in `dux@localhost` as the address (keeping your `user.name` if git knows one, and signing as `dux` if it does not) so adding the folder still succeeds. That applies to dux's own empty first commit and nothing else: your later commits still need an identity you have configured.
 
-The New dialog holds both flavors under **Projects** ("Add project" and "Initialize a repository"); either way the picker inspects your selection and offers the right action. The TUI's project browser makes the same offer.
+The launcher's **▾** menu holds both flavors under **Projects** ("Add project…" and "Initialize a repository…"); either way the picker inspects your selection and offers the right action. The TUI's project browser makes the same offer.
 
 ### Cloning a repository
 
-Not on the server yet? **Clone a repository** sits right beside them, under **Projects** in the New dialog and in the app menu's **Add project** submenu. Paste the remote's address and dux clones it, adds it as a project and starts its first agent, all in one go.
+Not on the server yet? **Clone a repository** sits right beside them, under **Projects** in the launcher's **▾** menu and in the app menu's **Add project** submenu. Paste the remote's address and dux clones it, adds it as a project and starts its first agent, all in one go.
 
 - The destination folder fills itself in from the address (your start directory plus the repository's name) until you type over it.
 - The agent gets the name you give it or a random one, exactly like **New agent**.
@@ -403,12 +404,12 @@ Three kinds of plain shell live in their own collapsible **Terminals** section i
 sidebar:
 
 - A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. Its row names the owning agent, and the title tracks whatever is in the foreground ("vim", "htop").
-  - Open one from the agent's `⋯` menu, or from **New terminal for an agent** in the New dialog, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
+  - Open one from the agent's `⋯` menu, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
 - A **project terminal** opens at the project's repo root with no agent attached. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
   - Spawn one from the project's `⋯` menu ("New terminal at the project root").
   - It shows up in the Task Manager and is destroyed on close.
 - A **standalone terminal** opens in your home directory with no agent and no project, so you can reach for one before you have added a single project.
-  - Open one from the **Terminals** group of the dialog the **New…** button opens, or from the cog menu's **New** submenu.
+  - Open one from the **Terminals** group of the launcher's **▾** menu, or from the cog menu's **New** submenu.
   - Its row shows the directory it opened in, shortened with `~` and marked with the `✷` standalone star, so the sidebar search finds it by path.
   - The other two show the `↳` arrow and their owner. The star always means the same thing: this one lives in your folder, not a working copy dux manages.
 
@@ -483,7 +484,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 
 ![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
-- **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New…** button along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). **New…** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
+- **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New agent…** launcher along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's **▾** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
 - **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip) and the tab strip when the agent has more than one tab.
 - **An agent's own terminal** keeps the agent's screen and the agent's menu, because the header and the count around it are that agent's, and adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**.
 - **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, **Open editor in new tab** and **Close…**, then the same **Settings** drill.

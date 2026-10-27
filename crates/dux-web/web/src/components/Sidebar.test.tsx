@@ -1516,8 +1516,8 @@ describe("AppSidebar auto-collapse on narrow drag", () => {
 })
 
 describe("AppSidebar launcher corner", () => {
-  // The collapsed rail is too narrow for the words, so it carries the same
-  // button as a bare +, and nothing else: no ⋯ beside it.
+  // The collapsed rail is too narrow for the split button, so it carries one
+  // bare + that opens the New dialog, and nothing else.
   it("gives the collapsed rail one + that names itself New…", () => {
     mockState = makeState()
     const { container } = render(
@@ -1528,11 +1528,11 @@ describe("AppSidebar launcher corner", () => {
     const footer = container.querySelector(
       '[data-sidebar="footer"]',
     ) as HTMLElement
-    const named = Array.from(footer.querySelectorAll("button")).map((b) =>
-      b.getAttribute("aria-label"),
+    const named = Array.from(footer.querySelectorAll("button")).map(
+      (b) => b.getAttribute("aria-label") ?? b.textContent,
     )
-    // The corner and the rail, each one button.
-    expect(named).toEqual(["New…", "New…"])
+    // The corner's two halves, then the rail's one button.
+    expect(named).toEqual(["New agent…", "More ways to start", "New…"])
     expect(
       footer.querySelector('[aria-label="New…"].size-8 svg.lucide-plus'),
     ).toBeTruthy()

@@ -675,7 +675,7 @@ function TerminalsSection({
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
       {/* The whole label is what expands the section. It carries no + of its
-          own: creating lives behind the launcher's New…. */}
+          own: creating lives behind the launcher corner. */}
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -1129,7 +1129,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           <span className={SECTION_COUNT_PILL}>{coreSessions.length}</span>
           {/* Sort rides the same gate as the list it sorts: with no agent
               there is nothing to order, and the empty state below carries its
-              own hero button. Creating lives behind the launcher's New…, so
+              own hero button. Creating lives behind the launcher corner, so
               the header carries no + of its own. */}
           {coreSessions.length > 0 ? (
             <div className="ml-auto flex items-center gap-2">
@@ -1169,7 +1169,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             </EmptyHeader>
             {/* A real button, not a sentence pointing at one elsewhere: an
                 empty workspace is exactly where the next click should be on
-                screen. It doubles with the launcher's New…, which is accepted:
+                screen. It doubles with the launcher corner's New agent…, which is accepted:
                 the duplicate costs a tap nobody needs, while the missing one
                 costs a hunt.
 
