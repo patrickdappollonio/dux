@@ -3378,6 +3378,9 @@ impl EngineService {
         &mut self,
         engine: &mut Engine,
     ) -> dux_core::background_serve::ServiceOutcome {
+        // Before the drain: a change this very turn applies is already one the
+        // terminal UI has to be told about.
+        self.status.keep_for_terminal_from_now();
         self.resolve_pending_subscribes(engine);
         self.check_spine(engine);
         let drained = self.drain_requests(engine);
@@ -3750,6 +3753,12 @@ impl StatusEmitter {
         if let Some(kept) = self.for_terminal.as_mut() {
             kept.push(status.clone());
         }
+    }
+
+    /// Start keeping statuses for the terminal UI, which is servicing this
+    /// emitter; a no-op once it is.
+    fn keep_for_terminal_from_now(&mut self) {
+        self.for_terminal.get_or_insert_with(Vec::new);
     }
 
     /// The statuses kept for the terminal UI since it last asked, from now on
@@ -5537,6 +5546,53 @@ mod tests {
 
     /// The pre-consume seam announces a reload the drainer has not applied yet, so
     /// it must not move the caps the routes answer on: an apply that fails would
+    /// A command-line change the core's very first turn applies still hands
+    /// its status to the terminal UI: a request that waited in the socket's
+    /// backlog during a hand-over is exactly that, the new core's first work.
+    #[test]
+    fn a_change_applied_on_the_first_turn_reaches_the_terminal_ui() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        engine
+            .sessions
+            .push(crate::test_support::sample_agent("s-cli"));
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let client = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime")
+                .block_on(handle.apply_wire(WireCommand::DeleteSession {
+                    session_id: "s-cli".to_string(),
+                    delete_worktree: false,
+                    delete_branch: None,
+                }))
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while svc.req_rx.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the delete never reached the engine"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let outcome = svc.service_engine_once(&mut engine);
+
+        client
+            .join()
+            .expect("the client thread")
+            .expect("the delete is applied");
+        assert!(
+            outcome
+                .statuses
+                .iter()
+                .any(|status| status.message.contains("Deleted")),
+            "{:?}",
+            outcome.statuses
+        );
+    }
+
     /// leave every route running the incoming limits against the old config.
     #[test]
     fn announcing_a_reload_leaves_the_live_limits_where_they_were() {
