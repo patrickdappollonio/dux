@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
-  THEATER_QUERY,
   THEATER_STORAGE_PREFIX,
   clearTheaterMemory,
   theaterEscapeAction,
@@ -10,11 +9,9 @@ import {
   theaterOwnershipWatchStart,
   isTypingSurfaceElement,
   readTheaterMemory,
-  splitTheaterHash,
   theaterMemoryKey,
   theaterSerializable,
   topChromeHidden,
-  withTheaterHash,
   writeTheaterMemory,
 } from "./theater"
 
@@ -124,39 +121,6 @@ describe("theater memory", () => {
 })
 
 describe("the theater hash modifier", () => {
-  it("appends the modifier to a position", () => {
-    expect(withTheaterHash("#/agent/s1", true)).toBe(`#/agent/s1${THEATER_QUERY}`)
-    expect(withTheaterHash("#/agent/s1/tab/t7", true)).toBe(
-      `#/agent/s1/tab/t7${THEATER_QUERY}`,
-    )
-  })
-
-  it("leaves a position alone when theater is off", () => {
-    expect(withTheaterHash("#/agent/s1", false)).toBe("#/agent/s1")
-  })
-
-  it("never modifies the empty (home) address", () => {
-    expect(withTheaterHash("", true)).toBe("")
-  })
-
-  it("splits the modifier back off, round-tripping the position", () => {
-    expect(splitTheaterHash(`#/agent/s1/tab/t7${THEATER_QUERY}`)).toEqual({
-      hash: "#/agent/s1/tab/t7",
-      theater: true,
-    })
-    expect(splitTheaterHash("#/agent/s1")).toEqual({
-      hash: "#/agent/s1",
-      theater: false,
-    })
-  })
-
-  it("leaves an unrecognized query alone rather than swallowing it", () => {
-    expect(splitTheaterHash("#/agent/s1?view=nonsense")).toEqual({
-      hash: "#/agent/s1?view=nonsense",
-      theater: false,
-    })
-  })
-
   it("is a modifier on a position, never on the editor or the changes screen", () => {
     const target = agent
     expect(

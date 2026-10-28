@@ -2527,3 +2527,153 @@ describe("the editor rides the URL", () => {
     expect(mod.getSnapshot().editorRoute).toBeNull()
   })
 })
+
+describe("the editor's view of its file rides the URL", () => {
+  const view = (patch: Record<string, unknown>) => ({
+    preview: false,
+    line: null,
+    top: null,
+    language: null,
+    encoding: null,
+    ...patch,
+  })
+
+  it("parses and serializes the view as exact inverses on both editor grammars", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
+    const views = [
+      ["file", "notes.md", view({ preview: true })],
+      ["file", "a.ts", view({ line: 40, top: 31, language: "python", encoding: "Shift_JIS" })],
+      ["diff", "logo.svg", view({ preview: true, encoding: "UTF-16LE" })],
+    ] as const
+    for (const standalone of [false, true]) {
+      for (const [mode, path, v] of views) {
+        const route = {
+          target,
+          changes: false,
+          editor: { mode, path, view: v },
+          standalone,
+          theater: false,
+        }
+        expect(mod.parseRoute(mod.routeHash(route))).toEqual(route)
+      }
+    }
+  })
+
+  it("keeps a literal ? in a hand-written path as part of the path", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.parseRoute("#/agent/s1/editor/file/a?b.md").editor).toEqual({
+      mode: "file",
+      path: "a?b.md",
+    })
+    expect(mod.parseRoute("#/agent/s1/editor/file/a?b=c.md").editor).toEqual({
+      mode: "file",
+      path: "a?b=c.md",
+    })
+    expect(mod.parseRoute("#/agent/s1/editor/file/a.md?view=preview").editor).toEqual({
+      mode: "file",
+      path: "a.md",
+      view: view({ preview: true }),
+    })
+  })
+
+  it("reads the first view value, so theater-then-preview on an editor is neither", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    const route = mod.parseRoute("#/agent/s1/editor/file/a.md?view=theater&view=preview")
+    expect(route.editor).toEqual({ mode: "file", path: "a.md" })
+    expect(route.theater).toBe(false)
+  })
+
+  it("degrades a bad value to the address without it, never to not-found", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+    expect(mod.parseRoute("#/editor/agent/s1/file/a.md?line=zz&lang=%E0").editor).toEqual({
+      mode: "file",
+      path: "a.md",
+    })
+    // A pane address ignores what only an editor can carry.
+    expect(mod.parseRoute("#/agent/s1?view=preview&line=3").target).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+  })
+
+  it("boots the standalone surface on an address that carries a view", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/notes.md?view=preview&line=8", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().standaloneEditor).toBe(true)
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      root: agentRoot("s1"),
+      mode: "file",
+      path: "notes.md",
+      view: view({ preview: true, line: 8 }),
+    })
+  })
+
+  it("writes a view change in place, and the one-shot spot leaves without the rest", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.md?line=8&top=2", [
+      { id: "s1", project_id: "p1" },
+    ])
+    const depth = entries.length
+    mod.editorSyncView(agentRoot("s1"), "a.md", { preview: true, language: "plaintext" })
+    expect(loc.hash).toBe("#/editor/agent/s1/file/a.md?view=preview&line=8&top=2&lang=plaintext")
+    mod.editorConsumeArrival(agentRoot("s1"), "a.md")
+    expect(loc.hash).toBe("#/editor/agent/s1/file/a.md?view=preview&lang=plaintext")
+    // Both are replaces: the same position, so Back has nothing new to undo.
+    expect(entries.length).toBe(depth)
+  })
+
+  it("restores the view on a navigation within the same root", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.md", [
+      { id: "s1", project_id: "p1" },
+    ])
+    entries = entries.slice(0, index + 1)
+    entries.push("#/editor/agent/s1/file/b.md?view=preview")
+    index = entries.length - 1
+    applyCurrentEntry()
+    for (const listener of hashchangeListeners) listener()
+    expect(mod.getSnapshot().editorRoute?.view).toEqual(view({ preview: true }))
+  })
+
+  it("keeps one arrival through a paired popstate and hashchange", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.md", [
+      { id: "s1", project_id: "p1" },
+    ])
+    entries = entries.slice(0, index + 1)
+    entries.push("#/editor/agent/s1/file/b.ts?line=5")
+    index = entries.length - 1
+    applyCurrentEntry()
+    for (const listener of popstateListeners) listener()
+    const first = mod.getSnapshot().editorRoute?.view
+    expect(first).toEqual(view({ line: 5 }))
+    for (const listener of hashchangeListeners) listener()
+    expect(mod.getSnapshot().editorRoute?.view).toBe(first)
+  })
+
+  it("moves the view with a rename or move of the file it names, in one step", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/src%2Fa.txt?lang=toml&enc=Shift_JIS", [
+      { id: "s1", project_id: "p1" },
+    ])
+    // A move of the folder it is in is the same rename, by prefix.
+    mod.editorRenameTabPaths(agentRoot("s1"), "src", "lib")
+    expect(mod.getSnapshot().editorRoute).toEqual({
+      root: agentRoot("s1"),
+      mode: "file",
+      path: "lib/a.txt",
+      view: view({ language: "toml", encoding: "Shift_JIS" }),
+    })
+    expect(loc.hash).toBe("#/editor/agent/s1/file/lib%2Fa.txt?lang=toml&enc=Shift_JIS")
+  })
+
+  it("drops a pending spot when the editor moves to another file first", async () => {
+    const mod = await loadStore("#/editor/agent/s1/file/a.ts?line=8&lang=python", [
+      { id: "s1", project_id: "p1" },
+    ])
+    mod.editorSyncActiveTab(agentRoot("s1"), "file", "b.ts", undefined)
+    expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
+    // Reporting the same file again keeps what the address already says.
+    mod.editorSyncActiveTab(agentRoot("s1"), "file", "b.ts", view({ language: "toml" }))
+    expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
+  })
+})

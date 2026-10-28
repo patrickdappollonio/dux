@@ -374,7 +374,7 @@ describe("theater in the address", () => {
   })
 
   it("never boots into theater on an address that names no pane", async () => {
-    // Home has nothing to fill the screen, and `withTheaterHash` refuses to
+    // Home has nothing to fill the screen, and the address writer refuses to
     // write the modifier there, so a bare one is a hand-made address that must
     // not blank the chrome while the route resolves to home anyway.
     holdSpine = true

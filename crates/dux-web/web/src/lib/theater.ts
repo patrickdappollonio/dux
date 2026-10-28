@@ -77,30 +77,9 @@ export function clearTheaterMemory(key: string | null): void {
   writeTheaterMemory(key, false)
 }
 
-/**
- * How theater rides the address: a modifier appended after the position's own
- * grammar rather than woven into it, so every shape gains it with no second
- * parser.
- */
-export const THEATER_QUERY = "?view=theater"
-
-/** Split the modifier off a hash, returning the bare position and the flag. */
-export function splitTheaterHash(hash: string): {
-  hash: string
-  theater: boolean
-} {
-  return hash.endsWith(THEATER_QUERY)
-    ? { hash: hash.slice(0, -THEATER_QUERY.length), theater: true }
-    : { hash, theater: false }
-}
-
-/**
- * Put the modifier back on. The empty hash never carries it: a bare
- * `#?view=theater` would be a position that names no pane.
- */
-export function withTheaterHash(hash: string, theater: boolean): string {
-  return theater && hash !== "" ? hash + THEATER_QUERY : hash
-}
+// How theater rides the address (`?view=theater` after the position) is the
+// query tail's business, written and read in `lib/routeQuery.ts` together with
+// the editor's view. What may carry it is decided here.
 
 /**
  * Whether a route may carry the modifier at all. Theater modifies a focused

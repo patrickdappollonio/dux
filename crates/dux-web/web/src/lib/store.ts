@@ -166,13 +166,21 @@ import { closeModals, onModalsChange, openModals, spendModals } from "./modalHis
 import {
   clearTheaterMemory,
   readTheaterMemory,
-  splitTheaterHash,
   theaterMemoryKey,
   theaterMemoryKeyForPty,
   theaterSerializable,
-  withTheaterHash,
   writeTheaterMemory,
 } from "./theater"
+import {
+  canonicalEditorView,
+  editorViewFromQuery,
+  queryTheater,
+  sameEditorView,
+  splitRouteQuery,
+  withRouteQuery,
+  DEFAULT_EDITOR_VIEW,
+  type EditorViewState,
+} from "./routeQuery"
 import type {
   AcceptedOperation,
   BranchChoiceView,
@@ -896,6 +904,12 @@ export interface DuxState {
     root: EditorRoot
     mode: EditorViewMode
     path: string | null
+    // How the active file is being looked at, in canonical form (see
+    // `canonicalEditorView`); absent when there is nothing beyond mode and
+    // path to say. Its `line` and `top` are a one-shot arrival from an
+    // address, cleared by `editorConsumeArrival` once the editor has gone
+    // there.
+    view?: EditorViewState
   } | null
   // True while this tab is the standalone editor surface: `App()` renders
   // `StandaloneEditorShell` and `EditorOverlay` stands down, so the two can
@@ -1065,7 +1079,7 @@ function loadingChanges(sessionId: string): ChangesSlice {
 // route-correction path rather than marooning the tab on an empty one.
 function bootIsStandaloneEditor(): boolean {
   if (typeof location === "undefined") return false
-  return parseStandaloneEditorRoute(location.hash ?? "") !== null
+  return parseStandaloneEditorRoute(splitRouteQuery(location.hash ?? "").hash) !== null
 }
 
 // Whether this tab booted on a theater address, so the first painted layout is
@@ -1079,8 +1093,8 @@ function bootIsStandaloneEditor(): boolean {
 // resolution commits the honest value for the position it lands on.
 function bootIsTheater(): boolean {
   if (typeof location === "undefined") return false
-  const { hash, theater } = splitTheaterHash(location.hash ?? "")
-  return theater && hash !== "" && hash !== "#"
+  const { hash, params } = splitRouteQuery(location.hash ?? "")
+  return queryTheater(params) && hash !== "" && hash !== "#"
 }
 
 let state: DuxState = {
@@ -2895,8 +2909,9 @@ export interface Route {
   // The editor suffix: the active tab's mode and path, path null when the
   // editor is open with no file. Mutually exclusive with `changes` in the
   // SERIALIZED form: `routeHash` emits at most one suffix (editor wins), and
-  // `parseRoute` tries the editor suffix first.
-  editor: { mode: EditorViewMode; path: string | null } | null
+  // `parseRoute` tries the editor suffix first. `view` rides the query tail
+  // and is canonical (see `canonicalEditorView`): absent when it says nothing.
+  editor: { mode: EditorViewMode; path: string | null; view?: EditorViewState } | null
   // Theater mode: the focused pane with dux's chrome taken away. A MODIFIER on
   // the position rather than a shape of its own, so it is spelled as a trailing
   // `?view=theater` on whatever grammar the position already has (see
@@ -2997,14 +3012,22 @@ function parseEditorSegment(
 // Exported for the round-trip tests only (`routeHash` likewise): the grammar
 // must stay an exact inverse pair, and that is only checkable from outside.
 export function parseRoute(rawHash: string): Route {
-  // THE MODIFIER COMES OFF FIRST. Every grammar below is end-anchored, so a
-  // trailing `?view=theater` would make each of them fail to match; peeling it
-  // here is what lets one modifier ride every position shape without a second
-  // parser per shape. It goes back on only where a pane exists to fill the
-  // screen, which is the same rule `routeHash` serializes by.
-  const { hash, theater } = splitTheaterHash(rawHash)
+  // THE QUERY TAIL COMES OFF FIRST. Every grammar below is end-anchored, so a
+  // trailing `?view=theater` or editor view would make each of them fail to
+  // match; peeling it here is what lets one tail ride every position shape
+  // without a second parser per shape. Each part goes back on only where the
+  // position can carry it: theater where a pane fills the screen, the view
+  // where an editor has a file, which is the same rule `routeHash` writes by.
+  const { hash, params } = splitRouteQuery(rawHash)
   const route = parsePosition(hash)
-  return theater && theaterSerializable(route) ? { ...route, theater: true } : route
+  if (route.editor !== null) {
+    const view = editorViewFromQuery(params, route.editor.mode, route.editor.path)
+    if (view !== undefined) return { ...route, editor: { ...route.editor, view } }
+    return route
+  }
+  return queryTheater(params) && theaterSerializable(route)
+    ? { ...route, theater: true }
+    : route
 }
 
 function parsePosition(hash: string): Route {
@@ -3035,10 +3058,14 @@ function parsePosition(hash: string): Route {
 // editor suffix carries no mode segment, so a pathless route's mode normalizes
 // to "file" on the way back in.
 export function routeHash(route: Route): string {
-  return withTheaterHash(
-    positionHash(route),
-    route.theater && theaterSerializable(route),
-  )
+  const editor = route.editor
+  return withRouteQuery(positionHash(route), {
+    theater: route.theater && theaterSerializable(route),
+    view:
+      editor === null || route.target === null
+        ? undefined
+        : canonicalEditorView(editor.mode, editor.path, editor.view),
+  })
 }
 
 function positionHash(route: Route): string {
@@ -3111,7 +3138,7 @@ function routeSubject(target: SelectedTarget | null): string {
 // the open-in-new-tab anchors can never drift from the parser's grammar.
 export function standaloneEditorHash(
   root: EditorRoot,
-  editor: { mode: EditorViewMode; path: string | null } | null = null,
+  editor: Route["editor"] = null,
 ): string {
   return routeHash({
     target: slotTargetFor(root),
@@ -3131,7 +3158,7 @@ export function standaloneEditorHash(
 // surface, so Back lands exactly where the user came from.
 export function openStandaloneEditorInThisTab(
   root: EditorRoot,
-  editor: { mode: EditorViewMode; path: string | null },
+  editor: NonNullable<Route["editor"]>,
 ): void {
   pushHashAfterModals(standaloneEditorHash(root, editor))
 }
@@ -3196,7 +3223,7 @@ function currentRoute(): Route {
   // suffix on the new address.
   const editor =
     er !== null && target !== null && sameRoot(editorRootForTarget(target), er.root)
-      ? { mode: er.mode, path: er.path }
+      ? { mode: er.mode, path: er.path, view: er.view }
       : null
   return {
     target,
@@ -3974,7 +4001,17 @@ function syncEditorStateFromRoute(spine: Spine, route: Route): void {
     state.editorTarget !== null && sameRoot(state.editorTarget.root, root)
       ? state.editorTarget
       : { root, initialPath: path, initialMode: mode }
-  setState({ editorTarget, editorRoute: { root, mode, path } })
+  // Re-canonical for the mode the store settled on (a terminal root's diff is
+  // its file mode). An equal view keeps its object, so the paired popstate and
+  // hashchange a fragment navigation delivers hand the editor ONE arrival, and
+  // it can tell a spot it already went to from a new one by identity.
+  const cur = state.editorRoute
+  const parsed = canonicalEditorView(mode, path, route.editor.view)
+  const view =
+    cur !== null && sameRoot(cur.root, root) && cur.path === path && sameEditorView(cur.view, parsed)
+      ? cur.view
+      : parsed
+  setState({ editorTarget, editorRoute: { root, mode, path, view } })
   if (path !== null) editorOpenFile(root, path, { mode })
 }
 
@@ -5250,15 +5287,62 @@ export function closeEditor(opts?: { urlMode?: "replace" }): void {
 // files inside the editor never piles up history entries. A report for a
 // session whose editor is not open is dropped: a late effect from an
 // unmounting body must not resurrect a closed editor's suffix.
+//
+// `view` is how the editor is looking at the newly active file. It is taken
+// only on a MOVE to another file or mode: a report of the file the route
+// already names keeps the route's view, which is what lets an address's view
+// survive the editor mounting with its defaults. A spot still waiting to be
+// gone to (`line`, `top`) never moves with it: it was about the other file.
 export function editorSyncActiveTab(
   root: EditorRoot,
   mode: EditorViewMode,
   path: string | null,
+  view: EditorViewState | undefined,
 ): void {
   const cur = state.editorRoute
   if (cur === null || !sameRoot(cur.root, root)) return
   if (cur.mode === mode && cur.path === path) return
-  setState({ editorRoute: { root, mode, path } })
+  const settled =
+    view === undefined ? undefined : { ...view, line: null, top: null }
+  setState({
+    editorRoute: { root, mode, path, view: canonicalEditorView(mode, path, settled) },
+  })
+  syncUrl()
+}
+
+// How the editor is looking at its active file changed by the person's hand
+// (Preview, a language picked, a reopen in another encoding): written in place,
+// a replace, since it is the same position. A report about a file the route no
+// longer names is dropped.
+export function editorSyncView(
+  root: EditorRoot,
+  path: string,
+  patch: Partial<Pick<EditorViewState, "preview" | "language" | "encoding">>,
+): void {
+  const cur = state.editorRoute
+  if (cur === null || !sameRoot(cur.root, root) || cur.path !== path) return
+  const next = canonicalEditorView(cur.mode, path, {
+    ...(cur.view ?? DEFAULT_EDITOR_VIEW),
+    ...patch,
+  })
+  if (sameEditorView(next, cur.view)) return
+  setState({ editorRoute: { ...cur, view: next } })
+  syncUrl()
+}
+
+// The arrival's cursor and scroll have been gone to, or cannot be (the file is
+// showing a preview, or is binary): they leave the route and the address, and
+// the rest of the view stays.
+export function editorConsumeArrival(root: EditorRoot, path: string): void {
+  const cur = state.editorRoute
+  if (cur === null || !sameRoot(cur.root, root) || cur.path !== path) return
+  if (cur.view === undefined || (cur.view.line === null && cur.view.top === null)) return
+  setState({
+    editorRoute: {
+      ...cur,
+      view: canonicalEditorView(cur.mode, path, { ...cur.view, line: null, top: null }),
+    },
+  })
   syncUrl()
 }
 
@@ -5367,12 +5451,35 @@ export function editorCloseTab(root: EditorRoot, tabId: string): void {
 // or folder from `from` to `to`. See `lib/editorTabs.ts` `renameTabPaths` for
 // the folder-prefix rewrite and the pre-existing-destination-tab collision
 // close.
+//
+// The route moves in the same step when it names a file under `from`, its view
+// with it: the editor's own reports would otherwise name the new path before
+// the editor's per-path state (a picked language, a chosen encoding) had
+// followed, and the view the address carried would be lost in between.
 export function editorRenameTabPaths(
   root: EditorRoot,
   from: string,
   to: string,
 ): void {
+  const cur = state.editorRoute
+  const moved =
+    cur !== null && cur.path !== null && sameRoot(cur.root, root)
+      ? renamedUnder(cur.path, from, to)
+      : null
+  if (cur !== null && moved !== null) {
+    setState({
+      editorRoute: { ...cur, path: moved, view: canonicalEditorView(cur.mode, moved, cur.view) },
+    })
+  }
   setEditorTabsFor(root, editorRenameTabPathsPure(editorTabsFor(root), from, to))
+  if (moved !== null) syncUrl()
+}
+
+// Where `path` lands when `from` is renamed to `to`, a folder's contents
+// included, or null when the rename does not touch it.
+function renamedUnder(path: string, from: string, to: string): string | null {
+  if (path === from) return to
+  return path.startsWith(`${from}/`) ? to + path.slice(from.length) : null
 }
 
 // Close every tab under a deleted file or folder path. See

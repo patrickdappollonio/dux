@@ -35,7 +35,7 @@ import {
   X,
 } from "lucide-react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
-import { notify, notifyBusy, notifyError, notifySuccess } from "@/lib/notify"
+import { notify, notifyBusy, notifyError, notifyInfo, notifySuccess } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { fileApi } from "@/lib/fileApi"
@@ -109,6 +109,8 @@ import {
 } from "@/lib/editorLayout"
 import { isImagePreviewPath, previewKind } from "@/lib/editorPreview"
 import { planStatusBar, type ImageDimensions } from "@/lib/editorStatus"
+import { goToEditorSpot, readEditorSpot, type SpotEditor } from "@/lib/editorSpot"
+import { DEFAULT_EDITOR_VIEW, type EditorViewState } from "@/lib/routeQuery"
 import {
   editorTitleProse,
   standaloneEditorName,
@@ -185,12 +187,14 @@ import {
   closeEditor,
   editorCloseTab,
   editorCloseTabsUnderPath,
+  editorConsumeArrival,
   editorOpenFile,
   editorPinTab,
   editorRenameTabPaths,
   editorSetTabDirty,
   editorSetTabMode,
   editorSyncActiveTab,
+  editorSyncView,
   leaveStandaloneEditor,
   openEditorCloseTab,
   standaloneEditorHash,
@@ -275,7 +279,7 @@ interface EditorBodyProps {
 }
 
 export function EditorBody({ root, standalone = false }: EditorBodyProps) {
-  const { bootstrap, changes, editorTarget, editorTabs, spine } = useDux()
+  const { bootstrap, changes, editorRoute, editorTarget, editorTabs, spine } = useDux()
   // The namespaced key for every per-root map, and the stable dependency for
   // every effect below: the root itself is a fresh object on each render.
   const key = rootKey(root)
@@ -292,6 +296,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     path: activeTabPath,
     dirty,
   } = activeTabFacts(activeTab)
+  // How the address says to look at the active file, when the store's route
+  // names that file (see `editorRouteViewFor`).
+  const routeView = editorRouteViewFor(editorRoute, key, activeTab)
 
   // Per-tab Monaco buffers (file content + diff cache), keyed by tab id, kept
   // OUT of the global store deliberately (see lib/editorTabs.ts header
@@ -310,17 +317,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   useEffect(() => {
     storeRootDrafts(key, buffers)
   }, [key, buffers])
-
-  // Report the active tab up as the editor's live URL position: the address
-  // bar names the file (and mode) actually on screen, and in-editor switches
-  // REPLACE the history entry (see the store's `editorSyncActiveTab`). No
-  // active tab reports a pathless open editor.
-  useEffect(() => {
-    editorSyncActiveTab(root, activeTabMode, activeTabPath)
-    // `root` is a fresh object every render, so the KEY is the dependency; a
-    // root that keys the same is the same root.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, activeTabMode, activeTabPath])
 
   // The `monaco` instance, captured once CodeEditor mounts (see CodeEditor's
   // `onReady`). EditorBody, not CodeEditor, owns disposal because it owns
@@ -374,6 +370,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function togglePreview(): void {
     if (!activeTab) return
     const tabId = activeTab.id
+    editorSyncView(root, activeTab.path, { preview: !previewOpenTabIds.has(tabId) })
     setPreviewOpenTabIds((prev) => {
       const next = new Set(prev)
       if (next.has(tabId)) next.delete(tabId)
@@ -477,7 +474,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The live Monaco editor while the file pane is showing it, for the status
   // bar to follow. State rather than a ref so the bar re-subscribes when the
   // editor comes and goes; the bar's own cursor reads stay inside the bar.
-  const [codeEditor, setCodeEditor] = useState<StatusBarEditor | null>(null)
+  const [codeEditor, setCodeEditor] = useState<LiveCodeEditor | null>(null)
   // The pixel size of the last image tab that finished loading, for the
   // status bar. Tagged with its path, so a picture still loading never shows
   // the previous one's.
@@ -629,6 +626,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   }
   function pickLanguage(id: string | null): void {
     if (languageTabPath === null) return
+    editorSyncView(root, languageTabPath, { language: id })
     setLanguageOverrides((prev) =>
       withLanguageOverride(prev, languageTabPath, id),
     )
@@ -913,6 +911,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     }
   }, [buffers])
 
+  // The address's encoding, seeded before the file's first read so that read
+  // already asks for it. Declared ahead of the readers, whose effects start it.
+  useEffect(() => {
+    const encoding = routeView?.encoding ?? null
+    if (activeTab === null || encoding === null) return
+    encodingChoicesRef.current.set(activeTab.path, encoding)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeView, activeTab?.id])
+
   const { loadFileBuffer, reloadFileInPlace } = useEditorFileReads({
     aliveRef,
     root,
@@ -954,9 +961,149 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     activeBuffer,
     tabsRef,
     buffersRef,
+    encodingChoicesRef,
     loadedSignalRef: openFileSignalRef,
     setBuffers,
   })
+
+  // How this editor is looking at a tab right now, which is what a tab switch
+  // and the open-in-new-tab link hand over. The cursor and scroll are not in
+  // it: those are read off the live editor only when a link is taken.
+  function localViewFor(tab: EditorTab): EditorViewState {
+    return {
+      ...DEFAULT_EDITOR_VIEW,
+      preview: previewOpenTabIds.has(tab.id),
+      language: languageOverrides.get(tab.path) ?? null,
+      encoding: buffers.get(tab.id)?.encodingRequested ?? null,
+    }
+  }
+
+  // Report the active tab up as the editor's live URL position: the address
+  // bar names the file (and mode) actually on screen, and in-editor switches
+  // REPLACE the history entry (see the store's `editorSyncActiveTab`). No
+  // active tab reports a pathless open editor. The tab's own view goes with it,
+  // and the store takes it only on a move to another file, so an address's view
+  // is not overwritten by the defaults of an editor that has just mounted.
+  useEffect(() => {
+    editorSyncActiveTab(
+      root,
+      activeTabMode,
+      activeTabPath,
+      activeTab === null ? undefined : localViewFor(activeTab),
+    )
+    // `root` is a fresh object every render, so the KEY is the dependency; a
+    // root that keys the same is the same root.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, activeTabMode, activeTabPath])
+
+  // An address's view arriving (on mount, or a navigation within this root):
+  // Preview and the language follow it. A language is taken only once Monaco's
+  // registry has loaded and has it; one it does not have leaves the address.
+  useEffect(() => {
+    if (activeTab === null || routeView === null) return
+    const tabId = activeTab.id
+    const preview = routeView?.preview ?? false
+    // Synchronous on purpose: the address is the outside truth this state
+    // follows, and the setter returns the same set when nothing changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPreviewOpenTabIds((prev) => {
+      if (prev.has(tabId) === preview) return prev
+      const next = new Set(prev)
+      if (preview) next.add(tabId)
+      else next.delete(tabId)
+      return next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeView, activeTab?.id])
+  useEffect(() => {
+    if (activeTab === null || routeView === null) return
+    const path = activeTab.path
+    const language = routeView?.language ?? null
+    if (language !== null && registeredLanguages.length === 0) return
+    if (language !== null && !registeredLanguages.some((l) => l.id === language)) {
+      editorSyncView(root, path, { language: null })
+      return
+    }
+    // Synchronous for the same reason as Preview above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLanguageOverrides((prev) =>
+      (prev.get(path) ?? null) === language
+        ? prev
+        : withLanguageOverride(prev, path, language),
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeView, activeTab?.id, registeredLanguages])
+
+  // An address naming another encoding for a file that is already open and
+  // clean reopens it in that encoding; an unsaved one is left as it is, since
+  // only the reopen confirm may throw typing away. A fresh read already asked
+  // for it (the seed above).
+  useEffect(() => {
+    const encoding = routeView?.encoding ?? null
+    if (activeTab === null || encoding === null || activeTab.mode !== "file") return
+    if (!fileReady || activeTab.dirty || activeBuffer === undefined) return
+    if ((activeBuffer.encodingRequested ?? activeBuffer.encoding) === encoding) return
+    reloadFileInPlace(activeTab.id, activeTab.path, true, { encoding })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeView, activeTab?.id, fileReady])
+
+  // A reopen in another encoding, or a save that converted the file, is a
+  // change of view the address follows. Only a CHANGE on the same tab is
+  // reported: the value a buffer comes back from the draft cache with is not
+  // news, and reporting it would overwrite the encoding an address asked for.
+  const reportedEncodingRef = useRef<{ tabId: string; encoding: string | null } | null>(
+    null,
+  )
+  const activeEncoding = activeBuffer?.encodingRequested ?? null
+  useEffect(() => {
+    const prev = reportedEncodingRef.current
+    reportedEncodingRef.current =
+      activeTab === null ? null : { tabId: activeTab.id, encoding: activeEncoding }
+    if (activeTab === null || activeEncoding === null) return
+    if (prev?.tabId !== activeTab.id || prev.encoding === activeEncoding) return
+    editorSyncView(root, activeTab.path, { encoding: activeEncoding })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab?.id, activeEncoding])
+
+  // An address's cursor and scroll are gone to once, when the file's own
+  // model is in the editor and laid out, and then handed back to the store,
+  // which takes them out of the address. A file that opens in its preview, or
+  // turns out binary, has no editor to put them in, so they are dropped. The
+  // arrival is remembered by identity, so a second delivery of the same one
+  // (a paired popstate and hashchange) is not gone to twice.
+  const arrivedViewRef = useRef<EditorViewState | null>(null)
+  useEffect(() => {
+    const view = routeView
+    if (activeTab === null || view === undefined || view === null) return
+    if (view.line === null && view.top === null) return
+    if (arrivedViewRef.current === view) return
+    const path = activeTab.path
+    if (isImageTab || binary || showPreview) {
+      arrivedViewRef.current = view
+      editorConsumeArrival(root, path)
+      return
+    }
+    const editor = codeEditor
+    const monaco = monacoRef.current
+    if (!fileReady || editor === null || monaco === null) return
+    if (editor.getModel()?.uri.toString() !== monaco.Uri.parse(path).toString()) return
+    const go = () => {
+      arrivedViewRef.current = view
+      goToEditorSpot(editor, view)
+      editorConsumeArrival(root, path)
+    }
+    if (editor.getLayoutInfo().height > 0) {
+      go()
+      return
+    }
+    const sub = editor.onDidLayoutChange(() => {
+      if (editor.getLayoutInfo().height <= 0) return
+      sub.dispose()
+      go()
+    })
+    return () => sub.dispose()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeView, activeTab?.id, codeEditor, fileReady, binary, showPreview, isImageTab])
 
   // Dispose and prune by the set of open paths so preview replacement and every
   // tab-scoped cache observe the same snapshot.
@@ -1659,6 +1806,35 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
+  // The open-in-new-tab address for what is on screen. The cursor and scroll
+  // are read off the live editor at the moment the link is taken (a press of
+  // any button, so a middle click and "Copy link" get them, or keyboard focus),
+  // and written straight onto the anchor rather than through a render, so a
+  // cursor move costs nothing.
+  function newTabHash(withSpot: boolean): string {
+    if (activeTab === null) return standaloneEditorHash(root)
+    const spot =
+      withSpot && activeTab.mode === "file" && !showPreview && codeEditor !== null
+        ? readEditorSpot(codeEditor)
+        : { line: null, top: null }
+    return standaloneEditorHash(root, {
+      mode: activeTab.mode,
+      path: activeTab.path,
+      view: { ...localViewFor(activeTab), ...spot },
+    })
+  }
+  function takeNewTabLink(event: React.SyntheticEvent<HTMLAnchorElement>): void {
+    event.currentTarget.setAttribute("href", newTabHash(true))
+  }
+  // A new tab is a fresh page and the drafts live in this one's memory, so it
+  // opens the file as saved; this tab is the only one that knows otherwise.
+  function noteUnsavedStayHere(): void {
+    if (activeTab === null || !activeTab.dirty) return
+    notifyInfo(
+      prose`The new tab opened ${chip(activeTab.path)} as it is saved on disk. Your unsaved edits are only in this tab.`,
+    )
+  }
+
   function renderStandaloneActions(): React.ReactNode {
     if (standalone) return null
     // Both of these leave the overlay rather than act on the file, and the
@@ -1673,12 +1849,17 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL, "max-md:h-10")}
             render={
               <a
-                href={standaloneEditorHash(
-                  root,
-                  activeTab ? { mode: activeTab.mode, path: activeTab.path } : null,
-                )}
+                href={newTabHash(false)}
                 target="_blank"
                 rel="noopener"
+                onPointerDown={takeNewTabLink}
+                onContextMenu={takeNewTabLink}
+                onFocus={takeNewTabLink}
+                onKeyDown={takeNewTabLink}
+                onClick={noteUnsavedStayHere}
+                onAuxClick={(event) => {
+                  if (event.button === 1) noteUnsavedStayHere()
+                }}
               />
             }
           >
@@ -2359,6 +2540,32 @@ function diffEditorIsShown(
   )
 }
 
+// The editor's live code editor: what the status bar follows, plus the reads
+// and moves an address's cursor and scroll need. Monaco's editor fits it.
+type LiveCodeModel = NonNullable<ReturnType<StatusBarEditor["getModel"]>> & {
+  uri: { toString(): string }
+  getLineCount(): number
+}
+type LiveCodeEditor = Omit<StatusBarEditor, "getModel"> &
+  Omit<SpotEditor, "getModel"> & {
+    getModel(): LiveCodeModel | null
+    getLayoutInfo(): { height: number }
+    onDidLayoutChange(listener: () => void): { dispose(): void }
+  }
+
+// The route's view, when the route names this root's active file in its mode;
+// `null` when it names something else (a report on its way up has not landed
+// yet), and `undefined` when it names this file with nothing to say about it.
+function editorRouteViewFor(
+  route: { root: EditorRoot; mode: string; path: string | null; view?: EditorViewState } | null,
+  key: string,
+  tab: EditorTab | null,
+): EditorViewState | undefined | null {
+  if (route === null || tab === null || rootKey(route.root) !== key) return null
+  if (route.path !== tab.path || route.mode !== tab.mode) return null
+  return route.view
+}
+
 function previewIsAvailable(
   kind: ReturnType<typeof previewKind>,
   tab: EditorTab | null,
@@ -2408,7 +2615,7 @@ interface EditorContentPaneProps {
   onDraftChange: (value: string, path: string) => void
   onSave: () => void
   onMonacoReady: (monaco: MonacoInstance) => void
-  onEditorChange: (editor: StatusBarEditor | null) => void
+  onEditorChange: (editor: LiveCodeEditor | null) => void
   onImageDims: (dims: ImageDimensions | null) => void
 }
 

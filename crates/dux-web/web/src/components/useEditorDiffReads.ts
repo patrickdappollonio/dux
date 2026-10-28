@@ -18,6 +18,9 @@ interface UseEditorDiffReadsOptions {
   activeBuffer: TabBuffer | undefined
   tabsRef: RefObject<readonly EditorTab[]>
   buffersRef: RefObject<Map<string, TabBuffer>>
+  // The encoding chosen for each open path when no buffer carries it yet (an
+  // address that names one, or a rename), the same map the file reads use.
+  encodingChoicesRef: RefObject<Map<string, string>>
   loadedSignalRef: RefObject<string>
   setBuffers: Dispatch<SetStateAction<Map<string, TabBuffer>>>
 }
@@ -86,6 +89,7 @@ export function useEditorDiffReads({
   activeBuffer,
   tabsRef,
   buffersRef,
+  encodingChoicesRef,
   loadedSignalRef,
   setBuffers,
 }: UseEditorDiffReadsOptions) {
@@ -107,9 +111,11 @@ export function useEditorDiffReads({
     // same characters the editor tab does.
     const buffer = buffersRef.current.get(tabId)
     const encoding =
-      buffer !== undefined && !isBufferStale(buffer, path)
-        ? (buffer.encodingRequested ?? null)
-        : null
+      (buffer !== undefined && !isBufferStale(buffer, path)
+        ? buffer.encodingRequested
+        : null) ??
+      encodingChoicesRef.current.get(path) ??
+      null
     fileApi
       .diff(root, path, encoding)
       .then((diff) => {

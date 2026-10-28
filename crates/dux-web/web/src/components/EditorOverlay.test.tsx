@@ -71,16 +71,26 @@ const closeEditorMock = vi.fn()
 // dirty-tab confirm when there is.
 const editorCloseTabMock = vi.fn()
 const openEditorCloseTabMock = vi.fn()
+// The view reports the editor makes up to the address.
+const editorSyncViewMock = vi.fn()
+const editorConsumeArrivalMock = vi.fn()
+// On for the cases that run the REAL store loop: the editor's reports land in
+// the store, and what the store then holds is what the editor renders from.
+let realStore = false
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
-    useDux: () => mockState,
+    useDux: () => (realStore ? actual.useDux() : mockState),
     editorSetTabDirty: editorSetTabDirtyMock,
     editorSetTabMode: (...a: unknown[]) => editorSetTabModeMock(...a),
     closeEditor: (...a: unknown[]) => closeEditorMock(...a),
     editorCloseTab: (...a: unknown[]) => editorCloseTabMock(...a),
     openEditorCloseTab: (...a: unknown[]) => openEditorCloseTabMock(...a),
+    editorSyncView: (...a: Parameters<typeof actual.editorSyncView>) =>
+      realStore ? actual.editorSyncView(...a) : editorSyncViewMock(...a),
+    editorConsumeArrival: (...a: Parameters<typeof actual.editorConsumeArrival>) =>
+      realStore ? actual.editorConsumeArrival(...a) : editorConsumeArrivalMock(...a),
   }
 })
 
@@ -187,14 +197,24 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
 let selectionActive = false
 // The live editor the stand-in hands the status bar: a cursor parked at a known
 // place in a known model, with events that never fire.
+// The file the stand-in editor's model is for, and where the person is in it.
+let stubModelPath = PATH
 const STATUS_EDITOR = {
   getModel: () => ({
+    uri: { toString: () => stubModelPath },
     getLineCount: () => 42,
     getEOL: () => "\n",
     getOptions: () => ({ insertSpaces: true, tabSize: 4, indentSize: 4 }),
     getValueLengthInRange: () => 0,
   }),
   getPosition: () => ({ lineNumber: 4, column: 2 }),
+  getVisibleRanges: () => [{ startLineNumber: 2 }],
+  getLayoutInfo: () => ({ height: 400 }),
+  onDidLayoutChange: () => ({ dispose() {} }),
+  setPosition: vi.fn(),
+  setScrollTop: vi.fn(),
+  revealLineInCenter: vi.fn(),
+  getTopForLineNumber: (line: number) => line * 20,
   getSelection: () => ({ isEmpty: () => true }),
   onDidChangeCursorSelection: () => ({ dispose() {} }),
   onDidChangeModelContent: () => ({ dispose() {} }),
@@ -347,8 +367,10 @@ vi.mock("@/lib/monacoLanguages", () => ({
 
 const toastError = vi.fn()
 const toastSuccess = vi.fn()
+const toastInfo = vi.fn()
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
+    info: (...a: unknown[]) => toastInfo(...a),
     success: (...a: unknown[]) => toastSuccess(...a),
     error: (...a: unknown[]) => toastError(...a),
     warning: vi.fn(),
@@ -4026,5 +4048,250 @@ describe("a file that is not plain UTF-8", () => {
     expect(shown.container.textContent).toContain("line 1, column 6")
     expect(shown.container.textContent).toContain("nothing was written")
     expect(box.value).toBe("café ☃\n")
+  })
+})
+
+// "Open in new tab" opens the same file in the same view at the same spot, and
+// an address carrying that view opens the editor in it.
+describe("the editor's view travels with its address", () => {
+  const view = (patch: Record<string, unknown>) => ({
+    preview: false,
+    line: null,
+    top: null,
+    language: null,
+    encoding: null,
+    ...patch,
+  })
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    // The SVG preview renders through an object URL.
+    installObjectUrlMocks()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    readMock.mockResolvedValue({
+      path: PATH,
+      content: ON_DISK,
+      binary: false,
+      read_only: false,
+    })
+    stubModelPath = PATH
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    removeObjectUrlMocks()
+  })
+
+  // Mount with the store naming `path` and, optionally, a view for it.
+  async function mountRouted(
+    path: string,
+    routeView?: Record<string, unknown>,
+    mode: "file" | "diff" = "file",
+  ) {
+    stubModelPath = path
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const { getSnapshot } = await import("@/lib/store")
+    mockState = {
+      ...getSnapshot(),
+      changes: changesSlice([]),
+      editorTarget: { root: agentRoot(SESSION), initialPath: path },
+      editorRoute: {
+        root: agentRoot(SESSION),
+        mode,
+        path,
+        view: routeView === undefined ? undefined : view(routeView),
+      },
+      editorTabs: {
+        [rootKey(agentRoot(SESSION))]: {
+          tabs: [{ id: TAB_ID, path, dirty: false, preview: false, mode }],
+          activeId: TAB_ID,
+        },
+      },
+    } as DuxState
+    return render(<EditorOverlay />)
+  }
+
+  async function newTabLink(): Promise<HTMLAnchorElement> {
+    return (await screen.findByRole("link", { name: /open in new tab/i })) as HTMLAnchorElement
+  }
+
+  it("carries Preview, and reports it to the address", async () => {
+    await mountRouted("icons/logo.svg")
+    await screen.findByTestId("code-editor")
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    await waitFor(async () =>
+      expect((await newTabLink()).getAttribute("href")).toBe(
+        "#/editor/agent/s1/file/icons%2Flogo.svg?view=preview",
+      ),
+    )
+    expect(editorSyncViewMock).toHaveBeenCalledWith(agentRoot(SESSION), "icons/logo.svg", {
+      preview: true,
+    })
+  })
+
+  it("carries the diff view", async () => {
+    await mountRouted(PATH, undefined, "diff")
+    expect((await newTabLink()).getAttribute("href")).toBe(
+      "#/editor/agent/s1/diff/src%2Fbig.txt",
+    )
+  })
+
+  it("carries the cursor line and scroll position read when the link is pressed", async () => {
+    await mountRouted(PATH)
+    await screen.findByTestId("code-editor")
+    const link = await newTabLink()
+    expect(link.getAttribute("href")).toBe("#/editor/agent/s1/file/src%2Fbig.txt")
+    fireEvent.pointerDown(link)
+    expect(link.getAttribute("href")).toBe("#/editor/agent/s1/file/src%2Fbig.txt?line=4&top=2")
+  })
+
+  it("carries a language picked by hand", async () => {
+    await mountRouted(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await screen.findByRole("button", { name: /^syntax language:/i }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(async () =>
+      expect((await newTabLink()).getAttribute("href")).toBe(
+        "#/editor/agent/s1/file/src%2Fbig.txt?lang=toml",
+      ),
+    )
+    expect(editorSyncViewMock).toHaveBeenCalledWith(agentRoot(SESSION), PATH, {
+      language: "toml",
+    })
+  })
+
+  it("says in this tab that the new one opens the saved file when there are unsaved edits", async () => {
+    await mountWithDirtyTab()
+    fireEvent.click(await newTabLink())
+    expect(toastInfo).toHaveBeenCalledTimes(1)
+  })
+
+  it("opens in the address's preview", async () => {
+    await mountRouted("icons/logo.svg", { preview: true })
+    const img = await screen.findByAltText("icons/logo.svg")
+    expect(img.getAttribute("src")).toMatch(/^blob:/)
+  })
+
+  it("opens with the address's language once the registry has it", async () => {
+    await mountRouted(PATH, { language: "toml" })
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-language")).toBe("toml"),
+    )
+  })
+
+  it("reads the file in the address's encoding from the first read, and keeps it", async () => {
+    await mountRouted(PATH, { encoding: "Shift_JIS" })
+    await screen.findByTestId("code-editor")
+    expect(readMock.mock.calls.map((call) => call[2])).toEqual(["Shift_JIS"])
+    // The buffer holds the choice once the read lands: the new-tab link, which
+    // reads it from there, carries it on.
+    await waitFor(async () =>
+      expect((await newTabLink()).getAttribute("href")).toBe(
+        "#/editor/agent/s1/file/src%2Fbig.txt?enc=Shift_JIS",
+      ),
+    )
+  })
+
+  it("goes to the address's spot once, then hands it back to the store", async () => {
+    await mountRouted(PATH, { line: 7, top: 3 })
+    await waitFor(() =>
+      expect(editorConsumeArrivalMock).toHaveBeenCalledWith(agentRoot(SESSION), PATH),
+    )
+    expect(STATUS_EDITOR.setPosition).toHaveBeenCalledTimes(1)
+    expect(STATUS_EDITOR.setPosition).toHaveBeenCalledWith({ lineNumber: 7, column: 1 })
+    expect(STATUS_EDITOR.setScrollTop).toHaveBeenCalledWith(60)
+  })
+
+  it("drops the spot without going anywhere when the file opens in its preview", async () => {
+    await mountRouted("icons/logo.svg", { preview: true, line: 7 })
+    await screen.findByAltText("icons/logo.svg")
+    await waitFor(() =>
+      expect(editorConsumeArrivalMock).toHaveBeenCalledWith(agentRoot(SESSION), "icons/logo.svg"),
+    )
+    expect(STATUS_EDITOR.setPosition).not.toHaveBeenCalled()
+  })
+})
+
+// The same journey through the real store: the editor's report lands there, the
+// address follows, and the view the store then holds is what the editor renders
+// from.
+describe("the editor's view and the store, end to end", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    installObjectUrlMocks()
+    realStore = true
+    const store = await import("@/lib/store")
+    store.closeEditor()
+    store.editorClearRoot(agentRoot(SESSION))
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    readMock.mockResolvedValue({
+      path: PATH,
+      content: ON_DISK,
+      binary: false,
+      read_only: false,
+    })
+    treeMock.mockImplementation(async () => ({
+      dir: "",
+      entries: [
+        { name: "big.txt", path: PATH, is_dir: false, is_symlink: false, expandable: false },
+      ],
+    }))
+    stubModelPath = PATH
+  })
+
+  afterEach(async () => {
+    const store = await import("@/lib/store")
+    store.closeEditor()
+    realStore = false
+    cleanup()
+    vi.unstubAllGlobals()
+    removeObjectUrlMocks()
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  async function openReal(path: string) {
+    const store = await import("@/lib/store")
+    store.openEditor(agentRoot(SESSION), path)
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    render(<EditorOverlay />)
+    return store
+  }
+
+  it("writes Preview into the address and renders it from what the store holds", async () => {
+    const store = await openReal("icons/logo.svg")
+    await screen.findByTestId("code-editor")
+    fireEvent.click(screen.getByRole("button", { name: /preview/i }))
+    await screen.findByAltText("icons/logo.svg")
+    expect(store.getSnapshot().editorRoute?.view?.preview).toBe(true)
+    expect(location.hash).toBe("#/agent/s1/editor/file/icons%2Flogo.svg?view=preview")
+  })
+
+  it("keeps a picked language through a rename, in the editor and in the address", async () => {
+    const store = await openReal(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await screen.findByRole("button", { name: /^syntax language:/i }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    await waitFor(() => expect(location.hash).toContain("lang=toml"))
+
+    const tree = await screen.findByTestId("file-tree-drop-surface")
+    fireEvent.contextMenu(await within(tree).findByText("big.txt"))
+    fireEvent.click(await screen.findByText(/^Rename…$/))
+    fireEvent.change(await screen.findByDisplayValue("big.txt"), {
+      target: { value: "renamed.txt" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
+    await waitFor(() =>
+      expect(store.getSnapshot().editorRoute?.path).toBe("src/renamed.txt"),
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId("code-editor").getAttribute("data-language")).toBe("toml"),
+    )
+    expect(store.getSnapshot().editorRoute?.view?.language).toBe("toml")
+    expect(location.hash).toBe("#/agent/s1/editor/file/src%2Frenamed.txt?lang=toml")
   })
 })

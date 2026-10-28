@@ -21,6 +21,11 @@ The editor opens as a full-screen overlay from a few places:
 
 For a separate browser tab, the agent's `⋯` menu also has **Open editor in new tab**, and the editor's header carries a matching icon that opens the current file there (middle-click works, it is a real link).
 
+The new tab opens that file the way you were looking at it: the same file or diff view, Preview on or off, a language you picked by hand, an encoding you reopened it in, and the line your cursor was on, scrolled to the same place. Your other open files stay behind.
+
+> [!NOTE]
+> Unsaved edits stay in the tab you typed them in. The new tab opens the file as it is saved on disk. When you click the icon or middle-click it, the tab you left says so; opening it from the browser's own right-click menu shows no notice.
+
 > [!IMPORTANT]
 > The editor overlay is **desktop-only**. Monaco is a poor experience on a touch screen, so on a phone the overlay does not open. The standalone tab is the deliberate exception.
 >
@@ -71,7 +76,10 @@ click into it, and dux re-checks what is open.
 
 The address bar names the editor and the file you are looking at, so a hard refresh
 reopens the editor on the same file and view, and a bookmark or shared link lands there
-directly. Opening the editor is exactly one step in your browser history, and switching
+directly. It also carries Preview, a language you picked and an encoding you
+reopened the file in, so those survive a refresh too. A link taken with the header's new
+tab icon (right-click, Copy link) also names your line and scroll position; the editor goes
+there once when the link opens. Opening the editor is exactly one step in your browser history, and switching
 files inside it updates the address in place, so one press of Back closes the editor and
 returns you to whatever was behind it. Closing it that way loses nothing (see below).
 
