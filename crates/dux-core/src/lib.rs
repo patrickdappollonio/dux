@@ -55,6 +55,7 @@ pub mod gitignore_seed;
 pub mod home_path;
 pub mod ids;
 pub mod io_retry;
+pub mod leftover_folders;
 pub mod lockfile;
 pub mod logger;
 pub mod macros;

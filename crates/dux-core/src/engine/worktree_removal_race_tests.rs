@@ -335,11 +335,31 @@ impl Drop for WritableAgain {
     }
 }
 
+/// Write the fixture's project to the session database, which is what lets a
+/// left-over folder of it be recorded.
+fn persist_project(fx: &Fixture) {
+    fx.engine
+        .session_store
+        .upsert_project(&crate::config::ProjectConfig {
+            id: "p1".to_string(),
+            path: fx.repo.to_string_lossy().into_owned(),
+            name: None,
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+        })
+        .expect("persist the project");
+}
+
 /// Something dux did not start and cannot see (a daemon in a session of its
 /// own) keeps writing into the worktree. Nothing dux knows of is left to stop,
 /// git removes what it can, and the final says what is left and how to finish
-/// rather than reporting a bare git error. The registration is gone, the
-/// branch the user asked to delete is deleted, and dux deletes nothing itself.
+/// rather than reporting a bare git error. The registration is gone, dux
+/// deletes nothing itself, the branch the user asked to delete is KEPT because
+/// the folder still holds its files, and the folder is recorded for the
+/// project's worktree manager, which forgets it once it is gone.
 ///
 /// Whether the writer refills the folder before git's last `rmdir` is a race,
 /// so the unseen program also holds a directory git cannot empty (one with no
@@ -355,12 +375,13 @@ fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
         return;
     }
     let mut fx = fixture();
+    persist_project(&fx);
     let held = fx.worktree.join(".astro-held");
     std::fs::create_dir(&held).expect("create the held directory");
     std::fs::write(held.join("lock"), "x").expect("seed the held directory");
     std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o555))
         .expect("take the held directory's write permission");
-    let _writable_again = WritableAgain(held);
+    let writable_again = WritableAgain(held);
     let script = writer_script(&fx.pidfile);
     let mut daemon = std::process::Command::new("sh");
     daemon.arg(&script).current_dir(&fx.worktree);
@@ -384,12 +405,29 @@ fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
     let named = format!("kept writing into {path} (.astro-");
     for needle in [
         named.as_str(),
-        "then delete the folder yourself.",
-        "Branch feat was deleted.",
+        "then delete the folder from the project's worktree manager.",
+        "Branch feat was kept because the folder is still on disk",
     ] {
         assert!(message.contains(needle), "missing {needle:?} in: {message}");
     }
     assert!(fx.worktree.exists(), "dux never deletes the folder itself");
+    assert!(
+        crate::git::resolve_branch_oid(&fx.repo, "feat")
+            .expect("git answers")
+            .is_some(),
+        "the branch is kept while its folder is on disk"
+    );
+    let project = fx.engine.projects[0].clone();
+    let ops = fx.engine.removal_coordination.ops.clone();
+    let listed =
+        crate::leftover_folders::list_leftover_folders(&project, &fx.engine.paths, &ops, &[]);
+    assert_eq!(
+        listed.len(),
+        1,
+        "the worktree manager lists the folder: {listed:?}"
+    );
+    assert_eq!(listed[0].branches, ["feat"]);
+    assert!(listed[0].deletes_branches_by_default(), "dux created feat");
     let listing = crate::test_git::fixture_git()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(&fx.repo)
@@ -413,6 +451,22 @@ fn a_writer_dux_cannot_see_leaves_a_folder_and_the_final_says_how_to_finish() {
             && surfaced.to_string().contains("kept writing into"),
         "{surfaced}"
     );
+
+    // A folder deleted by hand stays listed while its kept branch is there,
+    // and is forgotten once neither is.
+    drop(writable_again);
+    std::fs::remove_dir_all(&fx.worktree).expect("delete the folder by hand");
+    let listed =
+        crate::leftover_folders::list_leftover_folders(&project, &fx.engine.paths, &ops, &[]);
+    assert!(listed.len() == 1 && !listed[0].folder_present, "{listed:?}");
+    git(&fx.repo, &["branch", "-D", "feat"]);
+    assert_eq!(
+        crate::leftover_folders::list_leftover_folders(&project, &fx.engine.paths, &ops, &[]),
+        []
+    );
+    let store = crate::storage::SessionStore::open_live(&fx.engine.paths.sessions_db_path)
+        .expect("open the database");
+    assert_eq!(store.load_leftover_folders("p1").unwrap(), []);
 }
 
 /// Relaunching an agent whose previous CLI of the same provider is still

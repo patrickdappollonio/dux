@@ -824,6 +824,9 @@ pub enum WorkerEvent {
         project_id: String,
         /// The managed worktrees, or why they could not be listed.
         result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        /// The left-over folders recorded for the project (empty when the
+        /// worktrees could not be listed).
+        leftovers: Vec<crate::leftover_folders::LeftoverFolder>,
         /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
         /// the completion handler (it depends on whether the manager is still
         /// open, which the worker can't see).

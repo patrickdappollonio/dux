@@ -299,6 +299,9 @@ pub enum EventReaction {
         project_id: String,
         /// The managed worktrees, or why they could not be listed.
         result: Result<Vec<crate::worktree_manager::ManagedWorktree>, String>,
+        /// The left-over folders recorded for the project (empty when the
+        /// worktrees could not be listed).
+        leftovers: Vec<crate::leftover_folders::LeftoverFolder>,
         /// The op whose final the handler resolves, if any.
         status_op_id: Option<String>,
     },
@@ -970,7 +973,17 @@ pub(crate) fn perform_deferred_removal(
             )
         };
         remove_after_last_look(look, || {
-            remove_by_current_names(project_path, managed, leading, delete_branch)
+            remove_by_current_names(project_path, managed, leading, delete_branch).map_err(|err| {
+                // A folder git let go of but could not delete is listed by the
+                // project's worktree manager from here on.
+                crate::leftover_folders::record_if_leftover(
+                    &db_path,
+                    std::path::Path::new(project_path),
+                    &managed.project_id,
+                    Some(managed.branch_provenance),
+                    err,
+                )
+            })
         })
     }))
     .unwrap_or_else(|payload| {
@@ -5155,10 +5168,12 @@ impl Engine {
             WorkerEvent::ManageableWorktreesReady {
                 project_id,
                 result,
+                leftovers,
                 status_op_id,
             } => EventReaction::ManageableWorktreesArrived {
                 project_id,
                 result,
+                leftovers,
                 status_op_id,
             },
             WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {

@@ -102,6 +102,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::PickEditor { .. }
         | PromptState::PickProjectWorktree(_)
         | PromptState::ManageWorktrees(_)
+        | PromptState::LeftoverFolderActions(_)
         | PromptState::PickProject { .. }
         | PromptState::ProjectActions(_)
         | PromptState::ProjectInfo(_)
@@ -137,6 +138,8 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         // The worktree-removal confirm cancels back to the manager it was
         // raised from, exactly as its Esc arm does.
         | PromptState::ConfirmDeleteWorktree(_)
+        // The left-over folder delete cancels back to the folder's actions.
+        | PromptState::ConfirmDeleteLeftoverFolder(_)
         // `EditMacros` is three modals in one variant, so it answers three
         // ways. Its nested delete-confirm is a confirmation like any other and
         // dismisses. Its LIST is a Picker over saved rows, holding no unsaved
@@ -285,6 +288,8 @@ impl App {
             // their Escape does.
             PromptState::ChangeProjectDefaultProvider(_) => self.close_provider_picker(),
             PromptState::ManageWorktrees(_) => self.close_worktree_manager(),
+            // Back onto the manager it was opened from, as its Escape does.
+            PromptState::LeftoverFolderActions(_) => self.close_leftover_folder_actions(),
 
             // Dismissal is what records the running version as seen, so this
             // must go through the stamping helper.
@@ -334,6 +339,10 @@ impl App {
             // the kill-running idiom.
             PromptState::ConfirmDeleteWorktree(_) => {
                 self.resolve_confirm_delete_worktree(ConfirmAnswer::Cancel);
+            }
+            // Steps back to the folder's actions, as its Escape does.
+            PromptState::ConfirmDeleteLeftoverFolder(_) => {
+                self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Cancel);
             }
             PromptState::ConfirmDeleteTerminal { .. } => {
                 self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel);

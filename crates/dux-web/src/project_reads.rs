@@ -8,6 +8,13 @@
 //!   anything an agent is attached to (409). Answers 200 with a body reporting what
 //!   happened to the branch, because `git branch -D` can refuse one checked out in
 //!   another worktree and the client must not report its checkbox as the outcome.
+//! - `POST /api/v1/projects/:id/leftover-folders/delete` with
+//!   `{ path, delete_branches }`: delete ONE left-over folder (a worktree folder
+//!   a delete could not finish) and the kept branches named. Every decided
+//!   outcome, a refusal included, is a 200 `{ removed, warning, message,
+//!   segments }`: the sentence is dux-core's, the same one the terminal UI
+//!   prints, with its name parts. 404 for an unknown project, 400 for a bad
+//!   path.
 //! - `GET /api/v1/projects/worktree-counts`: how many managed worktrees each project
 //!   has, so the picker can label its rows before the user drills into an empty one.
 //! - `GET /api/v1/projects/inspect?path=`: branch pre-flight for the add-project
@@ -54,6 +61,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/projects/{id}/worktrees",
             get(list_worktrees).delete(delete_worktree),
+        )
+        .route(
+            "/api/v1/projects/{id}/leftover-folders/delete",
+            axum::routing::post(delete_leftover_folder),
         )
         .route("/api/v1/projects/{id}/branches", get(list_branches))
 }
@@ -203,9 +214,50 @@ struct ProjectWorktreeEntryView {
     in_use: Option<String>,
 }
 
+/// A left-over folder row of the Worktrees manager: a worktree folder a
+/// delete could not finish, which git no longer lists.
+#[derive(Serialize)]
+struct LeftoverFolderView {
+    path: String,
+    /// Whether the folder is still there. `false` when it was deleted by hand
+    /// or replaced while a branch it kept is still there: the row is then
+    /// about that branch, and nothing at the path is deleted.
+    folder_present: bool,
+    /// The kept branches a delete can remove, by name.
+    branches: Vec<String>,
+    /// The kept branches a delete would keep, each with why.
+    undeletable: Vec<UndeletableBranchView>,
+    /// The provenance the dialog warns by and defaults its box from
+    /// (`created`, `attached`, `adopted`, `unknown`), or `null` when the
+    /// manager's own removal kept the branches.
+    branch_provenance: Option<&'static str>,
+    /// What left the folder behind: `agent` or `manager`.
+    left_by: &'static str,
+    /// Whether the row offers a delete: a folder to delete, or a kept branch
+    /// a delete can remove.
+    offers_delete: bool,
+    /// What is using the folder now, as dux-core's sentence for both
+    /// surfaces, or `null`. A row with it offers no delete.
+    in_use: Option<String>,
+}
+
+/// A kept branch dux will not delete, and why: `no_commit`, `checked_out`
+/// (with the worktree's `path`), `moved` or `unchecked` (with git's
+/// `reason`). The browser words it with the same sentence dux-core builds.
+#[derive(Serialize)]
+struct UndeletableBranchView {
+    name: String,
+    why: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
 #[derive(Serialize)]
 struct WorktreesReply {
     entries: Vec<ProjectWorktreeEntryView>,
+    leftovers: Vec<LeftoverFolderView>,
 }
 
 #[derive(Serialize)]
@@ -225,10 +277,15 @@ async fn list_worktrees(State(state): State<AppState>, AxumPath(id): AxumPath<St
         None => (StatusCode::NOT_FOUND, "unknown project").into_response(),
         Some(inputs) => {
             let ops = state.engine.worktree_ops().clone();
-            match tokio::task::spawn_blocking(move || classify_managed_worktrees(&inputs, &ops))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                classify_managed_worktrees(&inputs, &ops)
+                    .map(|entries| (entries, leftover_folder_views(&inputs, &ops)))
+            })
+            .await
             {
-                Ok(Ok(entries)) => Json(WorktreesReply { entries }).into_response(),
+                Ok(Ok((entries, leftovers))) => {
+                    Json(WorktreesReply { entries, leftovers }).into_response()
+                }
                 Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -281,6 +338,56 @@ fn classify_managed_worktrees(
     })
     .collect();
     Ok(entries)
+}
+
+/// The project's left-over folders, from the same core listing the terminal
+/// UI's manager reads. Runs in `spawn_blocking` (it reads the database and
+/// shells to git).
+fn leftover_folder_views(
+    inputs: &crate::engine_actor::ProjectWorktreeInputs,
+    ops: &dux_core::worktree_ops::WorktreeOps,
+) -> Vec<LeftoverFolderView> {
+    dux_core::leftover_folders::list_leftover_folders(
+        &inputs.project,
+        &inputs.paths,
+        ops,
+        &inputs.busy,
+    )
+    .into_iter()
+    .map(|folder| LeftoverFolderView {
+        offers_delete: folder.offers_delete(),
+        path: folder.path.to_string_lossy().into_owned(),
+        folder_present: folder.folder_present,
+        branches: folder.branches,
+        undeletable: folder
+            .undeletable
+            .into_iter()
+            .map(|branch| {
+                use dux_core::leftover_folders::BranchBlock;
+                let (why, path, reason) = match branch.why {
+                    BranchBlock::NoCommit => ("no_commit", None, None),
+                    BranchBlock::CheckedOut { path } => ("checked_out", Some(path), None),
+                    BranchBlock::Moved => ("moved", None, None),
+                    BranchBlock::Unchecked { reason } => ("unchecked", None, Some(reason)),
+                };
+                UndeletableBranchView {
+                    name: branch.name,
+                    why,
+                    path,
+                    reason,
+                }
+            })
+            .collect(),
+        branch_provenance: folder.provenance.map(|p| p.as_str()),
+        left_by: match folder.left_by {
+            dux_core::leftover_folders::LeftBy::Agent => "agent",
+            dux_core::leftover_folders::LeftBy::Manager => "manager",
+        },
+        in_use: folder
+            .busy
+            .map(|busy| dux_core::leftover_folders::in_use_sentence(&busy)),
+    })
+    .collect()
 }
 
 // ── Worktree counts ────────────────────────────────────────────────────────────
@@ -943,5 +1050,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+// ── Delete one left-over folder ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DeleteLeftoverFolderBody {
+    #[serde(default)]
+    path: String,
+    /// The kept branches to delete with the folder, by name. Empty (the
+    /// default) deletes none; a name the folder did not keep is ignored.
+    #[serde(default)]
+    delete_branches: Vec<String>,
+}
+
+/// What a Delete folder request came to: whether the folder went, whether the
+/// sentence is a warning, and the sentence with its name parts.
+#[derive(Serialize)]
+struct DeleteLeftoverFolderReply {
+    removed: bool,
+    warning: bool,
+    message: String,
+    segments: Option<Vec<dux_core::prose::ProseSegment>>,
+}
+
+async fn delete_leftover_folder(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<DeleteLeftoverFolderBody>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    }
+    if body.path.is_empty() {
+        return (StatusCode::BAD_REQUEST, "path is required").into_response();
+    }
+    if body.path.chars().count() > MAX_PATH_LEN {
+        return (StatusCode::BAD_REQUEST, "path is too long").into_response();
+    }
+    let requested = PathBuf::from(&body.path);
+    // Admitted against the engine's live state, then checked against the
+    // record, the disk and git and deleted off-thread; both halves are core's,
+    // shared with the terminal UI's worktree manager.
+    let result = match state
+        .engine
+        .admit_leftover_removal(id, requested, body.delete_branches)
+        .await
+    {
+        None => return (StatusCode::NOT_FOUND, "unknown project").into_response(),
+        Some(dux_core::leftover_folders::LeftoverAdmission::Refused(outcome)) => Ok(Ok(outcome)),
+        Some(dux_core::leftover_folders::LeftoverAdmission::Admitted(ticket)) => {
+            tokio::task::spawn_blocking(move || ticket.run()).await
+        }
+    };
+    match result {
+        Ok(Ok(outcome)) => {
+            let report = dux_core::leftover_folders::leftover_removal_report(&body.path, &outcome);
+            let (message, segments) = report.message.into_parts();
+            Json(DeleteLeftoverFolderReply {
+                removed: matches!(
+                    outcome,
+                    dux_core::leftover_folders::LeftoverRemovalOutcome::Removed { .. }
+                ),
+                warning: report.warning,
+                message,
+                segments,
+            })
+            .into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("left-over folder delete failed: {e}"),
+        )
+            .into_response(),
     }
 }

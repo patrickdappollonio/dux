@@ -193,6 +193,8 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // Prose, a conditional checkbox and a Cancel/Delete pair; horizontal
         // keys move focus and Space acts on what has it.
         | PromptState::ConfirmDeleteWorktree(_)
+        // The left-over folder delete: the same shape as the worktree removal.
+        | PromptState::ConfirmDeleteLeftoverFolder(_)
         | PromptState::ConfigReloadFailed { .. } => ModalSpec { family: Confirm, multiline_field: false, confirm_button: true },
 
         // ── Picker ──────────────────────────────────────────────────────
@@ -219,6 +221,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // REMOVABLE worktrees, and a confirm key that acts on the selection by
         // raising the removal confirmation. No buttons, so no confirm button.
         | PromptState::ManageWorktrees(_)
+        // A left-over folder's actions: rows with a selection cursor, and
+        // picking one runs it. No buttons.
+        | PromptState::LeftoverFolderActions(_)
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
@@ -314,6 +319,8 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::PickProjectWorktree(_)
         | PromptState::ManageWorktrees(_)
         | PromptState::ConfirmDeleteWorktree(_)
+        | PromptState::LeftoverFolderActions(_)
+        | PromptState::ConfirmDeleteLeftoverFolder(_)
         | PromptState::ChangeTheme(_)
         | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
@@ -406,6 +413,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::PickEditor { .. }
         | OverlayMouseLayout::PickProjectWorktree { .. }
         | OverlayMouseLayout::ManageWorktrees { .. }
+        | OverlayMouseLayout::LeftoverFolderActions { .. }
         | OverlayMouseLayout::PickProject { .. }
         | OverlayMouseLayout::ProjectActions { .. }
         | OverlayMouseLayout::ChangeBaseBranch { .. }
@@ -433,6 +441,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ConfirmKillRunning { .. }
         | OverlayMouseLayout::ConfirmDeleteAgent { .. }
         | OverlayMouseLayout::ConfirmDeleteWorktree { .. }
+        | OverlayMouseLayout::ConfirmDeleteLeftoverFolder { .. }
         | OverlayMouseLayout::ConfirmDeleteTerminal { .. }
         | OverlayMouseLayout::ConfirmCloseTab { .. }
         | OverlayMouseLayout::ConfirmStopTab { .. }
@@ -821,10 +830,28 @@ pub(super) mod tests {
             return_to: None,
             project: project.clone(),
             entries: Vec::new(),
+            leftovers: Vec::new(),
             loading: false,
             selected: None,
             error: None,
         }
+    }
+
+    fn leftover_folder_actions_prompt(
+        project: &crate::model::Project,
+    ) -> crate::app::LeftoverFolderActionsPrompt {
+        crate::app::LeftoverFolderActionsPrompt::new(
+            manage_worktrees_prompt(project),
+            dux_core::leftover_folders::LeftoverFolder {
+                folder_present: true,
+                path: PathBuf::from("/tmp/worktrees/demo/left"),
+                branches: vec!["left".to_string()],
+                undeletable: Vec::new(),
+                provenance: None,
+                left_by: dux_core::leftover_folders::LeftBy::Manager,
+                busy: None,
+            },
+        )
     }
 
     fn change_base_branch_prompt(
@@ -1090,6 +1117,22 @@ pub(super) mod tests {
                     delete_branch: true,
                     focus: DeleteWorktreeFocus::Cancel,
                 })),
+            ),
+            (
+                "LeftoverFolderActions",
+                PromptState::LeftoverFolderActions(Box::new(leftover_folder_actions_prompt(
+                    &project,
+                ))),
+            ),
+            (
+                "ConfirmDeleteLeftoverFolder",
+                PromptState::ConfirmDeleteLeftoverFolder(Box::new(
+                    crate::app::ConfirmDeleteLeftoverFolderPrompt {
+                        previous: leftover_folder_actions_prompt(&project),
+                        delete_branches: true,
+                        focus: DeleteWorktreeFocus::Cancel,
+                    },
+                )),
             ),
             (
                 "KillRunning",

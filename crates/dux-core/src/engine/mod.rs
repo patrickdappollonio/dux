@@ -4385,6 +4385,7 @@ impl Engine {
                     WorkerEvent::ManageableWorktreesReady {
                         project_id: project_id_for_panic,
                         result: Err(format!("Worktree-manager worker panicked: {reason}")),
+                        leftovers: Vec::new(),
                         status_op_id: status_op_id_for_panic,
                     }
                 })),
@@ -4393,9 +4394,15 @@ impl Engine {
                 let result = crate::worktree_manager::list_manageable_worktrees_with_busy(
                     &project, &paths, &sessions, &ops, &busy,
                 );
+                let leftovers = if result.is_ok() {
+                    crate::leftover_folders::list_leftover_folders(&project, &paths, &ops, &busy)
+                } else {
+                    Vec::new()
+                };
                 let _ = tx.send(WorkerEvent::ManageableWorktreesReady {
                     project_id: project.id,
                     result,
+                    leftovers,
                     status_op_id,
                 });
             },
@@ -4407,6 +4414,7 @@ impl Engine {
                     result: Err(
                         "dux could not start a worker thread to list the worktrees".to_string()
                     ),
+                    leftovers: Vec::new(),
                     status_op_id: status_op_id_if_unspawned,
                 });
         }

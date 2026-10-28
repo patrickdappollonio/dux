@@ -90,6 +90,59 @@ fn decode_identities(text: &str) -> Vec<crate::process_sessions::ProcessIdentity
         .collect()
 }
 
+/// A left-over folder's kept branches as stored: one line per branch, its
+/// commit (`-` when none was recorded), its provenance (`-` when the worktree
+/// manager kept it) and its name. A refname holds neither a line break nor a
+/// space, and neither does a commit id or a provenance word.
+fn encode_kept_branches(branches: &[crate::git::KeptBranch]) -> String {
+    branches
+        .iter()
+        .map(|kept| {
+            format!(
+                "{} {} {}",
+                kept.oid.as_deref().unwrap_or("-"),
+                kept.provenance
+                    .map_or("-", |provenance| provenance.as_str()),
+                kept.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// [`encode_kept_branches`] read back. A line written before branches carried
+/// their own provenance (`<commit> <name>`) takes the record's.
+fn decode_kept_branches(
+    stored: &str,
+    record_provenance: Option<crate::model::BranchProvenance>,
+) -> Vec<crate::git::KeptBranch> {
+    stored
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            let (oid, second, third) = (fields.next()?, fields.next()?, fields.next());
+            let (provenance, name) = match third {
+                Some(name) => (
+                    (second != "-").then(|| crate::model::BranchProvenance::from_str(second)),
+                    name,
+                ),
+                None => (record_provenance, second),
+            };
+            Some(crate::git::KeptBranch {
+                name: name.to_string(),
+                oid: (oid != "-").then(|| oid.to_string()),
+                provenance,
+            })
+        })
+        .collect()
+}
+
+/// A `u64` (a device or inode number) as SQLite's signed integer, bit for bit,
+/// so the whole range round-trips.
+fn stored_u64(value: u64) -> i64 {
+    i64::from_ne_bytes(value.to_ne_bytes())
+}
+
 /// A worktree removal the user asked for that dux has not finished yet, kept
 /// in the database so a quit or a crash in the middle of it does not leave a
 /// worktree and a branch behind that no agent owns.
@@ -650,6 +703,33 @@ impl SessionStore {
             "process_registry",
             "text not null default ''",
         )?;
+        // A worktree folder a delete could not finish (git let go of the
+        // worktree, something kept writing into the folder), with the branches
+        // kept because of it and the folder's identity, so the worktree
+        // manager can list it and offer a confirmed delete. Derived runtime
+        // state; additive: existing databases start with zero rows.
+        self.conn.execute_batch(
+            r"
+            create table if not exists leftover_worktree_folders (
+                path text primary key,
+                project_id text not null,
+                branches text not null default '',
+                branch_provenance text,
+                dev integer not null,
+                ino integer not null,
+                birth_ns integer,
+                created_at text not null
+            );
+            ",
+        )?;
+        // The folder's birth time, where the filesystem keeps one, so a new
+        // folder that reuses the inode is not taken for the old one.
+        ensure_column(
+            &self.conn,
+            "leftover_worktree_folders",
+            "birth_ns",
+            "integer",
+        )?;
         // The process sessions dux started, kept across restarts (see
         // `crate::process_sessions::AgentProcessRegistry::attach_store`): one
         // row holding the whole registry, replaced atomically on every change.
@@ -1187,6 +1267,167 @@ impl SessionStore {
                 .context("failed to follow a branch rename into a pending removal")?;
             Ok(())
         })
+    }
+
+    /// Remember a worktree folder a delete left behind, replacing an earlier
+    /// row for the same path. Written only while its project exists, in the
+    /// same statement, so a removal that finishes after its project was
+    /// removed records nothing. `false` when nothing was written.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write fails.
+    pub fn record_leftover_folder(
+        &self,
+        record: &crate::leftover_folders::LeftoverFolderRecord,
+    ) -> Result<bool> {
+        let branches = encode_kept_branches(&record.branches);
+        let identity = &record.identity;
+        let written = self
+            .conn
+            .execute(
+                "insert or replace into leftover_worktree_folders \
+                 (path, project_id, branches, branch_provenance, dev, ino, birth_ns, created_at) \
+                 select ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 \
+                 where exists (select 1 from projects where id = ?2)",
+                params![
+                    record.path,
+                    record.project_id,
+                    branches,
+                    record.provenance.map(|p| p.as_str()),
+                    stored_u64(identity.dev),
+                    stored_u64(identity.ino),
+                    identity.birth_ns,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .context("failed to record a left-over worktree folder")?;
+        Ok(written > 0)
+    }
+
+    /// The left-over folders recorded for `project_id`, by path.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails.
+    pub(crate) fn load_leftover_folders(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<crate::leftover_folders::LeftoverFolderRecord>> {
+        self.leftover_folders_where("where project_id = ?1", params![project_id])
+    }
+
+    /// Every left-over folder recorded, whatever its project: what a factory
+    /// reset reads to delete the branches dux kept with them.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails.
+    pub fn load_all_leftover_folders(
+        &self,
+    ) -> Result<Vec<crate::leftover_folders::LeftoverFolderRecord>> {
+        self.leftover_folders_where("", params![])
+    }
+
+    fn leftover_folders_where(
+        &self,
+        filter: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<crate::leftover_folders::LeftoverFolderRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "select path, project_id, branches, branch_provenance, dev, ino, birth_ns \
+             from leftover_worktree_folders {filter} order by path"
+        ))?;
+        let rows = stmt.query_map(args, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (path, project_id, branches, provenance, dev, ino, birth_ns) = row?;
+            Ok(crate::leftover_folders::LeftoverFolderRecord {
+                path,
+                project_id,
+                branches: decode_kept_branches(
+                    &branches,
+                    provenance
+                        .as_deref()
+                        .map(crate::model::BranchProvenance::from_str),
+                ),
+                provenance: provenance
+                    .as_deref()
+                    .map(crate::model::BranchProvenance::from_str),
+                identity: crate::leftover_folders::FolderIdentity {
+                    dev: u64::from_ne_bytes(dev.to_ne_bytes()),
+                    ino: u64::from_ne_bytes(ino.to_ne_bytes()),
+                    birth_ns,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("failed to read left-over worktree folders")
+    }
+
+    /// Keep only `branches` on the left-over record at `path`, while the row
+    /// is the one for the folder with this identity: what is left to do once
+    /// a delete has acted on the rest.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write fails.
+    pub(crate) fn keep_only_leftover_branches(
+        &self,
+        path: &str,
+        identity: &crate::leftover_folders::FolderIdentity,
+        branches: &[crate::git::KeptBranch],
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "update leftover_worktree_folders set branches = ?5 \
+                 where path = ?1 and dev = ?2 and ino = ?3 and birth_ns is ?4",
+                params![
+                    path,
+                    stored_u64(identity.dev),
+                    stored_u64(identity.ino),
+                    identity.birth_ns,
+                    encode_kept_branches(branches),
+                ],
+            )
+            .context("failed to keep a left-over folder's branches")?;
+        Ok(())
+    }
+
+    /// Forget the left-over folder at `path`, only while the row is the one
+    /// for the folder with this identity: a listing that saw an older record
+    /// cannot delete a newer one for the same path.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write fails.
+    pub(crate) fn delete_leftover_folder(
+        &self,
+        path: &str,
+        identity: &crate::leftover_folders::FolderIdentity,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from leftover_worktree_folders \
+                 where path = ?1 and dev = ?2 and ino = ?3 and birth_ns is ?4",
+                params![
+                    path,
+                    stored_u64(identity.dev),
+                    stored_u64(identity.ino),
+                    identity.birth_ns
+                ],
+            )
+            .context("failed to forget a left-over worktree folder")?;
+        Ok(())
     }
 
     /// Forget a pending worktree removal, finished one way or the other.
@@ -1813,6 +2054,12 @@ impl SessionStore {
         )?;
         tx.execute(
             "delete from agent_sessions where project_id = ?1 and workspace_kind = 'managed'",
+            params![project_id],
+        )?;
+        // A left-over folder is listed by its project's worktree manager, which
+        // goes with the project.
+        tx.execute(
+            "delete from leftover_worktree_folders where project_id = ?1",
             params![project_id],
         )?;
         tx.execute("delete from projects where id = ?1", params![project_id])?;
@@ -2831,6 +3078,39 @@ mod tests {
         }));
         assert!(outcome.is_err());
         assert!(store.conn.is_autocommit());
+    }
+
+    /// A kept branch stored before branches carried their own provenance
+    /// takes its record's; one stored since keeps its own.
+    #[test]
+    fn kept_branches_read_their_own_provenance_or_their_records() {
+        let decoded = decode_kept_branches(
+            "abc feat\ndef attached old\n- - lost",
+            Some(crate::model::BranchProvenance::CreatedByDux),
+        );
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|kept| (kept.name.as_str(), kept.oid.as_deref(), kept.provenance))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "feat",
+                    Some("abc"),
+                    Some(crate::model::BranchProvenance::CreatedByDux)
+                ),
+                (
+                    "old",
+                    Some("def"),
+                    Some(crate::model::BranchProvenance::AttachedExisting)
+                ),
+                ("lost", None, None),
+            ]
+        );
+        assert_eq!(
+            decode_kept_branches(&encode_kept_branches(&decoded), None),
+            decoded
+        );
     }
 
     #[test]

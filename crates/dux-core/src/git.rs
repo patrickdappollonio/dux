@@ -3935,6 +3935,134 @@ pub(crate) fn delete_created_branch_best_effort(repo_path: &Path, branch_name: &
     let _ = delete_branch_force(repo_path, branch_name);
 }
 
+/// The object id `refs/heads/<branch_name>` points at, `None` when there is no
+/// such branch. Read with `for-each-ref`, whose pattern is fully qualified (so
+/// a dash-leading name is a ref) and whose answer is matched on the exact ref
+/// name, because a pattern also matches the refs below it.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or cannot read the repository's refs: that is
+/// never "no such branch".
+pub fn resolve_branch_oid(repo_path: &Path, branch_name: &str) -> Result<Option<String>> {
+    let reference = format!("refs/heads/{branch_name}");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            &reference,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            clean_git_reason(&String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, name)| *name == reference)
+        .map(|(oid, _)| oid.to_string()))
+}
+
+/// What became of a branch kept with a left-over folder when the folder was
+/// deleted and the user asked for the branch too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeptBranchDeletion {
+    /// Deleted.
+    Deleted,
+    /// It did not exist any more.
+    AlreadyGone,
+    /// It points somewhere else than when the folder was left behind, so it
+    /// was kept: what is on it now is not what the user was shown.
+    Moved,
+    /// git refused (or another worktree has it checked out), and the branch
+    /// is still there. git's reason, or dux's.
+    Refused {
+        /// Why.
+        reason: String,
+    },
+    /// No commit was recorded for it (git could not be asked when the folder
+    /// was left behind), so whether it moved since cannot be known: kept.
+    Unverifiable,
+}
+
+/// The worktree that has `branch_name` checked out, if any.
+///
+/// # Errors
+///
+/// Fails when git cannot list the repository's worktrees.
+pub fn branch_checked_out_in(repo_path: &Path, branch_name: &str) -> Result<Option<PathBuf>> {
+    Ok(list_worktrees(repo_path)?
+        .into_iter()
+        .find(|worktree| worktree.branch_name.as_deref() == Some(branch_name))
+        .map(|worktree| worktree.path))
+}
+
+/// Delete a branch kept with a left-over folder, only while it still points at
+/// `kept.oid`: `update-ref -d` with the old value, so a branch somebody moved
+/// since is kept. A branch another worktree has checked out is refused first,
+/// as `git branch -D` would. The ref is fully qualified and after `--`, so a
+/// dash-leading name is read as a ref (measured on git 2.53).
+///
+/// # Errors
+///
+/// Fails when git cannot be run or cannot say where the branch points.
+pub fn delete_kept_branch(repo_path: &Path, kept: &KeptBranch) -> Result<KeptBranchDeletion> {
+    let Some(recorded) = kept.oid.as_deref() else {
+        return Ok(KeptBranchDeletion::Unverifiable);
+    };
+    let Some(now) = resolve_branch_oid(repo_path, &kept.name)? else {
+        return Ok(KeptBranchDeletion::AlreadyGone);
+    };
+    if now != recorded {
+        return Ok(KeptBranchDeletion::Moved);
+    }
+    if let Some(holder) = branch_checked_out_in(repo_path, &kept.name)? {
+        return Ok(KeptBranchDeletion::Refused {
+            reason: format!(
+                "it is checked out in {}",
+                crate::home_path::shorten_home(&holder)
+            ),
+        });
+    }
+    let reference = format!("refs/heads/{}", kept.name);
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "update-ref",
+            "-d",
+            "--",
+            &reference,
+            recorded,
+        ])
+        .output()?;
+    if output.status.success() {
+        return Ok(KeptBranchDeletion::Deleted);
+    }
+    Ok(match resolve_branch_oid(repo_path, &kept.name)? {
+        None => KeptBranchDeletion::AlreadyGone,
+        Some(now) if now != recorded => KeptBranchDeletion::Moved,
+        Some(_) => KeptBranchDeletion::Refused {
+            reason: clean_git_reason(&String::from_utf8_lossy(&output.stderr)),
+        },
+    })
+}
+
+/// Delete the branches a left-over folder kept, once the folder itself is
+/// gone, each only while it still points at its recorded commit: factory
+/// reset's own cleanup, which deletes the folder as its last resort and must
+/// not leave dux's branches behind. Best effort.
+pub fn delete_kept_branches_after_folder(repo_path: &Path, leftover: &LeftoverWorktreeFolder) {
+    for kept in &leftover.kept_branches {
+        let _ = delete_kept_branch(repo_path, kept);
+    }
+}
+
 /// Whether `refs/heads/<branch_name>` still resolves. Best effort: a git that
 /// cannot answer is read as "gone", which keeps the old behaviour rather than
 /// inventing a refusal nobody can act on.
@@ -4038,9 +4166,10 @@ fn run_worktree_remove(repo_path: &Path, worktree_path: &Path) -> Result<std::pr
 /// fails its last `rmdir`; by then it has ALREADY dropped the worktree's
 /// registration (it carries on to the admin directory whatever the work tree
 /// did), so the same command a second time can only answer "is not a working
-/// tree". The folder is then left to the user with a
-/// [`LeftoverWorktreeFolder`] saying exactly that: dux never deletes a
-/// worktree's files itself, that is git's job.
+/// tree". The folder is then reported with a [`LeftoverWorktreeFolder`]
+/// saying exactly that: dux never deletes the folder on its own. The worktree
+/// manager lists it, and deletes it only once the user confirms a dialog that
+/// names it.
 fn finish_failed_removal(
     repo_path: &Path,
     worktree_path: &Path,
@@ -4070,12 +4199,32 @@ fn finish_failed_removal(
         leftovers,
         more,
         git_error,
-        branches: Vec::new(),
+        kept_branches: Vec::new(),
+        gone_branches: Vec::new(),
+        unchecked_branches: Vec::new(),
+        in_manager: false,
     }))
 }
 
 /// How many leftover paths a [`LeftoverWorktreeFolder`] names.
-const LEFTOVERS_NAMED: usize = 5;
+pub(crate) const LEFTOVERS_NAMED: usize = 5;
+
+/// Whether git lists `worktree_path` among the repository's worktrees, as a
+/// question that can fail: a git that cannot answer is an error, never "not
+/// registered", because the caller is about to delete the folder on the
+/// strength of the answer.
+///
+/// # Errors
+///
+/// Fails when git cannot list the repository's worktrees.
+pub(crate) fn worktree_registration_checked(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<bool> {
+    Ok(list_worktrees(repo_path)?
+        .iter()
+        .any(|entry| same_worktree_path(&entry.path, worktree_path)))
+}
 
 /// Whether git still lists `worktree_path` among the repository's worktrees.
 /// Read from `worktree list --porcelain -z`, the machine-stable form, through
@@ -4104,7 +4253,7 @@ pub(crate) fn worktree_is_registered(repo_path: &Path, worktree_path: &Path) -> 
 /// Up to `limit` of what is left in a folder git could not finish deleting,
 /// as relative paths, innermost first (an empty directory names itself), plus
 /// how many more there are.
-fn list_leftovers(folder: &Path, limit: usize) -> (Vec<String>, usize) {
+pub(crate) fn list_leftovers(folder: &Path, limit: usize) -> (Vec<String>, usize) {
     let mut leaves: Vec<String> = walkdir::WalkDir::new(folder)
         .follow_links(false)
         .min_depth(1)
@@ -4130,8 +4279,10 @@ fn list_leftovers(folder: &Path, limit: usize) -> (Vec<String>, usize) {
 
 /// A worktree removal git could only half finish: the registration is gone,
 /// the folder is not, because something kept writing into it while git was
-/// deleting it. dux never finishes the job with a recursive delete of its own,
-/// so the message tells the user what is left and how to finish.
+/// deleting it. dux does not finish the job on its own: the message says what
+/// is left, and the worktree manager offers a confirmed delete of the folder.
+/// The branches the removal was asked to delete are KEPT, because the folder
+/// still holds their files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeftoverWorktreeFolder {
     /// The worktree folder that was left behind.
@@ -4142,9 +4293,41 @@ pub struct LeftoverWorktreeFolder {
     pub more: usize,
     /// git's own last word on it.
     pub git_error: String,
-    /// What happened to each branch the delete was asked to remove, once git
-    /// had let go of the worktree.
-    pub branches: Vec<(String, BranchDeletion)>,
+    /// The branches the removal was asked to delete, kept because the folder
+    /// is still on disk, each at the commit it pointed at then.
+    pub kept_branches: Vec<KeptBranch>,
+    /// Branches the removal was asked to delete that did not exist any more.
+    pub gone_branches: Vec<String>,
+    /// Branches git could not be asked about, with why. Each is also in
+    /// `kept_branches`, with no commit, so no later delete removes it.
+    pub unchecked_branches: Vec<(String, String)>,
+    /// Whether the worktree manager lists the folder (its record was written),
+    /// which is when the message may send the user there.
+    pub in_manager: bool,
+}
+
+/// A branch kept because the folder that holds its files was left behind, and
+/// the commit it pointed at then: a later delete removes it only while it
+/// still points there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptBranch {
+    /// The branch's name.
+    pub name: String,
+    /// The object id `refs/heads/<name>` pointed at, `None` when git could
+    /// not be asked; such a branch is never deleted by dux.
+    pub oid: Option<String>,
+    /// Where the branch came from, as the agent that held it recorded it;
+    /// `None` when the worktree manager's own removal kept it.
+    pub provenance: Option<crate::model::BranchProvenance>,
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_string(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
 }
 
 impl std::fmt::Display for LeftoverWorktreeFolder {
@@ -4158,20 +4341,56 @@ impl std::fmt::Display for LeftoverWorktreeFolder {
             }
             write!(f, ")")?;
         }
-        write!(
-            f,
-            ", so the folder is still there. Stop it, then delete the folder yourself."
-        )?;
-        for (name, outcome) in &self.branches {
-            match outcome {
-                BranchDeletion::Deleted => write!(f, " Branch {name} was deleted.")?,
-                BranchDeletion::AlreadyGone => write!(f, " Branch {name} was already gone.")?,
-                BranchDeletion::Refused { reason } => write!(
+        if self.in_manager {
+            write!(
+                f,
+                ", so the folder is still there. Stop it, then delete the folder from the \
+                 project's worktree manager."
+            )?;
+        } else {
+            write!(
+                f,
+                ", so the folder is still there. Stop it, then delete the folder yourself."
+            )?;
+        }
+        let kept: Vec<&str> = self
+            .kept_branches
+            .iter()
+            .filter(|b| b.oid.is_some())
+            .map(|b| b.name.as_str())
+            .collect();
+        if !kept.is_empty() {
+            let (noun, verb, pronoun) = if kept.len() == 1 {
+                ("Branch", "was", "it")
+            } else {
+                ("Branches", "were", "them")
+            };
+            write!(
+                f,
+                " {noun} {} {verb} kept because the folder is still on disk; ",
+                and_list(&kept)
+            )?;
+            if self.in_manager {
+                write!(
                     f,
-                    " git refused to delete branch {name} ({reason}); delete it with \
-                     git branch -D once the folder is gone."
-                )?,
+                    "the worktree manager can delete {pronoun} with the folder."
+                )?;
+            } else {
+                write!(
+                    f,
+                    "delete {pronoun} with git branch -D once the folder is gone."
+                )?;
             }
+        }
+        for name in &self.gone_branches {
+            write!(f, " Branch {name} was already gone.")?;
+        }
+        for (name, reason) in &self.unchecked_branches {
+            write!(
+                f,
+                " git could not check branch {name} ({reason}), so it was kept; delete it \
+                 with git branch -D once the folder is gone."
+            )?;
         }
         Ok(())
     }
@@ -4233,9 +4452,10 @@ pub fn remove_worktree(
     // The worktree half is shared with `remove_worktree_keep_branch`; only the
     // branch deletions below are this function's own.
     if let Err(err) = remove_worktree_keep_branch(repo_path, worktree_path) {
-        // git let go of the worktree and only its folder is left, so the
-        // branches are no longer checked out anywhere and the deletion the user
-        // asked for still happens; the error says what became of them.
+        // git let go of the worktree but its folder is left, still holding
+        // the branches' files: they are KEPT, each recorded at the commit it
+        // points at now, so the worktree manager's later delete of the folder
+        // can remove them only while they still point there.
         return Err(match err.downcast::<LeftoverWorktreeFolder>() {
             Ok(mut leftover) => {
                 for name in [Some(branch_name), initial_branch]
@@ -4243,15 +4463,30 @@ pub fn remove_worktree(
                     .flatten()
                     .filter(|name| !name.is_empty())
                 {
-                    if leftover.branches.iter().any(|(done, _)| done == name) {
+                    let seen = leftover.kept_branches.iter().any(|kept| kept.name == name)
+                        || leftover.gone_branches.iter().any(|gone| gone == name);
+                    if seen {
                         continue;
                     }
-                    let outcome = delete_branch_force(repo_path, name).unwrap_or_else(|err| {
-                        BranchDeletion::Refused {
-                            reason: format!("{err:#}"),
+                    match resolve_branch_oid(repo_path, name) {
+                        Ok(Some(oid)) => leftover.kept_branches.push(KeptBranch {
+                            name: name.to_string(),
+                            oid: Some(oid),
+                            provenance: None,
+                        }),
+                        Ok(None) => leftover.gone_branches.push(name.to_string()),
+                        // Not "gone": kept, with no commit to delete it by.
+                        Err(err) => {
+                            leftover.kept_branches.push(KeptBranch {
+                                name: name.to_string(),
+                                oid: None,
+                                provenance: None,
+                            });
+                            leftover
+                                .unchecked_branches
+                                .push((name.to_string(), format!("{err:#}")));
                         }
-                    });
-                    leftover.branches.push((name.to_string(), outcome));
+                    }
                 }
                 anyhow::Error::new(leftover)
             }
@@ -10932,21 +11167,152 @@ mod tests {
             leftovers: vec![".astro/collections".to_string(), "dist".to_string()],
             more: 3,
             git_error: "error: failed to delete '/work/wt-feat': Directory not empty".to_string(),
-            branches: vec![("feat".to_string(), BranchDeletion::Deleted)],
+            kept_branches: vec![KeptBranch {
+                name: "feat".to_string(),
+                oid: Some("abc".to_string()),
+                provenance: None,
+            }],
+            gone_branches: Vec::new(),
+            unchecked_branches: Vec::new(),
+            in_manager: true,
         };
         assert_eq!(
             leftover.to_string(),
             "something kept writing into /work/wt-feat (.astro/collections, dist and 3 more), \
-             so the folder is still there. Stop it, then delete the folder yourself. \
-             Branch feat was deleted."
+             so the folder is still there. Stop it, then delete the folder from the project's \
+             worktree manager. Branch feat was kept because the folder is still on disk; the \
+             worktree manager can delete it with the folder."
         );
         leftover.leftovers.clear();
         leftover.more = 0;
+        leftover.in_manager = false;
+        leftover.kept_branches.push(KeptBranch {
+            name: "feat-old".to_string(),
+            oid: Some("def".to_string()),
+            provenance: None,
+        });
+        leftover.gone_branches.push("gone".to_string());
         assert_eq!(
             leftover.to_string(),
             "something kept writing into /work/wt-feat, so the folder is still there. \
-             Stop it, then delete the folder yourself. Branch feat was deleted."
+             Stop it, then delete the folder yourself. Branches feat and feat-old were kept \
+             because the folder is still on disk; delete them with git branch -D once the \
+             folder is gone. Branch gone was already gone."
         );
+    }
+
+    /// A branch git could not be asked about is never reported as gone: it is
+    /// kept, with no commit, and the message says why and how to finish.
+    #[test]
+    fn a_branch_git_cannot_check_is_kept_rather_than_called_gone() {
+        let leftover = LeftoverWorktreeFolder {
+            path: std::path::PathBuf::from("/work/wt-feat"),
+            leftovers: Vec::new(),
+            more: 0,
+            git_error: String::new(),
+            kept_branches: vec![KeptBranch {
+                name: "feat".to_string(),
+                oid: None,
+                provenance: None,
+            }],
+            gone_branches: Vec::new(),
+            unchecked_branches: vec![("feat".to_string(), "fatal: bad object".to_string())],
+            in_manager: true,
+        };
+        assert_eq!(
+            leftover.to_string(),
+            "something kept writing into /work/wt-feat, so the folder is still there. Stop it, \
+             then delete the folder from the project's worktree manager. git could not check \
+             branch feat (fatal: bad object), so it was kept; delete it with git branch -D once \
+             the folder is gone."
+        );
+        let not_a_repo = tempfile::tempdir().unwrap();
+        assert!(resolve_branch_oid(not_a_repo.path(), "feat").is_err());
+    }
+
+    /// The real removal, with git unable to read the repository's refs once
+    /// it has let go of the worktree (a corrupt `packed-refs`): the branch is
+    /// kept with no commit and said to be unchecked, never "already gone".
+    #[test]
+    fn a_removal_git_cannot_check_the_branch_of_keeps_it_unchecked() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "leftover");
+        run_git(
+            repo.path(),
+            &["worktree", "remove", "--force", wt.to_str().unwrap()],
+        );
+        std::fs::create_dir_all(wt.join(".astro")).unwrap();
+        run_git(repo.path(), &["pack-refs", "--all"]);
+        let packed = repo.path().join(".git/packed-refs");
+        let mut refs = std::fs::read_to_string(&packed).unwrap();
+        refs.push_str("not a ref line\n");
+        std::fs::write(&packed, refs).unwrap();
+
+        let err = remove_worktree(repo.path(), &wt, "leftover", None)
+            .expect_err("the folder is left over");
+        let leftover = err
+            .downcast_ref::<LeftoverWorktreeFolder>()
+            .expect("the leftover error");
+        assert_eq!(leftover.gone_branches, Vec::<String>::new());
+        assert_eq!(
+            leftover.kept_branches,
+            [KeptBranch {
+                name: "leftover".to_string(),
+                oid: None,
+                provenance: None,
+            }]
+        );
+        assert_eq!(leftover.unchecked_branches.len(), 1);
+    }
+
+    /// A kept branch goes only while it still points where it did when its
+    /// folder was left behind; one that moved, vanished or is checked out
+    /// elsewhere is reported as that and kept. A dash-leading name is a ref.
+    #[test]
+    fn a_kept_branch_is_deleted_only_while_it_points_where_it_did() {
+        let repo = init_test_repo();
+        let head = head_commit(repo.path()).unwrap();
+        run_git(repo.path(), &["update-ref", "refs/heads/--force", &head]);
+        run_git(repo.path(), &["update-ref", "refs/heads/moved", &head]);
+        let kept = |name: &str| KeptBranch {
+            name: name.to_string(),
+            oid: Some(head.clone()),
+            provenance: None,
+        };
+        assert_eq!(
+            delete_kept_branch(repo.path(), &kept("--force")).unwrap(),
+            KeptBranchDeletion::Deleted
+        );
+        assert_eq!(resolve_branch_oid(repo.path(), "--force").unwrap(), None);
+        assert_eq!(
+            delete_kept_branch(repo.path(), &kept("--force")).unwrap(),
+            KeptBranchDeletion::AlreadyGone
+        );
+        std::fs::write(repo.path().join("next.txt"), "x").unwrap();
+        run_git(repo.path(), &["add", "next.txt"]);
+        run_git(repo.path(), &["commit", "-m", "next"]);
+        let next = head_commit(repo.path()).unwrap();
+        run_git(repo.path(), &["update-ref", "refs/heads/moved", &next]);
+        assert_eq!(
+            delete_kept_branch(repo.path(), &kept("moved")).unwrap(),
+            KeptBranchDeletion::Moved
+        );
+        assert_eq!(
+            resolve_branch_oid(repo.path(), "moved").unwrap(),
+            Some(next.clone())
+        );
+        let wt = add_worktree(repo.path(), "held");
+        let checked_out = KeptBranch {
+            name: "held".to_string(),
+            oid: Some(next),
+            provenance: None,
+        };
+        assert!(matches!(
+            delete_kept_branch(repo.path(), &checked_out).unwrap(),
+            KeptBranchDeletion::Refused { reason } if reason.contains("checked out")
+        ));
+        assert!(wt.exists());
+        assert!(resolve_branch_oid(repo.path(), "held").unwrap().is_some());
     }
 
     /// Once git has dropped the registration and only the folder is left, the
@@ -10978,10 +11344,20 @@ mod tests {
             .downcast_ref::<LeftoverWorktreeFolder>()
             .expect("the leftover error");
         assert_eq!(leftover.leftovers, vec![".astro/collections".to_string()]);
+        let names: Vec<&str> = leftover
+            .kept_branches
+            .iter()
+            .map(|kept| kept.name.as_str())
+            .collect();
         assert_eq!(
-            leftover.branches,
-            vec![("leftover".to_string(), BranchDeletion::Deleted)],
-            "git let go of the worktree, so the branch the caller asked to delete goes"
+            names,
+            ["leftover"],
+            "the folder still holds the branch's files, so the branch is kept"
+        );
+        assert_eq!(
+            leftover.kept_branches[0].oid,
+            resolve_branch_oid(repo.path(), "leftover").unwrap(),
+            "the kept branch is recorded at the commit it points at"
         );
         assert!(
             wt.join(".astro/collections").exists(),

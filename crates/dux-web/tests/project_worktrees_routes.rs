@@ -501,3 +501,91 @@ async fn worktree_counts_reports_every_project() {
     assert_eq!(body["counts"]["p1"], 3, "got {body}");
     assert!(f.dirty.exists());
 }
+
+async fn delete_leftover(
+    addr: SocketAddr,
+    path: &Path,
+    branches: &[&str],
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "http://{addr}/api/v1/projects/p1/leftover-folders/delete"
+        ))
+        .json(&serde_json::json!({
+            "path": path.to_string_lossy(),
+            "delete_branches": branches,
+        }))
+        .send()
+        .await
+        .expect("send the request");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+async fn a_folder_a_removal_left_behind_is_listed_and_deleted_with_its_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("SKIPPED: root can empty a directory with no write permission");
+        return;
+    }
+    let f = boot().await;
+    let repo = f.tmp.path().join("repo");
+    // Something git cannot empty: its removal unregisters the worktree and
+    // leaves the folder.
+    let held = f.free.join(".astro");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::write(held.join("lock"), "x").unwrap();
+    std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (status, body) = delete_with(f.addr, "p1", &f.free, "&delete_branch=true").await;
+    assert_eq!(status, 500, "the removal could not finish: {body}");
+    assert!(body.contains("worktree manager"), "{body}");
+    assert!(
+        branch_exists(&repo, "free"),
+        "the branch is kept with the folder"
+    );
+
+    let (_, listing) = list(f.addr, "p1").await;
+    let leftovers = listing["leftovers"].as_array().expect("leftovers array");
+    assert_eq!(leftovers.len(), 1, "{listing}");
+    let row = &leftovers[0];
+    assert_eq!(row["branches"], serde_json::json!(["free"]));
+    assert_eq!(row["folder_present"], true);
+    assert_eq!(row["undeletable"], serde_json::json!([]));
+    assert_eq!(row["left_by"], "manager");
+    assert_eq!(row["offers_delete"], true);
+    assert_eq!(row["branch_provenance"], serde_json::Value::Null);
+    let path = PathBuf::from(row["path"].as_str().unwrap());
+
+    std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (status, reply) = delete_leftover(f.addr, &path, &["free"]).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["removed"], true, "{reply}");
+    assert_eq!(reply["warning"], false, "{reply}");
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Deleted the left-over folder at "),
+        "{reply}"
+    );
+    assert!(
+        reply["segments"].is_array(),
+        "the sentence carries its names"
+    );
+    assert!(!path.exists());
+    assert!(!branch_exists(&repo, "free"));
+    let (_, listing) = list(f.addr, "p1").await;
+    assert_eq!(listing["leftovers"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn deleting_a_folder_dux_has_no_record_of_is_refused_in_words() {
+    let f = boot().await;
+    let (status, reply) = delete_leftover(f.addr, &f.free, &["free"]).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["removed"], false, "{reply}");
+    assert_eq!(reply["warning"], true, "{reply}");
+    assert!(f.free.exists());
+    assert!(branch_exists(&f.tmp.path().join("repo"), "free"));
+}

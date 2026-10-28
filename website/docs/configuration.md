@@ -243,6 +243,9 @@ Some things to know:
   the database and the config, lists what it removed and what failed, and exits with status
   1. Fix that and run it again.
 - **A folder a standalone agent runs in is never removed.**
+- **Branches kept with a left-over folder go too,** when dux created them and they still
+  point where they did when the folder was left behind. A branch that existed before its
+  agent is kept, as a delete keeps it.
 - **The welcome screen stays dismissed.** The reset keeps the record that you have seen it.
 
 ### What `dux config diff` shows, and what it holds back

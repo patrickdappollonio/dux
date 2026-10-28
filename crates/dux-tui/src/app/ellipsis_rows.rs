@@ -219,8 +219,9 @@ fn the_worktree_manager_cuts_a_wide_folder_name_in_the_middle_by_columns() {
         return_to: None,
         project,
         entries: vec![managed(LONG_CJK, "brone"), managed("plain", "brtwo")],
+        leftovers: Vec::new(),
         loading: false,
-        selected: Some(0),
+        selected: Some(crate::app::ManagerSelection::Worktree(0)),
         error: None,
     });
     for (w, h) in [(120, 40), (80, 24)] {

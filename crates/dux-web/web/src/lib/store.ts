@@ -45,6 +45,7 @@ import type { ReconnectPlanEvent } from "./reconnectingSocket"
 import { paneMacroTargetFor } from "./paneMacroTarget"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
+import { normalizeLeftover } from "./leftoverFolder"
 import { reuseUnchangedFiles } from "./changedFiles"
 import { discardConfirmation, discardOutcome } from "./discardOutcome"
 import { terminalsApi } from "./terminalsApi"
@@ -103,7 +104,7 @@ import {
 import { publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
-import { worktreeDeleteReport } from "./worktreeDelete"
+import { leftoverDeleteReport, worktreeDeleteReport } from "./worktreeDelete"
 import { attentionCountForSurface, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
@@ -193,6 +194,7 @@ import type {
   MacroView,
   OperationView,
   ProjectWorktreeEntryView,
+  LeftoverFolderView,
   SessionView,
   StartupLogContent,
   StartupLogEntry,
@@ -632,6 +634,9 @@ export interface DuxState {
   // `new-agent-from-worktree` picker.
   attachWorktreeTarget: string | null
   attachWorktreeEntries: ProjectWorktreeEntryView[]
+  // The left-over folders the same listing reports: folders git let go of
+  // whose delete could not finish. Filled and cleared with the entries.
+  attachWorktreeLeftovers: LeftoverFolderView[]
   attachWorktreeLoading: boolean
   // True when the Worktrees dialog was reached by drilling through the project
   // picker, which is when a Back control makes sense: it returns to the project
@@ -642,6 +647,10 @@ export interface DuxState {
   // (not just its path) so the confirmation can name the branch and say whether
   // there is uncommitted work to lose without re-deriving either.
   deleteWorktreeTarget: { projectId: string; entry: ProjectWorktreeEntryView } | null
+  // The left-over folder pending a delete confirmation, or null. Carries the
+  // whole row so the confirmation can name its kept branches and their
+  // provenance.
+  deleteLeftoverTarget: { projectId: string; folder: LeftoverFolderView } | null
   // Managed-worktree counts per project id for the project picker's row labels,
   // or null before the first answer lands. Fetched when the picker opens in the
   // worktree intent, not kept live: it is a label, not a live view.
@@ -1159,9 +1168,11 @@ let state: DuxState = {
   projectsDialogOpen: false,
   attachWorktreeTarget: null,
   attachWorktreeEntries: [],
+  attachWorktreeLeftovers: [],
   attachWorktreeLoading: false,
   attachWorktreeFromPicker: false,
   deleteWorktreeTarget: null,
+  deleteLeftoverTarget: null,
   projectWorktreeCounts: null,
   createAgentTarget: null,
   renameTarget: null,
@@ -6901,6 +6912,7 @@ export function openAttachWorktree(
   setState({
     attachWorktreeTarget: projectId,
     attachWorktreeEntries: [],
+    attachWorktreeLeftovers: [],
     attachWorktreeLoading: true,
     attachWorktreeFromPicker: fromPicker,
   })
@@ -6918,12 +6930,17 @@ function loadProjectWorktrees(projectId: string): void {
       if (state.attachWorktreeTarget !== projectId) return
       setState({
         attachWorktreeEntries: res.entries,
+        attachWorktreeLeftovers: (res.leftovers ?? []).map(normalizeLeftover),
         attachWorktreeLoading: false,
       })
     })
     .catch((e) => {
       if (state.attachWorktreeTarget !== projectId) return
-      setState({ attachWorktreeEntries: [], attachWorktreeLoading: false })
+      setState({
+        attachWorktreeEntries: [],
+        attachWorktreeLeftovers: [],
+        attachWorktreeLoading: false,
+      })
       notifyError(
         e instanceof Error ? e.message : "Could not list the worktrees.",
       )
@@ -6983,13 +7000,57 @@ export function deleteProjectWorktree(
     )
 }
 
+// Arm the delete confirmation for one left-over folder. Only ever called from
+// a row with nothing using the folder; the server refuses one in use too.
+export function openDeleteLeftover(
+  projectId: string,
+  folder: LeftoverFolderView,
+): void {
+  setState({ deleteLeftoverTarget: { projectId, folder } })
+}
+
+export function closeDeleteLeftover(): void {
+  setState({ deleteLeftoverTarget: null })
+}
+
+// Delete one left-over folder, and the kept branches in `deleteBranches` with
+// it, then reload the listing so the row reflects the server's answer. A
+// refusal is a 200 like any other decided outcome, so it arrives here as a
+// warning rather than as an error. See lib/worktreeDelete.ts for the tone, and
+// for why no outcome is sticky.
+export function deleteLeftoverFolder(
+  projectId: string,
+  path: string,
+  deleteBranches: string[],
+): void {
+  projectsApi
+    .deleteLeftoverFolder(projectId, path, deleteBranches)
+    .then((reply) => {
+      const report = leftoverDeleteReport(reply)
+      notify(report.tone, report.message)
+      if (state.attachWorktreeTarget === projectId) {
+        loadProjectWorktrees(projectId)
+      }
+      loadProjectWorktreeCounts()
+    })
+    .catch((e) =>
+      notifyError(
+        e instanceof Error && e.message
+          ? e.message
+          : "Could not delete the left-over folder.",
+      ),
+    )
+}
+
 export function closeAttachWorktree(): void {
   setState({
     attachWorktreeTarget: null,
     attachWorktreeEntries: [],
+    attachWorktreeLeftovers: [],
     attachWorktreeLoading: false,
     attachWorktreeFromPicker: false,
     deleteWorktreeTarget: null,
+    deleteLeftoverTarget: null,
   })
 }
 

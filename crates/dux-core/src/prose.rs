@@ -286,6 +286,66 @@ mod tests {
     }
 
     /// A fixture argument that is a list of strings; absent is empty.
+    /// The left-over folder dialog's sentences, for [`build`].
+    fn build_leftover(sentence: &str, args: &Value) -> Prose {
+        let s = |key: &str| args[key].as_str().expect(key).to_string();
+        match sentence {
+            "leftover_delete_body" => crate::leftover_folders::delete_dialog_body(
+                &s("path"),
+                leftover_folder_on_disk(args),
+                if args["left_by_agent"].as_bool().expect("left_by_agent") {
+                    crate::leftover_folders::LeftBy::Agent
+                } else {
+                    crate::leftover_folders::LeftBy::Manager
+                },
+            ),
+            "leftover_branch_fate" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                crate::leftover_folders::delete_dialog_branch_fate(
+                    &branches,
+                    if args["delete"].as_bool().expect("delete") {
+                        crate::leftover_folders::BranchChoice::Delete
+                    } else {
+                        crate::leftover_folders::BranchChoice::Keep
+                    },
+                    leftover_folder_on_disk(args),
+                )
+            }
+            "leftover_delete_title" => {
+                Prose::new().text(crate::leftover_folders::delete_dialog_title(
+                    leftover_folder_on_disk(args),
+                    crate::numeric::u64_to_usize(
+                        args["branch_count"].as_u64().expect("branch_count"),
+                    ),
+                ))
+            }
+            "leftover_kept_branch" => crate::leftover_folders::kept_branch_sentence(
+                &s("name"),
+                &match s("why").as_str() {
+                    "no_commit" => crate::leftover_folders::BranchBlock::NoCommit,
+                    "checked_out" => {
+                        crate::leftover_folders::BranchBlock::CheckedOut { path: s("path") }
+                    }
+                    "moved" => crate::leftover_folders::BranchBlock::Moved,
+                    "unchecked" => crate::leftover_folders::BranchBlock::Unchecked {
+                        reason: s("reason"),
+                    },
+                    other => panic!("no such reason a branch is kept: {other}"),
+                },
+            ),
+            other => panic!("not a left-over folder sentence: {other}"),
+        }
+    }
+
+    fn leftover_folder_on_disk(args: &Value) -> crate::leftover_folders::FolderOnDisk {
+        if args["folder_present"].as_bool().expect("folder_present") {
+            crate::leftover_folders::FolderOnDisk::Present
+        } else {
+            crate::leftover_folders::FolderOnDisk::Gone
+        }
+    }
+
     fn strings(value: &Value) -> Vec<String> {
         value
             .as_array()
@@ -350,6 +410,7 @@ mod tests {
                     &worktree, &branch, &source, resume, &running,
                 )
             }
+            leftover if leftover.starts_with("leftover_") => build_leftover(leftover, args),
             "recreate_restart_checkbox" => {
                 crate::working_copy::recreate_restart_checkbox_prose(&strings(&args["restartable"]))
             }

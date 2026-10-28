@@ -4,13 +4,14 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import type { DuxState } from "@/lib/store"
-import type { ProjectWorktreeEntryView } from "@/lib/types"
+import type { LeftoverFolderView, ProjectWorktreeEntryView } from "@/lib/types"
 
 // Override only `useDux` so the dialog reads our seeded state, while the real
 // store exports (closeAttachWorktree, attachWorktree) stay intact.
 let mockState: DuxState
 const openNewAgentPicker = vi.fn()
 const deleteProjectWorktree = vi.fn()
+const deleteLeftoverFolder = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -18,6 +19,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     openNewAgentPicker: (...args: unknown[]) => openNewAgentPicker(...args),
     deleteProjectWorktree: (...args: unknown[]) => deleteProjectWorktree(...args),
+    deleteLeftoverFolder: (...args: unknown[]) => deleteLeftoverFolder(...args),
   }
 })
 
@@ -88,9 +90,11 @@ function seed(
   mockState = {
     attachWorktreeTarget: "p1",
     attachWorktreeEntries: entries,
+    attachWorktreeLeftovers: [],
     attachWorktreeLoading: false,
     attachWorktreeFromPicker: false,
     deleteWorktreeTarget: null,
+    deleteLeftoverTarget: null,
     spine: {
       projects: [{ id: "p1", name: "acme" }],
       sessions: [
@@ -109,6 +113,7 @@ beforeEach(() => {
   installBootStubs()
   openNewAgentPicker.mockClear()
   deleteProjectWorktree.mockClear()
+  deleteLeftoverFolder.mockClear()
 })
 
 afterEach(() => {
@@ -431,5 +436,236 @@ describe("WorktreesDialog", () => {
     seed([])
     render(<WorktreesDialog />)
     expect(screen.getByText(/no worktrees/i)).toBeTruthy()
+  })
+
+  describe("left-over folders", () => {
+    function leftover(
+      overrides: Partial<LeftoverFolderView> = {},
+    ): LeftoverFolderView {
+      return {
+        path: "/wt/acme/stuck",
+        branches: ["feat"],
+        undeletable: [],
+        branch_provenance: "created",
+        left_by: "agent",
+        offers_delete: true,
+        in_use: null,
+        folder_present: true,
+        ...overrides,
+      }
+    }
+
+    async function openRowMenu() {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Left-over folder actions" }),
+      )
+      await screen.findByRole("menu")
+    }
+
+    function menuLabels(): string[] {
+      return screen.getAllByRole("menuitem").map((item) => item.textContent ?? "")
+    }
+
+    it("lists a left-over folder with its kept branches as chips", async () => {
+      seed([], {
+        attachWorktreeLeftovers: [leftover({ branches: ["feat", "feat-old"] })],
+      } as Partial<DuxState>)
+      render(<WorktreesDialog />)
+      expect(screen.getByText("Left over after a delete")).toBeTruthy()
+      expect(screen.getByText("stuck")).toBeTruthy()
+      expect(screen.getByText("/wt/acme/stuck")).toBeTruthy()
+      const kept = screen.getByText("feat", { selector: "code" })
+      expect(kept.parentElement?.textContent).toBe("Kept branches feat and feat-old")
+      // A project whose only rows are left-over folders is not empty.
+      expect(screen.queryByText(/no worktrees/i)).toBeNull()
+      await openRowMenu()
+      expect(menuLabels()).toEqual(["Copy path", "Delete folder…"])
+    })
+
+    it("offers no delete while something is using the folder", async () => {
+      seed([], {
+        attachWorktreeLeftovers: [
+          leftover({ in_use: "In use: a terminal open in it." }),
+        ],
+      } as Partial<DuxState>)
+      render(<WorktreesDialog />)
+      expect(screen.getByText("In use: a terminal open in it.")).toBeTruthy()
+      await openRowMenu()
+      expect(menuLabels()).toEqual(["Copy path"])
+    })
+
+    it("says a row whose folder is gone is about its kept branch", async () => {
+      seed([], {
+        attachWorktreeLeftovers: [leftover({ folder_present: false })],
+      } as Partial<DuxState>)
+      render(<WorktreesDialog />)
+      expect(screen.getByText("Folder already removed; branch kept")).toBeTruthy()
+      await openRowMenu()
+      expect(menuLabels()).toEqual(["Copy path", "Delete branch…"])
+    })
+
+    it("offers only Copy path for a branch dux will not delete, and says why", async () => {
+      seed([], {
+        attachWorktreeLeftovers: [
+          leftover({
+            folder_present: false,
+            branches: [],
+            undeletable: [{ name: "feat", why: "moved" }],
+            offers_delete: false,
+          }),
+        ],
+      } as Partial<DuxState>)
+      render(<WorktreesDialog />)
+      expect(
+        screen.getByTestId("leftover-kept-branch").textContent,
+      ).toBe(
+        "The branch feat is kept: it has moved since the folder was left behind. Delete it yourself with git branch -D 'feat'.",
+      )
+      await openRowMenu()
+      expect(menuLabels()).toEqual(["Copy path"])
+    })
+
+    function confirmFor(
+      folder: LeftoverFolderView,
+      listed: LeftoverFolderView = folder,
+    ) {
+      seed([], {
+        attachWorktreeLeftovers: [listed],
+        deleteLeftoverTarget: { projectId: "p1", folder },
+      } as Partial<DuxState>)
+      render(<WorktreesDialog />)
+    }
+
+    const branchBox = () =>
+      screen.getByRole("checkbox", { name: /also delete the branch/i, hidden: true })
+    const confirmButton = () =>
+      screen.getByRole("button", { name: "Delete folder", hidden: true })
+
+    it.each(["created", null] as const)(
+      "ticks the branch box for a %s branch and sends it with the delete",
+      (provenance) => {
+        confirmFor(leftover({ branch_provenance: provenance }))
+        expect(branchBox().getAttribute("aria-checked")).toBe("true")
+        expect(screen.queryByTestId("delete-leftover-branch-warning")).toBeNull()
+        fireEvent.click(confirmButton())
+        expect(deleteLeftoverFolder).toHaveBeenCalledWith(
+          "p1",
+          "/wt/acme/stuck",
+          ["feat"],
+        )
+      },
+    )
+
+    it("leaves a branch that predates its agent unticked, warns, and keeps it", () => {
+      confirmFor(leftover({ branch_provenance: "attached" }))
+      expect(branchBox().getAttribute("aria-checked")).toBe("false")
+      expect(
+        screen.getByTestId("delete-leftover-branch-warning").textContent,
+      ).toBe("This branch existed before the agent.")
+      fireEvent.click(confirmButton())
+      expect(deleteLeftoverFolder).toHaveBeenCalledWith("p1", "/wt/acme/stuck", [])
+    })
+
+    it("says what is lost, and offers no branch box when no branch was kept", () => {
+      confirmFor(leftover({ branches: [] }))
+      expect(screen.getByTestId("delete-leftover-confirm").textContent).toBe(
+        "/wt/acme/stuck and everything in it will be deleted from disk. Something was still writing into it when its agent was deleted; stop it first, or the delete fails again. This cannot be undone: dux has no trash.",
+      )
+      expect(screen.queryByRole("checkbox", { hidden: true })).toBeNull()
+      fireEvent.click(confirmButton())
+      expect(deleteLeftoverFolder).toHaveBeenCalledWith("p1", "/wt/acme/stuck", [])
+    })
+
+    const fate = () =>
+      screen.getByTestId("delete-leftover-branch-fate").textContent
+
+    it("says the branch's fate the way the box is ticked", () => {
+      confirmFor(leftover())
+      expect(fate()).toBe(
+        "The branch feat will be deleted with it, unless it has moved since the folder was left behind.",
+      )
+      fireEvent.click(branchBox())
+      expect(fate()).toBe("The branch feat is kept.")
+    })
+
+    it("deletes the kept branches when the folder is already gone", () => {
+      confirmFor(
+        leftover({
+          folder_present: false,
+          branches: ["feat", "feat-old"],
+          branch_provenance: "attached",
+        }),
+      )
+      expect(
+        screen.getByRole("heading", { name: "Delete the kept branches?", hidden: true }),
+      ).toBeTruthy()
+      expect(screen.getByTestId("delete-leftover-confirm").textContent).toContain(
+        "The left-over folder at /wt/acme/stuck is already gone, so nothing is deleted from disk.",
+      )
+      expect(fate()).toBe(
+        "The branches feat and feat-old will be deleted, unless they have moved since the folder was left behind.",
+      )
+      expect(screen.getByTestId("delete-leftover-branch-warning").textContent).toBe(
+        "feat-old existed before the agent.",
+      )
+      // The delete IS the branches, so there is no box to untick.
+      expect(screen.queryByRole("checkbox", { hidden: true })).toBeNull()
+      fireEvent.click(
+        screen.getByRole("button", { name: "Delete branches", hidden: true }),
+      )
+      expect(deleteLeftoverFolder).toHaveBeenCalledWith("p1", "/wt/acme/stuck", [
+        "feat",
+        "feat-old",
+      ])
+    })
+
+    it("offers the box for the branch it can delete and says why it keeps the other", () => {
+      confirmFor(
+        leftover({
+          undeletable: [
+            { name: "feat-old", why: "checked_out", path: "/wt/acme/other" },
+          ],
+        }),
+      )
+      expect(
+        screen.getByRole("checkbox", { name: "Also delete the branch feat", hidden: true }),
+      ).toBeTruthy()
+      expect(fate()).toBe(
+        "The branch feat will be deleted with it, unless it has moved since the folder was left behind.",
+      )
+      expect(screen.getByTestId("delete-leftover-kept-branch").textContent).toBe(
+        "The branch feat-old is kept: it is checked out in /wt/acme/other. Delete it yourself with git branch -D 'feat-old' once it is not.",
+      )
+      fireEvent.click(confirmButton())
+      expect(deleteLeftoverFolder).toHaveBeenCalledWith("p1", "/wt/acme/stuck", ["feat"])
+    })
+
+    it("says the worktree manager's removal left the folder, by what left it", () => {
+      confirmFor(leftover({ left_by: "manager" }))
+      expect(screen.getByTestId("delete-leftover-confirm").textContent).toContain(
+        "when its worktree was removed;",
+      )
+    })
+
+    it.each([
+      ["its kept branches changed", { branches: ["feat", "feat-old"] }],
+      ["its folder went", { folder_present: false }],
+      [
+        "it keeps a branch it did not",
+        { undeletable: [{ name: "feat-old", why: "moved" }] },
+      ],
+      ["it no longer offers a delete", { offers_delete: false }],
+    ] as const)("closes when the row it was opened on changed: %s", (_why, change) => {
+      confirmFor(leftover(), leftover(change))
+      expect(screen.queryByTestId("delete-leftover-confirm")).toBeNull()
+    })
+
+    it("closes when a branch it keeps is kept for another reason", () => {
+      confirmFor(
+        leftover({ undeletable: [{ name: "feat-old", why: "no_commit" }] }),
+        leftover({ undeletable: [{ name: "feat-old", why: "moved" }] }),
+      )
+      expect(screen.queryByTestId("delete-leftover-confirm")).toBeNull()
+    })
   })
 })

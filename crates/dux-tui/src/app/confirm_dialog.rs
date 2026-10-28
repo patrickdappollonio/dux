@@ -527,6 +527,11 @@ mod tests {
                 delete_button,
                 ..
             }
+            | L::ConfirmDeleteLeftoverFolder {
+                cancel_button,
+                delete_button,
+                ..
+            }
             | L::ConfirmDeleteTerminal {
                 cancel_button,
                 delete_button,
@@ -695,6 +700,7 @@ mod tests {
                         return_to: None,
                         project: project.clone(),
                         entries: Vec::new(),
+                        leftovers: Vec::new(),
                         loading: false,
                         selected: None,
                         error: None,
@@ -1304,6 +1310,7 @@ mod tests {
                 ..
             } => rects.extend(checkbox.iter().chain(branch_checkbox).map(|c| c.rect)),
             L::ConfirmDeleteWorktree { checkbox, .. }
+            | L::ConfirmDeleteLeftoverFolder { checkbox, .. }
             | L::ConfirmRecreateWorkingCopy { checkbox, .. }
             | L::ConfirmNonDefaultBranch { checkbox, .. } => {
                 rects.extend(checkbox.iter().map(|c| c.rect));

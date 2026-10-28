@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Ellipsis, FileWarning, FolderGit2, Trash2 } from "lucide-react"
+import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -24,16 +24,28 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { branchCheckboxLabel, predatesSentence } from "@/lib/branchWarning"
+import { clipboardWorktree } from "@/lib/flatClipboard"
+import {
+  leftoverBranchFateProse,
+  leftoverDeleteBodyProse,
+  leftoverDeleteTitle,
+  leftoverKeptBranchProse,
+} from "@/lib/leftoverFolder"
+import { chip, type Prose, renderProse } from "@/lib/prose"
 import {
   attachWorktree,
   closeAttachWorktree,
+  closeDeleteLeftover,
   closeDeleteWorktree,
+  deleteLeftoverFolder,
   deleteProjectWorktree,
+  openDeleteLeftover,
   openDeleteWorktree,
   openNewAgentPicker,
   useDux,
 } from "@/lib/store"
-import type { ProjectWorktreeEntryView } from "@/lib/types"
+import type { LeftoverFolderView, ProjectWorktreeEntryView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
 // The last path segment (the worktree directory's name) is what the TUI shows
@@ -231,11 +243,292 @@ function ConfirmDeleteWorktree() {
   )
 }
 
+// The kept branches a left-over row names, every one a chip.
+function keptBranchesLine(branches: string[]): Prose {
+  if (branches.length === 1) return ["Kept branch ", chip(branches[0])]
+  return [
+    "Kept branches ",
+    ...branches.flatMap((branch, index): Prose =>
+      index === 0 ? [chip(branch)] : [" and ", chip(branch)],
+    ),
+  ]
+}
+
+// Whether the row the delete dialog was opened on is still the row listed: the
+// same folder, still deletable, with the same branches to delete, the same
+// branches kept for the same reasons and the same folder state, since the
+// dialog's sentences and its request are built from those.
+function sameLeftover(listed: LeftoverFolderView, opened: LeftoverFolderView): boolean {
+  return (
+    listed.path === opened.path &&
+    !listed.in_use &&
+    listed.offers_delete === opened.offers_delete &&
+    listed.folder_present === opened.folder_present &&
+    listed.branches.length === opened.branches.length &&
+    listed.branches.every((branch, index) => branch === opened.branches[index]) &&
+    listed.undeletable.length === opened.undeletable.length &&
+    listed.undeletable.every(
+      (branch, index) =>
+        branch.name === opened.undeletable[index].name &&
+        branch.why === opened.undeletable[index].why,
+    )
+  )
+}
+
+// A left-over folder row: the folder's name over its full path, the branches
+// kept with it, and what is using it now when something is. Once the folder
+// itself is gone the row says so, and its delete is about the branches. A row
+// with nothing a delete can remove offers no delete, and says of each branch
+// it keeps why, and how to delete it yourself.
+function LeftoverRow({
+  projectId,
+  folder,
+}: {
+  projectId: string
+  folder: LeftoverFolderView
+}) {
+  const kept = [
+    ...folder.branches,
+    ...folder.undeletable.map((branch) => branch.name),
+  ]
+  return (
+    <div className="flex min-h-11 w-full items-center gap-1 pr-1 hover:bg-accent/60 md:min-h-0">
+      <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2">
+        <FolderX className="size-4 shrink-0 text-muted-foreground" />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate font-mono text-sm">{pathTail(folder.path)}</span>
+          <span className="truncate text-xs text-muted-foreground">
+            {folder.path}
+          </span>
+          {folder.folder_present ? null : (
+            <span className="truncate text-xs text-muted-foreground">
+              {kept.length === 1
+                ? "Folder already removed; branch kept"
+                : "Folder already removed; branches kept"}
+            </span>
+          )}
+          {kept.length > 0 ? (
+            <span className="truncate text-xs text-muted-foreground">
+              {renderProse(keptBranchesLine(kept))}
+            </span>
+          ) : null}
+          {folder.offers_delete
+            ? null
+            : folder.undeletable.map((branch) => (
+                <span
+                  key={branch.name}
+                  data-testid="leftover-kept-branch"
+                  className="text-xs text-muted-foreground"
+                >
+                  {renderProse(leftoverKeptBranchProse(branch))}
+                </span>
+              ))}
+          {folder.in_use ? (
+            <span className="truncate text-xs text-muted-foreground">
+              {folder.in_use}
+            </span>
+          ) : null}
+        </div>
+      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 shrink-0 max-md:size-10"
+              aria-label="Left-over folder actions"
+            />
+          }
+        >
+          <Ellipsis />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => clipboardWorktree(folder.path)}>
+            <Copy />
+            Copy path
+          </DropdownMenuItem>
+          {/* Absent while something uses the folder, since the server refuses
+             the delete then, and when nothing on the row is a delete can
+             remove; the row already says why in both cases. Neutral colour,
+             per the row-menu convention. */}
+          {folder.in_use || !folder.offers_delete ? null : (
+            <DropdownMenuItem
+              onClick={() => openDeleteLeftover(projectId, folder)}
+            >
+              <Trash2 />
+              {folder.folder_present
+                ? "Delete folder…"
+                : folder.branches.length === 1
+                  ? "Delete branch…"
+                  : "Delete branches…"}
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+// The confirmation for deleting a left-over folder. Like the worktree removal
+// it is forcible with no trash, and it says why the last delete failed, since
+// whatever kept writing there will make this one fail too. Its sentences are
+// dux-core's, shared with the terminal UI (see lib/leftoverFolder.ts).
+//
+// With the folder already gone the delete is the kept branches and nothing
+// else, so there is no box: every branch a delete can remove goes with the
+// request, and the confirm says so. A kept branch a delete cannot remove is
+// never in the request or the box; the dialog says why it is kept instead.
+//
+// The branch box is ticked to begin with for a branch dux created, and for a
+// folder the manager's own removal left (null provenance), whose branch the
+// user had already asked to delete; a branch that predates its agent starts
+// unticked and carries the agent-delete dialog's warning for its provenance.
+function ConfirmDeleteLeftoverFolder() {
+  const { deleteLeftoverTarget, attachWorktreeLeftovers } = useDux()
+  const folder = deleteLeftoverTarget?.folder
+  const provenance = folder?.branch_provenance ?? null
+  const tickedByDefault = provenance === null || provenance === "created"
+  // `null` until the user touches the box, so each open starts at the
+  // default for its own folder.
+  const [choice, setChoice] = useState<boolean | null>(null)
+  const folderPresent = folder?.folder_present ?? true
+  const deleteBranches = !folderPresent || (choice ?? tickedByDefault)
+  const stillListed =
+    deleteLeftoverTarget !== null &&
+    attachWorktreeLeftovers.some((f) =>
+      sameLeftover(f, deleteLeftoverTarget.folder),
+    )
+  const open = useVanishedTargetGuard(
+    deleteLeftoverTarget !== null,
+    stillListed,
+    () => {
+      setChoice(null)
+      closeDeleteLeftover()
+    },
+  )
+  const branches = folder?.branches ?? []
+  const undeletable = folder?.undeletable ?? []
+  const warning =
+    branches.length > 0 && provenance !== null
+      ? predatesSentence(provenance, branches)
+      : null
+
+  function handleCancel() {
+    setChoice(null)
+    closeDeleteLeftover()
+  }
+
+  function handleConfirm() {
+    if (!deleteLeftoverTarget) return
+    deleteLeftoverFolder(
+      deleteLeftoverTarget.projectId,
+      deleteLeftoverTarget.folder.path,
+      deleteBranches ? branches : [],
+    )
+    handleCancel()
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) handleCancel()
+      }}
+    >
+      <DialogContent showCloseButton={false} destructive>
+        <DialogHeader>
+          <DialogTitle>
+            {leftoverDeleteTitle(folderPresent, branches.length)}
+          </DialogTitle>
+        </DialogHeader>
+        <div
+          data-testid="delete-leftover-confirm"
+          className="grid gap-2 text-sm text-destructive"
+        >
+          <p>
+            {renderProse(
+              leftoverDeleteBodyProse(
+                folder?.path ?? "",
+                folderPresent,
+                folder?.left_by !== "manager",
+              ),
+            )}
+          </p>
+          {branches.length > 0 ? (
+            <p
+              data-testid="delete-leftover-branch-fate"
+              className={deleteBranches ? undefined : "text-muted-foreground"}
+            >
+              {renderProse(
+                leftoverBranchFateProse(branches, deleteBranches, folderPresent),
+              )}
+            </p>
+          ) : null}
+          {undeletable.map((branch) => (
+            <p
+              key={branch.name}
+              data-testid="delete-leftover-kept-branch"
+              className="text-muted-foreground"
+            >
+              {renderProse(leftoverKeptBranchProse(branch))}
+            </p>
+          ))}
+        </div>
+        {branches.length > 0 ? (
+          <div className="grid gap-2">
+            {folderPresent ? (
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="delete-leftover-branches"
+                  checked={deleteBranches}
+                  onCheckedChange={setChoice}
+                />
+                <label
+                  htmlFor="delete-leftover-branches"
+                  className="min-w-0 text-sm"
+                >
+                  {renderProse(branchCheckboxLabel(branches))}
+                </label>
+              </div>
+            ) : null}
+            {/* The danger sits in the sentence, never in a red checkbox, as in
+               the agent-delete dialog. */}
+            {warning !== null ? (
+              <p
+                data-testid="delete-leftover-branch-warning"
+                className="text-sm text-destructive"
+              >
+                {renderProse(warning)}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        {/* Misclick-safe spacing between the checkbox and the footer. */}
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={handleCancel}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={handleConfirm}>
+            {folderPresent
+              ? "Delete folder"
+              : branches.length === 1
+                ? "Delete branch"
+                : "Delete branches"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // Mounted only while the dialog is open so its local select/name state resets on
 // each open, with no set-state-in-effect needed (matching AddProjectDialog).
 function WorktreesBody({ projectId }: { projectId: string }) {
   const {
     attachWorktreeEntries,
+    attachWorktreeLeftovers,
     attachWorktreeLoading,
     attachWorktreeFromPicker,
     spine,
@@ -316,7 +609,8 @@ function WorktreesBody({ projectId }: { projectId: string }) {
         ) : adoptable.length === 0 &&
           attached.length === 0 &&
           inUse.length === 0 &&
-          beingRemoved.length === 0 ? (
+          beingRemoved.length === 0 &&
+          attachWorktreeLeftovers.length === 0 ? (
           <div className="flex h-[40vh] items-center justify-center px-6 text-center text-sm text-muted-foreground md:h-64">
             This project has no worktrees dux manages yet. Create an agent and
             one appears here.
@@ -444,6 +738,24 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                 ))}
               </>
             ) : null}
+            {attachWorktreeLeftovers.length > 0 ? (
+              <>
+                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
+                  Left over after a delete
+                  <span className="block text-xs font-normal">
+                    git let go of these folders, but something was still
+                    writing into them when dux deleted them.
+                  </span>
+                </div>
+                {attachWorktreeLeftovers.map((folder) => (
+                  <LeftoverRow
+                    key={folder.path}
+                    projectId={projectId}
+                    folder={folder}
+                  />
+                ))}
+              </>
+            ) : null}
           </div>
         )}
       </ScrollArea>
@@ -528,6 +840,7 @@ export function WorktreesDialog() {
       {/* A sibling, not a child: the manager stays open behind the
          confirmation, so cancelling lands the user back on the list. */}
       <ConfirmDeleteWorktree />
+      <ConfirmDeleteLeftoverFolder />
     </>
   )
 }

@@ -270,6 +270,63 @@ export interface ProjectWorktreeEntryView {
   in_use?: string | null
 }
 
+// A left-over folder in the Worktrees manager: a worktree folder whose delete
+// git finished (it no longer lists the worktree) but whose directory could not
+// be removed, because something was still writing into it.
+// The store builds it from the wire through `normalizeLeftover`, which fills
+// the fields an older server does not send.
+export interface LeftoverFolderView {
+  path: string
+  // The kept branches a delete can remove, by name.
+  branches: string[]
+  // The kept branches a delete would keep, each with why.
+  undeletable: UndeletableBranchView[]
+  // The provenance of the agent's branch, or null when the worktree manager's
+  // own removal left the folder (its branch is then one dux created).
+  branch_provenance: "created" | "attached" | "adopted" | "unknown" | null
+  // What left the folder behind: an agent's delete, or the worktree
+  // manager's own removal.
+  left_by: "agent" | "manager"
+  // Whether the row offers a delete: a folder to delete, or a kept branch a
+  // delete can remove.
+  offers_delete: boolean
+  // What is using the folder now, as dux-core's sentence for both surfaces
+  // ("In use: <reason>. Delete it once that has stopped."), or null. A row
+  // with one offers no delete.
+  in_use: string | null
+  // False once the folder itself is gone (deleted by hand, or replaced by
+  // something else) while a kept branch is still there: the row is then about
+  // the branch, and a delete removes nothing at the path.
+  folder_present: boolean
+}
+
+// A kept branch dux will not delete, and why: it has no recorded commit, it
+// is checked out in the worktree at `path`, it moved since the folder was
+// left behind, or git could not check it (`reason` is git's own words).
+export interface UndeletableBranchView {
+  name: string
+  why: "no_commit" | "checked_out" | "moved" | "unchecked"
+  path?: string
+  reason?: string
+}
+
+// A left-over folder as the server sends it. An older server sends no
+// `undeletable`, `left_by` or `offers_delete`.
+export type LeftoverFolderWire = Omit<
+  LeftoverFolderView,
+  "undeletable" | "left_by" | "offers_delete"
+> &
+  Partial<Pick<LeftoverFolderView, "undeletable" | "left_by" | "offers_delete">>
+
+// The answer to a left-over folder delete. Every decided outcome, refusals
+// included, arrives this way; `segments` carries the names in `message`.
+export interface DeleteLeftoverFolderReply {
+  removed: boolean
+  warning: boolean
+  message: string
+  segments: unknown
+}
+
 // The branch-warning classification for a candidate project path. `known` names
 // the resolved default branch; `heuristic` means dux cannot confidently identify
 // it. Null on the reply means the repo is already on its default branch.

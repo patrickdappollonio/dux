@@ -17,7 +17,7 @@ use super::{
     PrLookupFinalOutcome, PrReferenceResolutionAnswer, PromptState, PruneViewContext,
     StartupCommandLogFocus, StartupCommandLogPrompt, TuiCheckoutInspectOutcome,
     TuiConfigReloadOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
-    build_visual_rows, removable_worktree_indices, selectable_project_worktree_indices,
+    build_visual_rows, manager_selectable_rows, selectable_project_worktree_indices,
 };
 use crate::config::Config;
 use crate::keybindings::Action;
@@ -713,9 +713,15 @@ impl App {
             EventReaction::ManageableWorktreesArrived {
                 project_id,
                 result,
+                leftovers,
                 status_op_id,
             } => {
-                self.apply_manageable_worktrees_arrived(&project_id, result, status_op_id);
+                self.apply_manageable_worktrees_arrived(
+                    &project_id,
+                    result,
+                    leftovers,
+                    status_op_id,
+                );
             }
 
             EventReaction::OpenNewAgentPromptForPr {
@@ -1565,30 +1571,42 @@ impl App {
         &mut self,
         project_id: &str,
         result: Result<Vec<dux_core::worktree_manager::ManagedWorktree>, String>,
+        leftovers: Vec<dux_core::leftover_folders::LeftoverFolder>,
         status_op_id: Option<String>,
     ) {
+        let mut note = None;
         let outcome = if let PromptState::ManageWorktrees(prompt) = &mut self.prompt
             && prompt.project.id == project_id
         {
             prompt.loading = false;
             match result {
                 Ok(entries) => {
-                    prompt.selected = removable_worktree_indices(&entries).into_iter().next();
+                    prompt.selected = manager_selectable_rows(&entries, &leftovers)
+                        .into_iter()
+                        .next();
                     prompt.entries = entries;
+                    prompt.leftovers = leftovers;
                     prompt.error = None;
                     WorktreesFinalOutcome::Loaded
                 }
                 Err(error) => {
                     prompt.entries.clear();
+                    prompt.leftovers.clear();
                     prompt.selected = None;
                     prompt.error = Some(error.clone());
                     WorktreesFinalOutcome::Failed(error)
                 }
             }
         } else {
+            if let Ok(entries) = result {
+                note = self.refresh_open_leftover_prompt(project_id, entries, leftovers);
+            }
             WorktreesFinalOutcome::Dismissed
         };
         self.resolve_worktree_listing_op(status_op_id, &outcome);
+        if let Some(note) = note {
+            self.set_info(note);
+        }
     }
 
     fn resolve_worktree_listing_op(

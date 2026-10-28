@@ -238,6 +238,9 @@ enum PromptMouseTarget {
     ManageWorktreeItem(usize),
     ConfirmDeleteWorktreeCancel,
     ConfirmDeleteWorktreeConfirm,
+    LeftoverFolderActionItem(usize),
+    ConfirmDeleteLeftoverFolderCancel,
+    ConfirmDeleteLeftoverFolderConfirm,
     PickProjectItem(usize),
     ProjectActionItem(usize),
     ChangeBaseBranchInput,
@@ -357,6 +360,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmDeleteWorktreeConfirm => {
                 Some(ButtonPressedTarget::ConfirmDeleteWorktreeConfirm)
+            }
+            PromptMouseTarget::ConfirmDeleteLeftoverFolderCancel => {
+                Some(ButtonPressedTarget::ConfirmDeleteLeftoverFolderCancel)
+            }
+            PromptMouseTarget::ConfirmDeleteLeftoverFolderConfirm => {
+                Some(ButtonPressedTarget::ConfirmDeleteLeftoverFolderConfirm)
             }
             PromptMouseTarget::ConfirmDeleteTerminalCancel => {
                 Some(ButtonPressedTarget::ConfirmDeleteTerminalCancel)
@@ -479,6 +488,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
             | PromptMouseTarget::ManageWorktreeItem(_)
+            | PromptMouseTarget::LeftoverFolderActionItem(_)
             | PromptMouseTarget::PickProjectItem(_)
             | PromptMouseTarget::ProjectActionItem(_)
             | PromptMouseTarget::ChangeBaseBranchInput
@@ -2133,6 +2143,8 @@ impl App {
             | PromptState::PickProjectWorktree(_)
             | PromptState::ManageWorktrees(_)
             | PromptState::ConfirmDeleteWorktree(_)
+            | PromptState::LeftoverFolderActions(_)
+            | PromptState::ConfirmDeleteLeftoverFolder(_)
             | PromptState::ChangeTheme(_)
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
@@ -4806,32 +4818,47 @@ impl App {
         let PromptState::ManageWorktrees(prompt) = &mut self.prompt else {
             return None;
         };
-        // Selection skips rows that cannot be removed.
+        // Selection skips rows that cannot be acted on.
         match self.bindings.lookup(&key, BindingScope::Palette) {
             Some(Action::CloseOverlay) => self.close_worktree_manager(),
             Some(Action::MoveDown) => {
-                let removable = removable_worktree_indices(&prompt.entries);
+                let selectable = manager_selectable_rows(&prompt.entries, &prompt.leftovers);
                 if let Some(current) = prompt.selected
-                    && let Some(position) = removable.iter().position(|idx| *idx == current)
-                    && let Some(next) = removable.get(position + 1)
+                    && let Some(position) = selectable.iter().position(|row| *row == current)
+                    && let Some(next) = selectable.get(position + 1)
                 {
                     prompt.selected = Some(*next);
                 } else if prompt.selected.is_none() {
-                    prompt.selected = removable.into_iter().next();
+                    prompt.selected = selectable.into_iter().next();
                 }
             }
             Some(Action::MoveUp) => {
-                let removable = removable_worktree_indices(&prompt.entries);
+                let selectable = manager_selectable_rows(&prompt.entries, &prompt.leftovers);
                 if let Some(current) = prompt.selected
-                    && let Some(position) = removable.iter().position(|idx| *idx == current)
+                    && let Some(position) = selectable.iter().position(|row| *row == current)
                     && position > 0
                 {
-                    prompt.selected = Some(removable[position - 1]);
+                    prompt.selected = Some(selectable[position - 1]);
                 } else if prompt.selected.is_none() {
-                    prompt.selected = removable.into_iter().next();
+                    prompt.selected = selectable.into_iter().next();
                 }
             }
-            Some(Action::Confirm) => self.confirm_delete_selected_worktree(),
+            Some(Action::Confirm) => self.activate_manager_selection(),
+            _ => {}
+        }
+        Some(false)
+    }
+
+    fn handle_leftover_folder_actions_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::LeftoverFolderActions(prompt) = &mut self.prompt else {
+            return None;
+        };
+        let rows = prompt.actions.len();
+        match self.bindings.lookup(&key, BindingScope::Palette) {
+            Some(Action::CloseOverlay) => self.close_leftover_folder_actions(),
+            Some(Action::MoveDown) if prompt.selected + 1 < rows => prompt.selected += 1,
+            Some(Action::MoveUp) if prompt.selected > 0 => prompt.selected -= 1,
+            Some(Action::Confirm) => self.activate_leftover_folder_action(),
             _ => {}
         }
         Some(false)
@@ -5510,8 +5537,48 @@ impl App {
         Some(false)
     }
 
+    fn handle_confirm_delete_leftover_folder_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
+        let PromptState::ConfirmDeleteLeftoverFolder(prompt) = &mut self.prompt else {
+            return None;
+        };
+        let ring = [
+            (DeleteWorktreeFocus::Cancel, true),
+            (DeleteWorktreeFocus::Delete, true),
+            (DeleteWorktreeFocus::Checkbox, prompt.has_branch_checkbox()),
+        ];
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Elsewhere) {
+            ModalKeyStep::Close => {
+                return Some(self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Cancel));
+            }
+            ModalKeyStep::MoveFocus(direction) => {
+                prompt.focus = next_focus(&ring, prompt.focus, direction);
+            }
+            ModalKeyStep::Confirm | ModalKeyStep::ActivateFocus => match prompt.focus {
+                DeleteWorktreeFocus::Checkbox => {
+                    prompt.delete_branches = !prompt.delete_branches;
+                }
+                DeleteWorktreeFocus::Cancel => {
+                    return Some(
+                        self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Cancel),
+                    );
+                }
+                DeleteWorktreeFocus::Delete => {
+                    return Some(
+                        self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Confirm),
+                    );
+                }
+            },
+            ModalKeyStep::FallThroughToField => {}
+        }
+        Some(false)
+    }
+
     fn handle_confirmation_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         if let Some(exit) = self.handle_confirm_delete_worktree_prompt_key(key) {
+            return Some(exit);
+        }
+        if let Some(exit) = self.handle_confirm_delete_leftover_folder_prompt_key(key) {
             return Some(exit);
         }
         if let Some(exit) = self.handle_confirm_change_base_branch_prompt_key(key) {
@@ -6205,6 +6272,9 @@ impl App {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_manage_worktrees_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_leftover_folder_actions_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_pick_project_worktree_prompt_key(key) {
@@ -7240,6 +7310,31 @@ impl App {
                     (
                         delete_button,
                         PromptMouseTarget::ConfirmDeleteWorktreeConfirm,
+                    ),
+                ],
+                column,
+                row,
+            ),
+            OverlayMouseLayout::LeftoverFolderActions {
+                list,
+                items,
+                offset,
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::LeftoverFolderActionItem),
+            OverlayMouseLayout::ConfirmDeleteLeftoverFolder {
+                cancel_button,
+                delete_button,
+                checkbox,
+            } => Self::checkbox_before_buttons_target(
+                checkbox,
+                &[
+                    (
+                        cancel_button,
+                        PromptMouseTarget::ConfirmDeleteLeftoverFolderCancel,
+                    ),
+                    (
+                        delete_button,
+                        PromptMouseTarget::ConfirmDeleteLeftoverFolderConfirm,
                     ),
                 ],
                 column,
@@ -8666,10 +8761,11 @@ impl App {
     /// refuses must do nothing at all, not confirm whatever was selected
     /// before it.
     fn set_manage_worktree_selection_from_visual_row(&mut self, visual_index: usize) -> bool {
-        let entry_index = match &self.prompt {
+        let selection = match &self.prompt {
             PromptState::ManageWorktrees(prompt) => {
                 let rows = manage_worktree_visual_rows(
                     &prompt.entries,
+                    &prompt.leftovers,
                     if prompt.loading {
                         Listing::Loading
                     } else {
@@ -8683,18 +8779,21 @@ impl App {
                             dux_core::worktree_manager::ManagedWorktree::is_removable,
                         ) =>
                     {
-                        Some(*index)
+                        Some(ManagerSelection::Worktree(*index))
+                    }
+                    ManageWorktreeVisualRow::Leftover(index) => {
+                        Some(ManagerSelection::Leftover(*index))
                     }
                     _ => None,
                 })
             }
             _ => None,
         };
-        let Some(entry_index) = entry_index else {
+        let Some(selection) = selection else {
             return false;
         };
         if let PromptState::ManageWorktrees(prompt) = &mut self.prompt {
-            prompt.selected = Some(entry_index);
+            prompt.selected = Some(selection);
         }
         true
     }
@@ -9956,6 +10055,22 @@ impl App {
         }
     }
 
+    /// The worktree manager's two "also delete the branch" boxes: the
+    /// worktree removal's and the left-over folder delete's.
+    fn toggle_worktree_manager_branch_box(&mut self) {
+        match &mut self.prompt {
+            PromptState::ConfirmDeleteWorktree(prompt) if prompt.has_branch_checkbox() => {
+                prompt.delete_branch = !prompt.delete_branch;
+                prompt.focus = DeleteWorktreeFocus::Checkbox;
+            }
+            PromptState::ConfirmDeleteLeftoverFolder(prompt) if prompt.has_branch_checkbox() => {
+                prompt.delete_branches = !prompt.delete_branches;
+                prompt.focus = DeleteWorktreeFocus::Checkbox;
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_overlay_checkbox(&mut self, checkbox_id: OverlayCheckboxId) {
         match checkbox_id {
             OverlayCheckboxId::DeleteAgentWorktree => {
@@ -10002,13 +10117,9 @@ impl App {
                     *focus = RecreateWorkingCopyFocus::RestartCheckbox;
                 }
             }
-            OverlayCheckboxId::DeleteWorktreeBranch => {
-                if let PromptState::ConfirmDeleteWorktree(prompt) = &mut self.prompt
-                    && prompt.has_branch_checkbox()
-                {
-                    prompt.delete_branch = !prompt.delete_branch;
-                    prompt.focus = DeleteWorktreeFocus::Checkbox;
-                }
+            OverlayCheckboxId::DeleteWorktreeBranch
+            | OverlayCheckboxId::DeleteLeftoverFolderBranches => {
+                self.toggle_worktree_manager_branch_box();
             }
             OverlayCheckboxId::RenameSessionBranch => {
                 self.toggle_rename_session_branch();
@@ -10340,7 +10451,23 @@ impl App {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         let landed = self.set_manage_worktree_selection_from_visual_row(index);
         if landed && double_click {
-            self.confirm_delete_selected_worktree();
+            self.activate_manager_selection();
+        }
+    }
+
+    /// A click on a left-over folder's action row selects it; a double click
+    /// runs it, like every other picker.
+    fn click_leftover_folder_action_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        let PromptState::LeftoverFolderActions(prompt) = &mut self.prompt else {
+            return;
+        };
+        if index >= prompt.actions.len() {
+            return;
+        }
+        prompt.selected = index;
+        if double_click {
+            self.activate_leftover_folder_action();
         }
     }
 
@@ -10499,6 +10626,9 @@ impl App {
             PromptMouseTarget::ManageWorktreeItem(index) => {
                 self.click_manage_worktree_item(index);
             }
+            PromptMouseTarget::LeftoverFolderActionItem(index) => {
+                self.click_leftover_folder_action_item(index);
+            }
             PromptMouseTarget::PickProjectItem(index) => {
                 self.click_project_picker_item(index);
             }
@@ -10602,6 +10732,8 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteConfirm
             | PromptMouseTarget::ConfirmDeleteWorktreeCancel
             | PromptMouseTarget::ConfirmDeleteWorktreeConfirm
+            | PromptMouseTarget::ConfirmDeleteLeftoverFolderCancel
+            | PromptMouseTarget::ConfirmDeleteLeftoverFolderConfirm
             | PromptMouseTarget::ConfirmDeleteTerminalCancel
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
             | PromptMouseTarget::ConfirmCloseTabCancel
@@ -10716,6 +10848,12 @@ impl App {
             }
             ButtonPressedTarget::ConfirmDeleteWorktreeConfirm => {
                 self.resolve_confirm_delete_worktree(ConfirmAnswer::Confirm)
+            }
+            ButtonPressedTarget::ConfirmDeleteLeftoverFolderCancel => {
+                self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Cancel)
+            }
+            ButtonPressedTarget::ConfirmDeleteLeftoverFolderConfirm => {
+                self.resolve_confirm_delete_leftover_folder(ConfirmAnswer::Confirm)
             }
             ButtonPressedTarget::ConfirmDeleteTerminalCancel => {
                 self.resolve_confirm_delete_terminal(ConfirmAnswer::Cancel)
@@ -26624,8 +26762,12 @@ cyan = "#00ffff"
             busy: None,
         };
         let entries = vec![entry("free", None), entry("held", Some("session-1"))];
-        let rows =
-            crate::app::manage_worktree_visual_rows(&entries, crate::app::Listing::Loaded, None);
+        let rows = crate::app::manage_worktree_visual_rows(
+            &entries,
+            &[],
+            crate::app::Listing::Loaded,
+            None,
+        );
         let held_row = rows
             .iter()
             .position(|r| matches!(r, crate::app::ManageWorktreeVisualRow::Entry(1)))
@@ -26634,8 +26776,9 @@ cyan = "#00ffff"
             return_to: None,
             project,
             entries,
+            leftovers: Vec::new(),
             loading: false,
-            selected: Some(0),
+            selected: Some(crate::app::ManagerSelection::Worktree(0)),
             error: None,
         });
         app.overlay_layout.active = OverlayMouseLayout::ManageWorktrees {
@@ -26651,7 +26794,7 @@ cyan = "#00ffff"
         match &app.prompt {
             PromptState::ManageWorktrees(prompt) => assert_eq!(
                 prompt.selected,
-                Some(0),
+                Some(crate::app::ManagerSelection::Worktree(0)),
                 "the free row stays selected and nothing was confirmed"
             ),
             other => panic!("no confirmation may open from a held row, got {other:?}"),

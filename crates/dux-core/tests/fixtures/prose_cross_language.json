@@ -819,6 +819,311 @@
         },
         " (git could not be run: No such file or directory); check them before deleting them."
       ]
+    },
+    {
+      "what": "the left-over folder delete dialog, for a folder an agent's delete left",
+      "sentence": "leftover_delete_body",
+      "args": {
+        "path": "/srv/worktrees/demo/landing-page",
+        "folder_present": true,
+        "left_by_agent": true
+      },
+      "segments": [
+        {
+          "name": "/srv/worktrees/demo/landing-page",
+          "quoted": false
+        },
+        " and everything in it will be deleted from disk. Something was still writing into it when its agent was deleted; stop it first, or the delete fails again. This cannot be undone: dux has no trash."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog, for a folder the worktree manager's own removal left",
+      "sentence": "leftover_delete_body",
+      "args": {
+        "path": "/srv/worktrees/demo/landing-page",
+        "folder_present": true,
+        "left_by_agent": false
+      },
+      "segments": [
+        {
+          "name": "/srv/worktrees/demo/landing-page",
+          "quoted": false
+        },
+        " and everything in it will be deleted from disk. Something was still writing into it when its worktree was removed; stop it first, or the delete fails again. This cannot be undone: dux has no trash."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog, once the folder is already gone",
+      "sentence": "leftover_delete_body",
+      "args": {
+        "path": "/srv/worktrees/demo/landing-page",
+        "folder_present": false,
+        "left_by_agent": true
+      },
+      "segments": [
+        "The left-over folder at ",
+        {
+          "name": "/srv/worktrees/demo/landing-page",
+          "quoted": false
+        },
+        " is already gone, so nothing is deleted from disk."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence with its box ticked",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page"
+        ],
+        "delete": true,
+        "folder_present": true
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " will be deleted with it, unless it has moved since the folder was left behind."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence for two branches with its box unticked",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page",
+          "landing"
+        ],
+        "delete": false,
+        "folder_present": true
+      },
+      "segments": [
+        "The branches ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "landing",
+          "quoted": false
+        },
+        " are kept."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence once the folder is gone",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page"
+        ],
+        "delete": true,
+        "folder_present": false
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " will be deleted, unless it has moved since the folder was left behind."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence for two branches once the folder is gone",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page",
+          "landing"
+        ],
+        "delete": true,
+        "folder_present": false
+      },
+      "segments": [
+        "The branches ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "landing",
+          "quoted": false
+        },
+        " will be deleted, unless they have moved since the folder was left behind."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence for two branches going with the folder",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page",
+          "landing"
+        ],
+        "delete": true,
+        "folder_present": true
+      },
+      "segments": [
+        "The branches ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "landing",
+          "quoted": false
+        },
+        " will be deleted with it, unless they have moved since the folder was left behind."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's branch sentence for one branch with its box unticked",
+      "sentence": "leftover_branch_fate",
+      "args": {
+        "branches": [
+          "landing-page"
+        ],
+        "delete": false,
+        "folder_present": true
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " is kept."
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's title while the folder is there",
+      "sentence": "leftover_delete_title",
+      "args": {
+        "folder_present": true,
+        "branch_count": 1
+      },
+      "segments": [
+        "Delete the left-over folder?"
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's title once the folder is gone, one branch",
+      "sentence": "leftover_delete_title",
+      "args": {
+        "folder_present": false,
+        "branch_count": 1
+      },
+      "segments": [
+        "Delete the kept branch?"
+      ]
+    },
+    {
+      "what": "the left-over folder delete dialog's title once the folder is gone, two branches",
+      "sentence": "leftover_delete_title",
+      "args": {
+        "folder_present": false,
+        "branch_count": 2
+      },
+      "segments": [
+        "Delete the kept branches?"
+      ]
+    },
+    {
+      "what": "a kept branch dux recorded no commit for",
+      "sentence": "leftover_kept_branch",
+      "args": {
+        "name": "landing-page",
+        "why": "no_commit"
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " is kept: dux has no record of the commit it was on when the folder was left behind. Delete it yourself with ",
+        {
+          "name": "git branch -D 'landing-page'",
+          "quoted": false
+        },
+        "."
+      ]
+    },
+    {
+      "what": "a kept branch another worktree has checked out",
+      "sentence": "leftover_kept_branch",
+      "args": {
+        "name": "landing-page",
+        "why": "checked_out",
+        "path": "/srv/worktrees/demo/other"
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " is kept: it is checked out in ",
+        {
+          "name": "/srv/worktrees/demo/other",
+          "quoted": false
+        },
+        ". Delete it yourself with ",
+        {
+          "name": "git branch -D 'landing-page'",
+          "quoted": false
+        },
+        " once it is not."
+      ]
+    },
+    {
+      "what": "a kept branch that moved since its folder was left behind",
+      "sentence": "leftover_kept_branch",
+      "args": {
+        "name": "landing-page",
+        "why": "moved"
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " is kept: it has moved since the folder was left behind. Delete it yourself with ",
+        {
+          "name": "git branch -D 'landing-page'",
+          "quoted": false
+        },
+        "."
+      ]
+    },
+    {
+      "what": "a kept branch git could not check",
+      "sentence": "leftover_kept_branch",
+      "args": {
+        "name": "landing-page",
+        "why": "unchecked",
+        "reason": "fatal: bad object"
+      },
+      "segments": [
+        "The branch ",
+        {
+          "name": "landing-page",
+          "quoted": false
+        },
+        " is kept: git could not check it (fatal: bad object). Delete it yourself with ",
+        {
+          "name": "git branch -D 'landing-page'",
+          "quoted": false
+        },
+        "."
+      ]
     }
   ]
 }

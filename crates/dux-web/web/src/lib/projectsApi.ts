@@ -8,7 +8,9 @@ import type {
   AcceptedOperation,
   BranchChoiceView,
   BranchWarningView,
+  DeleteLeftoverFolderReply,
   InspectKind,
+  LeftoverFolderWire,
   OperationView,
   ProjectView,
   ProjectWorktreeEntryView,
@@ -119,9 +121,14 @@ export const projectsApi = {
       `/api/v1/projects/${encodeURIComponent(id)}/base-branch`,
       { branch },
     ),
-  // List a project's managed worktrees for the "Attach worktree" picker.
+  // List a project's managed worktrees for the "Attach worktree" picker, plus
+  // the left-over folders its deletes could not finish. An older server sends
+  // no `leftovers`.
   worktrees: (id: string) =>
-    request<{ entries: ProjectWorktreeEntryView[] }>(
+    request<{
+      entries: ProjectWorktreeEntryView[]
+      leftovers?: LeftoverFolderWire[]
+    }>(
       "GET",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees`,
     ),
@@ -133,6 +140,15 @@ export const projectsApi = {
     request<DeleteWorktreeReply>(
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(id)}/worktrees?path=${encodeURIComponent(worktreePath)}&delete_branch=${deleteBranch}`,
+    ),
+  // Delete one left-over folder, and the kept branches named in
+  // `deleteBranches` with it. Every decided outcome, a refusal included, is a
+  // 200 whose reply says what happened; a 404 or 400 carries a plain reason.
+  deleteLeftoverFolder: (id: string, path: string, deleteBranches: string[]) =>
+    request<DeleteLeftoverFolderReply>(
+      "POST",
+      `/api/v1/projects/${encodeURIComponent(id)}/leftover-folders/delete`,
+      { path, delete_branches: deleteBranches },
     ),
   // Managed-worktree counts for every project, so the project picker can label its rows.
   worktreeCounts: () =>

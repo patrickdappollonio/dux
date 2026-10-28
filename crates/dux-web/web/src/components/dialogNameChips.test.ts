@@ -127,6 +127,11 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "A worktree row that is only its branch: a list row, out of the chip rule's scope.",
   },
   {
+    file: "components/WorktreesDialog.tsx",
+    line: '<span className="truncate font-mono text-sm">{pathTail(folder.path)}</span>',
+    reason: "A left-over folder row that is only its folder's name: a list row, out of the chip rule's scope.",
+  },
+  {
     file: "components/CustomizeWebappDialog.tsx",
     line: '<span className="font-mono text-xs break-all text-muted-foreground">',
     reason:

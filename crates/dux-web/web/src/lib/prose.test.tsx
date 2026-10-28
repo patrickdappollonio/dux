@@ -16,6 +16,12 @@ import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import { unpushedCountFailureProse } from "./deleteAgent"
 import { detachConfirmProse } from "./detachAgent"
+import {
+  leftoverBranchFateProse,
+  leftoverDeleteBodyProse,
+  leftoverDeleteTitle,
+  leftoverKeptBranchProse,
+} from "./leftoverFolder"
 import { deleteProjectProse, removeProjectProse } from "./projectConfirm"
 import {
   chip,
@@ -37,6 +43,7 @@ import {
   recreateRestartCheckboxProse,
 } from "./recreateWorkingCopy"
 import { renameBranchNoteProse } from "./renameAgent"
+import type { UndeletableBranchView } from "./types"
 
 describe("a name's bidi controls", () => {
   it("are dropped by both chip builders", () => {
@@ -207,6 +214,32 @@ describe("the sentences both surfaces print", () => {
           args.repository as string,
           args.number as string,
         )
+      case "leftover_delete_body":
+        return leftoverDeleteBodyProse(
+          args.path as string,
+          args.folder_present as boolean,
+          args.left_by_agent as boolean,
+        )
+      case "leftover_branch_fate":
+        return leftoverBranchFateProse(
+          args.branches as string[],
+          args.delete as boolean,
+          args.folder_present as boolean,
+        )
+      case "leftover_delete_title":
+        return [
+          leftoverDeleteTitle(
+            args.folder_present as boolean,
+            args.branch_count as number,
+          ),
+        ]
+      case "leftover_kept_branch":
+        return leftoverKeptBranchProse({
+          name: args.name as string,
+          why: args.why as UndeletableBranchView["why"],
+          path: args.path as string | undefined,
+          reason: args.reason as string | undefined,
+        })
       default:
         throw new Error(`the fixture names a sentence this test cannot build: ${sentence}`)
     }

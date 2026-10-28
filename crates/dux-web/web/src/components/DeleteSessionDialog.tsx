@@ -21,34 +21,12 @@ import {
   sessionLabel,
   type AgentWorkspaceWire,
 } from "@/lib/agentWorkspace"
+import { branchCheckboxLabel, predatesSentence } from "@/lib/branchWarning"
 import { unpushedCountFailureProse } from "@/lib/deleteAgent"
 import { chip, type Prose, renderProse } from "@/lib/prose"
 import { sessionsApi } from "@/lib/sessionsApi"
 import type { SessionView } from "@/lib/types"
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
-
-// Why a branch predates the agent, one clause per provenance; an unrecognized
-// provenance gets its own, since nothing here can claim the branch is older.
-// `subject` names the branch once there are two on screen.
-function existedBeforeSentence(provenance: string, subject: Prose): Prose {
-  if (provenance === "adopted")
-    return [...subject, " came with the worktree this agent adopted."]
-  if (provenance === "unknown") return [...subject, " is not one dux created."]
-  return [...subject, " existed before the agent."]
-}
-
-// The branch checkbox's label, naming EVERY branch the tick would delete: a box
-// promising one deletion and performing two takes consent it was not given.
-function branchCheckboxLabel(branches: string[]): Prose {
-  if (branches.length === 0) return []
-  if (branches.length === 1) return ["Also delete the branch ", chip(branches[0])]
-  return [
-    "Also delete the branches ",
-    ...branches.flatMap((branch, index): Prose =>
-      index === 0 ? [chip(branch)] : [" and ", chip(branch)],
-    ),
-  ]
-}
 
 type UnpushedCount =
   | { count: number; has_remote_refs: boolean }
@@ -94,8 +72,8 @@ function branchWarning(
   unpushed: UnpushedCount,
 ): Prose | null {
   const drifted = branches.length > 1
-  const predates = provenance !== "created"
-  if (!drifted && !predates) return null
+  const predates = predatesSentence(provenance, branches)
+  if (!drifted && predates === null) return null
   const parts: Prose[] = []
   if (drifted) {
     parts.push([
@@ -106,14 +84,7 @@ function branchWarning(
       ", so deleting the agent removes both.",
     ])
   }
-  if (predates) {
-    parts.push(
-      existedBeforeSentence(
-        provenance,
-        drifted ? [chip(branches[1])] : ["This branch"],
-      ),
-    )
-  }
+  if (predates !== null) parts.push(predates)
   const unpushedText = unpushedSentence(unpushed, drifted)
   if (unpushedText !== null) parts.push([unpushedText])
   if (unpushed !== null && "failed" in unpushed)

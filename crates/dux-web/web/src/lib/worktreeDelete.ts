@@ -2,8 +2,9 @@
 // git may refuse to delete a branch still checked out elsewhere.
 
 import type { FinalTone } from "@/lib/notify"
-import { chip, type Prose, prose, quotedChip } from "@/lib/prose"
+import { chip, type Prose, prose, quotedChip, wireProse } from "@/lib/prose"
 import { singleQuoted } from "@/lib/shellQuote"
+import type { DeleteLeftoverFolderReply } from "@/lib/types"
 
 /// What the server says happened to the branch. Mirrors
 /// `project_reads.rs`'s `BranchOutcomeReply`; `null`/absent means no branch
@@ -63,6 +64,25 @@ export function worktreeDeleteReport(
     tone: "warning",
     message: prose`Removed the worktree at ${chip(worktreePath)}, but git refused to delete its branch ${quotedChip(branch.name)}: ${reason} Delete it yourself with ${chip(`git branch -D ${singleQuoted(branch.name)}`)}, or leave it and give the next agent a different name.`,
     sticky: true,
+  }
+}
+
+/// The toast for a left-over folder delete, from the server's answer. The
+/// sentence is dux-core's, shared with the terminal UI, so nothing is reworded
+/// here, and the tone is the server's `warning` flag rather than `removed`:
+/// every refusal is a warning, and so is a branch that moved, refused or could
+/// not be checked, while a folder that was already gone is not removed by this
+/// request and is no warning by itself. No outcome is sticky, a warning
+/// included (the user's decision): each one leaves on its tone's normal
+/// window. A left-over record lives as long as its folder or a kept branch
+/// remains, so a delete that leaves either one, a branch it kept included,
+/// leaves the worktree manager's row in place showing it.
+export function leftoverDeleteReport(
+  reply: DeleteLeftoverFolderReply,
+): { tone: FinalTone; message: string | Prose } {
+  return {
+    tone: reply.warning ? "warning" : "success",
+    message: wireProse(reply.message, reply.segments),
   }
 }
 

@@ -533,21 +533,35 @@ impl AdmittedRemoval {
                     BranchRemoval::Keep
                 },
             )
+            .map_err(|err| {
+                crate::leftover_folders::record_if_leftover(
+                    &paths.sessions_db_path,
+                    Path::new(&project.path),
+                    &project.id,
+                    None,
+                    err,
+                )
+            })
         });
-        lease.finish(match &outcome {
-            Ok(RemovalOutcome::Removed {
-                branch: Some(branch),
-                ..
-            }) => Ok(crate::engine::RemovedBranches::Deleted(git::RemoveResult {
-                branch: branch.deletion.clone(),
-                initial_branch: None,
-            })),
-            Ok(_) => Ok(crate::engine::RemovedBranches::Kept(
-                crate::model::BranchKeptReason::UserDeclined,
-            )),
-            Err(message) => Err(message.clone()),
-        });
+        lease.finish(lease_outcome(&outcome));
         outcome
+    }
+}
+
+/// What a manager removal tells the removals that joined it.
+fn lease_outcome(outcome: &Result<RemovalOutcome, String>) -> crate::worktree_ops::RemovalResult {
+    match outcome {
+        Ok(RemovalOutcome::Removed {
+            branch: Some(branch),
+            ..
+        }) => Ok(crate::engine::RemovedBranches::Deleted(git::RemoveResult {
+            branch: branch.deletion.clone(),
+            initial_branch: None,
+        })),
+        Ok(_) => Ok(crate::engine::RemovedBranches::Kept(
+            crate::model::BranchKeptReason::UserDeclined,
+        )),
+        Err(message) => Err(message.clone()),
     }
 }
 

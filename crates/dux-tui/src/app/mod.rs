@@ -2123,6 +2123,30 @@ pub(crate) enum ManageWorktreeVisualRow {
     Header(&'static str),
     Empty(String),
     Entry(usize),
+    /// A left-over folder, by index into the manager's `leftovers`.
+    Leftover(usize),
+}
+
+impl ManageWorktreeVisualRow {
+    /// Whether this is the row `selection` names.
+    pub(crate) fn shows(&self, selection: ManagerSelection) -> bool {
+        match (self, selection) {
+            (Self::Entry(index), ManagerSelection::Worktree(chosen))
+            | (Self::Leftover(index), ManagerSelection::Leftover(chosen)) => *index == chosen,
+            _ => false,
+        }
+    }
+}
+
+/// A row of the worktree manager the cursor can rest on: a removable worktree
+/// or a left-over folder. Rows an agent holds and rows being removed are never
+/// one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagerSelection {
+    /// A removable worktree, by index into the manager's `entries`.
+    Worktree(usize),
+    /// A left-over folder, by index into the manager's `leftovers`.
+    Leftover(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -2597,10 +2621,12 @@ pub(crate) struct PickProjectWorktreePrompt {
 pub(crate) struct ManageWorktreesPrompt {
     pub(crate) project: Project,
     pub(crate) entries: Vec<dux_core::worktree_manager::ManagedWorktree>,
+    /// The folders a delete left behind, listed after the worktrees.
+    pub(crate) leftovers: Vec<dux_core::leftover_folders::LeftoverFolder>,
     pub(crate) loading: bool,
-    /// Index into `entries`, restricted to removable rows. `None` while
-    /// loading, on failure, or when every listed worktree is held by an agent.
-    pub(crate) selected: Option<usize>,
+    /// The row under the cursor, one of [`manager_selectable_rows`]. `None`
+    /// while loading, on failure, or when there is no such row.
+    pub(crate) selected: Option<ManagerSelection>,
     pub(crate) error: Option<String>,
     /// The project action list this was opened from, which closing it (by
     /// any way out, a save included) steps back to. `None` when nothing is
@@ -2636,6 +2662,85 @@ impl ConfirmDeleteWorktreePrompt {
     /// ring has three stops or two.
     pub(crate) fn has_branch_checkbox(&self) -> bool {
         self.branch.is_some()
+    }
+}
+
+/// What a left-over folder's action list offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeftoverFolderAction {
+    CopyPath,
+    DeleteFolder,
+}
+
+impl LeftoverFolderAction {
+    /// The row's label for `folder`; a trailing `…` marks the one that opens
+    /// a confirmation. A folder already gone is deleted as its kept branches.
+    pub(crate) fn label(self, folder: &dux_core::leftover_folders::LeftoverFolder) -> &'static str {
+        match self {
+            Self::CopyPath => "Copy path",
+            Self::DeleteFolder if folder.folder_present => "Delete folder…",
+            Self::DeleteFolder if folder.branches.len() == 1 => "Delete branch…",
+            Self::DeleteFolder => "Delete branches…",
+        }
+    }
+}
+
+/// One left-over folder's actions in the worktree manager, a Picker. Carries
+/// the manager it came from so closing it puts the listing back.
+#[derive(Clone, Debug)]
+pub(crate) struct LeftoverFolderActionsPrompt {
+    pub(crate) previous: ManageWorktreesPrompt,
+    pub(crate) folder: dux_core::leftover_folders::LeftoverFolder,
+    /// The rows, in order, decided when the list opens.
+    pub(crate) actions: Vec<LeftoverFolderAction>,
+    /// Index into `actions`.
+    pub(crate) selected: usize,
+}
+
+impl LeftoverFolderActionsPrompt {
+    /// The list for `folder`. Delete is absent while something uses the
+    /// folder (the header says what, and there is nothing to confirm until it
+    /// stops), and when there is nothing a delete could remove: the folder is
+    /// gone and every branch it kept is one a delete would keep (the header
+    /// says why each is kept).
+    pub(crate) fn new(
+        previous: ManageWorktreesPrompt,
+        folder: dux_core::leftover_folders::LeftoverFolder,
+    ) -> Self {
+        let mut actions = vec![LeftoverFolderAction::CopyPath];
+        if folder.busy.is_none() && folder.offers_delete() {
+            actions.push(LeftoverFolderAction::DeleteFolder);
+        }
+        Self {
+            previous,
+            folder,
+            actions,
+            selected: 0,
+        }
+    }
+}
+
+/// The confirmation of a left-over folder's delete. Carries the action list it
+/// came from so Cancel and Escape put it back.
+#[derive(Clone, Debug)]
+pub(crate) struct ConfirmDeleteLeftoverFolderPrompt {
+    pub(crate) previous: LeftoverFolderActionsPrompt,
+    /// Whether the kept branches a delete can remove (the folder's
+    /// `branches`) are deleted too; always true for a folder already gone.
+    pub(crate) delete_branches: bool,
+    pub(crate) focus: DeleteWorktreeFocus,
+}
+
+impl ConfirmDeleteLeftoverFolderPrompt {
+    pub(crate) fn folder(&self) -> &dux_core::leftover_folders::LeftoverFolder {
+        &self.previous.folder
+    }
+
+    /// Whether the branch checkbox is rendered, which is also whether the focus
+    /// ring has three stops or two. A folder already gone has none: deleting
+    /// its kept branches is the whole action.
+    pub(crate) fn has_branch_checkbox(&self) -> bool {
+        self.folder().folder_present && !self.folder().branches.is_empty()
     }
 }
 
@@ -3112,6 +3217,11 @@ pub(crate) enum PromptState {
     /// The manager's removal confirmation. Boxed because it carries the list it
     /// came from, and a big variant would inflate every `PromptState`.
     ConfirmDeleteWorktree(Box<ConfirmDeleteWorktreePrompt>),
+    /// A left-over folder's actions, opened from the manager. Boxed for the
+    /// same reason.
+    LeftoverFolderActions(Box<LeftoverFolderActionsPrompt>),
+    /// The confirmation of a left-over folder's delete, over its action list.
+    ConfirmDeleteLeftoverFolder(Box<ConfirmDeleteLeftoverFolderPrompt>),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfigReloadFailed {
@@ -3571,11 +3681,13 @@ pub(crate) fn project_worktree_visual_rows(
 }
 
 /// The manager's rows: removable worktrees first, then the ones an agent
-/// holds. Attached rows are LISTED rather than hidden, because a user looking
-/// for a directory they can see on disk must be told why it is not offered;
-/// they are not selectable, so the cursor cannot land on one.
+/// holds, the ones being removed, and the folders a delete left behind.
+/// Attached rows are LISTED rather than hidden, because a user looking for a
+/// directory they can see on disk must be told why it is not offered; they are
+/// not selectable, so the cursor cannot land on one.
 pub(crate) fn manage_worktree_visual_rows(
     entries: &[dux_core::worktree_manager::ManagedWorktree],
+    leftovers: &[dux_core::leftover_folders::LeftoverFolder],
     listing: Listing,
     error: Option<&str>,
 ) -> Vec<ManageWorktreeVisualRow> {
@@ -3634,7 +3746,25 @@ pub(crate) fn manage_worktree_visual_rows(
                 .map(ManageWorktreeVisualRow::Entry),
         );
     }
+    if !leftovers.is_empty() {
+        rows.push(ManageWorktreeVisualRow::Header("Left Over After A Delete"));
+        rows.extend((0..leftovers.len()).map(ManageWorktreeVisualRow::Leftover));
+    }
     rows
+}
+
+/// The rows the manager's cursor can rest on, in screen order: the removable
+/// worktrees, then every left-over folder (a busy one too, whose actions still
+/// copy its path).
+pub(crate) fn manager_selectable_rows(
+    entries: &[dux_core::worktree_manager::ManagedWorktree],
+    leftovers: &[dux_core::leftover_folders::LeftoverFolder],
+) -> Vec<ManagerSelection> {
+    removable_worktree_indices(entries)
+        .into_iter()
+        .map(ManagerSelection::Worktree)
+        .chain((0..leftovers.len()).map(ManagerSelection::Leftover))
+        .collect()
 }
 
 pub(crate) fn removable_worktree_indices(
@@ -4079,6 +4209,8 @@ pub(crate) enum OverlayCheckboxId {
     /// [`Self::DeleteWorktreeBranch`], which is the worktree manager's.
     DeleteAgentBranch,
     DeleteWorktreeBranch,
+    /// The left-over folder delete's "also delete the branch" box.
+    DeleteLeftoverFolderBranches,
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
@@ -4161,6 +4293,16 @@ pub(crate) enum OverlayMouseLayout {
         offset: usize,
     },
     ConfirmDeleteWorktree {
+        cancel_button: Rect,
+        delete_button: Rect,
+        checkbox: Option<OverlayCheckbox>,
+    },
+    LeftoverFolderActions {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ConfirmDeleteLeftoverFolder {
         cancel_button: Rect,
         delete_button: Rect,
         checkbox: Option<OverlayCheckbox>,

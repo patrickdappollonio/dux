@@ -297,6 +297,15 @@ describe("projectsApi", () => {
     )
   })
 
+  it("deleteLeftoverFolder POSTs the path and the branches to delete", async () => {
+    const fetchMock = stubOkFetch(200, { removed: true, warning: false, message: "ok", segments: null })
+    await projectsApi.deleteLeftoverFolder("p 1", "/wt/stuck", ["feat"])
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/projects/p%201/leftover-folders/delete")
+    expect(c.method).toBe("POST")
+    expect(c.body).toEqual({ path: "/wt/stuck", delete_branches: ["feat"] })
+  })
+
   it("patch sends the tri-state body verbatim (null clears, omit untouched)", async () => {
     const fetchMock = stubOkFetch(200)
     await projectsApi.patch("p1", {

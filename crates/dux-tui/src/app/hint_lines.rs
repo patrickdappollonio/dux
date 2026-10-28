@@ -189,6 +189,7 @@ const HINTLESS_PROMPTS: &[&str] = &[
     "ConfirmStopTab",
     "ConfirmCreateInitialCommit",
     "ConfirmDeleteAgent",
+    "ConfirmDeleteLeftoverFolder",
     "ConfirmDeleteProject",
     "ConfirmDeleteTerminal",
     "ConfirmDeleteWorktree",
@@ -772,6 +773,7 @@ fn describes(desc: &str, action: Action) -> bool {
 const DIALOG_WORDS: &[(&str, &[Action])] = &[
     ("cancel", &[Action::CloseOverlay]),
     ("close", &[Action::CloseOverlay]),
+    ("back", &[Action::CloseOverlay]),
     ("clear", &[Action::CloseOverlay, Action::ClearTextField]),
     ("close diff", &[Action::CloseOverlay]),
     ("close search", &[Action::CloseOverlay]),
@@ -844,6 +846,7 @@ const DIALOG_WORDS: &[(&str, &[Action])] = &[
     ("use", &[Action::Confirm]),
     ("run", &[Action::Confirm]),
     ("remove", &[Action::Confirm]),
+    ("actions", &[Action::Confirm]),
     ("resolve", &[Action::Confirm]),
     ("attach", &[Action::Confirm]),
     ("create agent", &[Action::Confirm]),

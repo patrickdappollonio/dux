@@ -34,12 +34,12 @@ use super::{
     DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache, FieldEngagement, FocusPane,
     FullscreenOverlay, InputTarget, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
     KillableRuntimeKind, LeftItem, LeftSection, Listing, MacroEditFocus, MacroEditState,
-    ManageWorktreeVisualRow, NameNewAgentFocus, OverlayCheckbox, OverlayCheckboxId,
-    OverlayMouseLayout, ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent,
-    ProjectWorktreeVisualRow, PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus,
-    RenameSessionFocus, RightSection, RowDragList, RuntimeTargetId, SelectionOrigin,
-    SidebarListGeometry, StartupCommandLogFocus, TerminalSidebarRow, VisualRow, WorkingCopy,
-    build_visual_rows, first_load, manage_worktree_visual_rows, pick_project_matches,
+    ManageWorktreeVisualRow, ManagerSelection, NameNewAgentFocus, OverlayCheckbox,
+    OverlayCheckboxId, OverlayMouseLayout, ProjectActionsTarget, ProjectChooserEntry,
+    ProjectChooserIntent, ProjectWorktreeVisualRow, PromptState, PullRequestInputFocus,
+    RecreateWorkingCopyFocus, RenameSessionFocus, RightSection, RowDragList, RuntimeTargetId,
+    SelectionOrigin, SidebarListGeometry, StartupCommandLogFocus, TerminalSidebarRow, VisualRow,
+    WorkingCopy, build_visual_rows, first_load, manage_worktree_visual_rows, pick_project_matches,
     project_worktree_visual_rows,
 };
 use crate::config::MacroSurface;
@@ -1499,6 +1499,32 @@ pub(super) fn delete_agent_branch_warning(
         .map(|prose| prose.plain())
 }
 
+/// The sentence saying the branch was never dux's to delete, `None` for one
+/// dux created. Mirrors `BranchProvenance::kept_reason`, in the dialog's own
+/// voice. `branches` lists the current branch first and the birth one second,
+/// and the provenance is recorded about the BIRTH branch, so with two on screen
+/// the sentence names it rather than saying "this".
+pub(super) fn branch_not_duxs_prose(
+    provenance: dux_core::model::BranchProvenance,
+    branches: &[&str],
+) -> Option<Prose> {
+    if provenance.dux_may_delete_branch() {
+        return None;
+    }
+    let mut text = Prose::new();
+    if let [_, birth, ..] = branches {
+        text.push_name(*birth);
+    } else {
+        text.push_text("This branch");
+    }
+    text.push_text(match provenance {
+        dux_core::model::BranchProvenance::Adopted => " came with the worktree this agent adopted.",
+        dux_core::model::BranchProvenance::Unknown => " is not one dux created.",
+        _ => " existed before the agent.",
+    });
+    Some(text)
+}
+
 /// [`delete_agent_branch_warning`] with every branch it names marked as a name.
 pub(super) fn delete_agent_branch_warning_prose(
     provenance: dux_core::model::BranchProvenance,
@@ -1518,25 +1544,11 @@ pub(super) fn delete_agent_branch_warning_prose(
         text.push_name(*current);
         text.push_text(", so deleting the agent removes both.");
     }
-    if predates {
-        // Mirrors `BranchProvenance::kept_reason`, in the dialog's own voice.
-        // The provenance is recorded about the BIRTH branch, so with two
-        // branches on screen the sentence names it rather than saying "this".
+    if let Some(reason) = branch_not_duxs_prose(provenance, branches) {
         if !text.is_empty() {
             text.push_text(" ");
         }
-        if drifted {
-            text.push_name(branches[1]);
-        } else {
-            text.push_text("This branch");
-        }
-        text.push_text(match provenance {
-            dux_core::model::BranchProvenance::Adopted => {
-                " came with the worktree this agent adopted."
-            }
-            dux_core::model::BranchProvenance::Unknown => " is not one dux created.",
-            _ => " existed before the agent.",
-        });
+        text = text.then(reason);
     }
     let spread = if drifted {
         BranchSpread::Drifted
@@ -7648,7 +7660,13 @@ impl App {
             &[
                 Hint::key(move_down, "down"),
                 Hint::key(move_up, "up"),
-                Hint::key(confirm_key, "remove"),
+                Hint::key(
+                    confirm_key,
+                    match prompt.selected {
+                        Some(ManagerSelection::Leftover(_)) => "actions",
+                        Some(ManagerSelection::Worktree(_)) | None => "remove",
+                    },
+                ),
                 Hint::key(close_key, "cancel").pinned(),
             ],
             area.width.saturating_sub(2),
@@ -7682,6 +7700,7 @@ impl App {
 
         let rows = manage_worktree_visual_rows(
             &prompt.entries,
+            &prompt.leftovers,
             if prompt.loading {
                 Listing::Loading
             } else {
@@ -7689,41 +7708,10 @@ impl App {
             },
             prompt.error.as_deref(),
         );
-        let path_col = prompt
-            .entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .path
-                    .file_name()
-                    .map_or(0, |name| display_width(&name.to_string_lossy()))
-            })
-            .max()
-            .unwrap_or(8)
-            .clamp(8, 24);
-        let items = rows
-            .iter()
-            .map(|row| match row {
-                ManageWorktreeVisualRow::Header(label) => ListItem::new(Line::from(Span::styled(
-                    format!(" {label}"),
-                    Style::default()
-                        .fg(self.theme.help_section_header_fg)
-                        .add_modifier(Modifier::BOLD),
-                ))),
-                ManageWorktreeVisualRow::Empty(message) => ListItem::new(Line::from(Span::styled(
-                    format!("  {message}"),
-                    Style::default().fg(self.theme.hint_dim_desc_fg),
-                ))),
-                ManageWorktreeVisualRow::Entry(index) => {
-                    self.manage_worktree_entry_item(&prompt.entries[*index], path_col)
-                }
-            })
-            .collect::<Vec<_>>();
-        let selected_visual = prompt.selected.and_then(|selected| {
-            rows.iter().position(
-                |row| matches!(row, ManageWorktreeVisualRow::Entry(index) if *index == selected),
-            )
-        });
+        let items = self.manage_worktree_items(prompt, &rows);
+        let selected_visual = prompt
+            .selected
+            .and_then(|selected| rows.iter().position(|row| row.shows(selected)));
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_style(Style::default().fg(self.theme.overlay_border))
@@ -7738,6 +7726,47 @@ impl App {
             items: list.items,
             offset: list.offset,
         };
+    }
+
+    /// The manager's list items, one per visual row, the folder names in one
+    /// column wide enough for the longest.
+    fn manage_worktree_items<'a>(
+        &self,
+        prompt: &'a crate::app::ManageWorktreesPrompt,
+        rows: &[ManageWorktreeVisualRow],
+    ) -> Vec<ListItem<'a>> {
+        let path_col = prompt
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .chain(prompt.leftovers.iter().map(|folder| folder.path.as_path()))
+            .map(|path| {
+                path.file_name()
+                    .map_or(0, |name| display_width(&name.to_string_lossy()))
+            })
+            .max()
+            .unwrap_or(8)
+            .clamp(8, 24);
+        rows.iter()
+            .map(|row| match row {
+                ManageWorktreeVisualRow::Header(label) => ListItem::new(Line::from(Span::styled(
+                    format!(" {label}"),
+                    Style::default()
+                        .fg(self.theme.help_section_header_fg)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                ManageWorktreeVisualRow::Empty(message) => ListItem::new(Line::from(Span::styled(
+                    format!("  {message}"),
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                ))),
+                ManageWorktreeVisualRow::Entry(index) => {
+                    self.manage_worktree_entry_item(&prompt.entries[*index], path_col)
+                }
+                ManageWorktreeVisualRow::Leftover(index) => {
+                    self.manage_worktree_leftover_item(&prompt.leftovers[*index], path_col)
+                }
+            })
+            .collect::<Vec<_>>()
     }
 
     /// One worktree row of the worktree manager: its folder, its branch, and
@@ -7815,6 +7844,279 @@ impl App {
         ];
         spans.extend(suffix_spans);
         ListItem::new(Line::from(spans))
+    }
+
+    /// One left-over folder row of the worktree manager: its folder, the
+    /// branches kept with it, and why it is there or what is using it.
+    fn manage_worktree_leftover_item<'a>(
+        &self,
+        folder: &'a dux_core::leftover_folders::LeftoverFolder,
+        path_col: usize,
+    ) -> ListItem<'a> {
+        let name = ellipsize_middle(
+            folder
+                .path
+                .file_name()
+                .map_or_else(
+                    || folder.path.display().to_string(),
+                    |name| name.to_string_lossy().to_string(),
+                )
+                .as_str(),
+            path_col,
+        );
+        let mut spans = vec![Span::styled(
+            format!("  {}", pad_to_width(&name, path_col)),
+            Style::default()
+                .fg(self.theme.text_fg)
+                .add_modifier(Modifier::BOLD),
+        )];
+        // Every branch kept with it, whether or not a delete can remove it:
+        // the actions say which ones it cannot, and why.
+        let kept: Vec<&str> = folder
+            .branches
+            .iter()
+            .map(String::as_str)
+            .chain(folder.undeletable.iter().map(|branch| branch.name.as_str()))
+            .collect();
+        if !kept.is_empty() {
+            spans.push(Span::styled(
+                "  kept: ",
+                Style::default().fg(self.theme.branch_fg),
+            ));
+            spans.push(Span::styled(
+                kept.join(", "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+        spans.push(Span::styled(
+            match &folder.busy {
+                Some(busy) => format!("  in use: {busy}"),
+                None if folder.folder_present => {
+                    "  something was still writing into it".to_string()
+                }
+                None if kept.len() == 1 => "  folder already removed; branch kept".to_string(),
+                None => "  folder already removed; branches kept".to_string(),
+            },
+            Style::default().fg(self.theme.hint_dim_desc_fg),
+        ));
+        ListItem::new(Line::from(spans))
+    }
+
+    fn render_leftover_folder_actions_prompt(&mut self, frame: &mut Frame<'_>) {
+        let PromptState::LeftoverFolderActions(prompt) = &self.prompt else {
+            return;
+        };
+        let actions = prompt.actions.clone();
+        let selected = (!actions.is_empty()).then(|| prompt.selected.min(actions.len() - 1));
+        let folder = prompt.folder.clone();
+        self.render_dim_overlay(frame);
+        let area = centered_rect(72, 50, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let label_style = Style::default().fg(self.theme.hint_desc_fg);
+        let mut header = vec![labelled_name(
+            " Folder: ",
+            &folder.path.display().to_string(),
+            label_style,
+            &self.theme,
+        )];
+        if let Some(busy) = &folder.busy {
+            header.push(Line::from(Span::styled(
+                format!(" {}", dux_core::leftover_folders::in_use_sentence(busy)),
+                Style::default().fg(self.theme.warning_fg),
+            )));
+        }
+        let header_width = area.width.saturating_sub(2);
+        let quiet = Style::default().fg(self.theme.hint_desc_fg);
+        for branch in &folder.undeletable {
+            header.extend(self.indented_prose_lines(
+                &dux_core::leftover_folders::kept_branch_sentence(&branch.name, &branch.why),
+                quiet,
+                header_width,
+            ));
+        }
+        let hints = modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::Confirm), "run"),
+                Hint::key(self.bindings.label_for(Action::CloseOverlay), "back").pinned(),
+            ],
+            area.width.saturating_sub(2),
+        );
+        let header_height = usize_to_u16_wrapping(header.len()) + 2;
+        let [details_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(header_height), Constraint::Min(3)])
+            .areas(area);
+        Paragraph::new(header)
+            .block(self.themed_overlay_block("Left-Over Folder"))
+            .render(details_area, frame.buffer_mut());
+
+        let text_style = Style::default().fg(self.theme.text_fg);
+        let items = actions
+            .iter()
+            .map(|action| {
+                ListItem::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(action.label(&folder), text_style),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg))
+            .title_bottom(hints);
+        let rendered = PickerList::new(items, selected, "No actions for this folder.")
+            .block(list_block)
+            .render(frame, list_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::LeftoverFolderActions {
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
+        };
+    }
+
+    fn render_confirm_delete_leftover_folder_prompt(&mut self, frame: &mut Frame<'_>) {
+        let PromptState::ConfirmDeleteLeftoverFolder(prompt) = &self.prompt else {
+            return;
+        };
+        let prompt = (**prompt).clone();
+        let inner_width = confirm_inner_width(frame.area());
+        let folder = prompt.folder();
+        let branches = folder
+            .branches
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let has_checkbox = prompt.has_branch_checkbox();
+        let checkbox_label = delete_agent_branch_checkbox_prose(&branches);
+        let checkbox_state = CheckboxState::of(prompt.focus, DeleteWorktreeFocus::Checkbox);
+        let checkbox_height = if has_checkbox {
+            Checkbox::with_prose(&checkbox_label, &self.theme)
+                .checked(CheckMark::from(prompt.delete_branches))
+                .state(checkbox_state)
+                .height_at(inner_width)
+        } else {
+            0
+        };
+
+        let body_lines = self.delete_leftover_folder_body(&prompt, &branches, inner_width);
+        let (title, act_label) = match (folder.folder_present, branches.len()) {
+            (true, _) => ("Delete Left-Over Folder", "Delete folder"),
+            (false, 1) => ("Delete Kept Branch", "Delete branch"),
+            (false, _) => ("Delete Kept Branches", "Delete branches"),
+        };
+
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title,
+                body: body_lines,
+                controls_height: checkbox_height,
+                cancel: ConfirmButton::new(
+                    "Cancel",
+                    ButtonKind::Confirm,
+                    ButtonPressedTarget::ConfirmDeleteLeftoverFolderCancel,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Cancel),
+                ),
+                act: ConfirmButton::new(
+                    act_label,
+                    ButtonKind::Danger,
+                    ButtonPressedTarget::ConfirmDeleteLeftoverFolderConfirm,
+                    FocusState::of(prompt.focus, DeleteWorktreeFocus::Delete),
+                ),
+                reserve_labels: &[],
+            },
+        );
+        let checkbox = has_checkbox.then(|| {
+            let (rect, _) = self.render_overlay_prose_checkbox(
+                frame,
+                layout.controls,
+                &checkbox_label,
+                CheckMark::from(prompt.delete_branches),
+                checkbox_state,
+                None,
+            );
+            OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteLeftoverFolderBranches,
+                rect,
+            }
+        });
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteLeftoverFolder {
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
+            checkbox,
+        };
+    }
+
+    /// The left-over folder delete's prose, in dux-core's shared sentences:
+    /// the question, what goes from disk, what becomes of the kept branches a
+    /// delete can remove (following the box), whether one was never dux's,
+    /// and why each kept branch a delete cannot remove stays.
+    fn delete_leftover_folder_body(
+        &self,
+        prompt: &crate::app::ConfirmDeleteLeftoverFolderPrompt,
+        branches: &[&str],
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        let folder = prompt.folder();
+        let warning_style = Style::default().fg(self.theme.warning_fg);
+        let mut body_lines = vec![Line::from("")];
+        body_lines.extend(prose_lines(
+            &Prose::new().text(dux_core::leftover_folders::delete_dialog_title(
+                folder.on_disk(),
+                branches.len(),
+            )),
+            " ",
+            Style::default().add_modifier(Modifier::BOLD),
+            &self.theme,
+        ));
+        body_lines.push(Line::from(""));
+        body_lines.extend(self.indented_prose_lines(
+            &dux_core::leftover_folders::delete_dialog_body(
+                &folder.path.display().to_string(),
+                folder.on_disk(),
+                folder.left_by,
+            ),
+            warning_style,
+            inner_width,
+        ));
+        if !branches.is_empty() {
+            body_lines.extend(self.indented_prose_lines(
+                &dux_core::leftover_folders::delete_dialog_branch_fate(
+                    branches,
+                    if prompt.delete_branches {
+                        dux_core::leftover_folders::BranchChoice::Delete
+                    } else {
+                        dux_core::leftover_folders::BranchChoice::Keep
+                    },
+                    folder.on_disk(),
+                ),
+                Style::default().fg(if prompt.delete_branches {
+                    self.theme.warning_fg
+                } else {
+                    self.theme.hint_desc_fg
+                }),
+                inner_width,
+            ));
+            if let Some(provenance) = folder.provenance
+                && let Some(reason) = branch_not_duxs_prose(provenance, branches)
+            {
+                body_lines.extend(self.indented_prose_lines(&reason, warning_style, inner_width));
+            }
+        }
+        let quiet = Style::default().fg(self.theme.hint_desc_fg);
+        for branch in &folder.undeletable {
+            body_lines.extend(self.indented_prose_lines(
+                &dux_core::leftover_folders::kept_branch_sentence(&branch.name, &branch.why),
+                quiet,
+                inner_width,
+            ));
+        }
+        body_lines
     }
 
     fn render_confirm_delete_worktree_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -12776,6 +13078,9 @@ impl App {
             PromptState::StartupCommandLogs(_) => self.render_startup_command_logs_prompt(frame),
             PromptState::PickEditor { .. } => self.render_pick_editor_prompt(frame),
             PromptState::ManageWorktrees(_) => self.render_manage_worktrees_prompt(frame),
+            PromptState::LeftoverFolderActions(_) => {
+                self.render_leftover_folder_actions_prompt(frame);
+            }
             PromptState::PickProjectWorktree(_) => self.render_pick_project_worktree_prompt(frame),
             PromptState::PickProject { .. } => self.render_pick_project_prompt(frame),
             PromptState::ProjectActions(_) => self.render_project_actions_prompt(frame),
@@ -12790,6 +13095,9 @@ impl App {
         match &self.prompt {
             PromptState::ConfirmDeleteWorktree(_) => {
                 self.render_confirm_delete_worktree_prompt(frame);
+            }
+            PromptState::ConfirmDeleteLeftoverFolder(_) => {
+                self.render_confirm_delete_leftover_folder_prompt(frame);
             }
             PromptState::ConfirmKillRunning(_) => self.render_confirm_kill_running_prompt(frame),
             PromptState::ConfigReloadFailed { .. } => {
@@ -27389,6 +27697,7 @@ mod tests {
                     return_to: None,
                     project: project.clone(),
                     entries: Vec::new(),
+                    leftovers: Vec::new(),
                     loading: false,
                     selected: None,
                     error: None,

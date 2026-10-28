@@ -117,6 +117,11 @@ fn published_list(layout: OverlayMouseLayout) -> (Rect, usize, usize) {
             items,
             offset,
         }
+        | OverlayMouseLayout::LeftoverFolderActions {
+            list,
+            items,
+            offset,
+        }
         | OverlayMouseLayout::PickProject {
             list,
             items,
@@ -442,13 +447,14 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                     return_to: None,
                     project: project.clone(),
                     entries: labels.iter().map(|l| managed_worktree(l)).collect(),
+                    leftovers: Vec::new(),
                     loading: false,
                     selected,
                     error: None,
                 })
             };
             PickerFixture {
-                tall: manage(&labels, Some(0)),
+                tall: manage(&labels, Some(crate::app::ManagerSelection::Worktree(0))),
                 last_label: last(&labels),
                 empty: manage(&[], None),
                 empty_text: "No removable worktrees.",
@@ -584,6 +590,47 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 last_label: None,
                 empty: set(0),
                 empty_text: "No modes",
+                row_height: 1,
+            }
+        }
+        "LeftoverFolderActions" => {
+            // The real list has two rows at most; the fixture repeats them.
+            let actions = |count: usize| {
+                let mut prompt = LeftoverFolderActionsPrompt::new(
+                    ManageWorktreesPrompt {
+                        return_to: None,
+                        project: project.clone(),
+                        entries: Vec::new(),
+                        leftovers: Vec::new(),
+                        loading: false,
+                        selected: None,
+                        error: None,
+                    },
+                    dux_core::leftover_folders::LeftoverFolder {
+                        folder_present: true,
+                        path: std::path::PathBuf::from("/tmp/worktrees/demo/left"),
+                        branches: Vec::new(),
+                        undeletable: Vec::new(),
+                        provenance: None,
+                        left_by: dux_core::leftover_folders::LeftBy::Manager,
+                        busy: None,
+                    },
+                );
+                prompt.actions = [
+                    LeftoverFolderAction::CopyPath,
+                    LeftoverFolderAction::DeleteFolder,
+                ]
+                .into_iter()
+                .cycle()
+                .take(count)
+                .collect();
+                PromptState::LeftoverFolderActions(Box::new(prompt))
+            };
+            PickerFixture {
+                tall: actions(TALL),
+                last_label: Some("Delete folder…".to_string()),
+                empty: actions(0),
+                empty_text: "No actions",
                 row_height: 1,
             }
         }

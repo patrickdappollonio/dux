@@ -100,6 +100,9 @@ pub(crate) enum ButtonPressedTarget {
     /// delete above: it removes a worktree nobody holds).
     ConfirmDeleteWorktreeCancel,
     ConfirmDeleteWorktreeConfirm,
+    /// The manager's delete of a folder a worktree removal left behind.
+    ConfirmDeleteLeftoverFolderCancel,
+    ConfirmDeleteLeftoverFolderConfirm,
     ConfirmDeleteTerminalCancel,
     ConfirmDeleteTerminalConfirm,
     ConfirmCloseTabCancel,

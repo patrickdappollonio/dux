@@ -817,6 +817,68 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Decide a Delete folder request for a left-over folder against LIVE
+    /// state, the same way [`Self::admit_manager_removal`] does: outside the
+    /// project's worktrees root, already being removed, or occupied (an
+    /// agent, a standalone agent, a running terminal, an agent being created,
+    /// a project) refuses it. The worker checks the record, the disk and git.
+    /// `None` for an unknown project.
+    pub fn admit_leftover_removal(
+        &self,
+        project_id: &str,
+        requested: &Path,
+        delete_branches: Vec<String>,
+    ) -> Option<crate::leftover_folders::LeftoverAdmission> {
+        use crate::leftover_folders::{
+            AdmittedLeftoverRemoval, LeftoverAdmission, LeftoverRemovalOutcome,
+        };
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?
+            .clone();
+        // A folder that holds the project's own repository is refused with
+        // that reason, before the containment rule says the same thing less
+        // truthfully.
+        if crate::worktree_ops::folder_contains(requested, Path::new(&project.path)) {
+            return Some(LeftoverAdmission::Refused(
+                LeftoverRemovalOutcome::HoldsProjectCheckout,
+            ));
+        }
+        if !could_be_managed_worktree(&self.paths.worktrees_root, &project, requested) {
+            return Some(LeftoverAdmission::Refused(
+                LeftoverRemovalOutcome::NotManaged,
+            ));
+        }
+        if self.removal_coordination.ops.is_being_removed(requested) {
+            return Some(LeftoverAdmission::Refused(
+                LeftoverRemovalOutcome::BeingRemoved,
+            ));
+        }
+        if let Some(occupant) = self.folder_occupant(
+            requested,
+            None,
+            super::pending_removals::StoppingProcesses::Occupy,
+        ) {
+            return Some(LeftoverAdmission::Refused(LeftoverRemovalOutcome::Busy {
+                reason: occupant.reason(),
+            }));
+        }
+        Some(LeftoverAdmission::Admitted(Box::new(
+            AdmittedLeftoverRemoval {
+                ops: self.removal_coordination.ops.clone(),
+                project,
+                paths: self.paths.clone(),
+                requested: requested.to_path_buf(),
+                delete_branches,
+                wait: self.removal_wait(),
+                registry: self.process_registry.clone(),
+            },
+        )))
+    }
+}
+
 /// Whether `requested` can be one of `project`'s managed worktrees at all,
 /// decided from paths alone: strictly inside the project's folder under the
 /// worktrees root, and not containing the project's own checkout. A cheap

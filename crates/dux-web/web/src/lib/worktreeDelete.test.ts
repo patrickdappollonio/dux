@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { type Prose, proseText } from "@/lib/prose"
-import { worktreeDeleteReport } from "@/lib/worktreeDelete"
+import { leftoverDeleteReport, worktreeDeleteReport } from "@/lib/worktreeDelete"
 
 const text = (m: string | Prose) => (typeof m === "string" ? m : proseText(m))
 
@@ -94,5 +94,20 @@ describe("worktreeDeleteReport", () => {
       branch: { name: "it's", outcome: "refused", reason: "nope" },
     })
     expect(text(r.message)).toContain(`git branch -D 'it'\\''s'`)
+  })
+})
+
+describe("leftoverDeleteReport", () => {
+  // The user's decision: no toast from a left-over folder delete stays on
+  // screen until closed, a warning included.
+  it.each([true, false])("never pins the toast (warning: %s)", (warning) => {
+    const r = leftoverDeleteReport({
+      removed: !warning,
+      warning,
+      message: "Deleted.",
+      segments: null,
+    })
+    expect(r.tone).toBe(warning ? "warning" : "success")
+    expect(r).not.toHaveProperty("sticky")
   })
 })

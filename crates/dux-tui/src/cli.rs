@@ -1115,6 +1115,10 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // What dux recorded starting, this boot only: a session from another boot
     // is void.
     let mut recorded: Vec<dux_core::process_sessions::StoredSession> = Vec::new();
+    // Branches kept with left-over folders, with the repository each lives
+    // in: they outlive the agent rows they came from.
+    let mut kept_with_leftovers: Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)> =
+        Vec::new();
     if paths.sessions_db_path.exists() {
         let db = paths.sessions_db_path.display();
         let store = SessionStore::open(&paths.sessions_db_path).map_err(|error| {
@@ -1154,6 +1158,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
                 .map(|project| canonical_or_original(Path::new(&project.path))),
         );
         recorded_folders.extend(projects.iter().map(|project| PathBuf::from(&project.path)));
+        kept_with_leftovers = branches_kept_with_leftovers(&store, &projects, paths)?;
         recorded = store
             .load_process_registry_strict()
             .map_err(|error| ResetRefused::unknown(format_args!("{error}")))?
@@ -1192,6 +1197,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         &mut removed,
         report,
     )?;
+    delete_branches_kept_with_leftovers(&kept_with_leftovers, report);
     remove_file_with_message(&paths.sessions_db_path, report)?;
     // The welcome screen was already seen, and a reset does not make it new
     // again: the fresh database starts with that one record.
@@ -1206,6 +1212,74 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every left-over folder record, with the repository its project lives in.
+fn branches_kept_with_leftovers(
+    store: &SessionStore,
+    projects: &[dux_core::config::ProjectConfig],
+    paths: &DuxPaths,
+) -> Result<Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)>> {
+    let db = paths.sessions_db_path.display();
+    Ok(store
+        .load_all_leftover_folders()
+        .map_err(|error| {
+            ResetRefused::unreadable_records(
+                format_args!("the left-over worktree folders recorded in {db} could not be read"),
+                paths,
+                error,
+            )
+        })?
+        .into_iter()
+        .filter_map(|record| {
+            projects
+                .iter()
+                .find(|project| project.id == record.project_id)
+                .map(|project| (PathBuf::from(&project.path), record))
+        })
+        .collect())
+}
+
+/// Delete the branches left-over folders kept, now that the folders are gone
+/// with the worktrees root, by the rule every unasked delete applies: only a
+/// branch dux created, and only while it still points at the commit recorded
+/// for it. Best effort: a branch that stays is a warning.
+fn delete_branches_kept_with_leftovers(
+    kept: &[(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)],
+    report: &mut ResetReport,
+) {
+    for (repo, record) in kept {
+        for branch in &record.branches {
+            // Each kept branch by its own provenance: a record a later
+            // removal recorded again holds branches of more than one agent.
+            if !branch
+                .provenance
+                .is_some_and(|provenance| provenance.dux_may_delete_branch())
+            {
+                continue;
+            }
+            let why = match git::delete_kept_branch(repo, branch) {
+                Ok(git::KeptBranchDeletion::Deleted | git::KeptBranchDeletion::AlreadyGone) => {
+                    continue;
+                }
+                Ok(git::KeptBranchDeletion::Moved) => {
+                    "it changed since its folder was left behind".to_string()
+                }
+                Ok(git::KeptBranchDeletion::Refused { reason }) => {
+                    format!("git refused to delete it ({reason})")
+                }
+                Ok(git::KeptBranchDeletion::Unverifiable) => {
+                    "no commit was recorded for it".to_string()
+                }
+                Err(error) => format!("git could not check it ({error:#})"),
+            };
+            report.warn(format_args!(
+                "warning: kept branch {} in {}: {why}",
+                branch.name,
+                repo.display()
+            ));
+        }
+    }
 }
 
 /// The release whose welcome screen was last seen, read before the database
@@ -1529,6 +1603,15 @@ fn remove_session_worktree(
         // never filesystem-deletes, so this stays the CLI's own last resort.
         if let Some(leftover) = remove_leftover_folder(worktree) {
             return leftover;
+        }
+        // A folder git let go of keeps the branches it was asked to delete;
+        // with the folder now gone, the reset deletes them as it would have.
+        if let Some(leftover) = first
+            .as_ref()
+            .err()
+            .and_then(|err| err.downcast_ref::<git::LeftoverWorktreeFolder>())
+        {
+            git::delete_kept_branches_after_folder(Path::new(project_path), leftover);
         }
         // git refused while it still had the worktree registered (a lock, a
         // transient failure), so its registration, and the branch it was
@@ -3940,6 +4023,154 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&worktrees.stdout).contains(removed_registration.as_ref()),
             "no stale worktree registration for the removed path may remain in the repo",
+        );
+    }
+
+    /// A branch a left-over folder kept outlives the agent row it came from,
+    /// so the reset reads the left-over records too and deletes the branches
+    /// provenance gives it, at the commit each was recorded on, keeping one
+    /// that predates its agent.
+    #[test]
+    fn factory_reset_deletes_the_branches_dux_kept_with_a_left_over_folder() {
+        use std::os::unix::fs::MetadataExt;
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |args: &[&str]| {
+            let out = dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-m", "initial"]);
+        git(&["branch", "made"]);
+        git(&["branch", "theirs"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let worktrees_root = tempdir.path().join("worktrees");
+        let paths = DuxPaths {
+            config_path: tempdir.path().join("config.toml"),
+            sessions_db_path: tempdir.path().join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
+            root: tempdir.path().to_path_buf(),
+        };
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_project(&dux_core::config::ProjectConfig {
+                id: "proj".to_string(),
+                path: repo.to_string_lossy().into_owned(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: std::collections::BTreeMap::new(),
+            })
+            .expect("project");
+        for (folder, branch, provenance) in [
+            ("a", "made", dux_core::model::BranchProvenance::CreatedByDux),
+            (
+                "b",
+                "theirs",
+                dux_core::model::BranchProvenance::AttachedExisting,
+            ),
+        ] {
+            let path = worktrees_root.join("repo").join(folder);
+            fs::create_dir_all(path.join(".astro")).expect("left-over folder");
+            let meta = fs::symlink_metadata(&path).expect("metadata");
+            store
+                .record_leftover_folder(&dux_core::leftover_folders::LeftoverFolderRecord {
+                    path: path.to_string_lossy().into_owned(),
+                    project_id: "proj".to_string(),
+                    branches: vec![git::KeptBranch {
+                        name: branch.to_string(),
+                        oid: Some(head.clone()),
+                        provenance: Some(provenance),
+                    }],
+                    provenance: Some(provenance),
+                    identity: dux_core::leftover_folders::FolderIdentity {
+                        dev: meta.dev(),
+                        ino: meta.ino(),
+                        birth_ns: None,
+                    },
+                })
+                .expect("record");
+        }
+        drop(store);
+
+        reset_agent_data(&paths, &mut ResetReport::discarding()).expect("reset");
+
+        assert!(!worktrees_root.join("repo/a").exists());
+        assert!(
+            git(&["branch", "--list", "made"]).is_empty(),
+            "the branch dux created is deleted"
+        );
+        assert_eq!(
+            git(&["branch", "--list", "theirs"]),
+            "theirs",
+            "a branch that predates its agent is kept"
+        );
+    }
+
+    /// A folder git has already let go of (a delete something kept writing
+    /// into) keeps its branch in core; the reset deletes the folder itself and
+    /// then the branch dux created, so it still leaves nothing of dux's.
+    #[test]
+    fn factory_reset_of_a_left_over_folder_deletes_the_folder_and_the_branch() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |args: &[&str]| {
+            let out = dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-m", "initial"]);
+        let worktrees_root = tempdir.path().join("worktrees");
+        let worktree = worktrees_root.join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "branch-wt",
+            worktree.to_str().unwrap(),
+        ]);
+        git(&["worktree", "remove", "--force", worktree.to_str().unwrap()]);
+        fs::create_dir_all(worktree.join(".astro")).expect("left-over contents");
+        let paths = DuxPaths {
+            config_path: tempdir.path().join("config.toml"),
+            sessions_db_path: tempdir.path().join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
+            root: tempdir.path().to_path_buf(),
+        };
+        let managed = dux_core::model::ManagedWorkspace {
+            project_id: "proj".to_string(),
+            project_path: Some(repo.to_string_lossy().to_string()),
+            source_branch: "main".to_string(),
+            branch_name: "branch-wt".to_string(),
+            initial_branch: "branch-wt".to_string(),
+            branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+            worktree_path: worktree.to_string_lossy().to_string(),
+        };
+
+        remove_session_worktree(&paths, &managed, &[], &mut ResetReport::discarding());
+
+        assert!(!worktree.exists(), "the reset deletes the left-over folder");
+        assert!(
+            git(&["branch", "--list", "branch-wt"]).trim().is_empty(),
+            "the branch dux created goes too"
         );
     }
 

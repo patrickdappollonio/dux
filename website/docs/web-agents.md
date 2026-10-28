@@ -212,6 +212,11 @@ Each row is in one of these states:
   agent being created there, a terminal open in it, the CLI of an agent you just deleted with
   its worktree kept (still stopping), or a standalone agent whose folder is the worktree or
   anywhere inside it. It cannot be deleted from the manager until that has gone.
+- **Left over after a delete.** A folder git let go of when its worktree was deleted, but
+  that dux could not delete because something kept writing into it. The row names the
+  branches dux kept because of it. Its `⋯` menu has **Copy path** and **Delete folder…**
+  (absent while something is using the folder). See
+  [When something keeps writing into the worktree](#when-something-keeps-writing-into-the-worktree).
 
 **Delete worktree…** removes the directory from disk after a confirmation naming the branch
 and the full path. That confirmation carries an **"Also delete the branch"** checkbox, ticked
@@ -518,9 +523,39 @@ When it cannot finish cleanly:
   or close the terminal, then remove the worktree from the worktree manager.
 - **Something dux cannot see writes into it.** A server another program launched in that
   folder can still write while git deletes it. git then removes the worktree from the
-  repository but cannot delete the folder. dux does not finish the job by deleting the folder
-  itself; it tells you what is left in it and that you can delete the folder once whatever is
-  writing there has stopped.
+  repository but cannot delete the folder. See below.
+
+#### When something keeps writing into the worktree
+
+dux does not delete such a folder on its own. It tells you what is left in it, and the
+project's worktree manager lists the folder under **Left over after a delete** until it is
+gone.
+
+- **The branches stay.** The branches the delete was going to remove are kept, because the
+  folder still holds their files. The message names them.
+- **Delete folder…** asks first. The confirmation names the folder and offers to delete the
+  kept branches too: ticked for a branch dux created, unticked (with a warning) for one that
+  existed before the agent.
+- **A branch that moved is kept.** If a kept branch now points at a different commit than
+  when the folder was left behind, it is not deleted, and dux says so.
+- **dux deletes only the folder that was left behind.** It refuses a folder outside its
+  worktrees folder for the project, one reached through a symbolic link, one git lists as a
+  worktree again, one that holds another worktree or repository, one that holds the
+  project's own repository, and one an agent, a standalone agent or a terminal is using. If
+  git cannot be asked, nothing is deleted.
+- **If something is still writing,** the delete fails again, says what is left, and the
+  row stays. Stop whatever is writing there first.
+- **Delete the folder yourself** and the row stays for as long as a kept branch is still
+  there, reading that the folder is already removed, so you can still delete the branch
+  from it. Once none of its branches is left, the row goes away. A different folder or a
+  link that took the folder's place counts as the folder being gone, and is never deleted.
+- **Each kept branch says whether a delete can remove it.** One that moved since the folder
+  was left behind, one another worktree has checked out, one with no recorded commit and one
+  git cannot check are kept, and the row and the confirmation say which and why, with the
+  `git branch -D` command to delete it yourself. When the folder is gone and no kept branch
+  can be deleted, the row offers only **Copy path**.
+- **The row stays while there is something left to do:** the folder, or a kept branch that
+  still exists. Once neither is left, it goes away.
 
 > [!IMPORTANT]
 > dux only sees what it started. A program that fully detaches itself from the terminal

@@ -733,9 +733,18 @@ In the terminal UI:
   standalone agent working inside it). Its row says `in use:` and what is using it.
 - **Being Removed:** a worktree whose agent was just deleted, until it is gone. It cannot
   be removed a second time.
+- **Left Over After A Delete:** a folder git let go of when its worktree was deleted, but
+  that could not be deleted because something kept writing into it. The row names the
+  branches kept because of it. Pick it for **Copy path** and **Delete folder…**.
 
 In the browser the same cases are three groups: **Already has an agent**, **In use** (each
-row says what is using it) and **Being removed**.
+row says what is using it) and **Being removed**, plus **Left over after a delete**.
+
+> [!IMPORTANT]
+> When a delete leaves its folder behind, dux keeps the branches it was going to delete,
+> because the folder still holds their files. **Delete folder…** confirms first and offers
+> the kept branches too; a branch that has moved since is kept. The rules are in
+> [When something keeps writing into the worktree](/docs/web-agents#when-something-keeps-writing-into-the-worktree).
 
 Either manager is how you remove a branch belonging to a worktree that has no agent. For a
 worktree that does have one, the agent's own delete dialog is the place: it names the

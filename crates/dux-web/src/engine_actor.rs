@@ -434,6 +434,15 @@ pub(crate) enum EngineRequest {
         branch: dux_core::worktree_manager::BranchRemoval,
         reply: oneshot::Sender<Option<dux_core::worktree_manager::RemovalAdmission>>,
     },
+    /// Admit a Delete folder request for a left-over worktree folder against
+    /// live state (see `Engine::admit_leftover_removal`); the admitted
+    /// ticket's checks and the delete run in the handler, off-thread.
+    AdmitLeftoverRemoval {
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branches: Vec<String>,
+        reply: oneshot::Sender<Option<dux_core::leftover_folders::LeftoverAdmission>>,
+    },
     /// What stands in the way of deleting or moving `path` and everything
     /// under it (see `Engine::destructive_check`); the caller evaluates the
     /// blocking part off the engine loop.
@@ -2122,6 +2131,30 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// See [`EngineRequest::AdmitLeftoverRemoval`].
+    pub async fn admit_leftover_removal(
+        &self,
+        project_id: String,
+        path: std::path::PathBuf,
+        delete_branches: Vec<String>,
+    ) -> Option<dux_core::leftover_folders::LeftoverAdmission> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::AdmitLeftoverRemoval {
+                project_id,
+                path,
+                delete_branches,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// See [`EngineRequest::DestructiveCheck`]. `None` when the engine is gone.
     pub async fn destructive_check(
         &self,
@@ -2521,6 +2554,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // Announces a removal in the worktree registry; no spine row changes
         // until the removal finishes and the listing is asked again.
         | EngineRequest::AdmitManagerRemoval { .. }
+        | EngineRequest::AdmitLeftoverRemoval { .. }
         | EngineRequest::DestructiveCheck(..)
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
@@ -4744,6 +4778,15 @@ fn handle_request(
         } => answer(
             reply,
             engine.admit_manager_removal(&project_id, &path, branch),
+        ),
+        EngineRequest::AdmitLeftoverRemoval {
+            project_id,
+            path,
+            delete_branches,
+            reply,
+        } => answer(
+            reply,
+            engine.admit_leftover_removal(&project_id, &path, delete_branches),
         ),
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             answer(reply, project_worktree_inputs(engine, &project_id));
@@ -9506,6 +9549,16 @@ mod tests {
                 false,
             ),
             (
+                "AdmitLeftoverRemoval",
+                EngineRequest::AdmitLeftoverRemoval {
+                    project_id: "p1".into(),
+                    path: "/tmp/wt".into(),
+                    delete_branches: Vec::new(),
+                    reply: dead_reply(),
+                },
+                false,
+            ),
+            (
                 "DestructiveCheck",
                 EngineRequest::DestructiveCheck("/tmp/wt".into(), dead_reply()),
                 false,
@@ -9644,7 +9697,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            47,
+            48,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

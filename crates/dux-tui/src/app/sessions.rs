@@ -9044,7 +9044,14 @@ mod tests {
             leftovers: vec![".astro/collections".to_string()],
             more: 0,
             git_error: "error: failed to delete '/work/wt-feat': Directory not empty".to_string(),
-            branches: vec![("feat".to_string(), dux_core::git::BranchDeletion::Deleted)],
+            kept_branches: vec![dux_core::git::KeptBranch {
+                name: "feat".to_string(),
+                oid: Some("abc".to_string()),
+                provenance: None,
+            }],
+            gone_branches: Vec::new(),
+            unchecked_branches: Vec::new(),
+            in_manager: true,
         }
         .to_string();
         let survivors = dux_core::engine::survivors_kept_worktree_message(
@@ -9063,8 +9070,8 @@ mod tests {
                 leftover,
                 &[
                     "kept writing into /work/wt-feat (.astro/collections)",
-                    "Stop it, then delete the folder yourself.",
-                    "Branch feat was deleted.",
+                    "Stop it, then delete the folder from the project's worktree manager.",
+                    "Branch feat was kept because the folder is still on disk",
                 ][..],
             ),
             (
