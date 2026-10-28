@@ -900,6 +900,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   opacity: 0.4;
 }
 
+/* A mouse or pen press on a toast is a selection, never a swipe (see `Toaster`):
+   sonner still marks the toast swiped on the first move, and its own rule for
+   that state would switch the text's selection off under the drag. */
+[data-dux-selecting] [data-sonner-toast][data-swiped="true"] {
+  user-select: text;
+}
+
 /* Less motion: the bar steps down once a second instead of gliding. */
 @media (prefers-reduced-motion: reduce) {
   .dux-toast-drain-fill {

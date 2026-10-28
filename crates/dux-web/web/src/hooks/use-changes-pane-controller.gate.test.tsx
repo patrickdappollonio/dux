@@ -83,3 +83,26 @@ describe("a Changes pane drag the gate interrupts", () => {
     expect(persistChangesPanePercent).toHaveBeenCalledWith(40)
   })
 })
+
+describe("a Changes pane drag and another pointer", () => {
+  function pointer(type: string, pointerId: number): Event {
+    const ev = new Event(type)
+    Object.defineProperty(ev, "pointerId", { value: pointerId })
+    return ev
+  }
+
+  it("is not ended by a release from a pointer it is not tracking", async () => {
+    const gate = await import("@/lib/authGate")
+    await gate.initAuthGate()
+    const { useChangesPaneController } = await import("./use-changes-pane-controller")
+    const { result } = renderHook(() => useChangesPaneController(true))
+    window.dispatchEvent(pointer("pointerdown", 1))
+    act(() => {
+      result.current.onLayoutChange({ "terminal-pane": 60, "changes-pane": 40 })
+    })
+    window.dispatchEvent(pointer("pointerup", 2))
+    expect(persistChangesPanePercent).not.toHaveBeenCalled()
+    window.dispatchEvent(pointer("pointerup", 1))
+    expect(persistChangesPanePercent).toHaveBeenCalledWith(40)
+  })
+})

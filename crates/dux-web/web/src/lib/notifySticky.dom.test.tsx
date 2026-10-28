@@ -48,14 +48,16 @@ function toastEl(): HTMLElement {
   return el as HTMLElement
 }
 
-// Drive a pointer drag across the toast. Each event goes in its OWN act()
-// because sonner locks the swipe axis into React state on the first move and
-// reads it on the NEXT one.
+// Drive a finger drag across the toast (a mouse drag selects text instead).
+// Each event goes in its OWN act() because sonner locks the swipe axis into
+// React state on the first move and reads it on the NEXT one.
 async function swipe(el: HTMLElement, dx: number, dy: number) {
   const opts = { bubbles: true, cancelable: true, button: 0 }
   const at = (type: string, x: number, y: number) =>
     act(() => {
-      el.dispatchEvent(new MouseEvent(type, { ...opts, clientX: x, clientY: y }))
+      const ev = new MouseEvent(type, { ...opts, clientX: x, clientY: y })
+      Object.defineProperty(ev, "pointerType", { value: "touch" })
+      el.dispatchEvent(ev)
     })
   at("pointerdown", 0, 0)
   at("pointermove", Math.sign(dx) * 4, Math.sign(dy) * 4)

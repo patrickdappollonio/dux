@@ -21,6 +21,20 @@ beforeAll(() => {
     Element.prototype.releasePointerCapture = () => {}
     Element.prototype.hasPointerCapture = () => false
   }
+  // Nor a PointerEvent constructor. This one carries the pointer type, which is
+  // what the Toaster reads, including on a release it replays itself.
+  if (typeof globalThis.PointerEvent !== "function") {
+    class PointerEventStandIn extends MouseEvent {
+      readonly pointerType: string
+      readonly pointerId: number
+      constructor(type: string, init: PointerEventInit = {}) {
+        super(type, init)
+        this.pointerType = init.pointerType ?? ""
+        this.pointerId = init.pointerId ?? 0
+      }
+    }
+    globalThis.PointerEvent = PointerEventStandIn as typeof PointerEvent
+  }
 })
 
 afterEach(() => {
@@ -32,6 +46,18 @@ afterEach(() => {
   // stay in the document and the next test's queries read the stale one.
   cleanup()
 })
+
+function pointerEvent(type: string, pointerType: string, x = 0, y = 0, pointerId = 1): PointerEvent {
+  return new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: x,
+    clientY: y,
+    pointerType,
+    pointerId,
+  })
+}
 
 // A human-plausible drag duration. 6px over this long is well under sonner's
 // 0.11 px/ms flick velocity; 120px over it is well over the distance threshold.
@@ -57,13 +83,12 @@ function iconSvg(): SVGElement {
 // Batching the whole gesture into one act() leaves the axis null for the entire
 // drag, so no swipe amount is ever recorded and nothing is dismissed. A real
 // browser delivers pointermove across frames, which is what this reproduces.
-async function swipe(el: HTMLElement, dx: number, dy: number) {
-  // jsdom has no PointerEvent constructor; MouseEvent carries every field
-  // sonner reads (button, clientX/clientY) and React dispatches by type name.
-  const opts = { bubbles: true, cancelable: true, button: 0 }
+//
+// A finger by default, the pointer a swipe is for; a mouse drag selects instead.
+async function swipe(el: HTMLElement, dx: number, dy: number, pointerType = "touch") {
   const at = (type: string, x: number, y: number) =>
     act(() => {
-      el.dispatchEvent(new MouseEvent(type, { ...opts, clientX: x, clientY: y }))
+      el.dispatchEvent(pointerEvent(type, pointerType, x, y))
     })
   at("pointerdown", 0, 0)
   // A small first move locks the axis, then the full drag is measured.
@@ -254,6 +279,370 @@ describe("Toaster swipe to dismiss", () => {
     await screen.findByText("hold still")
     await swipe(toastEl(), -6, 0)
     expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+  })
+})
+
+describe("Toaster text selection", () => {
+  function titleEl(): HTMLElement {
+    const el = document.querySelector("[data-sonner-toast] [data-title]")
+    if (!el) throw new Error("no toast title rendered")
+    return el as HTMLElement
+  }
+
+  it("marks every toast as selectable text, against the page's blanket user-select: none", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("copy ~/.config/dux/worktrees/demo")
+    })
+    await screen.findByText("copy ~/.config/dux/worktrees/demo")
+    expect(toastEl().className.split(/\s+/)).toContain("allow-select")
+  })
+
+  it("does not swipe a toast away under a mouse drag, which is selecting its text", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.error("drag across me")
+    })
+    await screen.findByText("drag across me")
+    await swipe(toastEl(), 120, 0, "mouse")
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+  })
+
+  it("holds the countdown while a selection lies inside a toast, and resumes once it is gone", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("select me before I go", { duration: 150 })
+    })
+    await screen.findByText("select me before I go")
+    const title = titleEl()
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+    })
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+      title.dispatchEvent(pointerEvent("pointerup", "mouse"))
+    })
+    const section = document.querySelector("[data-sonner-toaster]")?.closest("section")
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+    expect(section?.hasAttribute("data-dux-pressed")).toBe(true)
+
+    act(() => {
+      window.getSelection()?.removeAllRanges()
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    // The release reaches sonner in a task of its own.
+    await waitFor(() => {
+      expect(section?.hasAttribute("data-dux-pressed")).toBe(false)
+    })
+    await waitFor(() => {
+      expect(document.querySelector("[data-sonner-toast]")).toBeNull()
+    })
+  })
+
+  it("hands a held release over to the stack once the selected toast is gone", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("outlives the other", { duration: 150 })
+      toast.warning("removed while selected", { id: "removed", duration: 60_000 })
+    })
+    await screen.findByText("outlives the other")
+    const title = await screen.findByText("removed while selected")
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+    })
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+      title.dispatchEvent(pointerEvent("pointerup", "mouse"))
+    })
+    act(() => {
+      toast.dismiss("removed")
+    })
+    // No selectionchange: a browser need not send one when the selected nodes
+    // leave the document.
+    await waitFor(() => {
+      expect(screen.queryByText("removed while selected")).toBeNull()
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("outlives the other")).toBeNull()
+    })
+  })
+
+  it("leaves a finger's stack to sonner when its held release is handed over", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("long-pressed", { duration: 150 })
+      toast.warning("beside it", { duration: 150 })
+    })
+    const title = await screen.findByText("long-pressed")
+    act(() => {
+      title.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }))
+    })
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "touch"))
+    })
+    act(() => {
+      title.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }))
+    })
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+      title.dispatchEvent(pointerEvent("pointerup", "touch"))
+    })
+    act(() => {
+      window.getSelection()?.removeAllRanges()
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    const section = document.querySelector("[data-sonner-toaster]")?.closest("section")
+    // The release reaches sonner in a task of its own.
+    await waitFor(() => {
+      expect(section?.hasAttribute("data-dux-pressed")).toBe(false)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(toastEl().getAttribute("data-expanded")).toBe("true")
+    // sonner let go of the press: the next time the pointer leaves, it listens,
+    // and the countdown runs out.
+    act(() => {
+      title.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }))
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("long-pressed")).toBeNull()
+    })
+  })
+
+  it("lets a mouse move over a toast reach the rest of the page without moving the toast", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.error("moved over")
+    })
+    const title = await screen.findByText("moved over")
+    let seen = 0
+    const count = () => seen++
+    document.addEventListener("pointermove", count)
+    try {
+      act(() => {
+        title.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+      })
+      for (const x of [4, 60, 120]) {
+        act(() => {
+          title.dispatchEvent(pointerEvent("pointermove", "mouse", x, 0))
+        })
+      }
+      expect(seen).toBe(3)
+      expect(["", "0px"]).toContain(toastEl().style.getPropertyValue("--swipe-amount-x"))
+      // A page listener that stops a move after sonner has had it.
+      const swallow = (e: Event) => e.stopPropagation()
+      document.body.addEventListener("pointermove", swallow)
+      act(() => {
+        title.dispatchEvent(pointerEvent("pointermove", "mouse", 160, 0))
+      })
+      document.body.removeEventListener("pointermove", swallow)
+    } finally {
+      document.removeEventListener("pointermove", count)
+    }
+    // Read at the release itself, before React hands it to sonner.
+    let offsetAtRelease = "unread"
+    title.addEventListener("pointerup", () => {
+      offsetAtRelease = toastEl().style.getPropertyValue("--swipe-amount-x")
+    })
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerup", "mouse", 120, 0))
+    })
+    expect(["", "0px"]).toContain(offsetAtRelease)
+    expect(toastEl().getAttribute("data-removed")).not.toBe("true")
+  })
+
+  it("resumes a stack the selecting drag carried the pointer off", async () => {
+    // sonner ignores the pointer leaving the stack while a press is down, and
+    // nothing after the release tells it the pointer is gone. Two toasts,
+    // because sonner collapses a stack whose toast count drops to one.
+    render(<Toaster />)
+    act(() => {
+      toast.warning("left behind", { duration: 150 })
+      toast.warning("dragged off the edge", { duration: 150 })
+    })
+    await screen.findByText("dragged off the edge")
+    await screen.findByText("left behind")
+    const title = screen.getByText("dragged off the edge")
+    act(() => {
+      title.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }))
+    })
+    expect(toastEl().getAttribute("data-expanded")).toBe("true")
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+    })
+    act(() => {
+      title.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }))
+    })
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+      title.dispatchEvent(pointerEvent("pointerup", "mouse"))
+    })
+    act(() => {
+      window.getSelection()?.removeAllRanges()
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    await waitFor(() => {
+      expect(document.querySelector('[data-sonner-toast][data-removed="true"]')).not.toBeNull()
+    })
+  })
+})
+
+describe("Toaster presses that end without a release", () => {
+  function pressAndEnd(end: (title: HTMLElement) => void) {
+    const title = document.querySelector("[data-sonner-toast] [data-title]") as HTMLElement
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+    })
+    act(() => end(title))
+  }
+
+  it("resumes the countdown after a cancelled press", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("cancelled under me", { duration: 150 })
+    })
+    await screen.findByText("cancelled under me")
+    pressAndEnd((title) => title.dispatchEvent(pointerEvent("pointercancel", "mouse")))
+    const section = document.querySelector("[data-sonner-toaster]")?.closest("section")
+    // The release reaches sonner in a task of its own.
+    await waitFor(() => {
+      expect(section?.hasAttribute("data-dux-pressed")).toBe(false)
+    })
+    await waitFor(() => {
+      expect(document.querySelector("[data-sonner-toast]")).toBeNull()
+    })
+  })
+
+  it("resumes the countdown after a press that became a native drag", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("dragged out of me", { duration: 150 })
+    })
+    await screen.findByText("dragged out of me")
+    pressAndEnd((title) => {
+      title.dispatchEvent(new Event("dragstart", { bubbles: true }))
+      title.dispatchEvent(new Event("dragend", { bubbles: true }))
+    })
+    await waitFor(() => {
+      expect(document.querySelector("[data-sonner-toast]")).toBeNull()
+    })
+  })
+
+  it("keeps the countdown held after a native drag while the selection is still in the toast", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("dragged but still selected", { duration: 150 })
+    })
+    const title = await screen.findByText("dragged but still selected")
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+    })
+    pressAndEnd((t) => {
+      t.dispatchEvent(new Event("dragstart", { bubbles: true }))
+      t.dispatchEvent(new Event("dragend", { bubbles: true }))
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(screen.queryByText("dragged but still selected")).not.toBeNull()
+    act(() => {
+      window.getSelection()?.removeAllRanges()
+      document.dispatchEvent(new Event("selectionchange"))
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("dragged but still selected")).toBeNull()
+    })
+  })
+
+  it("ends a press whose toast was removed before the release landed outside", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("still counting", { duration: 150 })
+      toast.warning("pressed then removed", { id: "pressed", duration: 60_000 })
+    })
+    await screen.findByText("still counting")
+    const title = await screen.findByText("pressed then removed")
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse", 0, 0, 3))
+    })
+    act(() => {
+      toast.dismiss("pressed")
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("pressed then removed")).toBeNull()
+    })
+    act(() => {
+      document.body.dispatchEvent(pointerEvent("pointerup", "mouse", 0, 0, 3))
+    })
+    await waitFor(() => {
+      expect(screen.queryByText("still counting")).toBeNull()
+    })
+  })
+})
+
+describe("Toaster releases it sends itself", () => {
+  it("hands a held release over only once a press elsewhere has ended, under the original pointer", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("held across a drag", { duration: 150 })
+    })
+    const title = await screen.findByText("held across a drag")
+    act(() => {
+      title.dispatchEvent(pointerEvent("pointerdown", "mouse", 0, 0, 7))
+    })
+    act(() => {
+      window.getSelection()?.selectAllChildren(title)
+      title.dispatchEvent(pointerEvent("pointerup", "mouse", 0, 0, 7))
+    })
+    const heard: { during: boolean; pointerId: number }[] = []
+    let pressing = false
+    const listen = (e: Event) => heard.push({ during: pressing, pointerId: (e as PointerEvent).pointerId })
+    window.addEventListener("pointerup", listen, true)
+    try {
+      // A press on the page outside the toasts, such as a divider drag.
+      act(() => {
+        pressing = true
+        document.body.dispatchEvent(pointerEvent("pointerdown", "mouse", 0, 0, 1))
+      })
+      act(() => {
+        document.body.dispatchEvent(pointerEvent("pointermove", "mouse", 40, 0, 1))
+      })
+      act(() => {
+        pressing = false
+        document.body.dispatchEvent(pointerEvent("pointerup", "mouse", 40, 0, 1))
+      })
+      await waitFor(() => {
+        expect(screen.queryByText("held across a drag")).toBeNull()
+      })
+    } finally {
+      window.removeEventListener("pointerup", listen, true)
+    }
+    expect(heard.filter((h) => h.during)).toEqual([])
+    expect(heard.map((h) => h.pointerId)).toContain(7)
+  })
+
+  it("lets a release over a toast through for a press that began elsewhere", async () => {
+    render(<Toaster />)
+    act(() => {
+      toast.warning("released over", { duration: 60_000 })
+    })
+    const title = await screen.findByText("released over")
+    let reachedPage = false
+    const listen = () => {
+      reachedPage = true
+    }
+    document.addEventListener("pointerup", listen)
+    try {
+      act(() => {
+        document.body.dispatchEvent(pointerEvent("pointerdown", "mouse"))
+      })
+      act(() => {
+        window.getSelection()?.selectAllChildren(title)
+        title.dispatchEvent(pointerEvent("pointerup", "mouse"))
+      })
+    } finally {
+      document.removeEventListener("pointerup", listen)
+      window.getSelection()?.removeAllRanges()
+    }
+    expect(reachedPage).toBe(true)
   })
 })
 
