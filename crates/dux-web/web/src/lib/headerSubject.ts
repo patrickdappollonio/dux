@@ -138,7 +138,7 @@ export function agentHeaderChips(input: AgentChipsInput): HeaderChip[] {
   if (branch) chips.push(branch)
   const count = input.terminalCount ?? 0
   if (count > 0) {
-    chips.push({ kind: "terminal", label: "Terminals", value: String(count) })
+    chips.push({ kind: "terminal", label: "Terminals", value: formatRegularCount(count, "terminal") })
   }
   chips.push({
     kind: "assistant",

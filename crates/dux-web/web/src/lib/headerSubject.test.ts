@@ -98,7 +98,7 @@ describe("agentHeaderChips values", () => {
       ["project", "dux"],
       ["agent", "menu-demo"],
       ["branch", "fix/paste-crash"],
-      ["terminal", "2"],
+      ["terminal", "2 terminals"],
       ["assistant", "claude"],
     ])
   })
@@ -168,8 +168,9 @@ describe("the terminals chip", () => {
     expect(kinds({ ...AGENT, terminalCount: 1 })).toContain("terminal")
   })
 
-  it("shows the bare count, since the glyph already says what is being counted", () => {
-    expect(chip({ ...AGENT, terminalCount: 3 }, "terminal")?.value).toBe("3")
+  it("words the count, since the glyph alone does not say what is being counted", () => {
+    expect(chip({ ...AGENT, terminalCount: 3 }, "terminal")?.value).toBe("3 terminals")
+    expect(chip({ ...AGENT, terminalCount: 1 }, "terminal")?.value).toBe("1 terminal")
   })
 })
 

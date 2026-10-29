@@ -216,7 +216,7 @@ describe("InsetHeader agent chips", () => {
     ] as never
     mockState = withTerminals
     render(<InsetHeader />)
-    expect(chipValue("terminal")).toBe("2")
+    expect(chipValue("terminal")).toBe("2 terminals")
   })
 
   it("wires every chip to a hover label", () => {
